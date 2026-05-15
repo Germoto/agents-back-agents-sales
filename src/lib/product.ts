@@ -1,0 +1,134 @@
+import { Prisma } from "@prisma/client";
+
+const productArgs = Prisma.validator<Prisma.ProductDefaultArgs>()({
+  include: {
+    aliases: true,
+    benefits: { orderBy: { sortOrder: "asc" } },
+    includes: { orderBy: { sortOrder: "asc" } },
+    bonuses: { orderBy: { sortOrder: "asc" } },
+    faqs: { orderBy: { sortOrder: "asc" } },
+    objections: { orderBy: { sortOrder: "asc" } },
+    files: { orderBy: { sortOrder: "asc" } },
+    digitalDelivery: true,
+    physicalDelivery: true,
+    variants: { orderBy: { sortOrder: "asc" } },
+  },
+});
+
+export const productRelations = productArgs.include;
+
+export type ProductWithRelations = Prisma.ProductGetPayload<{
+  include: typeof productRelations;
+}>;
+
+function jsonArrayToStrings(value: Prisma.JsonValue | null | undefined) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+export function mapAdminProduct(product: ProductWithRelations) {
+  return {
+    id: product.id,
+    companyId: product.companyId,
+    slug: product.slug,
+    active: product.active,
+    productType: product.productType,
+    name: product.name,
+    price: product.price,
+    regularPrice: product.regularPrice,
+    stock: product.stock,
+    shortDescription: product.shortDescription,
+    fullDescription: product.fullDescription,
+    deliveryMethod: product.deliveryMethod,
+    support: product.support,
+    sortOrder: product.sortOrder,
+    aliases: product.aliases.map((item) => item.value),
+    benefits: product.benefits.map((item) => item.value),
+    includes: product.includes.map((item) => item.value),
+    bonuses: product.bonuses.map((item) => item.value),
+    faqs: product.faqs.map((item) => ({
+      question: item.question,
+      answer: item.answer,
+      sortOrder: item.sortOrder,
+    })),
+    objections: product.objections.map((item) => ({
+      question: item.question,
+      answer: item.answer,
+      sortOrder: item.sortOrder,
+    })),
+    variants: product.variants.map((variant) => ({
+      id: variant.id,
+      name: variant.name,
+      options: jsonArrayToStrings(variant.options),
+      sortOrder: variant.sortOrder,
+    })),
+    files: product.files.map((file) => ({
+      id: file.id,
+      type: file.type,
+      url: file.url,
+      description: file.description,
+      sortOrder: file.sortOrder,
+    })),
+    digitalDelivery: product.digitalDelivery,
+    physicalDelivery: product.physicalDelivery
+      ? {
+          requiresAddress: product.physicalDelivery.requiresAddress,
+          deliveryCost: product.physicalDelivery.deliveryCost,
+          deliveryTime: product.physicalDelivery.deliveryTime,
+          pickupAvailable: product.physicalDelivery.pickupAvailable,
+          deliveryAreas: jsonArrayToStrings(product.physicalDelivery.deliveryAreas),
+        }
+      : null,
+    createdAt: product.createdAt,
+    updatedAt: product.updatedAt,
+  };
+}
+
+export function mapBotProduct(product: ProductWithRelations) {
+  return {
+    id: product.slug,
+    active: product.active,
+    productType: product.productType.toLowerCase(),
+    name: product.name,
+    aliases: product.aliases.map((item) => item.value),
+    price: product.price,
+    regularPrice: product.regularPrice,
+    stock: product.stock,
+    shortDescription: product.shortDescription,
+    fullDescription: product.fullDescription,
+    benefits: product.benefits.map((item) => item.value),
+    includes: product.includes.map((item) => item.value),
+    bonuses: product.bonuses.map((item) => item.value),
+    variants: product.variants.map((variant) => ({
+      name: variant.name,
+      options: jsonArrayToStrings(variant.options),
+      sortOrder: variant.sortOrder,
+    })),
+    files: product.files.map((file) => ({
+      type: file.type.toLowerCase(),
+      url: file.url,
+      description: file.description,
+      sortOrder: file.sortOrder,
+    })),
+    digitalDelivery:
+      product.productType === "DIGITAL"
+        ? {
+            link: product.digitalDelivery?.link ?? null,
+            instructions: product.digitalDelivery?.instructions ?? null,
+          }
+        : null,
+    physicalDelivery:
+      product.productType === "PHYSICAL"
+        ? {
+            requiresAddress: product.physicalDelivery?.requiresAddress ?? true,
+            deliveryCost: product.physicalDelivery?.deliveryCost ?? null,
+            deliveryTime: product.physicalDelivery?.deliveryTime ?? null,
+            pickupAvailable: product.physicalDelivery?.pickupAvailable ?? false,
+            deliveryAreas: jsonArrayToStrings(product.physicalDelivery?.deliveryAreas),
+          }
+        : null,
+  };
+}

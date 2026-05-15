@@ -1,0 +1,376 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPERADMIN
+  ADMIN
+  OPERATOR
+}
+
+enum ProductType {
+  DIGITAL
+  PHYSICAL
+}
+
+enum PaymentMode {
+  BEFORE_DELIVERY
+  CASH_ON_DELIVERY
+  MANUAL
+}
+
+enum ConversationRole {
+  USER
+  ASSISTANT
+  ADMIN
+  SYSTEM
+}
+
+enum OrderStatus {
+  PEDIDO_REGISTRADO
+  EN_COORDINACION
+  DESPACHADO
+  CANCELADO
+}
+
+enum DigitalSaleStatus {
+  ESPERANDO_PAGO
+  COMPROBANTE_RECIBIDO
+  PAGO_RECHAZADO
+  ENTREGADO
+  CANCELADO
+}
+
+enum ReceiptStatus {
+  PENDIENTE
+  APROBADO
+  RECHAZADO
+}
+
+enum ProductFileType {
+  IMAGE
+  PDF
+  VIDEO
+  OTHER
+}
+
+model Company {
+  id               String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name             String
+  slug             String               @unique
+  adminPhone       String
+  timezone         String               @default("America/Lima")
+  isActive         Boolean              @default(true)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  users            User[]
+  agentConfig      AgentConfig?
+  whatsappConfig   WhatsappConfig?
+  paymentConfig    PaymentConfig?
+  products         Product[]
+  customers        Customer[]
+  messages         ConversationMessage[]
+  orders           Order[]
+  digitalSales     DigitalSale[]
+  paymentReceipts  PaymentReceipt[]
+}
+
+model User {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId    String   @db.Uuid
+  name         String
+  phone        String   @unique
+  passwordHash String
+  role         UserRole
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+}
+
+model AgentConfig {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String   @unique @db.Uuid
+  openaiModel String   @default("gpt-4o-mini")
+  openaiApiKey String?
+  temperature Decimal  @default(0.25) @db.Decimal(4, 2)
+  basePrompt  String
+  salesStyle  String
+  rules       Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model WhatsappConfig {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String   @unique @db.Uuid
+  apiUrl    String
+  secret    String
+  account   String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model PaymentConfig {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId         String          @unique @db.Uuid
+  enabled           Boolean         @default(true)
+  paymentMode       PaymentMode
+  notificationPhone String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  company           Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  methods           PaymentMethod[]
+}
+
+model PaymentMethod {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paymentConfigId String        @db.Uuid
+  method          String
+  number          String
+  holder          String
+  sortOrder       Int           @default(0)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  paymentConfig   PaymentConfig @relation(fields: [paymentConfigId], references: [id], onDelete: Cascade)
+
+  @@index([paymentConfigId, sortOrder])
+}
+
+model Product {
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId         String             @db.Uuid
+  slug              String
+  active            Boolean            @default(true)
+  productType       ProductType
+  name              String
+  price             String
+  regularPrice      String?
+  stock             Int?
+  shortDescription  String
+  fullDescription   String
+  deliveryMethod    String?
+  support           String?
+  sortOrder         Int                @default(0)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  company           Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  aliases           ProductAlias[]
+  benefits          ProductBenefit[]
+  includes          ProductInclude[]
+  bonuses           ProductBonus[]
+  faqs              ProductFaq[]
+  objections        ProductObjection[]
+  files             ProductFile[]
+  digitalDelivery   DigitalDelivery?
+  physicalDelivery  PhysicalDelivery?
+  variants          ProductVariant[]
+  customers         Customer[]
+  messages          ConversationMessage[]
+  orders            Order[]
+  digitalSales      DigitalSale[]
+  paymentReceipts   PaymentReceipt[]
+
+  @@unique([companyId, slug])
+  @@index([companyId, active, sortOrder])
+}
+
+model ProductAlias {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @db.Uuid
+  value     String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductBenefit {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @db.Uuid
+  value     String
+  sortOrder Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductInclude {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @db.Uuid
+  value     String
+  sortOrder Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductBonus {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @db.Uuid
+  value     String
+  sortOrder Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductFaq {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @db.Uuid
+  question  String
+  answer    String
+  sortOrder Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductObjection {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @db.Uuid
+  question  String
+  answer    String
+  sortOrder Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductFile {
+  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId   String          @db.Uuid
+  type        ProductFileType
+  url         String
+  description String
+  sortOrder   Int             @default(0)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  product     Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, sortOrder])
+}
+
+model DigitalDelivery {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId    String   @unique @db.Uuid
+  link         String
+  instructions String
+  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model PhysicalDelivery {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId       String   @unique @db.Uuid
+  requiresAddress Boolean  @default(true)
+  deliveryCost    String?
+  deliveryTime    String?
+  pickupAvailable Boolean  @default(false)
+  deliveryAreas   Json
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductVariant {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @db.Uuid
+  name      String
+  options   Json
+  sortOrder Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model Customer {
+  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId         String                @db.Uuid
+  phone             String
+  name              String?
+  email             String?
+  status            String
+  selectedProductId String?               @db.Uuid
+  lastInteractionAt DateTime
+  metadata          Json
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  company           Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  selectedProduct   Product?              @relation(fields: [selectedProductId], references: [id], onDelete: SetNull)
+  messages          ConversationMessage[]
+  orders            Order[]
+  digitalSales      DigitalSale[]
+  paymentReceipts   PaymentReceipt[]
+
+  @@unique([companyId, phone])
+  @@index([companyId, lastInteractionAt])
+}
+
+model ConversationMessage {
+  id         String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String           @db.Uuid
+  customerId String           @db.Uuid
+  productId  String?          @db.Uuid
+  role       ConversationRole
+  message    String?
+  mediaUrl   String?
+  rawPayload Json?
+  createdAt  DateTime         @default(now())
+  company    Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product    Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, customerId, createdAt])
+}
+
+model Order {
+  id           String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId    String      @db.Uuid
+  customerId   String      @db.Uuid
+  productId    String      @db.Uuid
+  orderCode    String      @unique
+  quantity     Int
+  customerName String
+  address      String
+  reference    String
+  notes        String?
+  status       OrderStatus
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  company      Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer     Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product      Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, createdAt])
+}
+
+model DigitalSale {
+  id             String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String            @db.Uuid
+  customerId     String            @db.Uuid
+  productId      String            @db.Uuid
+  amountExpected String
+  status         DigitalSaleStatus
+  deliveredAt    DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  company        Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer       Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product        Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  receipts       PaymentReceipt[]
+
+  @@index([companyId, createdAt])
+}
+
+model PaymentReceipt {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId       String        @db.Uuid
+  customerId      String        @db.Uuid
+  productId       String        @db.Uuid
+  digitalSaleId   String?       @db.Uuid
+  mediaUrl        String?
+  amountExpected  String
+  status          ReceiptStatus
+  rejectionReason String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  company         Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer        Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product         Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  digitalSale     DigitalSale?  @relation(fields: [digitalSaleId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, createdAt])
+}
