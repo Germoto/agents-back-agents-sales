@@ -99,9 +99,21 @@ export function mapBotProduct(product: ProductWithRelations) {
     stock: product.stock,
     shortDescription: product.shortDescription,
     fullDescription: product.fullDescription,
+    deliveryMethod: product.deliveryMethod,
+    support: product.support,
     benefits: product.benefits.map((item) => item.value),
     includes: product.includes.map((item) => item.value),
     bonuses: product.bonuses.map((item) => item.value),
+    faqs: product.faqs.map((item) => ({
+      question: item.question,
+      answer: item.answer,
+      sortOrder: item.sortOrder,
+    })),
+    objections: product.objections.map((item) => ({
+      question: item.question,
+      answer: item.answer,
+      sortOrder: item.sortOrder,
+    })),
     variants: product.variants.map((variant) => ({
       name: variant.name,
       options: jsonArrayToStrings(variant.options),
