@@ -1,0 +1,66 @@
+name: Deploy Production Backend
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Deploy backend over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || '22' }}
+          script_stop: true
+          script: |
+            set -Eeuo pipefail
+            TARGET_BRANCH="${{ github.ref_name }}"
+            REPO_DIR="${{ secrets.DEPLOY_REPO_DIR || '/root/projects/agents-sales-back' }}"
+            DEPLOY_BACKEND_DIR="${{ secrets.DEPLOY_BACKEND_DIR || '/root/.openclaw/workspace/projects/agents-sales/backend' }}"
+            COMPOSE_DIR="${{ secrets.DEPLOY_COMPOSE_DIR || '/root/.openclaw/workspace/projects/agents-sales' }}"
+            APP_URL="${{ secrets.BACKEND_HEALTHCHECK_URL || 'http://127.0.0.1:3202/api/bot/config?channel=whatsapp&account=ACCOUNT_WA_DEMO&phone=51999999999' }}"
+
+            echo "==> Updating source repo in $REPO_DIR"
+            git -C "$REPO_DIR" fetch origin
+            CURRENT_BRANCH="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)"
+            if [ "$CURRENT_BRANCH" != "$TARGET_BRANCH" ]; then
+              git -C "$REPO_DIR" checkout "$TARGET_BRANCH"
+            fi
+            git -C "$REPO_DIR" pull --ff-only origin "$TARGET_BRANCH"
+
+            echo "==> Syncing sources to $DEPLOY_BACKEND_DIR"
+            mkdir -p "$DEPLOY_BACKEND_DIR"
+            rsync -av --delete \
+              --exclude '.git' \
+              --exclude 'node_modules' \
+              --exclude 'dist' \
+              --exclude '.env' \
+              "$REPO_DIR/" "$DEPLOY_BACKEND_DIR/"
+
+            echo "==> Building and restarting backend container"
+            docker compose -f "$COMPOSE_DIR/docker-compose.yml" build backend
+            docker compose -f "$COMPOSE_DIR/docker-compose.yml" up -d backend
+
+            echo "==> Waiting for backend to settle"
+            sleep 5
+
+            echo "==> Verifying backend container"
+            docker compose -f "$COMPOSE_DIR/docker-compose.yml" ps backend
+
+            echo "==> Verifying app endpoint $APP_URL"
+            curl -fsSI "$APP_URL" >/dev/null || curl -fsS "$APP_URL" >/dev/null
+
+            echo "==> Backend deployment completed"

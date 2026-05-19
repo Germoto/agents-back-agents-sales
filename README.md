@@ -29,6 +29,28 @@ npm run prisma:seed
 npm run dev
 ```
 
+## Deploy de producción
+
+El backend puede desplegarse automáticamente por GitHub Actions usando:
+
+- workflow: `.github/workflows/deploy-production.yml`
+- script de referencia/manual: `scripts/deploy-backend.sh`
+
+El flujo seguro de producción es:
+
+- `git pull --ff-only`
+- `rsync` del código al directorio de despliegue
+- `docker compose build backend`
+- `docker compose up -d backend`
+- arranque con `prisma migrate deploy`
+
+Precauciones importantes:
+
+- no ejecutar `prisma migrate dev` en producción
+- no ejecutar seeds en producción
+- no usar `docker compose down -v`
+- la data vive en el volumen de PostgreSQL, no en el contenedor del backend
+
 ## Credenciales demo
 
 - `phone`: `963337953`
