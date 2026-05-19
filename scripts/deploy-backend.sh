@@ -35,6 +35,20 @@ printf '==> Verifying backend container is running\n'
 docker compose -f "$COMPOSE_DIR/docker-compose.yml" ps backend
 
 printf '==> Verifying app endpoint %s\n' "$APP_URL"
-curl -fsSI "$APP_URL" >/dev/null || curl -fsS "$APP_URL" >/dev/null
+for attempt in $(seq 1 12); do
+  HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "$APP_URL" || true)"
+  if [ "$HTTP_CODE" != "000" ]; then
+    printf '==> Healthcheck responded with HTTP %s\n' "$HTTP_CODE"
+    break
+  fi
+
+  if [ "$attempt" -eq 12 ]; then
+    echo '==> Healthcheck did not receive an HTTP response in time'
+    exit 1
+  fi
+
+  printf '==> Healthcheck not ready yet (attempt %s/12), retrying...\n' "$attempt"
+  sleep 5
+done
 
 printf '==> Backend deployment completed successfully\n'
