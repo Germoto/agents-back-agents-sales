@@ -1,7 +1,10 @@
 import { Prisma } from "@prisma/client";
+import fs from "fs/promises";
+import path from "path";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { mapAdminProduct, productRelations } from "../../lib/product";
+import { env } from "../../config/env";
 
 type ProductPayload = {
   slug: string;
@@ -23,8 +26,14 @@ type ProductPayload = {
   faqs: Array<{ question: string; answer: string; sortOrder: number }>;
   objections: Array<{ question: string; answer: string; sortOrder: number }>;
   files: Array<{
-    type: "IMAGE" | "PDF" | "VIDEO" | "OTHER";
+    id?: string;
+    type: "IMAGE" | "PDF" | "VIDEO" | "AUDIO" | "OTHER";
     url: string;
+    storagePath: string;
+    originalName: string;
+    extension: string;
+    mimeType: string;
+    size: number;
     description: string;
     sortOrder: number;
   }>;
@@ -54,6 +63,72 @@ async function ensureProductBelongsToCompany(companyId: string, productId: strin
   return product;
 }
 
+async function safeUnlinkStorage(storagePath: string | null | undefined) {
+  if (!storagePath) return;
+  const normalized = storagePath.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!normalized.startsWith("products/") || normalized.includes("..")) return;
+  const absolute = path.resolve(process.cwd(), env.UPLOAD_DIR, normalized);
+  try {
+    await fs.unlink(absolute);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      // eslint-disable-next-line no-console
+      console.warn("[products] No se pudo eliminar archivo:", absolute, err?.message);
+    }
+  }
+}
+
+async function syncProductFiles(
+  tx: Prisma.TransactionClient,
+  productId: string,
+  files: ProductPayload["files"],
+) {
+  const existing = await tx.productFile.findMany({ where: { productId } });
+  const existingById = new Map(existing.map((f) => [f.id, f] as const));
+  const incomingIds = new Set(files.filter((f) => f.id).map((f) => f.id as string));
+
+  // Delete files no longer present
+  const toRemove = existing.filter((f) => !incomingIds.has(f.id));
+  if (toRemove.length) {
+    await tx.productFile.deleteMany({
+      where: { id: { in: toRemove.map((f) => f.id) } },
+    });
+    // physical removal happens after the transaction completes successfully (best effort)
+    for (const f of toRemove) {
+      await safeUnlinkStorage(f.storagePath);
+    }
+  }
+
+  // Upsert each incoming
+  for (const file of files) {
+    const data = {
+      type: file.type,
+      url: file.url,
+      storagePath: file.storagePath,
+      originalName: file.originalName ?? "",
+      extension: file.extension ?? "",
+      mimeType: file.mimeType ?? "",
+      size: file.size ?? 0,
+      description: file.description ?? "",
+      sortOrder: file.sortOrder ?? 0,
+    } satisfies Prisma.ProductFileUncheckedUpdateInput;
+
+    if (file.id && existingById.has(file.id)) {
+      await tx.productFile.update({
+        where: { id: file.id },
+        data,
+      });
+    } else {
+      await tx.productFile.create({
+        data: {
+          productId,
+          ...data,
+        } as Prisma.ProductFileUncheckedCreateInput,
+      });
+    }
+  }
+}
+
 async function writeProductGraph(tx: Prisma.TransactionClient, productId: string, payload: ProductPayload) {
   await tx.productAlias.deleteMany({ where: { productId } });
   await tx.productBenefit.deleteMany({ where: { productId } });
@@ -62,7 +137,8 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
   await tx.productFaq.deleteMany({ where: { productId } });
   await tx.productObjection.deleteMany({ where: { productId } });
   await tx.productVariant.deleteMany({ where: { productId } });
-  await tx.productFile.deleteMany({ where: { productId } });
+  // ProductFile is NOT wiped here; it uses a diff/upsert strategy below
+  await syncProductFiles(tx, productId, payload.files);
 
   if (payload.aliases.length) {
     await tx.productAlias.createMany({
@@ -111,16 +187,8 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
     });
   }
 
-  if (payload.files.length) {
-    await tx.productFile.createMany({
-      data: payload.files.map((item) => ({
-        productId,
-        type: item.type,
-        url: item.url,
-        description: item.description,
-        sortOrder: item.sortOrder,
-      })),
-    });
+  if (payload.files.length === 0) {
+    // handled by syncProductFiles; nothing to do here
   }
 
   if (payload.digitalDelivery) {

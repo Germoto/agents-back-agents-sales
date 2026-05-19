@@ -10,6 +10,9 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(1, "JWT_SECRET es obligatorio"),
   JWT_EXPIRES_IN: z.string().default("7d"),
   BOT_CONFIG_API_KEY: z.string().optional(),
+  UPLOAD_DIR: z.string().default("uploads"),
+  PUBLIC_BASE_URL: z.string().default("http://localhost:3000"),
+  MAX_UPLOAD_MB: z.coerce.number().int().positive().default(50),
 });
 
 export const env = envSchema.parse(process.env);

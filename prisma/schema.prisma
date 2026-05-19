@@ -56,6 +56,7 @@ enum ProductFileType {
   IMAGE
   PDF
   VIDEO
+  AUDIO
   OTHER
 }
 
@@ -235,15 +236,20 @@ model ProductObjection {
 }
 
 model ProductFile {
-  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId   String          @db.Uuid
-  type        ProductFileType
-  url         String
-  description String
-  sortOrder   Int             @default(0)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  product     Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId    String          @db.Uuid
+  type         ProductFileType
+  url          String
+  storagePath  String          @default("")
+  originalName String          @default("")
+  extension    String          @default("")
+  mimeType     String          @default("")
+  size         Int             @default(0)
+  description  String          @default("")
+  sortOrder    Int             @default(0)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  product      Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([productId, sortOrder])
 }

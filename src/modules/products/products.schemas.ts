@@ -18,9 +18,15 @@ const productVariantSchema = z.object({
 });
 
 const productFileSchema = z.object({
-  type: z.enum(["IMAGE", "PDF", "VIDEO", "OTHER"]),
-  url: z.string().url(),
-  description: z.string().min(1),
+  id: z.string().uuid().optional(),
+  type: z.enum(["IMAGE", "PDF", "VIDEO", "AUDIO", "OTHER"]),
+  url: z.string().min(1),
+  storagePath: z.string().min(1),
+  originalName: z.string().default(""),
+  extension: z.string().default(""),
+  mimeType: z.string().default(""),
+  size: z.coerce.number().int().min(0).default(0),
+  description: z.string().default(""),
   sortOrder: z.coerce.number().int().min(0).default(0),
 });
 

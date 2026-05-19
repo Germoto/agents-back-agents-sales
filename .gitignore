@@ -35,3 +35,10 @@ node_modules/.prisma/
 tmp/
 temp/
 *.tmp
+
+# Uploaded files (user content - do not version)
+uploads/*
+!uploads/.gitkeep
+!uploads/products/
+uploads/products/*
+!uploads/products/.gitkeep
