@@ -42,7 +42,7 @@ export async function getWhatsappConfig(companyId: string) {
 export async function upsertWhatsappConfig(companyId: string, data: {
   apiUrl: string;
   secret: string;
-  account: string;
+  account?: string | null;
   isActive: boolean;
   defaultServerId?: number | null;
 }) {

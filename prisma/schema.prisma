@@ -115,7 +115,7 @@ model WhatsappConfig {
   companyId       String   @unique @db.Uuid
   apiUrl          String
   secret          String
-  account         String   @unique
+  account         String?  @unique
   defaultServerId Int?
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())

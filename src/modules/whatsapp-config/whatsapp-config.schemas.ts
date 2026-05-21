@@ -9,7 +9,7 @@ const whatsappRecipient = z
 export const upsertWhatsappConfigSchema = z.object({
   apiUrl: z.string().url(),
   secret: noSpacesText,
-  account: noSpacesText,
+  account: noSpacesText.nullable().optional(),
   isActive: z.boolean().default(true),
   defaultServerId: z.number().int().positive().nullable().optional(),
 });
