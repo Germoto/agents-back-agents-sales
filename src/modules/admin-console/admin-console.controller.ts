@@ -3,6 +3,7 @@ import {
   createClient,
   deleteClient,
   getAuthenticatedSuperadmin,
+  impersonateClientAdmin,
   listClients,
   loginSuperadmin,
   updateClientStatus,
@@ -44,4 +45,11 @@ export async function deleteClientController(req: Request, res: Response) {
     console.error("[deleteClientController] error", err);
     throw err;
   }
+}
+
+export async function impersonateClientController(req: Request, res: Response) {
+  const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const superadminId = req.user!.id;
+  const result = await impersonateClientAdmin(superadminId, companyId);
+  return res.json(result);
 }

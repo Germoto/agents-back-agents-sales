@@ -5,11 +5,13 @@ export type JwtPayload = {
   sub: string;
   companyId: string;
   role: string;
+  impersonatedBy?: string;
 };
 
-export function signAccessToken(payload: JwtPayload) {
+export function signAccessToken(payload: JwtPayload, options?: jwt.SignOptions) {
   return jwt.sign(payload, env.JWT_SECRET, {
     expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions["expiresIn"],
+    ...options,
   });
 }
 

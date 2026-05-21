@@ -6,6 +6,7 @@ import { validate } from "../../middlewares/validate";
 import {
   createClientController,
   deleteClientController,
+  impersonateClientController,
   listClientsController,
   superadminLoginController,
   superadminMeController,
@@ -37,6 +38,13 @@ router.delete(
   requireRole("SUPERADMIN"),
   validate({ params: clientIdParamsSchema }),
   asyncHandler(deleteClientController),
+);
+router.post(
+  "/clients/:id/impersonate",
+  requireAuth,
+  requireRole("SUPERADMIN"),
+  validate({ params: clientIdParamsSchema }),
+  asyncHandler(impersonateClientController),
 );
 
 export default router;

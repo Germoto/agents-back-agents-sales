@@ -392,3 +392,53 @@ export async function deleteClient(companyId: string) {
   await prisma.company.delete({ where: { id: companyId } });
   console.log("[deleteClient] done");
 }
+
+export async function impersonateClientAdmin(superadminId: string, companyId: string) {
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { id: true, name: true, slug: true, isActive: true },
+  });
+
+  if (!company) {
+    throw new AppError("Cliente no encontrado", 404);
+  }
+
+  const adminUser = await prisma.user.findFirst({
+    where: {
+      companyId,
+      role: "ADMIN",
+      isActive: true,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  if (!adminUser) {
+    throw new AppError("Esta empresa no tiene un admin activo para impersonar", 404);
+  }
+
+  const accessToken = signAccessToken(
+    {
+      sub: adminUser.id,
+      companyId: adminUser.companyId,
+      role: adminUser.role,
+      impersonatedBy: superadminId,
+    },
+    { expiresIn: "1h" },
+  );
+
+  return {
+    accessToken,
+    user: {
+      id: adminUser.id,
+      name: adminUser.name,
+      phone: adminUser.phone,
+      companyId: adminUser.companyId,
+      role: adminUser.role,
+    },
+    company: {
+      id: company.id,
+      name: company.name,
+      slug: company.slug,
+    },
+  };
+}
