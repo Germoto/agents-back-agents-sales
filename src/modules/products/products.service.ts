@@ -312,3 +312,13 @@ export async function deleteProduct(companyId: string, productId: string) {
   await prisma.product.delete({ where: { id: productId } });
   return { success: true };
 }
+
+export async function toggleProductActive(companyId: string, productId: string) {
+  await ensureProductBelongsToCompany(companyId, productId);
+  const current = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+  const updated = await prisma.product.update({
+    where: { id: productId },
+    data: { active: !current.active },
+  });
+  return { id: updated.id, active: updated.active };
+}
