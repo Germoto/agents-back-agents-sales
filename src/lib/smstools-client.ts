@@ -137,7 +137,18 @@ async function smsToolsRequest<T = unknown>(
 
   const envelope = parsed as SmsToolsEnvelope<T> | null;
   if (envelope && typeof envelope === "object" && typeof envelope.status === "number" && envelope.status >= 400) {
-    throw new AppError(envelope.message ?? "Error del proveedor.", 502, envelope);
+    // SMS TOOLS returns HTTP 200 with envelope.status >= 400 when the request
+    // succeeded but the operation has no result (e.g. no servers assigned to
+    // the subscription, empty list, etc.). For 404 with falsy data we treat it
+    // as "empty" and return null so list wrappers can normalize to [].
+    if (envelope.status === 404 && (envelope.data === false || envelope.data === null || envelope.data === undefined)) {
+      return null as unknown as T;
+    }
+    throw new AppError(
+      envelope.message ?? "Error del proveedor de WhatsApp.",
+      502,
+      envelope,
+    );
   }
 
   return (envelope?.data as T) ?? (parsed as T);
