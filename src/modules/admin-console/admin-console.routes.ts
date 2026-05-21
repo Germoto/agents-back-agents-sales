@@ -5,6 +5,7 @@ import { requireRole } from "../../middlewares/role.middleware";
 import { validate } from "../../middlewares/validate";
 import {
   createClientController,
+  deleteClientController,
   listClientsController,
   superadminLoginController,
   superadminMeController,
@@ -29,6 +30,13 @@ router.put(
   requireRole("SUPERADMIN"),
   validate({ params: clientIdParamsSchema, body: updateClientStatusSchema }),
   asyncHandler(updateClientStatusController),
+);
+router.delete(
+  "/clients/:id",
+  requireAuth,
+  requireRole("SUPERADMIN"),
+  validate({ params: clientIdParamsSchema }),
+  asyncHandler(deleteClientController),
 );
 
 export default router;

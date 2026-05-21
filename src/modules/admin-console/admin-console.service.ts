@@ -267,6 +267,7 @@ export async function createClient(payload: {
         companyId: createdCompany.id,
         apiUrl: env.SMSTOOLS_API_URL,
         secret: smsToolsSecret!,
+        smsToolsUserId: smsToolsUserId,
         isActive: payload.isActive,
       },
     });
@@ -350,4 +351,30 @@ export async function updateClientStatus(companyId: string, isActive: boolean) {
   });
 
   return mapClient(company);
+}
+
+export async function deleteClient(companyId: string) {
+  const existing = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { id: true },
+  });
+
+  if (!existing) {
+    throw new AppError("Cliente no encontrado", 404);
+  }
+
+  const whatsappConfig = await prisma.whatsappConfig.findUnique({
+    where: { companyId },
+    select: { smsToolsUserId: true },
+  });
+
+  if (whatsappConfig?.smsToolsUserId) {
+    try {
+      await smsToolsAdmin.deleteUser(whatsappConfig.smsToolsUserId);
+    } catch {
+      // Ignore — user may already be deleted in SMS Tools
+    }
+  }
+
+  await prisma.company.delete({ where: { id: companyId } });
 }

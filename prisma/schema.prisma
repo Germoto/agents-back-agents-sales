@@ -117,6 +117,7 @@ model WhatsappConfig {
   secret          String
   account         String?  @unique
   defaultServerId Int?
+  smsToolsUserId  Int?
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
