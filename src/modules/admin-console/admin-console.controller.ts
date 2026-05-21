@@ -36,6 +36,12 @@ export async function updateClientStatusController(req: Request, res: Response) 
 
 export async function deleteClientController(req: Request, res: Response) {
   const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  await deleteClient(companyId);
-  return res.status(204).send();
+  console.log("[deleteClientController] DELETE /clients/:id", { companyId });
+  try {
+    await deleteClient(companyId);
+    return res.status(204).send();
+  } catch (err) {
+    console.error("[deleteClientController] error", err);
+    throw err;
+  }
 }

@@ -354,27 +354,40 @@ export async function updateClientStatus(companyId: string, isActive: boolean) {
 }
 
 export async function deleteClient(companyId: string) {
+  console.log("[deleteClient] start", { companyId });
+
   const existing = await prisma.company.findUnique({
     where: { id: companyId },
-    select: { id: true },
+    select: { id: true, name: true },
   });
 
   if (!existing) {
+    console.warn("[deleteClient] company not found", { companyId });
     throw new AppError("Cliente no encontrado", 404);
   }
+
+  console.log("[deleteClient] company found", { name: existing.name });
 
   const whatsappConfig = await prisma.whatsappConfig.findUnique({
     where: { companyId },
     select: { smsToolsUserId: true },
   });
 
+  console.log("[deleteClient] whatsappConfig", { smsToolsUserId: whatsappConfig?.smsToolsUserId ?? null });
+
   if (whatsappConfig?.smsToolsUserId) {
     try {
-      await smsToolsAdmin.deleteUser(whatsappConfig.smsToolsUserId);
-    } catch {
-      // Ignore — user may already be deleted in SMS Tools
+      console.log("[deleteClient] deleting SMS Tools user", { smsToolsUserId: whatsappConfig.smsToolsUserId });
+      const result = await smsToolsAdmin.deleteUser(whatsappConfig.smsToolsUserId);
+      console.log("[deleteClient] SMS Tools delete result", result);
+    } catch (err) {
+      console.warn("[deleteClient] SMS Tools delete failed (ignored)", err instanceof Error ? err.message : err);
     }
+  } else {
+    console.log("[deleteClient] no SMS Tools user to delete");
   }
 
+  console.log("[deleteClient] deleting company from DB", { companyId });
   await prisma.company.delete({ where: { id: companyId } });
+  console.log("[deleteClient] done");
 }
