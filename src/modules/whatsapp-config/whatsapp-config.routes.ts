@@ -3,17 +3,70 @@ import { asyncHandler } from "../../lib/async-handler";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { validate } from "../../middlewares/validate";
 import {
+  createWhatsappLinkController,
+  deleteWhatsappAccountController,
+  deleteWhatsappReceivedController,
+  deleteWhatsappSentController,
   getWhatsappConfigController,
+  getWhatsappLinkInfoController,
+  getWhatsappQrImageController,
+  listWhatsappAccountsController,
+  listWhatsappPendingController,
+  listWhatsappReceivedController,
+  listWhatsappSentController,
+  listWhatsappServersController,
+  relinkWhatsappAccountController,
   testWhatsappConnectionController,
   upsertWhatsappConfigController,
 } from "./whatsapp-config.controller";
-import { testWhatsappConnectionSchema, upsertWhatsappConfigSchema } from "./whatsapp-config.schemas";
+import {
+  linkSchema,
+  paginationSchema,
+  relinkSchema,
+  testWhatsappConnectionSchema,
+  tokenQuerySchema,
+  upsertWhatsappConfigSchema,
+} from "./whatsapp-config.schemas";
 
 const router = Router();
 
 router.use(requireAuth);
+
 router.get("/", asyncHandler(getWhatsappConfigController));
 router.put("/", validate({ body: upsertWhatsappConfigSchema }), asyncHandler(upsertWhatsappConfigController));
 router.post("/test", validate({ body: testWhatsappConnectionSchema }), asyncHandler(testWhatsappConnectionController));
+
+router.get("/servers", asyncHandler(listWhatsappServersController));
+
+router.get(
+  "/accounts",
+  validate({ query: paginationSchema }),
+  asyncHandler(listWhatsappAccountsController),
+);
+router.delete("/accounts/:unique", asyncHandler(deleteWhatsappAccountController));
+
+router.post("/link", validate({ body: linkSchema }), asyncHandler(createWhatsappLinkController));
+router.post("/relink", validate({ body: relinkSchema }), asyncHandler(relinkWhatsappAccountController));
+
+router.get("/qr-image", validate({ query: tokenQuerySchema }), asyncHandler(getWhatsappQrImageController));
+router.get("/link-info", validate({ query: tokenQuerySchema }), asyncHandler(getWhatsappLinkInfoController));
+
+router.get(
+  "/messages/pending",
+  validate({ query: paginationSchema }),
+  asyncHandler(listWhatsappPendingController),
+);
+router.get(
+  "/messages/sent",
+  validate({ query: paginationSchema }),
+  asyncHandler(listWhatsappSentController),
+);
+router.get(
+  "/messages/received",
+  validate({ query: paginationSchema }),
+  asyncHandler(listWhatsappReceivedController),
+);
+router.delete("/messages/sent/:id", asyncHandler(deleteWhatsappSentController));
+router.delete("/messages/received/:id", asyncHandler(deleteWhatsappReceivedController));
 
 export default router;

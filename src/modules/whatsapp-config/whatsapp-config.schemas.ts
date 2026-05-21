@@ -11,6 +11,7 @@ export const upsertWhatsappConfigSchema = z.object({
   secret: noSpacesText,
   account: noSpacesText,
   isActive: z.boolean().default(true),
+  defaultServerId: z.number().int().positive().nullable().optional(),
 });
 
 export const testWhatsappConnectionSchema = z.object({
@@ -20,3 +21,22 @@ export const testWhatsappConnectionSchema = z.object({
   recipient: whatsappRecipient,
   message: z.string().trim().min(3, "El mensaje de prueba es muy corto"),
 });
+
+export const paginationSchema = z.object({
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+export const linkSchema = z.object({
+  sid: z.number().int().positive().optional(),
+});
+
+export const relinkSchema = z.object({
+  unique: noSpacesText,
+  sid: z.number().int().positive().optional(),
+});
+
+export const tokenQuerySchema = z.object({
+  token: z.string().min(8),
+});
+

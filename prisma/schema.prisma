@@ -111,15 +111,16 @@ model AgentConfig {
 }
 
 model WhatsappConfig {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String   @unique @db.Uuid
-  apiUrl    String
-  secret    String
-  account   String   @unique
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId       String   @unique @db.Uuid
+  apiUrl          String
+  secret          String
+  account         String   @unique
+  defaultServerId Int?
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
 model PaymentConfig {
