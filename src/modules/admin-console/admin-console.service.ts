@@ -184,9 +184,10 @@ export async function createClient(payload: {
       password: payload.password,
       timezone: payload.timezone,
     });
-    smsToolsUserId = createdUser?.id ?? null;
+    const parsedSmsToolsUserId = Number(createdUser?.id);
+    smsToolsUserId = Number.isInteger(parsedSmsToolsUserId) && parsedSmsToolsUserId > 0 ? parsedSmsToolsUserId : null;
     if (!smsToolsUserId) {
-      throw new AppError("SMS TOOLS no devolvió el id del usuario creado.", 502);
+      throw new AppError("SMS TOOLS no devolvió un id de usuario válido.", 502);
     }
 
     const apiKey = await smsToolsAdmin.createApiKey(
