@@ -45,7 +45,34 @@ export async function upsertWhatsappConfig(companyId: string, data: {
   account?: string | null;
   isActive: boolean;
   defaultServerId?: number | null;
-}) {
+}, callerPhone?: string) {
+  // Si se está estableciendo (o cambiando) una cuenta vinculada, validamos
+  // que el teléfono de WhatsApp del `unique` en SMSTools coincida con el
+  // teléfono del usuario logueado (no con el adminPhone de la empresa).
+  if (data.account && callerPhone) {
+    const current = await prisma.whatsappConfig.findUnique({ where: { companyId } });
+    const changed = !current || current.account !== data.account;
+    if (changed) {
+      const creds: SmsToolsCredentials = { apiUrl: data.apiUrl, secret: data.secret };
+      const accounts = await smsTools.getAccounts(creds, 1, 100);
+      const match = accounts.find((a) => a.unique === data.account);
+      if (!match) {
+        throw new AppError(
+          "La cuenta de WhatsApp no se encontró en SMSTools con tus credenciales.",
+          404,
+        );
+      }
+      const accountPhone = normalizePhone(match.phone);
+      const userPhone = normalizePhone(callerPhone);
+      if (!accountPhone || !userPhone || accountPhone !== userPhone) {
+        throw new AppError(
+          `El número vinculado (${match.phone ?? "desconocido"}) no coincide con el número registrado para tu cuenta (${callerPhone}). Solo puedes vincular tu propio WhatsApp.`,
+          403,
+        );
+      }
+    }
+  }
+
   return prisma.whatsappConfig.upsert({
     where: { companyId },
     update: data,
@@ -54,6 +81,17 @@ export async function upsertWhatsappConfig(companyId: string, data: {
       ...data,
     },
   });
+}
+
+/**
+ * Normaliza un número telefónico a solo dígitos para comparar de forma
+ * tolerante (ignora "+", espacios, guiones, paréntesis). Devuelve null si la
+ * cadena no contiene dígitos suficientes.
+ */
+function normalizePhone(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const digits = value.replace(/\D+/g, "");
+  return digits.length >= 7 ? digits : null;
 }
 
 export async function testWhatsappConnection(data: {
@@ -128,18 +166,87 @@ export async function listWhatsappAccounts(companyId: string, page?: number, lim
   return smsTools.getAccounts(creds, page, limit);
 }
 
+/**
+ * Sincroniza el campo `account` del panel con el estado real en SMSTools.
+ *
+ * Comportamiento:
+ *  - Lista las cuentas en SMSTools usando el `secret` de la empresa.
+ *  - Busca la que coincida con el teléfono del usuario logueado.
+ *  - Si la encuentra, actualiza el DB con su `unique` (incluso si era distinta).
+ *  - Si no la encuentra, limpia el `account` del DB.
+ *
+ * Cubre los dos escenarios opuestos:
+ *  - Local tiene unique pero ya no existe en SMSTools → limpia.
+ *  - SMSTools tiene cuenta del usuario pero local no la tiene → vincula.
+ */
+export async function syncWhatsappAccount(companyId: string, callerPhone: string) {
+  const config = await prisma.whatsappConfig.findUnique({ where: { companyId } });
+  if (!config) {
+    throw new AppError("Aún no has configurado la API de WhatsApp.", 400);
+  }
+  const creds: SmsToolsCredentials = { apiUrl: config.apiUrl, secret: config.secret };
+  const accounts = await smsTools.getAccounts(creds, 1, 100);
+  const userPhone = normalizePhone(callerPhone);
+  const match = userPhone
+    ? accounts.find((a) => normalizePhone(a.phone) === userPhone)
+    : undefined;
+
+  const nextAccount = match?.unique ?? null;
+  if (nextAccount === config.account) {
+    return {
+      action: "unchanged" as const,
+      account: config.account,
+      phone: match?.phone ?? null,
+      status: match?.status ?? null,
+      config,
+    };
+  }
+
+  const updated = await prisma.whatsappConfig.update({
+    where: { companyId },
+    data: { account: nextAccount },
+  });
+
+  return {
+    action: nextAccount ? ("linked" as const) : ("unlinked" as const),
+    account: nextAccount,
+    phone: match?.phone ?? null,
+    status: match?.status ?? null,
+    config: updated,
+  };
+}
+
 export async function createWhatsappLink(companyId: string, sid?: number) {
   const creds = await getCredentials(companyId);
   return smsTools.createLink(creds, sid);
 }
 
+async function assertAccountBelongsToCompany(
+  creds: SmsToolsCredentials,
+  unique: string,
+): Promise<void> {
+  // Cada empresa usa su propio secret; SMSTools solo lista las cuentas
+  // vinculadas a ese secret. Si el `unique` no aparece, significa que no
+  // pertenece a la empresa (o ya fue eliminado en SMSTools).
+  const accounts = await smsTools.getAccounts(creds, 1, 100);
+  const exists = accounts.some((a) => a.unique === unique);
+  if (!exists) {
+    throw new AppError(
+      "La cuenta de WhatsApp no pertenece a tu organización o ya fue eliminada en SMSTools.",
+      404,
+    );
+  }
+}
+
 export async function relinkWhatsappAccount(companyId: string, unique: string, sid?: number) {
   const creds = await getCredentials(companyId);
+  await assertAccountBelongsToCompany(creds, unique);
   return smsTools.relinkAccount(creds, unique, sid);
 }
 
 export async function deleteWhatsappAccount(companyId: string, unique: string) {
   const creds = await getCredentials(companyId);
+  await assertAccountBelongsToCompany(creds, unique);
   return smsTools.deleteAccount(creds, unique);
 }
 
@@ -153,19 +260,70 @@ export async function getWhatsappLinkInfo(companyId: string, token: string) {
   return smsTools.getLinkInfo(creds, token);
 }
 
-export async function listWhatsappPending(companyId: string, page?: number, limit?: number) {
+export async function listWhatsappPending(companyId: string, page = 1, limit = 20) {
   const creds = await getCredentials(companyId);
-  return smsTools.getPending(creds, page, limit);
+  return fetchAndPaginate(companyId, (p, l) => smsTools.getPending(creds, p, l), page, limit);
 }
 
-export async function listWhatsappSent(companyId: string, page?: number, limit?: number) {
+export async function listWhatsappSent(companyId: string, page = 1, limit = 20) {
   const creds = await getCredentials(companyId);
-  return smsTools.getSent(creds, page, limit);
+  return fetchAndPaginate(companyId, (p, l) => smsTools.getSent(creds, p, l), page, limit);
 }
 
-export async function listWhatsappReceived(companyId: string, page?: number, limit?: number) {
+export async function listWhatsappReceived(companyId: string, page = 1, limit = 20) {
   const creds = await getCredentials(companyId);
-  return smsTools.getReceived(creds, page, limit);
+  return fetchAndPaginate(companyId, (p, l) => smsTools.getReceived(creds, p, l), page, limit);
+}
+
+/**
+ * Dado que SMSTools ignora cualquier filtro por cuenta, traemos en lotes de 100
+ * desde la API, filtramos por la cuenta vinculada y devolvemos la "página"
+ * real que pidió el cliente. Así el paginado es correcto aunque haya mensajes
+ * de otras cuentas mezclados.
+ *
+ * Devuelve { items, hasMore } para que el frontend sepa si habilitar "Siguiente".
+ */
+async function fetchAndPaginate<T extends { account?: string | null }>(
+  companyId: string,
+  fetcher: (page: number, limit: number) => Promise<T[]>,
+  targetPage: number,
+  pageSize: number,
+): Promise<{ items: T[]; hasMore: boolean }> {
+  const phone = await getLinkedPhone(companyId);
+  if (!phone) return { items: [], hasMore: false };
+
+  const BATCH = 100;
+  const needed = targetPage * pageSize; // cuántos ítems filtrados necesitamos ver
+  const filtered: T[] = [];
+  let apiPage = 1;
+
+  // Traemos lotes hasta tener suficiente o quedarnos sin datos
+  while (filtered.length < needed + pageSize) {
+    const batch = await fetcher(apiPage, BATCH);
+    if (!batch?.length) break;
+    filtered.push(...batch.filter((m) => m.account === phone));
+    if (batch.length < BATCH) break; // último lote
+    apiPage++;
+  }
+
+  const start = (targetPage - 1) * pageSize;
+  const items = filtered.slice(start, start + pageSize);
+  const hasMore = filtered.length > start + pageSize;
+  return { items, hasMore };
+}
+
+/** Resuelve el teléfono real (+51...) de la cuenta `unique` almacenada en config. */
+async function getLinkedPhone(companyId: string): Promise<string | null> {
+  const config = await prisma.whatsappConfig.findUnique({
+    where: { companyId },
+    select: { account: true },
+  });
+  const unique = config?.account ?? null;
+  if (!unique) return null;
+
+  const creds = await getCredentials(companyId);
+  const accounts = await smsTools.getAccounts(creds).catch(() => [] as Array<{ unique?: string; phone?: string }>);
+  return accounts.find((a) => a.unique === unique)?.phone ?? null;
 }
 
 export async function deleteWhatsappSent(companyId: string, id: number | string) {

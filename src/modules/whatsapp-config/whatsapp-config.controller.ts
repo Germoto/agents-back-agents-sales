@@ -13,6 +13,7 @@ import {
   listWhatsappSent,
   listWhatsappServers,
   relinkWhatsappAccount,
+  syncWhatsappAccount,
   testWhatsappConnection,
   upsertWhatsappConfig,
 } from "./whatsapp-config.service";
@@ -23,7 +24,7 @@ export async function getWhatsappConfigController(req: Request, res: Response) {
 }
 
 export async function upsertWhatsappConfigController(req: Request, res: Response) {
-  const config = await upsertWhatsappConfig(req.user!.companyId, req.body);
+  const config = await upsertWhatsappConfig(req.user!.companyId, req.body, req.user!.phone);
   return res.json(config);
 }
 
@@ -61,6 +62,11 @@ export async function deleteWhatsappAccountController(req: Request, res: Respons
   return res.json(data);
 }
 
+export async function syncWhatsappAccountController(req: Request, res: Response) {
+  const data = await syncWhatsappAccount(req.user!.companyId, req.user!.phone);
+  return res.json(data);
+}
+
 export async function getWhatsappQrImageController(req: Request, res: Response) {
   const { token } = req.query as { token: string };
   const { buffer, contentType } = await getWhatsappQrImage(req.user!.companyId, token);
@@ -76,21 +82,24 @@ export async function getWhatsappLinkInfoController(req: Request, res: Response)
 }
 
 export async function listWhatsappPendingController(req: Request, res: Response) {
-  const { page, limit } = req.query as { page?: number; limit?: number };
-  const data = await listWhatsappPending(req.user!.companyId, page, limit);
-  return res.json(data);
+  const page = Number(req.query.page ?? 1);
+  const limit = Number(req.query.limit ?? 20);
+  const result = await listWhatsappPending(req.user!.companyId, page, limit);
+  return res.json(result);
 }
 
 export async function listWhatsappSentController(req: Request, res: Response) {
-  const { page, limit } = req.query as { page?: number; limit?: number };
-  const data = await listWhatsappSent(req.user!.companyId, page, limit);
-  return res.json(data);
+  const page = Number(req.query.page ?? 1);
+  const limit = Number(req.query.limit ?? 20);
+  const result = await listWhatsappSent(req.user!.companyId, page, limit);
+  return res.json(result);
 }
 
 export async function listWhatsappReceivedController(req: Request, res: Response) {
-  const { page, limit } = req.query as { page?: number; limit?: number };
-  const data = await listWhatsappReceived(req.user!.companyId, page, limit);
-  return res.json(data);
+  const page = Number(req.query.page ?? 1);
+  const limit = Number(req.query.limit ?? 20);
+  const result = await listWhatsappReceived(req.user!.companyId, page, limit);
+  return res.json(result);
 }
 
 export async function deleteWhatsappSentController(req: Request, res: Response) {

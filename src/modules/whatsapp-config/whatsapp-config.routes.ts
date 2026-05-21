@@ -16,6 +16,7 @@ import {
   listWhatsappSentController,
   listWhatsappServersController,
   relinkWhatsappAccountController,
+  syncWhatsappAccountController,
   testWhatsappConnectionController,
   upsertWhatsappConfigController,
 } from "./whatsapp-config.controller";
@@ -44,6 +45,7 @@ router.get(
   asyncHandler(listWhatsappAccountsController),
 );
 router.delete("/accounts/:unique", asyncHandler(deleteWhatsappAccountController));
+router.post("/sync", asyncHandler(syncWhatsappAccountController));
 
 router.post("/link", validate({ body: linkSchema }), asyncHandler(createWhatsappLinkController));
 router.post("/relink", validate({ body: relinkSchema }), asyncHandler(relinkWhatsappAccountController));
