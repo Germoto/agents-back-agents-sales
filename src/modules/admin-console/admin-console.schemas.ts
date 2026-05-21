@@ -12,6 +12,7 @@ export const createClientSchema = z.object({
     .min(2)
     .regex(/^[a-z0-9-]+$/, "El slug solo puede tener minusculas, numeros y guiones"),
   adminName: z.string().min(2),
+  adminEmail: z.string().trim().email("Ingresa un email valido"),
   adminPhone: z.string().trim().regex(/^\+?\d{8,20}$/, "Ingresa un celular valido"),
   password: z.string().min(6),
   timezone: z.string().min(3).default("America/Lima"),

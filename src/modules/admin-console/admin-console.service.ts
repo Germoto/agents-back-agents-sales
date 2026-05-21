@@ -3,6 +3,8 @@ import { Prisma, UserRole } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { signAccessToken } from "../../lib/jwt";
+import { smsToolsAdmin, DEFAULT_API_KEY_PERMISSIONS } from "../../lib/smstools-admin-client";
+import { env } from "../../config/env";
 
 function defaultRules() {
   return [
@@ -145,6 +147,7 @@ export async function createClient(payload: {
   companyName: string;
   slug: string;
   adminName: string;
+  adminEmail: string;
   adminPhone: string;
   password: string;
   timezone: string;
@@ -170,7 +173,53 @@ export async function createClient(payload: {
 
   const passwordHash = await bcrypt.hash(payload.password, 10);
 
-  const company = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+  // 1) Provision the SMS TOOLS account + API key BEFORE we touch the DB
+  //    so we can fail fast without leaving orphan records.
+  let smsToolsUserId: number | null = null;
+  let smsToolsSecret: string | null = null;
+  try {
+    const createdUser = await smsToolsAdmin.createUser({
+      name: payload.adminName,
+      email: payload.adminEmail,
+      password: payload.password,
+      timezone: payload.timezone,
+    });
+    smsToolsUserId = createdUser?.id ?? null;
+    if (!smsToolsUserId) {
+      throw new AppError("SMS TOOLS no devolvió el id del usuario creado.", 502);
+    }
+
+    const apiKey = await smsToolsAdmin.createApiKey(
+      smsToolsUserId,
+      `Tenant ${payload.slug}`,
+      DEFAULT_API_KEY_PERMISSIONS,
+    );
+    smsToolsSecret = apiKey?.secret ?? null;
+    if (!smsToolsSecret) {
+      throw new AppError("SMS TOOLS no devolvió el secret de la API key.", 502);
+    }
+  } catch (error) {
+    // Best-effort rollback: if the user was created but the api key failed,
+    // remove the user so we don't leave an unusable account behind.
+    if (smsToolsUserId) {
+      try {
+        await smsToolsAdmin.deleteUser(smsToolsUserId);
+      } catch {
+        /* ignore secondary error */
+      }
+    }
+    if (error instanceof AppError) throw error;
+    throw new AppError(
+      error instanceof Error
+        ? `No se pudo aprovisionar la cuenta de SMS TOOLS: ${error.message}`
+        : "No se pudo aprovisionar la cuenta de SMS TOOLS.",
+      502,
+    );
+  }
+
+  let company;
+  try {
+    company = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const createdCompany = await tx.company.create({
       data: {
         name: payload.companyName,
@@ -213,6 +262,15 @@ export async function createClient(payload: {
       },
     });
 
+    await tx.whatsappConfig.create({
+      data: {
+        companyId: createdCompany.id,
+        apiUrl: env.SMSTOOLS_API_URL,
+        secret: smsToolsSecret!,
+        isActive: payload.isActive,
+      },
+    });
+
     return tx.company.findUniqueOrThrow({
       where: { id: createdCompany.id },
       include: {
@@ -231,7 +289,18 @@ export async function createClient(payload: {
         },
       },
     });
-  });
+    });
+  } catch (error) {
+    // Local DB write failed; roll back the SMS TOOLS user we just created.
+    if (smsToolsUserId) {
+      try {
+        await smsToolsAdmin.deleteUser(smsToolsUserId);
+      } catch {
+        /* ignore secondary error */
+      }
+    }
+    throw error;
+  }
 
   return mapClient(company);
 }
