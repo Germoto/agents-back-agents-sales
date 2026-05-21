@@ -188,9 +188,17 @@ export const smsTools = {
     sid?: number,
   ): Promise<SmsToolsLinkResponse> {
     const base = deriveApiBase(creds.apiUrl);
-    const data = await smsToolsRequest<SmsToolsLinkResponse>(base, "/create/wa.relink", {
-      query: { secret: creds.secret, unique, sid },
-    });
+    const data = await smsToolsRequest<SmsToolsLinkResponse & { already_connected?: boolean }>(
+      base,
+      "/create/wa.relink",
+      { query: { secret: creds.secret, unique, sid } },
+    );
+    if ((data as { already_connected?: boolean } | null)?.already_connected) {
+      throw new AppError(
+        "La cuenta ya está activa y conectada. Para escanear un QR nuevo primero desvincúlala.",
+        409,
+      );
+    }
     return {
       ...data,
       token: extractTokenFromUrl(data?.qrimagelink) ?? extractTokenFromUrl(data?.infolink) ?? undefined,
