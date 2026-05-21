@@ -87,7 +87,7 @@ async function main() {
   const whatsappConfig = await prisma.whatsappConfig.create({
     data: {
       companyId: company.id,
-      apiUrl: "https://smstools.molanosoft.com/api/send/whatsapp",
+      apiUrl: "https://smstools.pro/api/send/whatsapp",
       secret: "9187147171baf7eb01136414276272c793403885",
       account: "1776450964c4ca4238a0b923820dcc509a6f75849b69e27d9428a35",
       isActive: true,

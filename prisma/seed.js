@@ -68,14 +68,14 @@ async function main() {
     await prisma.whatsappConfig.upsert({
         where: { companyId: company.id },
         update: {
-            apiUrl: "https://smstools.molanosoft.com/api/send/whatsapp",
+            apiUrl: "https://smstools.pro/api/send/whatsapp",
             secret: "demo-whatsapp-secret",
             account: "ACCOUNT_WA_DEMO",
             isActive: true,
         },
         create: {
             companyId: company.id,
-            apiUrl: "https://smstools.molanosoft.com/api/send/whatsapp",
+            apiUrl: "https://smstools.pro/api/send/whatsapp",
             secret: "demo-whatsapp-secret",
             account: "ACCOUNT_WA_DEMO",
             isActive: true,
