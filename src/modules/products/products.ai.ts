@@ -113,13 +113,17 @@ function buildUserPrompt(body: AiSuggestBody) {
   if (context.fullDescription?.trim()) lines.push(`Descripción completa actual: ${context.fullDescription}`);
 
   if (LIST_FIELDS.has(field) && context.existing && context.existing.length > 0) {
-    lines.push(`\nYa existen estos elementos (NO los repitas, sugiere COMPLEMENTARIOS o distintos):`);
+    lines.push("");
+    lines.push("ELEMENTOS QUE YA EXISTEN EN EL FORMULARIO (PROHIBIDO repetirlos ni siquiera como sinónimo, variación, plural/singular, mayúsculas/minúsculas o reordenando palabras):");
     context.existing.forEach((item) => lines.push(`- ${item}`));
+    lines.push("Tu salida debe ser totalmente DISTINTA y COMPLEMENTARIA a la lista anterior. Si no puedes generar suficientes nuevos sin repetir, devuelve menos elementos.");
   }
 
   if (QA_FIELDS.has(field) && context.existingQa && context.existingQa.length > 0) {
-    lines.push(`\nYa existen estas preguntas/objeciones (NO las repitas):`);
+    lines.push("");
+    lines.push("PREGUNTAS/OBJECIONES QUE YA EXISTEN (PROHIBIDO repetirlas, ni siquiera reformulando):");
     context.existingQa.forEach((qa) => lines.push(`- ${qa.question}`));
+    lines.push("Genera preguntas/objeciones distintas que aporten ángulos NUEVOS.");
   }
 
   lines.push("");
@@ -230,14 +234,26 @@ export async function aiSuggestProductFieldController(req: Request, res: Respons
   }
 
   if (LIST_FIELDS.has(body.field)) {
-    const list = Array.isArray(parsed.suggestions)
+    const rawList = Array.isArray(parsed.suggestions)
       ? (parsed.suggestions as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
       : [];
+    const existingSet = new Set(
+      (body.context.existing ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean),
+    );
+    const seen = new Set<string>();
+    const list: string[] = [];
+    for (const raw of rawList) {
+      const value = raw.trim();
+      const key = value.toLowerCase();
+      if (!value || existingSet.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      list.push(value);
+    }
     return res.json({ field: body.field, suggestions: list });
   }
 
   // QA
-  const list = Array.isArray(parsed.suggestions)
+  const rawQa = Array.isArray(parsed.suggestions)
     ? (parsed.suggestions as unknown[]).filter(
         (x): x is { question: string; answer: string } =>
           typeof x === "object" &&
@@ -246,5 +262,19 @@ export async function aiSuggestProductFieldController(req: Request, res: Respons
           typeof (x as { answer?: unknown }).answer === "string",
       )
     : [];
-  return res.json({ field: body.field, suggestions: list });
+  const existingQaSet = new Set(
+    (body.context.existingQa ?? [])
+      .map((q) => q.question.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const seenQa = new Set<string>();
+  const qaList: { question: string; answer: string }[] = [];
+  for (const item of rawQa) {
+    const q = item.question.trim();
+    const key = q.toLowerCase();
+    if (!q || existingQaSet.has(key) || seenQa.has(key)) continue;
+    seenQa.add(key);
+    qaList.push({ question: q, answer: item.answer.trim() });
+  }
+  return res.json({ field: body.field, suggestions: qaList });
 }
