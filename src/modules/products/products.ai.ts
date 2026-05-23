@@ -13,6 +13,7 @@ export const aiSuggestBodySchema = z.object({
     "faqs",
     "objections",
     "aliases",
+    "deliveryInstructions",
   ]),
   context: z.object({
     name: z.string().trim().min(1, "El nombre del producto es obligatorio para sugerir"),
@@ -33,26 +34,28 @@ type AiSuggestBody = z.infer<typeof aiSuggestBodySchema>;
 
 const FIELD_INSTRUCTIONS: Record<AiSuggestBody["field"], string> = {
   shortDescription:
-    "Genera UNA sola frase de catálogo, máximo 140 caracteres, en español neutro, clara y atractiva. No uses emojis. Devuelve solo el texto, sin comillas.",
+    "Genera UNA sola frase de catálogo, máximo 140 caracteres, en español neutro, clara y atractiva. Puedes incluir 1 emoji al inicio si le da personalidad. Devuelve solo el texto, sin comillas.",
   fullDescription:
-    "Genera una descripción completa del producto en español neutro, en 2-4 párrafos cortos separados por saltos de línea. Habla del valor, a quién va dirigido y qué obtiene. No uses listas, no uses emojis.",
+    "Genera una descripción completa del producto en español neutro, en 2-4 párrafos cortos separados por saltos de línea. Habla del valor, a quién va dirigido y qué obtiene. Puedes usar emojis con moderación (máx. 3 en todo el texto) para calidez visual.",
   benefits:
-    "Genera 5 beneficios concretos del producto, en español neutro, frases cortas (máx. 90 caracteres cada una), enfocadas en el resultado para el cliente.",
+    "Genera 5 beneficios concretos del producto, en español neutro, frases cortas (máx. 90 caracteres). Cada beneficio puede comenzar con un emoji relevante (✅ 🚀 💡 💰 🎯 ⚡ etc.) para hacerlo más visual y cálido.",
   includes:
-    "Genera 5 elementos concretos que incluye el producto al comprarlo, en español neutro, frases cortas (máx. 90 caracteres), específicas y verificables.",
+    "Genera 5 elementos que incluye el producto al comprarlo, en español neutro, frases cortas (máx. 90 caracteres). Cada elemento puede comenzar con un emoji (📦 🎁 📄 🎥 💬 etc.).",
   bonuses:
-    "Genera 4 bonos o extras atractivos que complementen el producto, en español neutro, frases cortas (máx. 90 caracteres).",
+    "Genera 4 bonos o extras atractivos que complementen el producto, en español neutro, frases cortas (máx. 90 caracteres). Cada bono puede comenzar con un emoji que refuerce la idea (🎁 🔥 ⭐ 🏆 etc.).",
   faqs:
-    "Genera 5 preguntas frecuentes con sus respuestas. Cada elemento debe tener 'question' (pregunta natural que haría un cliente real por WhatsApp) y 'answer' (respuesta clara, 1-3 frases). En español neutro.",
+    "Genera 5 preguntas frecuentes con sus respuestas. Cada elemento debe tener 'question' (pregunta natural que haría un cliente real por WhatsApp, puedes agregar emoji al inicio) y 'answer' (respuesta clara y cálida, 1-3 frases, con algún emoji si aporta). En español neutro.",
   objections:
-    "Genera 5 objeciones típicas (dudas o frenos antes de comprar) con su respuesta persuasiva. Cada elemento debe tener 'question' (la objeción en primera persona, ej. 'No tengo tiempo') y 'answer' (respuesta empática que avanza la venta). En español neutro.",
+    "Genera 5 objeciones típicas con su respuesta persuasiva. Cada elemento debe tener 'question' (la objeción en primera persona, ej. '😰 No tengo tiempo') y 'answer' (respuesta empática y positiva que avanza la venta, puede incluir 1-2 emojis). En español neutro.",
   aliases:
-    "Genera 6 alias o variaciones de búsqueda para este producto: sinónimos, errores comunes de tipeo, formas coloquiales. NO se muestran al cliente, sirven para que un bot reconozca al producto. Palabras o frases cortas en minúsculas.",
+    "Genera 6 alias o variaciones de búsqueda para este producto: sinónimos, errores comunes de tipeo, formas coloquiales. NO se muestran al cliente, sirven para que un bot reconozca al producto. Palabras o frases cortas en minúsculas, SIN emojis.",
+  deliveryInstructions:
+    "Genera un mensaje de entrega cálido y claro que el bot enviará al cliente después de que el pago sea aprobado. Debe: 1) felicitar la compra brevemente, 2) indicar cómo acceder al contenido/producto, 3) qué hacer si tiene dudas. Usa emojis para hacerlo amigable (✅ 🎉 📦 💬 etc.). Máximo 5-7 líneas. Devuelve solo el texto del mensaje.",
 };
 
 const LIST_FIELDS = new Set<AiSuggestBody["field"]>(["benefits", "includes", "bonuses", "aliases"]);
 const QA_FIELDS = new Set<AiSuggestBody["field"]>(["faqs", "objections"]);
-const TEXT_FIELDS = new Set<AiSuggestBody["field"]>(["shortDescription", "fullDescription"]);
+const TEXT_FIELDS = new Set<AiSuggestBody["field"]>(["shortDescription", "fullDescription", "deliveryInstructions"]);
 
 function buildSchemaForField(field: AiSuggestBody["field"]) {
   if (TEXT_FIELDS.has(field)) {
@@ -213,8 +216,8 @@ export async function aiSuggestProductFieldController(req: Request, res: Respons
   const systemPrompt =
     "Eres un copywriter experto en e-commerce y ventas conversacionales por WhatsApp. " +
     "Generas contenido para fichas de producto que serán usadas por un bot vendedor. " +
-    "Respondes SIEMPRE en español neutro, sin emojis, sin disclaimers, sin saludos. " +
-    "Sé concreto, profesional y orientado a beneficios. Devuelve únicamente el JSON solicitado.";
+    "Respondes SIEMPRE en español neutro. Usa emojis cuando el campo lo indique, con moderación y buen gusto. Sin disclaimers, sin saludos, sin comentarios fuera del JSON. " +
+    "Sé concreto, cálido y orientado a beneficios. Devuelve únicamente el JSON solicitado.";
 
   const userPrompt = buildUserPrompt(body);
   const schema = buildSchemaForField(body.field);
