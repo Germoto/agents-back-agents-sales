@@ -14,6 +14,7 @@ import botRoutes from "../modules/bot/bot.routes";
 import adminConsoleRoutes from "../modules/admin-console/admin-console.routes";
 import webhookEndpointsRoutes from "../modules/webhook-endpoints/webhook-endpoints.routes";
 import webhooksRoutes from "../modules/webhooks/webhooks.routes";
+import publicPaymentsRoutes from "../modules/public-payments/public-payments.routes";
 
 const router = Router();
 
@@ -34,5 +35,8 @@ router.use("/control-room-7m4x", adminConsoleRoutes);
 router.use("/webhook-endpoints", webhookEndpointsRoutes);
 // Recepción de webhooks entrantes (público, autenticado via HMAC)
 router.use("/webhooks", webhooksRoutes);
+// API pública para n8n (consulta y actualización de comprobantes; sin token,
+// resuelve company por phone admin igual que /api/bot/config)
+router.use("/public/payments", publicPaymentsRoutes);
 
 export default router;

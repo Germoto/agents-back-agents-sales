@@ -367,8 +367,8 @@ model DigitalSale {
 model PaymentReceipt {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId       String        @db.Uuid
-  customerId      String        @db.Uuid
-  productId       String        @db.Uuid
+  customerId      String?       @db.Uuid
+  productId       String?       @db.Uuid
   digitalSaleId   String?       @db.Uuid
   mediaUrl        String?
   amountExpected  String
@@ -376,16 +376,22 @@ model PaymentReceipt {
   rejectionReason String?
   source          String?       // "validpay", "manual", etc.
   externalId      String?       // id del pago en el sistema externo (idempotencia)
+  payerName       String?       // nombre del pagador reportado por el origen
+  paymentSource   String?       // "yape", "plin", "transferencia", etc.
+  occurredAt      DateTime?     // momento en que ocurrió el pago según el origen
+  validatedAt     DateTime?     // momento en que se aprobó/rechazó
+  validationNote  String?       // nota libre de quien validó (n8n / admin)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   company         Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  customer        Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  product         Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  customer        Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  product         Product?      @relation(fields: [productId], references: [id], onDelete: SetNull)
   digitalSale     DigitalSale?  @relation(fields: [digitalSaleId], references: [id], onDelete: SetNull)
   webhookEvents   WebhookEvent[]
 
   @@unique([source, externalId])
   @@index([companyId, createdAt])
+  @@index([companyId, status, createdAt])
 }
 
 model WebhookEndpoint {
