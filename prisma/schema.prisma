@@ -48,6 +48,7 @@ enum DigitalSaleStatus {
 
 enum ReceiptStatus {
   PENDIENTE
+  EN_REVISION
   APROBADO
   RECHAZADO
 }
@@ -369,18 +370,32 @@ model PaymentReceipt {
   companyId       String        @db.Uuid
   customerId      String?       @db.Uuid
   productId       String?       @db.Uuid
+  productIds      String[]      @default([]) @db.Uuid
+  orderId         String?
   digitalSaleId   String?       @db.Uuid
   mediaUrl        String?
-  amountExpected  String
+  amountExpected  String        // mantenido por compatibilidad; mirror de amountPaid
+  amountPaid      String?       // monto realmente recibido del origen
+  currency        String        @default("PEN")
   status          ReceiptStatus
   rejectionReason String?
   source          String?       // "validpay", "manual", etc.
   externalId      String?       // id del pago en el sistema externo (idempotencia)
   payerName       String?       // nombre del pagador reportado por el origen
   paymentSource   String?       // "yape", "plin", "transferencia", etc.
+  payerPhone      String?       // teléfono o últimos dígitos si el origen los emite
+  operationCode   String?       // código de operación bancaria si aplica
+  reference       String?       // referencia libre del origen
   occurredAt      DateTime?     // momento en que ocurrió el pago según el origen
   validatedAt     DateTime?     // momento en que se aprobó/rechazó
   validationNote  String?       // nota libre de quien validó (n8n / admin)
+  validationMode  String?       // "AUTO" | "MANUAL"
+  matchScore      Int?          // 0-100 score con que n8n lo cerró
+  matchStrategy   String?       // ej: "amount_name_time"
+  matchedPayerNameInput String? // nombre que envió el cliente vs el del comprobante
+  metadata        Json?         // extras: conversationKey, waPhone, cartTotal, expectedAmount, etc.
+  claimedBy       String?       // identificador de la ejecución n8n que reclamó el pago
+  claimedUntil    DateTime?     // timestamp hasta el cual el claim es válido
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   company         Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -392,6 +407,8 @@ model PaymentReceipt {
   @@unique([source, externalId])
   @@index([companyId, createdAt])
   @@index([companyId, status, createdAt])
+  @@index([companyId, amountPaid])
+  @@index([companyId, occurredAt])
 }
 
 model WebhookEndpoint {

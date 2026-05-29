@@ -1,6 +1,11 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import type { MatchBody, UpdateStatusBody, ClaimBody } from "./public-payments.schemas";
 
+// -------------------------------------------------------------------------
+// Helpers de identificación de company por phone admin (estilo /bot/config)
+// -------------------------------------------------------------------------
 function normalizePhone(value: string) {
   return value.replace(/\D/g, "");
 }
@@ -16,10 +21,6 @@ function phoneMatches(source: string, incoming: string) {
   );
 }
 
-/**
- * Resuelve companyId a partir del teléfono de un usuario admin activo.
- * Mismo patrón que /api/bot/config.
- */
 export async function resolveCompanyIdByPhone(phone: string): Promise<string> {
   const users = await prisma.user.findMany({
     where: { isActive: true },
@@ -35,22 +36,40 @@ export async function resolveCompanyIdByPhone(phone: string): Promise<string> {
   return match.companyId;
 }
 
+// -------------------------------------------------------------------------
+// Serializer
+// -------------------------------------------------------------------------
 function serializeReceipt(r: any) {
   return {
     id: r.id,
     companyId: r.companyId,
     source: r.source,
     externalId: r.externalId,
+    // amountExpected se mantiene como mirror; amountPaid es el campo principal
     amountExpected: r.amountExpected,
+    amountPaid: r.amountPaid ?? r.amountExpected,
+    currency: r.currency ?? "PEN",
     status: r.status,
     payerName: r.payerName,
     paymentSource: r.paymentSource,
+    payerPhone: r.payerPhone,
+    operationCode: r.operationCode,
+    reference: r.reference,
     occurredAt: r.occurredAt,
     validatedAt: r.validatedAt,
+    validationMode: r.validationMode,
+    matchScore: r.matchScore,
+    matchStrategy: r.matchStrategy,
+    matchedPayerNameInput: r.matchedPayerNameInput,
     validationNote: r.validationNote,
     rejectionReason: r.rejectionReason,
     customerId: r.customerId,
     productId: r.productId,
+    productIds: r.productIds ?? [],
+    orderId: r.orderId,
+    metadata: r.metadata ?? null,
+    claimedBy: r.claimedBy,
+    claimedUntil: r.claimedUntil,
     customer: r.customer
       ? { id: r.customer.id, phone: r.customer.phone, name: r.customer.name }
       : null,
@@ -62,21 +81,72 @@ function serializeReceipt(r: any) {
   };
 }
 
-export async function listPendingPayments(
-  companyId: string,
-  opts: { limit?: number; since?: string; source?: string },
-) {
+const RECEIPT_INCLUDE = {
+  customer: { select: { id: true, phone: true, name: true } },
+  product: { select: { id: true, slug: true, name: true } },
+} as const;
+
+// -------------------------------------------------------------------------
+// Filtros utilitarios
+// -------------------------------------------------------------------------
+function normalizeAmount(value: string | number): string {
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) return String(value);
+  return num.toFixed(2);
+}
+
+function buildAmountFilter(value: string | number | undefined) {
+  if (value === undefined || value === null || value === "") return {};
+  const normalized = normalizeAmount(value);
+  // Buscamos coincidencia en amountPaid o, para registros viejos, en amountExpected
+  return {
+    OR: [{ amountPaid: normalized }, { amountExpected: normalized }],
+  } as Prisma.PaymentReceiptWhereInput;
+}
+
+interface ListPendingOpts {
+  limit?: number;
+  since?: string;
+  source?: string;
+  amountPaid?: string | number;
+  payerName?: string;
+  occurredFrom?: string;
+  occurredTo?: string;
+  paymentSource?: string;
+  status?: "PENDIENTE" | "EN_REVISION" | "APROBADO" | "RECHAZADO";
+}
+
+export async function listPendingPayments(companyId: string, opts: ListPendingOpts) {
+  const where: Prisma.PaymentReceiptWhereInput = {
+    companyId,
+    status: opts.status ?? "PENDIENTE",
+  };
+
+  if (opts.source) where.source = opts.source;
+  if (opts.since) where.createdAt = { gte: new Date(opts.since) };
+
+  const occurred: Prisma.DateTimeFilter = {};
+  if (opts.occurredFrom) occurred.gte = new Date(opts.occurredFrom);
+  if (opts.occurredTo) occurred.lte = new Date(opts.occurredTo);
+  if (Object.keys(occurred).length) where.occurredAt = occurred;
+
+  if (opts.paymentSource) {
+    where.paymentSource = { equals: opts.paymentSource.toUpperCase(), mode: "insensitive" };
+  }
+
+  if (opts.payerName) {
+    where.payerName = { contains: opts.payerName, mode: "insensitive" };
+  }
+
+  // amountPaid puede venir como mirror en amountExpected (registros viejos)
+  const amountFilter = buildAmountFilter(opts.amountPaid);
+  if ((amountFilter as any).OR) {
+    where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), amountFilter];
+  }
+
   const receipts = await prisma.paymentReceipt.findMany({
-    where: {
-      companyId,
-      status: "PENDIENTE",
-      ...(opts.source ? { source: opts.source } : {}),
-      ...(opts.since ? { createdAt: { gte: new Date(opts.since) } } : {}),
-    },
-    include: {
-      customer: { select: { id: true, phone: true, name: true } },
-      product: { select: { id: true, slug: true, name: true } },
-    },
+    where,
+    include: RECEIPT_INCLUDE,
     orderBy: { createdAt: "desc" },
     take: opts.limit ?? 50,
   });
@@ -86,57 +156,271 @@ export async function listPendingPayments(
 export async function getPaymentById(companyId: string, id: string) {
   const r = await prisma.paymentReceipt.findFirst({
     where: { id, companyId },
-    include: {
-      customer: { select: { id: true, phone: true, name: true } },
-      product: { select: { id: true, slug: true, name: true } },
-    },
+    include: RECEIPT_INCLUDE,
   });
   if (!r) throw new AppError("Comprobante no encontrado", 404);
   return serializeReceipt(r);
 }
 
-interface UpdateStatusInput {
-  status: "APROBADO" | "RECHAZADO";
-  reason?: string;
-  customerPhone?: string;
-  customerName?: string;
-  productId?: string;
-  note?: string;
+// -------------------------------------------------------------------------
+// POST /match : devuelve candidatos PENDIENTES con score
+// -------------------------------------------------------------------------
+function normalizeName(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // quita acentos
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-/**
- * Aprueba o rechaza un comprobante. n8n puede enviar customerPhone/productId
- * para asociar el comprobante huérfano al cliente/producto correspondiente.
- */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const dp: number[] = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) dp[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = dp[j];
+      dp[j] = a[i - 1] === b[j - 1] ? prev : Math.min(prev, dp[j - 1], dp[j]) + 1;
+      prev = tmp;
+    }
+  }
+  return dp[b.length];
+}
+
+function nameSimilarity(input: string, target: string): "exact" | "similar" | "no" {
+  const a = normalizeName(input);
+  const b = normalizeName(target);
+  if (!a || !b) return "no";
+  if (a === b) return "exact";
+  if (a.includes(b) || b.includes(a)) return "similar";
+  // tokens en común
+  const tokensA = new Set(a.split(" "));
+  const tokensB = new Set(b.split(" "));
+  let common = 0;
+  for (const t of tokensA) if (tokensB.has(t) && t.length >= 3) common++;
+  if (common >= 1) return "similar";
+  // distancia relativa
+  const maxLen = Math.max(a.length, b.length);
+  const dist = levenshtein(a, b);
+  if (maxLen > 0 && dist / maxLen <= 0.3) return "similar";
+  return "no";
+}
+
+interface ScoredReceipt {
+  receipt: any;
+  matchScore: number;
+  matchReasons: string[];
+}
+
+export async function matchPayments(companyId: string, body: MatchBody) {
+  // Filtros de candidatos: traemos un superset y luego scoreamos en memoria
+  const where: Prisma.PaymentReceiptWhereInput = {
+    companyId,
+    status: "PENDIENTE",
+  };
+  if (body.source) where.source = body.source;
+
+  const occurred: Prisma.DateTimeFilter = {};
+  if (body.occurredFrom) occurred.gte = new Date(body.occurredFrom);
+  if (body.occurredTo) occurred.lte = new Date(body.occurredTo);
+  if (Object.keys(occurred).length) where.occurredAt = occurred;
+
+  // Si vino amountPaid lo usamos como filtro fuerte (rara vez hay match con monto distinto)
+  const amountFilter = buildAmountFilter(body.amountPaid);
+  if ((amountFilter as any).OR) {
+    where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), amountFilter];
+  }
+
+  const candidates = await prisma.paymentReceipt.findMany({
+    where,
+    include: RECEIPT_INCLUDE,
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+
+  const scored: ScoredReceipt[] = candidates.map((r) => {
+    const reasons: string[] = [];
+    let score = 0;
+
+    if (body.amountPaid !== undefined) {
+      const target = normalizeAmount(body.amountPaid);
+      const paid = r.amountPaid ?? r.amountExpected;
+      if (paid && paid === target) {
+        score += 50;
+        reasons.push("amount_exact");
+      }
+    }
+
+    if (body.payerName && r.payerName) {
+      const sim = nameSimilarity(body.payerName, r.payerName);
+      if (sim === "exact") {
+        score += 30;
+        reasons.push("payer_name_exact");
+      } else if (sim === "similar") {
+        score += 20;
+        reasons.push("payer_name_similar");
+      }
+    }
+
+    if ((body.occurredFrom || body.occurredTo) && r.occurredAt) {
+      const t = r.occurredAt.getTime();
+      const fromOk = body.occurredFrom ? t >= new Date(body.occurredFrom).getTime() : true;
+      const toOk = body.occurredTo ? t <= new Date(body.occurredTo).getTime() : true;
+      if (fromOk && toOk) {
+        score += 15;
+        reasons.push("time_window");
+      }
+    }
+
+    if (body.paymentSource && r.paymentSource) {
+      if (r.paymentSource.toUpperCase() === body.paymentSource.toUpperCase()) {
+        score += 5;
+        reasons.push("payment_source_match");
+      }
+    }
+
+    return { receipt: r, matchScore: score, matchReasons: reasons };
+  });
+
+  scored.sort((a, b) => b.matchScore - a.matchScore || b.receipt.createdAt - a.receipt.createdAt);
+
+  const limit = body.limit ?? 10;
+  return scored.slice(0, limit).map((s) => ({
+    ...serializeReceipt(s.receipt),
+    matchScore: s.matchScore,
+    matchReasons: s.matchReasons,
+  }));
+}
+
+// -------------------------------------------------------------------------
+// POST /:id/claim : lock con TTL
+// -------------------------------------------------------------------------
+const DEFAULT_CLAIM_TTL_SECONDS = 120;
+const MAX_CLAIM_TTL_SECONDS = 600;
+
+export async function claimPayment(companyId: string, id: string, body: ClaimBody) {
+  const ttl = Math.min(body.claimTtlSeconds ?? DEFAULT_CLAIM_TTL_SECONDS, MAX_CLAIM_TTL_SECONDS);
+
+  return prisma.$transaction(async (tx) => {
+    const receipt = await tx.paymentReceipt.findFirst({ where: { id, companyId } });
+    if (!receipt) throw new AppError("Comprobante no encontrado", 404);
+
+    const now = new Date();
+    const claimExpired = receipt.claimedUntil ? receipt.claimedUntil.getTime() < now.getTime() : true;
+
+    const claimable =
+      receipt.status === "PENDIENTE" || (receipt.status === "EN_REVISION" && claimExpired);
+
+    if (!claimable) {
+      throw new AppError(
+        receipt.status === "EN_REVISION"
+          ? `Comprobante ya reclamado por '${receipt.claimedBy}' hasta ${receipt.claimedUntil?.toISOString()}`
+          : `Comprobante en estado ${receipt.status}, no se puede reclamar`,
+        409,
+      );
+    }
+
+    const claimedUntil = new Date(now.getTime() + ttl * 1000);
+
+    const updated = await tx.paymentReceipt.update({
+      where: { id: receipt.id },
+      data: {
+        status: "EN_REVISION",
+        claimedBy: body.claimedBy,
+        claimedUntil,
+      },
+      include: RECEIPT_INCLUDE,
+    });
+
+    return serializeReceipt(updated);
+  });
+}
+
+// -------------------------------------------------------------------------
+// PATCH /:id/status (extendido)
+// -------------------------------------------------------------------------
+function mergeMetadata(
+  existing: Prisma.JsonValue | null | undefined,
+  incoming: Record<string, any> | undefined,
+  extras: Record<string, any> = {},
+): Prisma.InputJsonValue | undefined {
+  const base =
+    existing && typeof existing === "object" && !Array.isArray(existing)
+      ? (existing as Record<string, any>)
+      : {};
+  const merged = { ...base, ...(incoming ?? {}), ...extras };
+  if (!Object.keys(merged).length) return undefined;
+  return merged as Prisma.InputJsonValue;
+}
+
 export async function updatePaymentStatus(
   companyId: string,
   id: string,
-  input: UpdateStatusInput,
+  input: UpdateStatusBody,
 ) {
   const receipt = await prisma.paymentReceipt.findFirst({
     where: { id, companyId },
   });
   if (!receipt) throw new AppError("Comprobante no encontrado", 404);
-  if (receipt.status !== "PENDIENTE") {
+
+  // Transición permitida
+  // - APROBADO/RECHAZADO desde PENDIENTE o EN_REVISION (con TTL no expirado)
+  // - EN_REVISION redirige a /claim conceptualmente; aquí lo bloqueamos para forzar uso del endpoint claim
+  if (input.status === "EN_REVISION") {
     throw new AppError(
-      `El comprobante ya está en estado ${receipt.status}. Solo se puede actualizar uno PENDIENTE.`,
+      "Para reclamar un comprobante usa POST /api/public/payments/:id/claim",
+      400,
+    );
+  }
+
+  if (receipt.status === "APROBADO" || receipt.status === "RECHAZADO") {
+    throw new AppError(
+      `El comprobante ya está en estado ${receipt.status}. Solo se puede actualizar uno PENDIENTE o EN_REVISION.`,
       409,
     );
   }
 
-  // Validar productId si vino
-  let productIdToSet: string | null | undefined = undefined;
-  if (input.productId) {
-    const product = await prisma.product.findFirst({
-      where: { id: input.productId, companyId },
-      select: { id: true },
-    });
-    if (!product) throw new AppError("productId no pertenece a esta compañía", 422);
-    productIdToSet = product.id;
+  if (receipt.status === "EN_REVISION") {
+    const now = Date.now();
+    if (receipt.claimedUntil && receipt.claimedUntil.getTime() < now) {
+      throw new AppError(
+        "El claim de este comprobante expiró. Vuelve a reclamarlo antes de cerrarlo.",
+        409,
+      );
+    }
   }
 
-  // Upsert de customer por phone si vino
-  let customerIdToSet: string | null | undefined = undefined;
+  // -------- Validar productIds / productId --------
+  const productIdsInput =
+    input.productIds && input.productIds.length
+      ? input.productIds
+      : input.productId
+      ? [input.productId]
+      : [];
+
+  let productIdsToSet: string[] | undefined;
+  let productIdToSet: string | null | undefined;
+
+  if (productIdsInput.length > 0) {
+    const found = await prisma.product.findMany({
+      where: { id: { in: productIdsInput }, companyId },
+      select: { id: true },
+    });
+    if (found.length !== productIdsInput.length) {
+      throw new AppError("Uno o más productIds no pertenecen a esta compañía", 422);
+    }
+    productIdsToSet = productIdsInput;
+    productIdToSet = productIdsInput[0];
+  }
+
+  // -------- Upsert customer por phone --------
+  let customerIdToSet: string | null | undefined;
   if (input.customerPhone) {
     const phoneNorm = input.customerPhone.startsWith("+")
       ? input.customerPhone
@@ -171,6 +455,13 @@ export async function updatePaymentStatus(
     }
   }
 
+  // -------- Metadata merge --------
+  const metadataExtras: Record<string, any> = {};
+  if (input.expectedAmount !== undefined) {
+    metadataExtras.expectedAmount = normalizeAmount(input.expectedAmount);
+  }
+  const mergedMetadata = mergeMetadata(receipt.metadata, input.metadata, metadataExtras);
+
   const updated = await prisma.paymentReceipt.update({
     where: { id: receipt.id },
     data: {
@@ -178,13 +469,20 @@ export async function updatePaymentStatus(
       rejectionReason: input.status === "RECHAZADO" ? input.reason ?? null : null,
       validationNote: input.note ?? null,
       validatedAt: new Date(),
+      validationMode: input.validationMode ?? null,
+      matchScore: input.matchScore ?? null,
+      matchStrategy: input.matchStrategy ?? null,
+      matchedPayerNameInput: input.matchedPayerNameInput ?? null,
+      orderId: input.orderId ?? receipt.orderId ?? null,
+      ...(mergedMetadata !== undefined ? { metadata: mergedMetadata } : {}),
       ...(customerIdToSet !== undefined ? { customerId: customerIdToSet } : {}),
       ...(productIdToSet !== undefined ? { productId: productIdToSet } : {}),
+      ...(productIdsToSet !== undefined ? { productIds: productIdsToSet } : {}),
+      // Liberar claim
+      claimedBy: null,
+      claimedUntil: null,
     },
-    include: {
-      customer: { select: { id: true, phone: true, name: true } },
-      product: { select: { id: true, slug: true, name: true } },
-    },
+    include: RECEIPT_INCLUDE,
   });
 
   return serializeReceipt(updated);

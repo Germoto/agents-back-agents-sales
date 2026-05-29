@@ -61,12 +61,18 @@ export async function processWebhook(
           customerId: null,
           productId: null,
           digitalSaleId: null,
+          // amountExpected se mantiene como mirror de amountPaid por compatibilidad
           amountExpected: payment.amount,
+          amountPaid: payment.amount,
+          currency: payment.currency ?? "PEN",
           status: "PENDIENTE",
           source,
           externalId: payment.externalId,
           payerName: payment.payerName || null,
           paymentSource: payment.paymentSource ?? null,
+          payerPhone: payment.payerPhone ?? null,
+          operationCode: payment.operationCode ?? null,
+          reference: payment.reference ?? null,
           occurredAt: payment.occurredAt ?? null,
         },
       });

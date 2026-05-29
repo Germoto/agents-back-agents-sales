@@ -9,12 +9,20 @@ export interface NormalizedPayment {
   externalId: string;
   /** Monto como string para comparar con DigitalSale.amountExpected (que también es string) */
   amount: string;
+  /** Moneda ISO (PEN, USD, etc). Default depende del adapter. */
+  currency?: string;
   /** Nombre del pagador tal como lo reporta el proveedor */
   payerName: string;
   /** Fecha/hora en que ocurrió el pago en el sistema externo */
   occurredAt: Date;
   /** Fuente del proveedor de pago: "YAPE", "PLIN", etc. (interno al payload) */
   paymentSource?: string;
+  /** Teléfono del pagador o últimos dígitos si el origen los emite */
+  payerPhone?: string;
+  /** Código de operación bancaria si aplica */
+  operationCode?: string;
+  /** Referencia libre del origen */
+  reference?: string;
   /** Texto original sin parsear (para auditoría) */
   rawText?: string;
 }
