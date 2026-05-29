@@ -5,27 +5,24 @@ import { PaymentAdapter, NormalizedPayment } from "./types";
 /**
  * Adapter para el payload que emite ValidPay en el evento "payment.received".
  *
- * Formato esperado:
+ * Formato real (envelope con payload anidado):
  * {
- *   "id": "cuid",           <- usado como externalId (paymentId en el eventPayload)
- *   "monto": 49.90,
- *   "nombre_cliente": "JUAN PEREZ",
- *   "source": "yape",
- *   "fecha": "2026-05-29T15:30:00.000Z"
+ *   "id": "cmprbfe1g003b2vqe3fmhun9f",  <- event id (no usado como externalId)
+ *   "event": "payment.received",
+ *   "payload": {
+ *     "id": "cmprbfe0s00372vqe60zme6ls",  <- paymentId real (externalId)
+ *     "monto": 49.90,
+ *     "nombre_cliente": "JUAN PEREZ",
+ *     "source": "yape",
+ *     "fecha": "2026-05-29T15:30:00.000Z"
+ *   },
+ *   "timestamp": 1780082949
  * }
  *
- * ValidPay también puede envolver el pago en un envelope de evento:
- * { "event": "payment.received", "sentAt": "...", "paymentId": "...", ...campos arriba }
- *
- * El adapter maneja ambas formas.
+ * También acepta el formato plano (sin envelope) por compatibilidad.
  */
 
-const validpayPayloadSchema = z.object({
-  // envelope opcional
-  event: z.string().optional(),
-  sentAt: z.string().optional(),
-
-  // campos del pago (según payments.service.ts línea 40-46 de ValidPay)
+const paymentFieldsSchema = z.object({
   id: z.string().optional(),
   paymentId: z.string().optional(),
   monto: z.number().optional(),
@@ -37,16 +34,33 @@ const validpayPayloadSchema = z.object({
   occurredAt: z.string().optional(),
 });
 
+const envelopeSchema = z.object({
+  id: z.string().optional(),
+  event: z.string().optional(),
+  sentAt: z.string().optional(),
+  timestamp: z.number().optional(),
+  payload: paymentFieldsSchema.optional(),
+}).passthrough();
+
 export const validpayAdapter: PaymentAdapter = {
   source: "validpay",
 
   normalize(raw: unknown): NormalizedPayment {
-    const result = validpayPayloadSchema.safeParse(raw);
-    if (!result.success) {
+    const env = envelopeSchema.safeParse(raw);
+    if (!env.success) {
       throw new AppError("Payload de ValidPay inválido", 422);
     }
 
-    const p = result.data;
+    // Si viene envelope con payload anidado, usar payload; sino, asumir top-level
+    const pParsed = env.data.payload
+      ? paymentFieldsSchema.safeParse(env.data.payload)
+      : paymentFieldsSchema.safeParse(raw);
+
+    if (!pParsed.success) {
+      throw new AppError("Payload de ValidPay: estructura inválida", 422);
+    }
+
+    const p = pParsed.data;
 
     const externalId = p.id ?? p.paymentId;
     if (!externalId) throw new AppError("Payload ValidPay: falta id del pago", 422);
