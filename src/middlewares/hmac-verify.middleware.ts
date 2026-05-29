@@ -5,26 +5,21 @@ import { prisma } from "../lib/prisma";
 /**
  * Middleware para webhooks entrantes.
  *
- * Extrae companyId de req.params.companyId, carga todos los WebhookEndpoint
- * activos de esa company y valida la firma HMAC-SHA256 enviada en el header
- * X-Webhook-Signature (formato: "sha256=<hex>").
+ * Para source = "validpay":
+ *   Header: X-Validpay-Signature: t=<timestamp>,v1=<hmac_body>,v2=<hmac_ts.body>
+ *   Verifica v1 = HMAC-SHA256(bodyStr, secret)  ó
+ *            v2 = HMAC-SHA256("<timestamp>.<bodyStr>", secret)
  *
- * Si hay múltiples endpoints activos para la misma company (ej. dos fuentes
- * distintas o dos cuentas del mismo proveedor) itera sobre todos y acepta si
- * alguno coincide.
+ * Para otros sources:
+ *   Header: X-Webhook-Signature: sha256=<hex>
+ *   Verifica HMAC-SHA256(rawBody, secret)
  *
- * En caso de éxito adjunta req.webhookEndpoint para que el controller lo use.
+ * Si hay múltiples endpoints activos para la misma company itera sobre todos.
  */
 export async function hmacVerify(req: Request, res: Response, next: NextFunction) {
   const companyId = req.params.companyId ? String(req.params.companyId) : "";
   if (!companyId) {
     res.status(400).json({ success: false, error: "companyId requerido" });
-    return;
-  }
-
-  const signature = req.headers["x-webhook-signature"] as string | undefined;
-  if (!signature || !signature.startsWith("sha256=")) {
-    res.status(401).json({ success: false, error: "X-Webhook-Signature ausente o con formato incorrecto" });
     return;
   }
 
@@ -43,22 +38,15 @@ export async function hmacVerify(req: Request, res: Response, next: NextFunction
     return;
   }
 
-  const received = signature.slice(7); // quitar "sha256="
-
   let matched = null;
+
   for (const endpoint of endpoints) {
-    const expected = crypto
-      .createHmac("sha256", endpoint.secret)
-      .update(rawBody)
-      .digest("hex");
-    // Comparación en tiempo constante para prevenir timing attacks
-    if (
-      received.length === expected.length &&
-      crypto.timingSafeEqual(Buffer.from(received, "hex"), Buffer.from(expected, "hex"))
-    ) {
-      matched = endpoint;
-      break;
+    if (endpoint.source === "validpay") {
+      matched = verifyValidpay(req, endpoint) ? endpoint : null;
+    } else {
+      matched = verifyGeneric(req, rawBody, endpoint) ? endpoint : null;
     }
+    if (matched) break;
   }
 
   if (!matched) {
@@ -68,4 +56,62 @@ export async function hmacVerify(req: Request, res: Response, next: NextFunction
 
   (req as any).webhookEndpoint = matched;
   next();
+}
+
+/** Verifica firma ValidPay: X-Validpay-Signature: t=...,v1=...,v2=... */
+function verifyValidpay(req: Request, endpoint: { secret: string }): boolean {
+  const header = req.headers["x-validpay-signature"] as string | undefined;
+  if (!header) return false;
+
+  // Parsear: t=1234,v1=abc,v2=def
+  const parts: Record<string, string> = {};
+  for (const part of header.split(",")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    parts[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+  }
+
+  const rawBody: Buffer = (req as any).rawBody;
+  const bodyStr = rawBody.toString("utf8");
+  const secret = endpoint.secret;
+
+  // v2: HMAC("<timestamp>.<body>", secret)
+  if (parts.t && parts.v2) {
+    const expected = crypto.createHmac("sha256", secret)
+      .update(`${parts.t}.${bodyStr}`)
+      .digest("hex");
+    if (safeEqual(parts.v2, expected)) return true;
+  }
+
+  // v1 compat: HMAC(body, secret)
+  if (parts.v1) {
+    const expected = crypto.createHmac("sha256", secret)
+      .update(bodyStr)
+      .digest("hex");
+    if (safeEqual(parts.v1, expected)) return true;
+  }
+
+  return false;
+}
+
+/** Verifica firma genérica: X-Webhook-Signature: sha256=<hex> */
+function verifyGeneric(req: Request, rawBody: Buffer, endpoint: { secret: string }): boolean {
+  const signature = req.headers["x-webhook-signature"] as string | undefined;
+  if (!signature || !signature.startsWith("sha256=")) return false;
+
+  const received = signature.slice(7);
+  const expected = crypto.createHmac("sha256", endpoint.secret)
+    .update(rawBody)
+    .digest("hex");
+
+  return safeEqual(received, expected);
+}
+
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
+  } catch {
+    return false;
+  }
 }

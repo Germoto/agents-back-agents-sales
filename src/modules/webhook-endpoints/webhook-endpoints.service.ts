@@ -22,18 +22,17 @@ export async function listWebhookEndpoints(companyId: string) {
 }
 
 export async function createWebhookEndpoint(companyId: string, dto: CreateWebhookEndpointDto) {
-  const secret = generateSecret();
   const endpoint = await prisma.webhookEndpoint.create({
     data: {
       companyId,
       source: dto.source,
       description: dto.description,
       autoApprove: dto.autoApprove ?? true,
-      secret,
+      secret: dto.secret,
     },
   });
   // Devuelve el secret en texto plano SOLO en la respuesta de creación
-  return { ...endpoint, secret };
+  return { ...endpoint, secret: dto.secret };
 }
 
 export async function updateWebhookEndpoint(

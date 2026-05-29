@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const createWebhookEndpointSchema = z.object({
   source: z.string().min(1).max(64),
+  secret: z.string().min(8).max(512),
   description: z.string().max(280).optional(),
   autoApprove: z.boolean().optional(),
 });
