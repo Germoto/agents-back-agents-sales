@@ -54,17 +54,15 @@ export async function updateWebhookEndpoint(
   return stripSecret(updated);
 }
 
-export async function regenerateSecret(companyId: string, id: string) {
+export async function regenerateSecret(companyId: string, id: string, newSecret: string) {
   const existing = await prisma.webhookEndpoint.findFirst({ where: { id, companyId } });
   if (!existing) throw new AppError("Endpoint no encontrado", 404);
 
-  const secret = generateSecret();
   const updated = await prisma.webhookEndpoint.update({
     where: { id },
-    data: { secret },
+    data: { secret: newSecret },
   });
-  // Devuelve el secret en texto plano SOLO aquí
-  return { ...updated, secret };
+  return stripSecret(updated);
 }
 
 export async function deleteWebhookEndpoint(companyId: string, id: string) {

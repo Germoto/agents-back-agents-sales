@@ -7,6 +7,7 @@ import {
   createWebhookEndpointSchema,
   updateWebhookEndpointSchema,
   idParamsSchema,
+  regenerateSecretSchema,
 } from "./webhook-endpoints.schema";
 import {
   listWebhookEndpoints,
@@ -59,10 +60,10 @@ router.patch(
 // POST /api/webhook-endpoints/:id/regenerate
 router.post(
   "/:id/regenerate",
-  validate({ params: idParamsSchema }),
+  validate({ params: idParamsSchema, body: regenerateSecretSchema }),
   asyncHandler(async (req: Request, res: Response) => {
     const companyId = req.user!.companyId;
-    const data = await regenerateSecret(companyId, String(req.params.id));
+    const data = await regenerateSecret(companyId, String(req.params.id), req.body.secret);
     res.json({ success: true, data });
   }),
 );

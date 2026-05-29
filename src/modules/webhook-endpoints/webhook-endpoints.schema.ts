@@ -17,3 +17,5 @@ export type CreateWebhookEndpointDto = z.infer<typeof createWebhookEndpointSchem
 export type UpdateWebhookEndpointDto = z.infer<typeof updateWebhookEndpointSchema>;
 
 export const idParamsSchema = z.object({ id: z.string().min(1) });
+
+export const regenerateSecretSchema = z.object({ secret: z.string().min(8).max(512) });
