@@ -409,14 +409,31 @@ export async function updatePaymentStatus(
 
   if (productIdsInput.length > 0) {
     const found = await prisma.product.findMany({
-      where: { id: { in: productIdsInput }, companyId },
-      select: { id: true },
+      where: {
+        companyId,
+        OR: [{ id: { in: productIdsInput } }, { slug: { in: productIdsInput } }],
+      },
+      select: { id: true, slug: true },
     });
-    if (found.length !== productIdsInput.length) {
-      throw new AppError("Uno o más productIds no pertenecen a esta compañía", 422);
+
+    // Construir mapa raw (uuid o slug) -> uuid resuelto
+    const resolvedMap = new Map<string, string>();
+    for (const p of found) {
+      resolvedMap.set(p.id, p.id);
+      resolvedMap.set(p.slug, p.id);
     }
-    productIdsToSet = productIdsInput;
-    productIdToSet = productIdsInput[0];
+
+    const unresolved = productIdsInput.filter((raw) => !resolvedMap.has(raw));
+    if (unresolved.length > 0) {
+      throw new AppError(
+        `Producto(s) no encontrado(s) para esta compañía: ${unresolved.join(", ")}`,
+        404,
+      );
+    }
+
+    const resolvedIds = productIdsInput.map((raw) => resolvedMap.get(raw)!);
+    productIdsToSet = resolvedIds;
+    productIdToSet = resolvedIds[0];
   }
 
   // -------- Upsert customer por phone --------
