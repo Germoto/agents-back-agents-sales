@@ -12,6 +12,8 @@ import digitalSalesRoutes from "../modules/digital-sales/digital-sales.routes";
 import receiptsRoutes from "../modules/receipts/receipts.routes";
 import botRoutes from "../modules/bot/bot.routes";
 import adminConsoleRoutes from "../modules/admin-console/admin-console.routes";
+import webhookEndpointsRoutes from "../modules/webhook-endpoints/webhook-endpoints.routes";
+import webhooksRoutes from "../modules/webhooks/webhooks.routes";
 
 const router = Router();
 
@@ -28,5 +30,9 @@ router.use("/digital-sales", digitalSalesRoutes);
 router.use("/receipts", receiptsRoutes);
 router.use("/bot", botRoutes);
 router.use("/control-room-7m4x", adminConsoleRoutes);
+// Gestión de endpoints de webhook (CRUD para admins)
+router.use("/webhook-endpoints", webhookEndpointsRoutes);
+// Recepción de webhooks entrantes (público, autenticado via HMAC)
+router.use("/webhooks", webhooksRoutes);
 
 export default router;

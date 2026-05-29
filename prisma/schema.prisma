@@ -76,9 +76,10 @@ model Company {
   products         Product[]
   customers        Customer[]
   messages         ConversationMessage[]
-  orders           Order[]
-  digitalSales     DigitalSale[]
-  paymentReceipts  PaymentReceipt[]
+  orders            Order[]
+  digitalSales      DigitalSale[]
+  paymentReceipts   PaymentReceipt[]
+  webhookEndpoints  WebhookEndpoint[]
 }
 
 model User {
@@ -373,12 +374,54 @@ model PaymentReceipt {
   amountExpected  String
   status          ReceiptStatus
   rejectionReason String?
+  source          String?       // "validpay", "manual", etc.
+  externalId      String?       // id del pago en el sistema externo (idempotencia)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   company         Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
   customer        Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
   product         Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
   digitalSale     DigitalSale?  @relation(fields: [digitalSaleId], references: [id], onDelete: SetNull)
+  webhookEvents   WebhookEvent[]
 
+  @@unique([source, externalId])
   @@index([companyId, createdAt])
+}
+
+model WebhookEndpoint {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String   @db.Uuid
+  source      String   // "validpay", "mercadopago", "custom"
+  secret      String   // plain text (almacenado en zona de confianza, igual que Stripe)
+  active      Boolean  @default(true)
+  autoApprove Boolean  @default(true)
+  description String?
+  createdAt   DateTime @default(now())
+  lastUsedAt  DateTime?
+
+  company Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  events  WebhookEvent[]
+
+  @@index([companyId])
+  @@map("webhook_endpoints")
+}
+
+model WebhookEvent {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  endpointId String   @db.Uuid
+  companyId  String   @db.Uuid
+  source     String
+  externalId String
+  payload    Json
+  status     String   // RECEIVED, PROCESSED, FAILED, DUPLICATE
+  error      String?
+  receiptId  String?  @db.Uuid
+  receivedAt DateTime @default(now())
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  receipt  PaymentReceipt? @relation(fields: [receiptId], references: [id], onDelete: SetNull)
+
+  @@unique([source, externalId])
+  @@index([companyId, receivedAt])
+  @@map("webhook_events")
 }

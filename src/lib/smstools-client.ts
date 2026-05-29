@@ -258,4 +258,29 @@ export const smsTools = {
     const base = deriveApiBase(creds.apiUrl);
     return smsToolsRequest(base, "/delete/wa.received", { query: { secret: creds.secret, id } });
   },
+
+  /**
+   * Envia un mensaje de texto via WhatsApp.
+   * @param account  - unique del account SMS Tools (WhatsappConfig.account)
+   * @param to       - numero destino en formato internacional sin "+" (e.g. "51987654321")
+   * @param message  - texto del mensaje
+   */
+  async sendMessage(
+    creds: SmsToolsCredentials,
+    account: string,
+    to: string,
+    message: string,
+  ): Promise<SmsToolsMessage> {
+    const base = deriveApiBase(creds.apiUrl);
+    const body = new URLSearchParams();
+    body.set("secret", creds.secret);
+    body.set("account", account);
+    body.set("recipient", to);
+    body.set("type", "text");
+    body.set("message", message);
+    return smsToolsRequest<SmsToolsMessage>(base, "/send/whatsapp", {
+      method: "POST",
+      body,
+    });
+  },
 };
