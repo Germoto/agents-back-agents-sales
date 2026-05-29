@@ -7,15 +7,23 @@ export function errorHandler(error: unknown, _req: Request, res: Response, _next
     return res.status(error.statusCode).json({
       success: false,
       message: error.message,
-      details: error.details,
+      ...(error.code !== undefined ? { code: error.code } : {}),
+      ...(error.errors !== undefined ? { errors: error.errors } : {}),
+      ...(error.details !== undefined ? { details: error.details } : {}),
     });
   }
 
   if (error instanceof ZodError) {
+    const errors = error.issues.map((i) => ({
+      field: i.path.join(".") || "(root)",
+      message: i.message,
+    }));
     return res.status(422).json({
       success: false,
-      message: "Error de validacion",
-      details: error.flatten(),
+      message: "Validación fallida",
+      code: "VALIDATION_FAILED",
+      errors,
+      details: error.flatten(), // retrocompat con frontend
     });
   }
 

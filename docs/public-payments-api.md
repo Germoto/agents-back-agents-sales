@@ -228,12 +228,13 @@ Aprueba o rechaza. **Body 100% retrocompatible**: solo agrega campos opcionales.
 ```json
 {
   "status": "APROBADO",
-  "reason": "opcional, recomendado en RECHAZADO",
+  "reason": "opcional (alias: rejectionReason), recomendado en RECHAZADO",
+  "rejectionReason": "alias de reason — cualquiera de los dos funciona",
 
   "customerPhone": "+51999999999",
   "customerName": "Juan Pérez",
 
-  "productId": "uuid",
+  "productId": "uuid-real",
   "productIds": ["uuid-1", "uuid-2"],
   "orderId": "ORD-2026-0001",
   "expectedAmount": "19.99",
@@ -300,13 +301,34 @@ curl -X PATCH "https://api-sales-agents.molanosoft.com/api/public/payments/<id>/
 
 ## Errores comunes
 
-| HTTP | Causa |
-|------|-------|
-| 400  | Body/query inválido (zod) o intentar `status=EN_REVISION` por PATCH |
-| 403  | El phone no pertenece a un usuario admin activo |
-| 404  | Comprobante no existe o no es de esta company |
-| 409  | Estado terminal (APROBADO/RECHAZADO), claim vigente de otro proceso, o claim expirado al intentar cerrar |
-| 422  | productId/productIds no pertenecen a la company |
+Todas las respuestas de error siguen el mismo shape:
+
+```json
+{
+  "success": false,
+  "message": "Mensaje legible",
+  "code": "CODIGO_ESTANDAR",
+  "errors": [
+    { "field": "productId", "message": "'slug-inexistente' no pertenece a esta compañía o no existe" }
+  ]
+}
+```
+
+`code` y `errors` solo aparecen cuando corresponde.
+
+### Tabla de códigos
+
+| HTTP | `code`                    | Causa |
+|------|---------------------------|-------|
+| 400  | `USE_CLAIM_ENDPOINT`      | Se intentó `status=EN_REVISION` en PATCH `/status` |
+| 403  | `PHONE_NOT_AUTHORIZED`    | El phone no pertenece a un usuario admin activo |
+| 404  | `RECEIPT_NOT_FOUND`       | Comprobante no existe o no es de esta company |
+| 404  | `PRODUCT_NOT_FOUND`       | Uno o más `productId`/`productIds` no existen para esta company |
+| 409  | `PAYMENT_ALREADY_APPROVED`| El comprobante ya está APROBADO |
+| 409  | `PAYMENT_ALREADY_REJECTED`| El comprobante ya está RECHAZADO |
+| 409  | `CLAIM_EXPIRED`           | El TTL del claim expiró antes de cerrar; hay que reclamar de nuevo |
+| 409  | `CLAIM_HELD_BY_OTHER`     | El comprobante tiene claim vigente de otro proceso |
+| 422  | `VALIDATION_FAILED`       | Fallo de validación Zod; `errors[]` detalla campo y mensaje |
 
 ---
 
@@ -324,3 +346,47 @@ curl -X PATCH "https://api-sales-agents.molanosoft.com/api/public/payments/<id>/
 - `amountExpected` sigue presente y refleja `amountPaid` en webhooks nuevos.
 - Body antiguo de `PATCH /:id/status` (`status`+`customerPhone`+`customerName`+`productId`+`note`) sigue funcionando sin cambios.
 - `GET /pending` sin filtros nuevos sigue funcionando idéntico.
+
+---
+
+## Contrato `/api/bot/config` (productos)
+
+> **⚠️ BREAKING** (mayo 2026): el campo `id` de cada producto en la respuesta de
+> `/api/bot/config` cambió de **slug** (ej: `"pack-mundial-2026-pdf"`) a **UUID real**
+> (ej: `"6dc6dbcd-c775-4ae5-965a-bf2df4654d20"`).
+
+### Shape de producto en `/api/bot/config`
+
+```json
+{
+  "id": "6dc6dbcd-c775-4ae5-965a-bf2df4654d20",
+  "slug": "pack-mundial-2026-pdf",
+  "code": "pack-mundial-2026-pdf",
+  "name": "Pack de Álbum del Mundial 2026 en PDF",
+  "productType": "digital",
+  "active": true,
+  "price": "5",
+  "priceText": "S/ 5",
+  "regularPrice": "69",
+  "regularPriceText": "S/ 69",
+  "aliases": ["mundial", "album mundial", "pack mundial pdf"],
+  "shortDescription": "...",
+  "fullDescription": "...",
+  "digitalDelivery": {
+    "link": "https://drive.google.com/...",
+    "instructions": "Mensaje postventa"
+  }
+}
+```
+
+### Guía de uso en n8n
+
+| Campo | Uso recomendado |
+|-------|----------------|
+| `id`  | Usar como `productId`/`productIds` en `PATCH /payments/:id/status` |
+| `slug` / `code` | Identificación textual/conversacional, URLs, alias |
+| `name` / `aliases` | Detección de intención del cliente por texto |
+| `priceText` / `regularPriceText` | Mostrar precio formateado al cliente en WhatsApp |
+
+> `priceText` y `regularPriceText` usan símbolo `S/` (soles peruanos).
+> Cuando se agregue `Company.currencySymbol` a la DB, se leerá automáticamente.

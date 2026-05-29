@@ -92,15 +92,27 @@ export function mapAdminProduct(product: ProductWithRelations) {
   };
 }
 
-export function mapBotProduct(product: ProductWithRelations) {
+export function mapBotProduct(
+  product: ProductWithRelations,
+  opts?: { currencySymbol?: string },
+) {
+  // TODO: leer currencySymbol de Company.currencySymbol cuando se agregue la columna
+  const symbol = opts?.currencySymbol ?? "S/";
+  const fmtPrice = (v: string | null | undefined) =>
+    v === null || v === undefined || v === "" ? null : `${symbol} ${v}`;
+
   return {
-    id: product.slug,
+    id: product.id,               // UUID real (antes era product.slug)
+    slug: product.slug,           // identificador amigable para conversación / URL
+    code: product.slug,           // alias de slug, para uso en n8n
     active: product.active,
     productType: product.productType.toLowerCase(),
     name: product.name,
     aliases: product.aliases.map((item) => item.value),
     price: product.price,
+    priceText: fmtPrice(product.price),
     regularPrice: product.regularPrice,
+    regularPriceText: fmtPrice(product.regularPrice),
     stock: product.stock,
     shortDescription: product.shortDescription,
     fullDescription: product.fullDescription,

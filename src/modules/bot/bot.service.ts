@@ -136,6 +136,6 @@ export async function getBotConfig(account: string | undefined, phone: string) {
       rules: agentConfig.rules as string[],
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
-    products: products.map(mapBotProduct),
+    products: products.map((p) => mapBotProduct(p)),
   };
 }

@@ -36,6 +36,7 @@ export const getOneQuerySchema = phoneQuerySchema;
 export const updateStatusBodySchema = z.object({
   status: receiptStatusEnum,
   reason: z.string().trim().min(1).max(500).optional(),
+  rejectionReason: z.string().trim().min(1).max(500).optional(),
   customerPhone: z.string().trim().regex(phoneRegex, "customerPhone inválido").optional(),
   customerName: z.string().trim().min(1).max(200).optional(),
   productId: z.string().min(1).max(120).optional(),

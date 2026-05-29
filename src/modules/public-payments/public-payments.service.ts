@@ -31,6 +31,7 @@ export async function resolveCompanyIdByPhone(phone: string): Promise<string> {
     throw new AppError(
       "El numero indicado no pertenece a un usuario activo con acceso a la API publica de pagos",
       403,
+      { code: "PHONE_NOT_AUTHORIZED" },
     );
   }
   return match.companyId;
@@ -158,7 +159,7 @@ export async function getPaymentById(companyId: string, id: string) {
     where: { id, companyId },
     include: RECEIPT_INCLUDE,
   });
-  if (!r) throw new AppError("Comprobante no encontrado", 404);
+  if (!r) throw new AppError("Comprobante no encontrado", 404, { code: "RECEIPT_NOT_FOUND" });
   return serializeReceipt(r);
 }
 
@@ -309,7 +310,7 @@ export async function claimPayment(companyId: string, id: string, body: ClaimBod
 
   return prisma.$transaction(async (tx) => {
     const receipt = await tx.paymentReceipt.findFirst({ where: { id, companyId } });
-    if (!receipt) throw new AppError("Comprobante no encontrado", 404);
+    if (!receipt) throw new AppError("Comprobante no encontrado", 404, { code: "RECEIPT_NOT_FOUND" });
 
     const now = new Date();
     const claimExpired = receipt.claimedUntil ? receipt.claimedUntil.getTime() < now.getTime() : true;
@@ -318,11 +319,18 @@ export async function claimPayment(companyId: string, id: string, body: ClaimBod
       receipt.status === "PENDIENTE" || (receipt.status === "EN_REVISION" && claimExpired);
 
     if (!claimable) {
+      const code =
+        receipt.status === "EN_REVISION"
+          ? "CLAIM_HELD_BY_OTHER"
+          : receipt.status === "APROBADO"
+          ? "PAYMENT_ALREADY_APPROVED"
+          : "PAYMENT_ALREADY_REJECTED";
       throw new AppError(
         receipt.status === "EN_REVISION"
           ? `Comprobante ya reclamado por '${receipt.claimedBy}' hasta ${receipt.claimedUntil?.toISOString()}`
           : `Comprobante en estado ${receipt.status}, no se puede reclamar`,
         409,
+        { code },
       );
     }
 
@@ -376,13 +384,22 @@ export async function updatePaymentStatus(
     throw new AppError(
       "Para reclamar un comprobante usa POST /api/public/payments/:id/claim",
       400,
+      { code: "USE_CLAIM_ENDPOINT" },
     );
   }
 
-  if (receipt.status === "APROBADO" || receipt.status === "RECHAZADO") {
+  if (receipt.status === "APROBADO") {
     throw new AppError(
-      `El comprobante ya está en estado ${receipt.status}. Solo se puede actualizar uno PENDIENTE o EN_REVISION.`,
+      "El comprobante ya está APROBADO",
       409,
+      { code: "PAYMENT_ALREADY_APPROVED" },
+    );
+  }
+  if (receipt.status === "RECHAZADO") {
+    throw new AppError(
+      "El comprobante ya está RECHAZADO",
+      409,
+      { code: "PAYMENT_ALREADY_REJECTED" },
     );
   }
 
@@ -392,6 +409,7 @@ export async function updatePaymentStatus(
       throw new AppError(
         "El claim de este comprobante expiró. Vuelve a reclamarlo antes de cerrarlo.",
         409,
+        { code: "CLAIM_EXPIRED" },
       );
     }
   }
@@ -428,6 +446,13 @@ export async function updatePaymentStatus(
       throw new AppError(
         `Producto(s) no encontrado(s) para esta compañía: ${unresolved.join(", ")}`,
         404,
+        {
+          code: "PRODUCT_NOT_FOUND",
+          errors: unresolved.map((v) => ({
+            field: "productId",
+            message: `'${v}' no pertenece a esta compañía o no existe`,
+          })),
+        },
       );
     }
 
@@ -479,11 +504,13 @@ export async function updatePaymentStatus(
   }
   const mergedMetadata = mergeMetadata(receipt.metadata, input.metadata, metadataExtras);
 
+  const rejectionInput = input.rejectionReason ?? input.reason ?? null;
+
   const updated = await prisma.paymentReceipt.update({
     where: { id: receipt.id },
     data: {
       status: input.status,
-      rejectionReason: input.status === "RECHAZADO" ? input.reason ?? null : null,
+      rejectionReason: input.status === "RECHAZADO" ? rejectionInput : null,
       validationNote: input.note ?? null,
       validatedAt: new Date(),
       validationMode: input.validationMode ?? null,
