@@ -21,12 +21,14 @@ jobs:
 
       - name: Pack backend sources
         run: |
+          mkdir -p .deploy-tmp
           tar \
             --exclude='.git' \
             --exclude='node_modules' \
             --exclude='dist' \
             --exclude='uploads' \
-            -czf /tmp/backend.tgz .
+            --exclude='.deploy-tmp' \
+            -czf .deploy-tmp/backend.tgz .
 
       - name: Upload backend bundle
         uses: appleboy/scp-action@v0.1.7
@@ -35,7 +37,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT || '22' }}
-          source: /tmp/backend.tgz
+          source: .deploy-tmp/backend.tgz
           target: /tmp/agents-sales-backend-deploy
           overwrite: true
 
