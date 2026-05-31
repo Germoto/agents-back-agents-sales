@@ -17,30 +17,6 @@ jobs:
     environment: production
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Pack backend sources
-        run: |
-          mkdir -p .deploy-tmp
-          tar \
-            --exclude='.git' \
-            --exclude='node_modules' \
-            --exclude='dist' \
-            --exclude='uploads' \
-            --exclude='.deploy-tmp' \
-            -czf .deploy-tmp/backend.tgz .
-
-      - name: Upload backend bundle
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || '22' }}
-          source: .deploy-tmp/backend.tgz
-          target: /tmp/agents-sales-backend-deploy
-          overwrite: true
-
       - name: Deploy backend over SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -51,12 +27,21 @@ jobs:
           script_stop: true
           script: |
             set -Eeuo pipefail
-            APP_DIR="${{ secrets.DEPLOY_BACKEND_DIR || '/opt/apps/agents-sales/backend' }}"
+            APP_DIR="${{ secrets.DEPLOY_BACKEND_DIR || '/opt/deploy/app-stack/agents-sales/backend' }}"
             COMPOSE_FILE="${{ secrets.DEPLOY_COMPOSE_FILE || '/opt/deploy/app-stack/docker-compose.yml' }}"
             APP_URL="${{ secrets.BACKEND_HEALTHCHECK_URL || 'http://127.0.0.1:3202/api/bot/config?channel=whatsapp&account=ACCOUNT_WA_DEMO&phone=51999999999' }}"
+            REPO_URL="https://github.com/Germoto/agents-back-agents-sales.git"
+            BRANCH="${{ github.ref_name }}"
 
-            mkdir -p "$APP_DIR"
-            tar -xzf /tmp/agents-sales-backend-deploy/backend.tgz -C "$APP_DIR"
+            if [ ! -d "$APP_DIR/.git" ]; then
+              rm -rf "$APP_DIR"
+              git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+            else
+              git -C "$APP_DIR" fetch origin "$BRANCH"
+              git -C "$APP_DIR" checkout "$BRANCH"
+              git -C "$APP_DIR" reset --hard "origin/$BRANCH"
+              git -C "$APP_DIR" clean -fd
+            fi
 
             docker compose -f "$COMPOSE_FILE" up -d --build sales-backend
 
