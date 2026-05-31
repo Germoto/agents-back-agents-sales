@@ -68,6 +68,11 @@ export async function approveReceipt(companyId: string, receiptId: string) {
   });
 }
 
+export async function deleteReceipt(companyId: string, receiptId: string) {
+  await findReceipt(companyId, receiptId);
+  await prisma.paymentReceipt.delete({ where: { id: receiptId } });
+}
+
 export async function rejectReceipt(companyId: string, receiptId: string, rejectionReason: string) {
   const receipt = await findReceipt(companyId, receiptId);
 
