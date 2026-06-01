@@ -12,10 +12,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch prod deploy in agents-sales-infra
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.INFRA_REPO_DISPATCH_TOKEN }}
-          repository: Germoto/agents-sales-infra
-          event-type: agents-sales-back-updated
-          client-payload: |
-            {"environment":"prod","services":"sales-backend"}
+        env:
+          DISPATCH_TOKEN: ${{ secrets.INFRA_REPO_DISPATCH_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          HTTP_CODE="$(curl -sS -o /tmp/dispatch-response.json -w '%{http_code}' \
+            -X POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            https://api.github.com/repos/Germoto/agents-sales-infra/dispatches \
+            -d '{"event_type":"agents-sales-back-updated","client_payload":{"environment":"prod","services":"sales-backend"}}')"
+          test "$HTTP_CODE" = "204" || { cat /tmp/dispatch-response.json; exit 1; }
