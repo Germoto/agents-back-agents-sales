@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
 COPY prisma ./prisma
-RUN npm install
+RUN npm ci
 RUN npx prisma generate
 
 COPY tsconfig.json ./
@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
 COPY prisma ./prisma
-RUN npm install --omit=dev && npx prisma generate
+RUN npm ci --omit=dev && npx prisma generate
 
+# Solo copiar el dist compilado — no se necesita el source en runtime
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/src ./src
 
 EXPOSE 3000
 CMD ["sh", "-c", "npx prisma migrate deploy && node dist/src/server.js"]
