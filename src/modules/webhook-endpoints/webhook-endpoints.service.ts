@@ -28,6 +28,12 @@ export async function listWebhookEndpoints(companyId: string) {
 }
 
 export async function createWebhookEndpoint(companyId: string, dto: CreateWebhookEndpointDto) {
+  console.log("[webhook-endpoints] createWebhookEndpoint dto:", JSON.stringify({
+    source: dto.source,
+    hasSecret: !!dto.secret,
+    hasValidpayApiKey: !!dto.validpayApiKey,
+    validpayApiKeyLen: dto.validpayApiKey?.length ?? 0,
+  }));
   const endpoint = await prisma.webhookEndpoint.create({
     data: {
       companyId,
@@ -47,18 +53,28 @@ export async function updateWebhookEndpoint(
   id: string,
   dto: UpdateWebhookEndpointDto,
 ) {
+  console.log("[webhook-endpoints] updateWebhookEndpoint dto:", JSON.stringify({
+    ...dto,
+    validpayApiKey: dto.validpayApiKey ? `[SET:${String(dto.validpayApiKey).length}chars]` : dto.validpayApiKey,
+  }));
   const existing = await prisma.webhookEndpoint.findFirst({ where: { id, companyId } });
   if (!existing) throw new AppError("Endpoint no encontrado", 404);
 
+  // Construir el objeto de actualización explícitamente
+  // para no depender de la distinción undefined vs ausente de Zod v4
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const dataToUpdate: Record<string, any> = {};
+  if (dto.active !== undefined) dataToUpdate.active = dto.active;
+  if (dto.autoApprove !== undefined) dataToUpdate.autoApprove = dto.autoApprove;
+  if (dto.description !== undefined) dataToUpdate.description = dto.description;
+  // validpayApiKey: null → borrar, string → actualizar, undefined (no vino en body) → no tocar
+  if ("validpayApiKey" in (dto as object) && dto.validpayApiKey !== undefined) {
+    dataToUpdate.validpayApiKey = dto.validpayApiKey; // puede ser null o string
+  }
+
   const updated = await prisma.webhookEndpoint.update({
     where: { id },
-    data: {
-      active: dto.active ?? undefined,
-      autoApprove: dto.autoApprove ?? undefined,
-      description: dto.description ?? undefined,
-      // null permite borrar la API Key; undefined no la toca
-      ...(dto.validpayApiKey !== undefined ? { validpayApiKey: dto.validpayApiKey } : {}),
-    },
+    data: dataToUpdate,
   });
   return stripSecret(updated);
 }
