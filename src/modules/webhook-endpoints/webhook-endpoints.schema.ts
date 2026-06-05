@@ -8,13 +8,15 @@ export const createWebhookEndpointSchema = z.object({
   validpayApiKey: z.string().max(512).optional(),
 });
 
-// Usamos .passthrough() para que Zod v4 no haga strip del campo validpayApiKey
-// cuando viene junto a otros campos opcionales
 export const updateWebhookEndpointSchema = z.object({
   active: z.boolean().optional(),
   autoApprove: z.boolean().optional(),
   description: z.string().max(280).optional(),
-  validpayApiKey: z.string().max(512).or(z.null()).optional(),
+  // Acepta string (nueva key), null (borrar key), o ausente (no tocar)
+  validpayApiKey: z.preprocess(
+    (v) => (v === "" ? null : v),  // string vacío → null
+    z.string().max(512).nullable().optional()
+  ),
 });
 
 export type CreateWebhookEndpointDto = z.infer<typeof createWebhookEndpointSchema>;
