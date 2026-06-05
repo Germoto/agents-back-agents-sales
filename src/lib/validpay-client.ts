@@ -13,23 +13,27 @@ const VALIDPAY_API_URL =
   process.env.VALIDPAY_API_URL ?? "https://api-validpay.molanosoft.com/api";
 
 /**
- * Marca un pago como VALIDATED en ValidPay.
+ * Marca un pago como VALIDATED en ValidPay vía el endpoint público de la API.
+ * Usa X-ACCESS-TOKEN (API Key del comercio en ValidPay, tipo sk_live_...).
  * Idempotente: si ya está validado, ValidPay devuelve { ok: true, alreadyValidated: true }.
  *
- * @param apiKey   Bearer token (sk_live_... o JWT de usuario ValidPay)
- * @param paymentId  ID del pago en ValidPay (externalId guardado en PaymentReceipt)
+ * Endpoint: PATCH /api/v1/payments/:id/validate
+ * Auth:     X-ACCESS-TOKEN: sk_live_...
+ *
+ * @param apiKey    API Key del comercio en ValidPay (sk_live_...)
+ * @param paymentId ID del pago en ValidPay (externalId guardado en PaymentReceipt)
  */
 export async function validatePaymentInValidPay(
   apiKey: string,
   paymentId: string,
 ): Promise<void> {
-  const url = `${VALIDPAY_API_URL}/payments/${encodeURIComponent(paymentId)}/validate`;
+  const url = `${VALIDPAY_API_URL}/v1/payments/${encodeURIComponent(paymentId)}/validate`;
 
   const res = await fetch(url, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      "X-ACCESS-TOKEN": apiKey,
     },
     body: JSON.stringify({
       validationNote: "Aprobado manualmente desde Sales Agents",
