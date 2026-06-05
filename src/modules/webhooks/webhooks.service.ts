@@ -39,9 +39,10 @@ export async function processWebhook(
 
   const payment = adapter.normalize(rawPayload);
 
-  // Idempotencia
+  // Idempotencia por (source, externalId, eventType) — distintos eventos del mismo pago no colisionan
+  const eventType = payment.event ?? "";
   const existing = await prisma.webhookEvent.findUnique({
-    where: { source_externalId: { source, externalId: payment.externalId } },
+    where: { source_externalId_eventType: { source, externalId: payment.externalId, eventType } },
   });
   if (existing) {
     return {
@@ -140,6 +141,7 @@ export async function processWebhook(
           companyId,
           source,
           externalId: payment.externalId,
+          eventType,
           payload: rawPayload as any,
           status: "PROCESSED",
           receiptId: receipt.id,
@@ -174,7 +176,7 @@ export async function processWebhook(
     // Carrera de idempotencia
     if (err.code === "P2002") {
       const dup = await prisma.webhookEvent.findUnique({
-        where: { source_externalId: { source, externalId: payment.externalId } },
+        where: { source_externalId_eventType: { source, externalId: payment.externalId, eventType } },
       });
       return {
         eventId: dup?.id ?? "",
@@ -191,6 +193,7 @@ export async function processWebhook(
           companyId,
           source,
           externalId: payment.externalId,
+          eventType,
           payload: rawPayload as any,
           status: "FAILED",
           error: err.message ?? String(err),

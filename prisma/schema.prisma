@@ -436,6 +436,7 @@ model WebhookEvent {
   companyId  String   @db.Uuid
   source     String
   externalId String
+  eventType  String   @default("")
   payload    Json
   status     String   // RECEIVED, PROCESSED, FAILED, DUPLICATE
   error      String?
@@ -445,7 +446,7 @@ model WebhookEvent {
   endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
   receipt  PaymentReceipt? @relation(fields: [receiptId], references: [id], onDelete: SetNull)
 
-  @@unique([source, externalId])
+  @@unique([source, externalId, eventType])
   @@index([companyId, receivedAt])
   @@map("webhook_events")
 }
