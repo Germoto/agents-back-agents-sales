@@ -1,6 +1,7 @@
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { getAdapter } from "./adapters";
+import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 
 /**
  * Resultado devuelto al controller tras procesar un webhook entrante.
@@ -152,6 +153,17 @@ export async function processWebhook(
     prisma.webhookEndpoint
       .update({ where: { id: endpointId }, data: { lastUsedAt: new Date() } })
       .catch(() => {/* silent */});
+
+    // Emitir evento Socket.IO a los clientes de la empresa en tiempo real
+    const socketEvent = isValidated ? SOCKET_EVENTS.RECEIPT_UPDATED : SOCKET_EVENTS.RECEIPT_NEW;
+    socketService.emitToCompany(companyId, socketEvent, {
+      id: result.receipt.id,
+      status: result.receipt.status,
+      source: result.receipt.source,
+      externalId: result.receipt.externalId,
+      amountPaid: result.receipt.amountPaid,
+      payerName: result.receipt.payerName,
+    });
 
     return {
       eventId: result.event.id,

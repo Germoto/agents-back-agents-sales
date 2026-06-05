@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { validatePaymentInValidPay } from "../../lib/validpay-client";
+import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 
 export async function listReceipts(companyId: string) {
   return prisma.paymentReceipt.findMany({
@@ -76,6 +77,14 @@ export async function approveReceipt(companyId: string, receiptId: string) {
     });
   }
 
+  // Emitir evento Socket.IO para que el frontend actualice en tiempo real
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
+    id: updated.id,
+    status: updated.status,
+    source: updated.source,
+    externalId: updated.externalId,
+  });
+
   return updated;
 }
 
@@ -102,8 +111,8 @@ export async function deleteReceipt(companyId: string, receiptId: string) {
 export async function rejectReceipt(companyId: string, receiptId: string, rejectionReason: string) {
   const receipt = await findReceipt(companyId, receiptId);
 
-  return prisma.$transaction(async (tx) => {
-    const updated = await tx.paymentReceipt.update({
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.paymentReceipt.update({
       where: { id: receipt.id },
       data: {
         status: "RECHAZADO",
@@ -120,6 +129,16 @@ export async function rejectReceipt(companyId: string, receiptId: string, reject
       });
     }
 
-    return updated;
+    return result;
   });
+
+  // Emitir evento Socket.IO para que el frontend actualice en tiempo real
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
+    id: updated.id,
+    status: updated.status,
+    source: updated.source,
+    externalId: updated.externalId,
+  });
+
+  return updated;
 }
