@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { validatePaymentInValidPay } from "../../lib/validpay-client";
 import type { MatchBody, UpdateStatusBody, ClaimBody } from "./public-payments.schemas";
 
 // -------------------------------------------------------------------------
@@ -535,10 +536,26 @@ export async function updatePaymentStatus(
     include: RECEIPT_INCLUDE,
   });
 
+  // Solo notificar a ValidPay cuando se aprueba (RECHAZADO es estado interno de Sales Agents)
+  if (input.status === "APROBADO" && updated.source === "validpay" && updated.externalId) {
+    notifyValidPayApproval(companyId, updated.externalId).catch((err) => {
+      console.error("[ValidPay] No se pudo notificar aprobación desde n8n:", err.message);
+    });
+  }
+
   const serialized = serializeReceipt(updated);
   socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
     id: serialized.id,
     status: serialized.status,
   });
   return serialized;
+}
+
+async function notifyValidPayApproval(companyId: string, externalId: string): Promise<void> {
+  const endpoint = await prisma.webhookEndpoint.findFirst({
+    where: { companyId, source: "validpay", active: true, validpayApiKey: { not: null } },
+    select: { validpayApiKey: true },
+  });
+  if (!endpoint?.validpayApiKey) return;
+  await validatePaymentInValidPay(endpoint.validpayApiKey, externalId);
 }
