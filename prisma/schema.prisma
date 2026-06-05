@@ -412,15 +412,16 @@ model PaymentReceipt {
 }
 
 model WebhookEndpoint {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId   String   @db.Uuid
-  source      String   // "validpay", "mercadopago", "custom"
-  secret      String   // plain text (almacenado en zona de confianza, igual que Stripe)
-  active      Boolean  @default(true)
-  autoApprove Boolean  @default(true)
-  description String?
-  createdAt   DateTime @default(now())
-  lastUsedAt  DateTime?
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String   @db.Uuid
+  source         String   // "validpay", "mercadopago", "custom"
+  secret         String   // plain text (almacenado en zona de confianza, igual que Stripe)
+  active         Boolean  @default(true)
+  autoApprove    Boolean  @default(true)
+  description    String?
+  validpayApiKey String?  // API Key de ValidPay para notificar de vuelta al aprobar (source=validpay)
+  createdAt      DateTime @default(now())
+  lastUsedAt     DateTime?
 
   company Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
   events  WebhookEvent[]

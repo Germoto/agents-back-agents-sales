@@ -7,10 +7,16 @@ function generateSecret(): string {
   return "whsec_" + crypto.randomBytes(32).toString("hex");
 }
 
-function stripSecret<T extends { secret: string }>(endpoint: T): Omit<T, "secret"> & { secret: undefined } {
+function stripSecret<T extends { secret: string; validpayApiKey?: string | null }>(
+  endpoint: T,
+): Omit<T, "secret" | "validpayApiKey"> & { secret: undefined; hasValidpayApiKey: boolean } {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { secret: _s, ...rest } = endpoint;
-  return { ...rest, secret: undefined } as Omit<T, "secret"> & { secret: undefined };
+  const { secret: _s, validpayApiKey, ...rest } = endpoint;
+  return {
+    ...rest,
+    secret: undefined,
+    hasValidpayApiKey: !!validpayApiKey,
+  } as Omit<T, "secret" | "validpayApiKey"> & { secret: undefined; hasValidpayApiKey: boolean };
 }
 
 export async function listWebhookEndpoints(companyId: string) {
@@ -29,10 +35,11 @@ export async function createWebhookEndpoint(companyId: string, dto: CreateWebhoo
       description: dto.description,
       autoApprove: dto.autoApprove ?? true,
       secret: dto.secret,
+      validpayApiKey: dto.validpayApiKey ?? null,
     },
   });
   // Devuelve el secret en texto plano SOLO en la respuesta de creación
-  return { ...endpoint, secret: dto.secret };
+  return { ...endpoint, secret: dto.secret, hasValidpayApiKey: !!endpoint.validpayApiKey };
 }
 
 export async function updateWebhookEndpoint(
@@ -49,6 +56,8 @@ export async function updateWebhookEndpoint(
       active: dto.active ?? undefined,
       autoApprove: dto.autoApprove ?? undefined,
       description: dto.description ?? undefined,
+      // null permite borrar la API Key; undefined no la toca
+      ...(dto.validpayApiKey !== undefined ? { validpayApiKey: dto.validpayApiKey } : {}),
     },
   });
   return stripSecret(updated);

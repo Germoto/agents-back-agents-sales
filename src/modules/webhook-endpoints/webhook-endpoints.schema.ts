@@ -5,12 +5,14 @@ export const createWebhookEndpointSchema = z.object({
   secret: z.string().min(8).max(512),
   description: z.string().max(280).optional(),
   autoApprove: z.boolean().optional(),
+  validpayApiKey: z.string().max(512).optional(),
 });
 
 export const updateWebhookEndpointSchema = z.object({
   active: z.boolean().optional(),
   autoApprove: z.boolean().optional(),
   description: z.string().max(280).optional(),
+  validpayApiKey: z.string().max(512).nullable().optional(),
 });
 
 export type CreateWebhookEndpointDto = z.infer<typeof createWebhookEndpointSchema>;

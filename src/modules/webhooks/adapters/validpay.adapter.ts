@@ -102,6 +102,9 @@ export const validpayAdapter: PaymentAdapter = {
       payerPhone: payerPhone?.trim() || undefined,
       operationCode: operationCode?.trim() || undefined,
       reference: reference?.trim() || undefined,
+      // Exponer el evento del envelope para que el service pueda diferenciar
+      // payment.received (crear) de payment.validated (actualizar existente)
+      event: env.data.event ?? undefined,
     };
   },
 };

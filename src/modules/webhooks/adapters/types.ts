@@ -7,6 +7,8 @@
 export interface NormalizedPayment {
   /** ID único del pago en el sistema externo (usado para idempotencia) */
   externalId: string;
+  /** Evento del sistema origen: "payment.received", "payment.validated", "payment.expired", etc. */
+  event?: string;
   /** Monto como string para comparar con DigitalSale.amountExpected (que también es string) */
   amount: string;
   /** Moneda ISO (PEN, USD, etc). Default depende del adapter. */

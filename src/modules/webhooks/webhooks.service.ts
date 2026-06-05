@@ -53,29 +53,85 @@ export async function processWebhook(
   const endpoint = await prisma.webhookEndpoint.findUnique({ where: { id: endpointId } });
   if (!endpoint) throw new AppError("Endpoint no encontrado", 404);
 
+  // Si el evento es "payment.validated", actualizamos el receipt existente en vez de crear uno nuevo.
+  const isValidated = payment.event === "payment.validated";
+
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const receipt = await tx.paymentReceipt.create({
-        data: {
-          companyId,
-          customerId: null,
-          productId: null,
-          digitalSaleId: null,
-          // amountExpected se mantiene como mirror de amountPaid por compatibilidad
-          amountExpected: payment.amount,
-          amountPaid: payment.amount,
-          currency: payment.currency ?? "PEN",
-          status: "PENDIENTE",
-          source,
-          externalId: payment.externalId,
-          payerName: payment.payerName || null,
-          paymentSource: payment.paymentSource ?? null,
-          payerPhone: payment.payerPhone ?? null,
-          operationCode: payment.operationCode ?? null,
-          reference: payment.reference ?? null,
-          occurredAt: payment.occurredAt ?? null,
-        },
-      });
+      let receipt;
+
+      if (isValidated) {
+        // Buscar el receipt existente por (source, externalId)
+        const existing = await tx.paymentReceipt.findUnique({
+          where: { source_externalId: { source, externalId: payment.externalId } },
+        });
+
+        if (existing) {
+          // Actualizar a APROBADO si está en estado PENDIENTE o EN_REVISION
+          if (existing.status === "PENDIENTE" || existing.status === "EN_REVISION") {
+            receipt = await tx.paymentReceipt.update({
+              where: { id: existing.id },
+              data: {
+                status: "APROBADO",
+                validatedAt: new Date(),
+                validationMode: "AUTO",
+                validationNote: "Validado automáticamente por ValidPay",
+              },
+            });
+          } else {
+            // Ya estaba APROBADO o RECHAZADO — no tocamos
+            receipt = existing;
+          }
+        } else {
+          // Nunca recibimos el payment.received, crear directamente como APROBADO
+          receipt = await tx.paymentReceipt.create({
+            data: {
+              companyId,
+              customerId: null,
+              productId: null,
+              digitalSaleId: null,
+              amountExpected: payment.amount,
+              amountPaid: payment.amount,
+              currency: payment.currency ?? "PEN",
+              status: "APROBADO",
+              source,
+              externalId: payment.externalId,
+              payerName: payment.payerName || null,
+              paymentSource: payment.paymentSource ?? null,
+              payerPhone: payment.payerPhone ?? null,
+              operationCode: payment.operationCode ?? null,
+              reference: payment.reference ?? null,
+              occurredAt: payment.occurredAt ?? null,
+              validatedAt: new Date(),
+              validationMode: "AUTO",
+              validationNote: "Validado automáticamente por ValidPay",
+            },
+          });
+        }
+      } else {
+        // payment.received (o cualquier otro evento) — crear receipt PENDIENTE
+        receipt = await tx.paymentReceipt.create({
+          data: {
+            companyId,
+            customerId: null,
+            productId: null,
+            digitalSaleId: null,
+            // amountExpected se mantiene como mirror de amountPaid por compatibilidad
+            amountExpected: payment.amount,
+            amountPaid: payment.amount,
+            currency: payment.currency ?? "PEN",
+            status: "PENDIENTE",
+            source,
+            externalId: payment.externalId,
+            payerName: payment.payerName || null,
+            paymentSource: payment.paymentSource ?? null,
+            payerPhone: payment.payerPhone ?? null,
+            operationCode: payment.operationCode ?? null,
+            reference: payment.reference ?? null,
+            occurredAt: payment.occurredAt ?? null,
+          },
+        });
+      }
 
       const event = await tx.webhookEvent.create({
         data: {

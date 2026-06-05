@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import { validatePaymentInValidPay } from "../../lib/validpay-client";
 
 export async function listReceipts(companyId: string) {
   return prisma.paymentReceipt.findMany({
@@ -63,9 +64,34 @@ export async function applyReceiptApproval(
 export async function approveReceipt(companyId: string, receiptId: string) {
   const receipt = await findReceipt(companyId, receiptId);
 
-  return prisma.$transaction(async (tx) => {
+  const updated = await prisma.$transaction(async (tx) => {
     return applyReceiptApproval(tx, receipt.id, receipt.digitalSaleId);
   });
+
+  // Notificar a ValidPay de forma asíncrona (best-effort) si el receipt viene de ValidPay
+  // y el endpoint tiene una API Key configurada.
+  if (receipt.source === "validpay" && receipt.externalId) {
+    notifyValidPayApproval(companyId, receipt.externalId).catch((err) => {
+      console.error("[ValidPay] No se pudo notificar aprobación:", err.message);
+    });
+  }
+
+  return updated;
+}
+
+/**
+ * Busca la API Key de ValidPay del endpoint activo de la empresa
+ * y llama a ValidPay para marcar el pago como validado.
+ */
+async function notifyValidPayApproval(companyId: string, externalId: string): Promise<void> {
+  const endpoint = await prisma.webhookEndpoint.findFirst({
+    where: { companyId, source: "validpay", active: true, validpayApiKey: { not: null } },
+    select: { validpayApiKey: true },
+  });
+
+  if (!endpoint?.validpayApiKey) return; // Sin API Key configurada, silencio
+
+  await validatePaymentInValidPay(endpoint.validpayApiKey, externalId);
 }
 
 export async function deleteReceipt(companyId: string, receiptId: string) {
