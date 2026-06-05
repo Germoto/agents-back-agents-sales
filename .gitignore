@@ -42,3 +42,6 @@ uploads/*
 !uploads/products/
 uploads/products/*
 !uploads/products/.gitkeep
+
+# Engram memory (local tooling, no versionar)
+.engram/

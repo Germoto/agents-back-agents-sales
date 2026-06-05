@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import type { MatchBody, UpdateStatusBody, ClaimBody } from "./public-payments.schemas";
 
 // -------------------------------------------------------------------------
@@ -346,7 +347,12 @@ export async function claimPayment(companyId: string, id: string, body: ClaimBod
       include: RECEIPT_INCLUDE,
     });
 
-    return serializeReceipt(updated);
+    const serialized = serializeReceipt(updated);
+    socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
+      id: serialized.id,
+      status: serialized.status,
+    });
+    return serialized;
   });
 }
 
@@ -529,5 +535,10 @@ export async function updatePaymentStatus(
     include: RECEIPT_INCLUDE,
   });
 
-  return serializeReceipt(updated);
+  const serialized = serializeReceipt(updated);
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
+    id: serialized.id,
+    status: serialized.status,
+  });
+  return serialized;
 }
