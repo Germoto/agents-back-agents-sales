@@ -29,6 +29,15 @@ function renderVerticalData(vertical: string | undefined, vData: unknown): strin
       show("renovación", "renewal"),
     ].filter(Boolean).join(" · ");
   }
+  if (vertical === "SERVICE") {
+    return [
+      show("duración", "duration"),
+      show("modalidad", "modality"),
+      show("requisitos", "requirements"),
+      show("disponibilidad", "schedulingWindow"),
+      show("seña", "deposit"),
+    ].filter(Boolean).join(" · ");
+  }
   if (vertical === "RESTAURANT") {
     const bits: string[] = [];
     if (v.prepTime != null && String(v.prepTime).trim()) bits.push(`preparación: ${v.prepTime}`);
@@ -130,7 +139,7 @@ function verticalGuidance(vertical: string | undefined): string {
     case "STREAMER":
       return "Rubro STREAMER/SUSCRIPCIONES: el catálogo son PLANES (agrupados por plataforma/servicio en la categoría). Compara planes por periodo (mensual/anual), tier, nº de pantallas y calidad; recomienda el más conveniente. Cobra y, tras validar el pago, entrega el acceso (flujo digital). Haz upsell del plan superior y ofrece renovación cuando esté por vencer.";
     case "SERVICE":
-      return "Rubro SERVICIOS: vendes servicios (citas, asesorías, reservas). Explica alcance, duración y modalidad; coordina fecha/horario en texto y deja constancia en notas. Cobra según el modo configurado. Si requiere agenda, deriva o confirma con un asesor.";
+      return "Rubro SERVICIOS: vendes servicios (citas, asesorías, reservas). Explica alcance, duración y modalidad (presencial/online) y requisitos. Cuando el cliente acepte, pregunta su horario preferido y usa agendar_servicio para registrar la reserva (queda SOLICITADA; un asesor confirma el horario exacto). Si hay seña/depósito configurado, cóbralo con enviar_metodos_pago + validar_pago antes de confirmar. No inventes disponibilidad horaria que no esté configurada.";
     case "PHYSICAL_GOODS":
       return "Rubro PRODUCTOS FÍSICOS: prioriza catálogo, variantes (talla/color), stock y envío. Cierra con registrar_pedido tras tomar datos de entrega.";
     case "INFOPRODUCT":

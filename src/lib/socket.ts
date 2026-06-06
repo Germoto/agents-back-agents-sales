@@ -22,6 +22,7 @@ export const SOCKET_EVENTS = {
   MESSAGE_NEW:          "message.new",          // nuevo mensaje de conversación (inbound u outbound del agente)
   CONVERSATION_UPDATED: "conversation.updated", // estado de conversación cambió (pausa/humano/cierre)
   ORDER_NEW:            "order.new",            // pedido físico registrado por el agente
+  BOOKING_NEW:          "booking.new",          // reserva de servicio registrada por el agente
 } as const;
 
 class SocketService {

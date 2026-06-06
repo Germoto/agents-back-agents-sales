@@ -23,6 +23,7 @@ import {
   updatePaymentStatus,
 } from "../public-payments/public-payments.service";
 import { createAgentOrder, createOrderFromCart } from "./order.service";
+import { createBooking } from "./booking.service";
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
@@ -280,6 +281,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           address: { type: "string", description: "Dirección de entrega (o 'recojo en local')" },
           reference: { type: "string", description: "Referencia del domicilio" },
           notes: { type: "string", description: "Notas del pedido (ej. sin picante, tocar timbre)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "agendar_servicio",
+      description:
+        "Registra una reserva de un SERVICIO (rubro servicios) cuando el cliente acepta y da un horario preferido. Guarda el horario tal cual lo dice el cliente; un asesor confirmará el detalle.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId", "requestedText"],
+        properties: {
+          productId: { type: "string", description: "id del servicio" },
+          requestedText: { type: "string", description: "Fecha/hora preferida tal como la dijo el cliente (ej. 'sábado 4pm')" },
+          modality: { type: "string", description: "presencial | online (si aplica)" },
+          notes: { type: "string", description: "Detalles o requisitos del cliente" },
         },
       },
     },
@@ -606,6 +626,37 @@ export async function executeTool(
         });
       } catch (err) {
         return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo registrar el pedido" });
+      }
+    }
+
+    case "agendar_servicio": {
+      const product = findProductById(ctx, String(args.productId ?? ""));
+      if (!product) return JSON.stringify({ ok: false, error: "servicio no encontrado" });
+      const requestedText = String(args.requestedText ?? "").trim();
+      if (!requestedText) return JSON.stringify({ ok: false, error: "falta el horario solicitado" });
+      try {
+        const booking = await createBooking({
+          companyId: ctx.companyId,
+          customerId: ctx.customerId,
+          productId: product.id,
+          requestedText,
+          modality: String(args.modality ?? "").trim() || null,
+          notes: String(args.notes ?? "").trim() || null,
+        });
+        ctx.state.status = "RESERVA_SOLICITADA";
+        ctx.state.selectedProductId = product.id;
+        ctx.adminNotices.push(
+          `📅 Nueva reserva (${ctx.customerPhone}): ${product.name} — "${requestedText}"${
+            args.modality ? ` · ${args.modality}` : ""
+          }.`,
+        );
+        return JSON.stringify({
+          ok: true,
+          bookingId: booking.id,
+          note: "Reserva registrada como SOLICITADA. Confirma al cliente que un asesor coordinará el horario exacto.",
+        });
+      } catch (err) {
+        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo registrar la reserva" });
       }
     }
 

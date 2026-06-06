@@ -102,6 +102,14 @@ enum ScheduledMessageStatus {
   FAILED
 }
 
+// Estado de una reserva de servicio (rubro SERVICE).
+enum ServiceBookingStatus {
+  SOLICITADA
+  CONFIRMADA
+  CANCELADA
+  COMPLETADA
+}
+
 model Company {
   id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name              String
@@ -122,6 +130,7 @@ model Company {
   conversations     Conversation[]
   carts             Cart[]
   scheduledMessages ScheduledMessage[]
+  serviceBookings   ServiceBooking[]
   orders            Order[]
   digitalSales      DigitalSale[]
   paymentReceipts   PaymentReceipt[]
@@ -242,6 +251,7 @@ model Product {
   orders           Order[]
   digitalSales     DigitalSale[]
   paymentReceipts  PaymentReceipt[]
+  serviceBookings  ServiceBooking[]
 
   @@unique([companyId, slug])
   @@index([companyId, active, sortOrder])
@@ -361,6 +371,7 @@ model Customer {
   conversations     Conversation[]
   carts             Cart[]
   scheduledMessages ScheduledMessage[]
+  serviceBookings   ServiceBooking[]
   orders            Order[]
   digitalSales      DigitalSale[]
   paymentReceipts   PaymentReceipt[]
@@ -471,6 +482,26 @@ model ScheduledMessage {
 
   @@index([status, sendAt])
   @@index([companyId, customerId, status])
+}
+
+// Reserva ligera de un servicio (rubro SERVICE). El horario solicitado se guarda
+// como texto (lo que pidió el cliente); el admin coordina/confirma el detalle.
+model ServiceBooking {
+  id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId     String               @db.Uuid
+  customerId    String               @db.Uuid
+  productId     String               @db.Uuid
+  requestedText String               // p.ej. "este sábado 4pm"
+  modality      String?              // presencial | online | ...
+  status        ServiceBookingStatus @default(SOLICITADA)
+  notes         String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  company       Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer      Customer             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product       Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, createdAt])
 }
 
 model Order {
