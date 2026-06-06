@@ -40,7 +40,8 @@ export const productBodySchema = z.object({
   regularPrice: z.string().nullable().optional(),
   stock: z.coerce.number().int().nullable().optional(),
   shortDescription: z.string().min(1),
-  fullDescription: z.string().min(1),
+  // Opcional: varios rubros (restaurante/streaming) no usan descripción completa.
+  fullDescription: z.string().optional().default(""),
   deliveryMethod: z.string().nullable().optional(),
   support: z.string().nullable().optional(),
   // Atributos flexibles por rubro (clave→valor). Ej. restaurante: {ingredientes, tiempo_preparacion};
@@ -60,9 +61,11 @@ export const productBodySchema = z.object({
   faqs: z.array(qaSchema).default([]),
   objections: z.array(qaSchema).default([]),
   files: z.array(productFileSchema).default([]),
+  // Tolerante al registrar (se puede guardar borrador sin link); el requisito real
+  // para INFOPRODUCT/STREAMER es rubro-aware en bot.service.buildBotConfig.
   digitalDelivery: z.object({
-    link: z.string().url(),
-    instructions: z.string().min(1),
+    link: z.string().optional().default(""),
+    instructions: z.string().optional().default(""),
   }).nullable().optional(),
   physicalDelivery: z.object({
     requiresAddress: z.boolean().default(true),

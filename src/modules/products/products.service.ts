@@ -15,7 +15,7 @@ type ProductPayload = {
   regularPrice?: string | null;
   stock?: number | null;
   shortDescription: string;
-  fullDescription: string;
+  fullDescription?: string;
   deliveryMethod?: string | null;
   support?: string | null;
   attributes?: Record<string, string> | null;
@@ -42,8 +42,8 @@ type ProductPayload = {
     sortOrder: number;
   }>;
   digitalDelivery?: {
-    link: string;
-    instructions: string;
+    link?: string;
+    instructions?: string;
   } | null;
   physicalDelivery?: {
     requiresAddress: boolean;
@@ -212,13 +212,15 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
   }
 
   if (payload.digitalDelivery) {
+    // Columnas no-nulas: default a "" si vienen vacías (borrador sin link).
+    const dd = {
+      link: payload.digitalDelivery.link ?? "",
+      instructions: payload.digitalDelivery.instructions ?? "",
+    };
     await tx.digitalDelivery.upsert({
       where: { productId },
-      update: payload.digitalDelivery,
-      create: {
-        productId,
-        ...payload.digitalDelivery,
-      },
+      update: dd,
+      create: { productId, ...dd },
     });
   } else {
     await tx.digitalDelivery.deleteMany({ where: { productId } });
@@ -277,7 +279,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         regularPrice: payload.regularPrice ?? null,
         stock: payload.stock ?? null,
         shortDescription: payload.shortDescription,
-        fullDescription: payload.fullDescription,
+        fullDescription: payload.fullDescription ?? "",
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
@@ -315,7 +317,7 @@ export async function updateProduct(companyId: string, productId: string, payloa
         regularPrice: payload.regularPrice ?? null,
         stock: payload.stock ?? null,
         shortDescription: payload.shortDescription,
-        fullDescription: payload.fullDescription,
+        fullDescription: payload.fullDescription ?? "",
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
