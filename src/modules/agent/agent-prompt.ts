@@ -29,6 +29,23 @@ function renderVerticalData(vertical: string | undefined, vData: unknown): strin
       show("renovación", "renewal"),
     ].filter(Boolean).join(" · ");
   }
+  if (vertical === "RESTAURANT") {
+    const bits: string[] = [];
+    if (v.prepTime != null && String(v.prepTime).trim()) bits.push(`preparación: ${v.prepTime}`);
+    const groups = Array.isArray(v.modifierGroups) ? (v.modifierGroups as any[]) : [];
+    if (groups.length) {
+      const g = groups
+        .map((grp) => {
+          const opts = (grp.options ?? [])
+            .map((o: any) => `${o.label}${Number(o.priceDelta) ? ` +${o.priceDelta}` : ""}`)
+            .join("/");
+          return `${grp.name}${grp.required ? "*" : ""}: ${opts}`;
+        })
+        .join(" | ");
+      bits.push(`opciones: ${g}`);
+    }
+    return bits.join(" · ");
+  }
   return Object.entries(v)
     .filter(([, val]) => val != null && String(val).trim())
     .map(([k, val]) => `${k}: ${val}`)
@@ -109,7 +126,7 @@ function renderPaymentMethods(payment: BotConfig["payment"]): string {
 function verticalGuidance(vertical: string | undefined): string {
   switch (vertical) {
     case "RESTAURANT":
-      return "Rubro RESTAURANTE: el catálogo son platos/combos. Ayuda a armar el pedido (varios ítems con cantidades en el carrito), sugiere acompañamientos/bebidas (upsell), considera tiempo de preparación y zona de entrega. Para delivery toma dirección y registra el pedido; para recojo en local indícalo. Sé rápido y apetitoso.";
+      return "Rubro RESTAURANTE: el catálogo son platos/combos agrupados por sección del menú (categoría). Arma el pedido con varios ítems en el carrito (agregar_carrito); cuando un plato tenga opciones/extras, pregúntalas y pásalas como `modifiers` en agregar_carrito (el precio de la línea se ajusta solo con sus deltas). Sugiere acompañamientos/bebidas (upsell). Ten en cuenta el tiempo de preparación y la zona de entrega. Cuando el cliente confirme, toma nombre y dirección (o indica recojo en local) y usa registrar_pedido_carrito para registrar TODO el carrito como un pedido. Sé rápido y apetitoso.";
     case "STREAMER":
       return "Rubro STREAMER/SUSCRIPCIONES: el catálogo son PLANES (agrupados por plataforma/servicio en la categoría). Compara planes por periodo (mensual/anual), tier, nº de pantallas y calidad; recomienda el más conveniente. Cobra y, tras validar el pago, entrega el acceso (flujo digital). Haz upsell del plan superior y ofrece renovación cuando esté por vencer.";
     case "SERVICE":

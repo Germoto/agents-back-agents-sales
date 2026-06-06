@@ -7,6 +7,7 @@
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { renderCartForOrder, type CartSummary } from "./cart.service";
 
 // Código corto y legible: PED-<base36 del tiempo>-<aleatorio>. Se pasa el
 // timestamp desde el caller (Date.now en backend es válido) para mantenerlo puro.
@@ -48,6 +49,53 @@ export async function createAgentOrder(input: CreateOrderInput) {
       address: input.address.trim(),
       reference: (input.reference ?? "").trim(),
       notes: input.notes?.trim() || null,
+      status: "PEDIDO_REGISTRADO",
+    },
+    include: { product: { select: { name: true } } },
+  });
+
+  socketService.emitToCompany(input.companyId, SOCKET_EVENTS.ORDER_NEW, {
+    id: order.id,
+    orderCode: order.orderCode,
+    status: order.status,
+    customerName: order.customerName,
+    product: order.product?.name,
+  });
+
+  return order;
+}
+
+/**
+ * Crea UN pedido a partir del carrito completo (restaurante: varios platos con
+ * modificadores). productId = el primer ítem (representativo); el detalle
+ * itemizado va en notes. quantity = suma de unidades.
+ */
+export async function createOrderFromCart(input: {
+  companyId: string;
+  customerId: string;
+  cart: CartSummary;
+  customerName: string;
+  address: string;
+  reference?: string;
+  extraNotes?: string;
+}) {
+  if (!input.cart.items.length) throw new AppError("El carrito está vacío", 422);
+
+  const firstProductId = input.cart.items[0].productId;
+  const totalQty = input.cart.items.reduce((acc, it) => acc + it.quantity, 0);
+  const notes = [input.extraNotes?.trim(), renderCartForOrder(input.cart)].filter(Boolean).join("\n");
+
+  const order = await prisma.order.create({
+    data: {
+      companyId: input.companyId,
+      customerId: input.customerId,
+      productId: firstProductId,
+      orderCode: buildOrderCode(Date.now()),
+      quantity: totalQty,
+      customerName: input.customerName.trim(),
+      address: input.address.trim(),
+      reference: (input.reference ?? "").trim(),
+      notes,
       status: "PEDIDO_REGISTRADO",
     },
     include: { product: { select: { name: true } } },

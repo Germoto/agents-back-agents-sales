@@ -1,16 +1,33 @@
 /**
- * Carrito multi-producto del agente. Un carrito OPEN por cliente; al cobrar se
- * marca CHECKED_OUT y sus productIds se usan para cerrar el PaymentReceipt.
+ * Carrito multi-producto del agente. Un carrito OPEN por cliente; al cobrar/
+ * registrar se marca CHECKED_OUT.
+ *
+ * Soporta MODIFICADORES con price-delta (restaurante: "extra queso +S/2"):
+ * el mismo producto puede aparecer en varias líneas con distintos modificadores.
+ * El precio de cada línea = precio base + suma de deltas de sus modificadores.
  */
 
 import { prisma } from "../../lib/prisma";
 
+export interface ChosenModifier {
+  group: string;
+  option: string;
+  priceDelta: number;
+}
+
+export interface ModifierInput {
+  group: string;
+  option: string;
+}
+
 export interface CartLine {
+  itemId: string;
   productId: string;
   name: string;
   quantity: number;
   unitPriceText: string | null;
   unitPrice: number;
+  modifiers: ChosenModifier[];
 }
 
 export interface CartSummary {
@@ -33,6 +50,36 @@ function formatMoney(n: number): string {
   return `${CURRENCY} ${n.toFixed(2)}`;
 }
 
+function norm(s: string): string {
+  return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+}
+
+/** Resuelve los modificadores elegidos contra verticalData.modifierGroups y suma sus deltas. */
+function resolveModifiers(
+  verticalData: unknown,
+  inputs: ModifierInput[] | undefined,
+): { chosen: ChosenModifier[]; delta: number } {
+  const chosen: ChosenModifier[] = [];
+  let delta = 0;
+  if (!inputs?.length) return { chosen, delta };
+  const groups = ((verticalData as any)?.modifierGroups ?? []) as Array<{
+    name?: string;
+    options?: Array<{ label?: string; priceDelta?: number }>;
+  }>;
+  for (const inp of inputs) {
+    if (!inp?.option) continue;
+    const g = groups.find((x) => x.name && norm(x.name) === norm(inp.group ?? ""));
+    let priceDelta = 0;
+    if (g) {
+      const o = (g.options ?? []).find((op) => op.label && norm(op.label) === norm(inp.option));
+      if (o) priceDelta = Number(o.priceDelta) || 0;
+    }
+    chosen.push({ group: inp.group ?? "", option: inp.option, priceDelta });
+    delta += priceDelta;
+  }
+  return { chosen, delta };
+}
+
 async function getOpenCart(companyId: string, customerId: string) {
   const existing = await prisma.cart.findFirst({
     where: { companyId, customerId, status: "OPEN" },
@@ -51,19 +98,41 @@ export async function addToCart(
   customerId: string,
   productId: string,
   quantity = 1,
+  modifiers?: ModifierInput[],
 ): Promise<CartSummary> {
   const product = await prisma.product.findFirst({
     where: { id: productId, companyId, active: true },
-    select: { id: true, price: true },
+    select: { id: true, price: true, verticalData: true },
   });
   if (!product) throw new Error("Producto no encontrado o inactivo");
 
   const cartId = await getOpenCart(companyId, customerId);
-  await prisma.cartItem.upsert({
-    where: { cartId_productId: { cartId, productId } },
-    update: { quantity: { increment: quantity }, unitPriceText: product.price },
-    create: { cartId, productId, quantity, unitPriceText: product.price },
-  });
+  const { chosen, delta } = resolveModifiers(product.verticalData, modifiers);
+  const unit = parsePrice(product.price) + delta;
+  const unitPriceText = formatMoney(unit);
+  const qty = Math.max(1, quantity || 1);
+
+  // Buscar una línea existente del mismo producto con los MISMOS modificadores
+  const lines = await prisma.cartItem.findMany({ where: { cartId, productId } });
+  const key = JSON.stringify(chosen);
+  const match = lines.find((l) => JSON.stringify((l.variantChoices as unknown) ?? []) === key);
+
+  if (match) {
+    await prisma.cartItem.update({
+      where: { id: match.id },
+      data: { quantity: { increment: qty }, unitPriceText },
+    });
+  } else {
+    await prisma.cartItem.create({
+      data: {
+        cartId,
+        productId,
+        quantity: qty,
+        unitPriceText,
+        variantChoices: chosen as unknown as object,
+      },
+    });
+  }
   return summarizeCart(companyId, customerId);
 }
 
@@ -91,10 +160,13 @@ export async function summarizeCart(
     select: {
       id: true,
       items: {
+        orderBy: { createdAt: "asc" },
         select: {
+          id: true,
           productId: true,
           quantity: true,
           unitPriceText: true,
+          variantChoices: true,
           product: { select: { name: true, price: true } },
         },
       },
@@ -107,12 +179,15 @@ export async function summarizeCart(
 
   const items: CartLine[] = cart.items.map((it) => {
     const unitPrice = parsePrice(it.unitPriceText ?? it.product.price);
+    const modifiers = (Array.isArray(it.variantChoices) ? it.variantChoices : []) as unknown as ChosenModifier[];
     return {
+      itemId: it.id,
       productId: it.productId,
       name: it.product.name,
       quantity: it.quantity,
       unitPriceText: it.unitPriceText ?? it.product.price,
       unitPrice,
+      modifiers,
     };
   });
   const total = items.reduce((acc, it) => acc + it.unitPrice * it.quantity, 0);
@@ -122,11 +197,11 @@ export async function summarizeCart(
     items,
     total,
     totalText: formatMoney(total),
-    productIds: items.map((it) => it.productId),
+    productIds: Array.from(new Set(items.map((it) => it.productId))),
   };
 }
 
-/** Marca el carrito OPEN como CHECKED_OUT. Llamar tras aprobar el pago. */
+/** Marca el carrito OPEN como CHECKED_OUT. Llamar tras aprobar el pago / registrar el pedido. */
 export async function checkoutCart(companyId: string, customerId: string, totalText: string) {
   await prisma.cart.updateMany({
     where: { companyId, customerId, status: "OPEN" },
@@ -134,11 +209,25 @@ export async function checkoutCart(companyId: string, customerId: string, totalT
   });
 }
 
+function lineLabel(it: CartLine): string {
+  const mods = it.modifiers?.length
+    ? ` (${it.modifiers.map((m) => m.option).join(", ")})`
+    : "";
+  return `${it.quantity}x ${it.name}${mods}`;
+}
+
 export function renderCartText(summary: CartSummary): string {
   if (!summary.items.length) return "Tu carrito está vacío.";
   const lines = summary.items.map(
-    (it) => `• ${it.name} x${it.quantity} — ${formatMoney(it.unitPrice * it.quantity)}`,
+    (it) => `• ${lineLabel(it)} — ${formatMoney(it.unitPrice * it.quantity)}`,
   );
   lines.push(`\n*Total: ${summary.totalText}*`);
+  return lines.join("\n");
+}
+
+/** Itemizado para el pedido (notas del Order). */
+export function renderCartForOrder(summary: CartSummary): string {
+  const lines = summary.items.map((it) => `- ${lineLabel(it)} (${formatMoney(it.unitPrice * it.quantity)})`);
+  lines.push(`Total: ${summary.totalText}`);
   return lines.join("\n");
 }

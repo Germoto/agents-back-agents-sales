@@ -22,7 +22,7 @@ import {
   claimPayment,
   updatePaymentStatus,
 } from "../public-payments/public-payments.service";
-import { createAgentOrder } from "./order.service";
+import { createAgentOrder, createOrderFromCart } from "./order.service";
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
@@ -165,7 +165,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "agregar_carrito",
-      description: "Agrega un producto al carrito del cliente. Úsalo cuando quiera comprar uno o varios productos.",
+      description:
+        "Agrega un producto al carrito. Úsalo cuando quiera comprar uno o varios. Para rubros con modificadores (restaurante), pasa los modificadores elegidos (tamaño, extras); el precio de la línea se ajusta con sus deltas.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -173,6 +174,16 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           productId: { type: "string" },
           quantity: { type: "integer", minimum: 1 },
+          modifiers: {
+            type: "array",
+            description: "Modificadores elegidos (ej. {group:'Tamaño', option:'Familiar'}). Solo si el producto los define.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["group", "option"],
+              properties: { group: { type: "string" }, option: { type: "string" } },
+            },
+          },
         },
       },
     },
@@ -250,6 +261,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           quantity: { type: "integer", minimum: 1 },
           variant: { type: "string", description: "Variante/opción elegida (talla, color, etc.) si aplica" },
           notes: { type: "string", description: "Notas adicionales del pedido" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "registrar_pedido_carrito",
+      description:
+        "Registra UN pedido con todo el carrito (ej. restaurante: varios platos con sus modificadores). Úsalo cuando el cliente confirme el pedido y tengas los datos de entrega. Para pago anticipado, valida el pago ANTES.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["customerName", "address"],
+        properties: {
+          customerName: { type: "string", description: "Nombre de quien recibe" },
+          address: { type: "string", description: "Dirección de entrega (o 'recojo en local')" },
+          reference: { type: "string", description: "Referencia del domicilio" },
+          notes: { type: "string", description: "Notas del pedido (ej. sin picante, tocar timbre)" },
         },
       },
     },
@@ -345,9 +375,23 @@ export async function executeTool(
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
       const qty = Math.max(1, Number(args.quantity ?? 1));
-      const summary = await addToCart(ctx.companyId, ctx.customerId, product.id, qty);
+      const modifiers = Array.isArray(args.modifiers)
+        ? args.modifiers
+            .map((m: any) => ({ group: String(m?.group ?? ""), option: String(m?.option ?? "") }))
+            .filter((m: { option: string }) => m.option)
+        : undefined;
+      const summary = await addToCart(ctx.companyId, ctx.customerId, product.id, qty, modifiers);
       ctx.state.selectedProductId = product.id;
-      return JSON.stringify({ ok: true, cart: summary.items, total: summary.totalText });
+      return JSON.stringify({
+        ok: true,
+        cart: summary.items.map((it) => ({
+          name: it.name,
+          qty: it.quantity,
+          modifiers: it.modifiers.map((m) => m.option),
+          lineTotal: (it.unitPrice * it.quantity).toFixed(2),
+        })),
+        total: summary.totalText,
+      });
     }
 
     case "ver_carrito": {
@@ -522,6 +566,43 @@ export async function executeTool(
           ok: true,
           orderCode: order.orderCode,
           note: "Pedido registrado. Confirma al cliente con el código y los próximos pasos de entrega.",
+        });
+      } catch (err) {
+        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo registrar el pedido" });
+      }
+    }
+
+    case "registrar_pedido_carrito": {
+      const cart = await summarizeCart(ctx.companyId, ctx.customerId);
+      if (!cart.items.length) return JSON.stringify({ ok: false, error: "el carrito está vacío" });
+      const customerName = String(args.customerName ?? "").trim();
+      const address = String(args.address ?? "").trim();
+      if (!customerName || !address) {
+        return JSON.stringify({ ok: false, error: "faltan nombre o dirección/recojo" });
+      }
+      try {
+        const order = await createOrderFromCart({
+          companyId: ctx.companyId,
+          customerId: ctx.customerId,
+          cart,
+          customerName,
+          address,
+          reference: String(args.reference ?? "").trim(),
+          extraNotes: String(args.notes ?? "").trim(),
+        });
+        await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
+        ctx.state.status = "PEDIDO_REGISTRADO";
+        const resumen = cart.items
+          .map((it) => `${it.quantity}x ${it.name}${it.modifiers.length ? ` (${it.modifiers.map((m) => m.option).join(", ")})` : ""}`)
+          .join(", ");
+        ctx.adminNotices.push(
+          `🍽️ Nuevo pedido ${order.orderCode} (${ctx.customerPhone}): ${resumen}. Total ${cart.totalText}. Entrega: ${address}.`,
+        );
+        return JSON.stringify({
+          ok: true,
+          orderCode: order.orderCode,
+          total: cart.totalText,
+          note: "Pedido registrado. Confirma al cliente con el código, el total y el tiempo estimado.",
         });
       } catch (err) {
         return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo registrar el pedido" });
