@@ -45,6 +45,10 @@ export const productBodySchema = z.object({
   // Atributos flexibles por rubro (clave→valor). Ej. restaurante: {ingredientes, tiempo_preparacion};
   // streamer: {duracion_suscripcion}; servicio: {duracion, modalidad}.
   attributes: z.record(z.string(), z.string()).nullable().optional(),
+  category: z.string().nullable().optional(),
+  // Datos del vertical pack (estructura depende del rubro). Validación laxa aquí;
+  // la UI construye la forma correcta según Company.vertical.
+  verticalData: z.record(z.string(), z.unknown()).nullable().optional(),
   sortOrder: z.coerce.number().int().min(0).default(0),
   aliases: z.array(z.string().min(1)).default([]),
   benefits: z.array(orderedValueSchema).default([]),

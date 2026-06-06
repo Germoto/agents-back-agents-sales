@@ -11,49 +11,91 @@ import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
+type BotProduct = BotConfig["products"][number];
 
-function renderCatalog(products: BotConfig["products"]): string {
+// Renderiza los datos estructurados del rubro (vertical pack) de un producto.
+function renderVerticalData(vertical: string | undefined, vData: unknown): string {
+  if (!vData || typeof vData !== "object") return "";
+  const v = vData as Record<string, unknown>;
+  const show = (label: string, key: string) =>
+    v[key] != null && String(v[key]).trim() ? `${label}: ${v[key]}` : "";
+  if (vertical === "STREAMER") {
+    return [
+      show("periodo", "billingPeriod"),
+      show("duración (días)", "durationDays"),
+      show("plan", "tier"),
+      show("pantallas", "screens"),
+      show("calidad", "quality"),
+      show("renovación", "renewal"),
+    ].filter(Boolean).join(" · ");
+  }
+  return Object.entries(v)
+    .filter(([, val]) => val != null && String(val).trim())
+    .map(([k, val]) => `${k}: ${val}`)
+    .join(" · ");
+}
+
+function renderProduct(p: BotProduct, index: number, vertical: string | undefined): string {
+  const parts = [
+    `${index + 1}. [${p.id}] ${p.name} — ${p.priceText ?? p.price}${
+      p.regularPriceText ? ` (antes ${p.regularPriceText})` : ""
+    } · ${p.productType}`,
+    `   ${p.shortDescription}`,
+  ];
+  if (p.aliases?.length) parts.push(`   alias: ${p.aliases.join(", ")}`);
+  const vd = renderVerticalData(vertical, p.verticalData);
+  if (vd) parts.push(`   ${vertical === "STREAMER" ? "plan" : "detalle"}: ${vd}`);
+  if (p.benefits?.length) parts.push(`   beneficios: ${p.benefits.slice(0, 5).join("; ")}`);
+  if (p.includes?.length) parts.push(`   incluye: ${p.includes.slice(0, 5).join("; ")}`);
+  if (p.faqs?.length)
+    parts.push(`   faq: ${p.faqs.slice(0, 4).map((f) => `${f.question} -> ${f.answer}`).join(" | ")}`);
+  if (p.objections?.length)
+    parts.push(
+      `   objeciones: ${p.objections.slice(0, 4).map((o) => `${o.question} -> ${o.answer}`).join(" | ")}`,
+    );
+  const mediaCount = p.files?.length ?? 0;
+  if (mediaCount) parts.push(`   multimedia disponible: ${mediaCount} archivo(s)`);
+  if (p.productType === "physical" && p.physicalDelivery) {
+    const d = p.physicalDelivery;
+    const env: string[] = [];
+    if (d.deliveryCost) env.push(`costo envío: ${d.deliveryCost}`);
+    if (d.deliveryTime) env.push(`tiempo: ${d.deliveryTime}`);
+    if (d.pickupAvailable) env.push("recojo disponible");
+    if (d.requiresAddress === false) env.push("no requiere dirección");
+    if (env.length) parts.push(`   envío: ${env.join(" · ")}`);
+    if (d.deliveryAreas?.length) parts.push(`   zonas de envío: ${d.deliveryAreas.slice(0, 8).join(", ")}`);
+  }
+  if (p.variants?.length)
+    parts.push(`   variantes: ${p.variants.map((v) => `${v.name} (${v.options.join("/")})`).join(" | ")}`);
+  if (p.attributes && typeof p.attributes === "object") {
+    const attrs = Object.entries(p.attributes as Record<string, unknown>)
+      .filter(([, v]) => v != null && String(v).trim())
+      .map(([k, v]) => `${k}: ${v}`);
+    if (attrs.length) parts.push(`   atributos: ${attrs.join(" · ")}`);
+  }
+  return parts.join("\n");
+}
+
+function renderCatalog(products: BotConfig["products"], vertical: string | undefined): string {
   if (!products.length) return "(sin productos activos)";
-  return products
-    .map((p, i) => {
-      const parts = [
-        `${i + 1}. [${p.id}] ${p.name} — ${p.priceText ?? p.price}${
-          p.regularPriceText ? ` (antes ${p.regularPriceText})` : ""
-        } · ${p.productType}`,
-        `   ${p.shortDescription}`,
-      ];
-      if (p.aliases?.length) parts.push(`   alias: ${p.aliases.join(", ")}`);
-      if (p.benefits?.length) parts.push(`   beneficios: ${p.benefits.slice(0, 5).join("; ")}`);
-      if (p.includes?.length) parts.push(`   incluye: ${p.includes.slice(0, 5).join("; ")}`);
-      if (p.faqs?.length)
-        parts.push(`   faq: ${p.faqs.slice(0, 4).map((f) => `${f.question} -> ${f.answer}`).join(" | ")}`);
-      if (p.objections?.length)
-        parts.push(
-          `   objeciones: ${p.objections.slice(0, 4).map((o) => `${o.question} -> ${o.answer}`).join(" | ")}`,
-        );
-      const mediaCount = p.files?.length ?? 0;
-      if (mediaCount) parts.push(`   multimedia disponible: ${mediaCount} archivo(s)`);
-      if (p.productType === "physical" && p.physicalDelivery) {
-        const d = p.physicalDelivery;
-        const env: string[] = [];
-        if (d.deliveryCost) env.push(`costo envío: ${d.deliveryCost}`);
-        if (d.deliveryTime) env.push(`tiempo: ${d.deliveryTime}`);
-        if (d.pickupAvailable) env.push("recojo disponible");
-        if (d.requiresAddress === false) env.push("no requiere dirección");
-        if (env.length) parts.push(`   envío: ${env.join(" · ")}`);
-        if (d.deliveryAreas?.length) parts.push(`   zonas de envío: ${d.deliveryAreas.slice(0, 8).join(", ")}`);
-      }
-      if (p.variants?.length)
-        parts.push(`   variantes: ${p.variants.map((v) => `${v.name} (${v.options.join("/")})`).join(" | ")}`);
-      if (p.attributes && typeof p.attributes === "object") {
-        const attrs = Object.entries(p.attributes as Record<string, unknown>)
-          .filter(([, v]) => v != null && String(v).trim())
-          .map(([k, v]) => `${k}: ${v}`);
-        if (attrs.length) parts.push(`   atributos: ${attrs.join(" · ")}`);
-      }
-      return parts.join("\n");
-    })
-    .join("\n\n");
+  const hasCategories = products.some((p) => p.category && p.category.trim());
+  if (!hasCategories) {
+    return products.map((p, i) => renderProduct(p, i, vertical)).join("\n\n");
+  }
+  // Agrupado por categoría (menú por secciones / planes por servicio).
+  const groups = new Map<string, BotProduct[]>();
+  for (const p of products) {
+    const cat = p.category?.trim() || "Otros";
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat)!.push(p);
+  }
+  let idx = 0;
+  const sections: string[] = [];
+  for (const [cat, items] of groups) {
+    const lines = items.map((p) => renderProduct(p, idx++, vertical));
+    sections.push(`== ${cat} ==\n${lines.join("\n\n")}`);
+  }
+  return sections.join("\n\n");
 }
 
 function renderPaymentMethods(payment: BotConfig["payment"]): string {
@@ -69,7 +111,7 @@ function verticalGuidance(vertical: string | undefined): string {
     case "RESTAURANT":
       return "Rubro RESTAURANTE: el catálogo son platos/combos. Ayuda a armar el pedido (varios ítems con cantidades en el carrito), sugiere acompañamientos/bebidas (upsell), considera tiempo de preparación y zona de entrega. Para delivery toma dirección y registra el pedido; para recojo en local indícalo. Sé rápido y apetitoso.";
     case "STREAMER":
-      return "Rubro STREAMER/SUSCRIPCIONES: vendes accesos, membresías o suscripciones (digitales). Explica qué incluye y la duración, cobra y, tras validar el pago, entrega el acceso. Ofrece renovaciones y planes superiores.";
+      return "Rubro STREAMER/SUSCRIPCIONES: el catálogo son PLANES (agrupados por plataforma/servicio en la categoría). Compara planes por periodo (mensual/anual), tier, nº de pantallas y calidad; recomienda el más conveniente. Cobra y, tras validar el pago, entrega el acceso (flujo digital). Haz upsell del plan superior y ofrece renovación cuando esté por vencer.";
     case "SERVICE":
       return "Rubro SERVICIOS: vendes servicios (citas, asesorías, reservas). Explica alcance, duración y modalidad; coordina fecha/horario en texto y deja constancia en notas. Cobra según el modo configurado. Si requiere agenda, deriva o confirma con un asesor.";
     case "PHYSICAL_GOODS":
@@ -110,7 +152,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "- Si pide hablar con una persona o hay un problema que no puedes resolver, usa derivar_humano.",
     "",
     "Catálogo disponible:",
-    renderCatalog(config.products),
+    renderCatalog(config.products, vertical),
     "",
     "Métodos de pago configurados:",
     renderPaymentMethods(config.payment),

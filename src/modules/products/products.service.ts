@@ -19,6 +19,8 @@ type ProductPayload = {
   deliveryMethod?: string | null;
   support?: string | null;
   attributes?: Record<string, string> | null;
+  category?: string | null;
+  verticalData?: Record<string, unknown> | null;
   sortOrder: number;
   aliases: string[];
   benefits: Array<{ value: string; sortOrder: number }>;
@@ -261,6 +263,8 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
+        category: payload.category ?? null,
+        verticalData: payload.verticalData == null ? Prisma.JsonNull : (payload.verticalData as Prisma.InputJsonValue),
         sortOrder: payload.sortOrder,
       },
     });
@@ -295,6 +299,8 @@ export async function updateProduct(companyId: string, productId: string, payloa
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
+        category: payload.category ?? null,
+        verticalData: payload.verticalData == null ? Prisma.JsonNull : (payload.verticalData as Prisma.InputJsonValue),
         sortOrder: payload.sortOrder,
       },
     });

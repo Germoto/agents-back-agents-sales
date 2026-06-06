@@ -214,9 +214,14 @@ model Product {
   fullDescription  String
   deliveryMethod   String?
   support          String?
-  // Atributos flexibles por rubro (ej. duración/nivel infoproducto; ingredientes
-  // restaurante). Los campos estructurados se mantienen; esto los complementa.
+  // Atributos flexibles libres por rubro (clave→valor). Complemento opcional.
   attributes       Json?
+  // Categoría/sección para agrupar el catálogo (restaurante: "Entradas";
+  // streaming: la plataforma "Netflix"). Opcional.
+  category         String?
+  // Datos estructurados del rubro (vertical pack), validados por schema según
+  // Company.vertical. Ej. streaming: { billingPeriod, tier, screens, quality }.
+  verticalData     Json?
   sortOrder        Int                   @default(0)
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt
