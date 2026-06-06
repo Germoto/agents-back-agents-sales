@@ -114,6 +114,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
       id: whatsappConfig.company.id,
       name: whatsappConfig.company.name,
       adminPhone: whatsappConfig.company.adminPhone,
+      vertical: whatsappConfig.company.vertical,
       timezone: whatsappConfig.company.timezone,
     },
     openai: {

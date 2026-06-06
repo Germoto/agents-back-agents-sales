@@ -18,6 +18,7 @@ type ProductPayload = {
   fullDescription: string;
   deliveryMethod?: string | null;
   support?: string | null;
+  attributes?: Record<string, string> | null;
   sortOrder: number;
   aliases: string[];
   benefits: Array<{ value: string; sortOrder: number }>;
@@ -259,6 +260,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         fullDescription: payload.fullDescription,
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
+        attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
         sortOrder: payload.sortOrder,
       },
     });
@@ -292,6 +294,7 @@ export async function updateProduct(companyId: string, productId: string, payloa
         fullDescription: payload.fullDescription,
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
+        attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
         sortOrder: payload.sortOrder,
       },
     });

@@ -45,6 +45,12 @@ function renderCatalog(products: BotConfig["products"]): string {
       }
       if (p.variants?.length)
         parts.push(`   variantes: ${p.variants.map((v) => `${v.name} (${v.options.join("/")})`).join(" | ")}`);
+      if (p.attributes && typeof p.attributes === "object") {
+        const attrs = Object.entries(p.attributes as Record<string, unknown>)
+          .filter(([, v]) => v != null && String(v).trim())
+          .map(([k, v]) => `${k}: ${v}`);
+        if (attrs.length) parts.push(`   atributos: ${attrs.join(" · ")}`);
+      }
       return parts.join("\n");
     })
     .join("\n\n");
@@ -57,14 +63,34 @@ function renderPaymentMethods(payment: BotConfig["payment"]): string {
     .join("\n");
 }
 
+// Guía de comportamiento según el rubro del negocio (Company.vertical).
+function verticalGuidance(vertical: string | undefined): string {
+  switch (vertical) {
+    case "RESTAURANT":
+      return "Rubro RESTAURANTE: el catálogo son platos/combos. Ayuda a armar el pedido (varios ítems con cantidades en el carrito), sugiere acompañamientos/bebidas (upsell), considera tiempo de preparación y zona de entrega. Para delivery toma dirección y registra el pedido; para recojo en local indícalo. Sé rápido y apetitoso.";
+    case "STREAMER":
+      return "Rubro STREAMER/SUSCRIPCIONES: vendes accesos, membresías o suscripciones (digitales). Explica qué incluye y la duración, cobra y, tras validar el pago, entrega el acceso. Ofrece renovaciones y planes superiores.";
+    case "SERVICE":
+      return "Rubro SERVICIOS: vendes servicios (citas, asesorías, reservas). Explica alcance, duración y modalidad; coordina fecha/horario en texto y deja constancia en notas. Cobra según el modo configurado. Si requiere agenda, deriva o confirma con un asesor.";
+    case "PHYSICAL_GOODS":
+      return "Rubro PRODUCTOS FÍSICOS: prioriza catálogo, variantes (talla/color), stock y envío. Cierra con registrar_pedido tras tomar datos de entrega.";
+    case "INFOPRODUCT":
+      return "Rubro INFOPRODUCTOS: cursos, ebooks y accesos digitales. Resuelve dudas, maneja objeciones, cobra y entrega el acceso tras validar el pago.";
+    default:
+      return "Adapta el comportamiento al tipo de cada producto (digital o físico) y a la base de conocimiento configurada.";
+  }
+}
+
 export function buildSystemPrompt(config: BotConfig, state: ConversationState): string {
   const rules = Array.isArray(config.agent.rules) ? config.agent.rules : [];
   const paymentMode = config.payment.paymentMode; // before_delivery | cash_on_delivery | manual
+  const vertical = (config.business as { vertical?: string }).vertical;
 
   return [
     config.agent.basePrompt,
     "",
     `Negocio: ${config.business.name}. Estilo comercial: ${config.agent.salesStyle}.`,
+    `Rubro del negocio: ${vertical ?? "INFOPRODUCT"}. ${verticalGuidance(vertical)}`,
     "",
     "Reglas del negocio configuradas por el dueño:",
     ...rules.map((r) => `- ${r}`),
