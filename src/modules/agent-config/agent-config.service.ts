@@ -11,6 +11,8 @@ function mapAgentConfig(config: {
   salesStyle: string;
   rules: unknown;
   followupConfig?: unknown;
+  replyMode?: string;
+  testNumbers?: unknown;
   createdAt: Date;
   updatedAt: Date;
 } | null) {
@@ -23,6 +25,10 @@ function mapAgentConfig(config: {
     temperature: Number(config.temperature),
     rules: Array.isArray(config.rules) ? config.rules.filter((item): item is string => typeof item === "string") : [],
     followupConfig: config.followupConfig ?? null,
+    replyMode: config.replyMode ?? "OPEN",
+    testNumbers: Array.isArray(config.testNumbers)
+      ? config.testNumbers.filter((item): item is string => typeof item === "string")
+      : [],
   };
 }
 
@@ -39,10 +45,14 @@ export async function upsertAgentConfig(companyId: string, data: {
   salesStyle: string;
   rules: string[];
   followupConfig?: Record<string, number> | null;
+  replyMode?: string;
+  testNumbers?: string[];
 }) {
-  const { followupConfig, ...rest } = data;
+  const { followupConfig, testNumbers, replyMode, ...rest } = data;
   const followupValue: Prisma.InputJsonValue | typeof Prisma.JsonNull =
     followupConfig == null ? Prisma.JsonNull : (followupConfig as Prisma.InputJsonValue);
+  const testNumbersValue: Prisma.InputJsonValue = (testNumbers ?? []) as Prisma.InputJsonValue;
+  const replyModeValue = replyMode === "ALLOWLIST" ? "ALLOWLIST" : "OPEN";
 
   const config = await prisma.agentConfig.upsert({
     where: { companyId },
@@ -50,12 +60,16 @@ export async function upsertAgentConfig(companyId: string, data: {
       ...rest,
       temperature: data.temperature.toString(),
       followupConfig: followupValue,
+      replyMode: replyModeValue,
+      testNumbers: testNumbersValue,
     },
     create: {
       companyId,
       ...rest,
       temperature: data.temperature.toString(),
       followupConfig: followupValue,
+      replyMode: replyModeValue,
+      testNumbers: testNumbersValue,
     },
   });
 

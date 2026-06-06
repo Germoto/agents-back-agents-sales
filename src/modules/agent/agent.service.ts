@@ -31,6 +31,21 @@ interface FollowupConfig {
   leftOnReadMinutes?: number;
 }
 
+/** Match tolerante por sufijo de dígitos (cubre con/sin código de país). */
+function isPhoneAllowed(fromPhone: string, allow: string[]): boolean {
+  const a = fromPhone.replace(/\D/g, "");
+  if (!a) return false;
+  for (const raw of allow) {
+    const b = String(raw).replace(/\D/g, "");
+    if (!b) continue;
+    if (a === b || a.endsWith(b) || b.endsWith(a)) {
+      // evita falsos positivos por sufijos muy cortos
+      if (Math.min(a.length, b.length) >= 8) return true;
+    }
+  }
+  return false;
+}
+
 async function resolveCompanyByAccount(account: string | null): Promise<string | null> {
   if (!account) return null;
   const cfg = await prisma.whatsappConfig.findFirst({
@@ -88,6 +103,17 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   } catch (err) {
     console.error("[agent] buildBotConfig falló:", err instanceof Error ? err.message : err);
     return; // sin config (p.ej. falta openaiApiKey) no podemos responder
+  }
+
+  // Modo de respuesta: en ALLOWLIST (modo prueba) el agente solo responde a los
+  // números configurados; a cualquier otro lo ignora por completo.
+  const replyMode = (config as any).agent?.replyMode ?? "OPEN";
+  if (replyMode === "ALLOWLIST") {
+    const allow = ((config as any).agent?.testNumbers ?? []) as string[];
+    if (!isPhoneAllowed(inbound.fromPhone, allow)) {
+      console.log(`[agent] ignorado por ALLOWLIST: ${inbound.fromPhone}`);
+      return;
+    }
   }
 
   const convo = await loadOrCreateConversation(companyId, inbound.fromPhone, inbound.messageId);

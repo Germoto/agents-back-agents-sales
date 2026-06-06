@@ -164,6 +164,10 @@ model AgentConfig {
   // Config de recordatorios/seguimientos (horas de abandono, dejado en visto,
   // ventana de timer de oferta, plantillas). Null = usar defaults del agente.
   followupConfig Json?
+  // Modo de respuesta del agente: "OPEN" responde a todos; "ALLOWLIST" solo a
+  // los números en testNumbers (modo prueba). Default OPEN.
+  replyMode      String   @default("OPEN")
+  testNumbers    Json?    // array de teléfonos permitidos cuando replyMode=ALLOWLIST
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

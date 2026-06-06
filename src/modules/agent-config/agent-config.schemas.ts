@@ -18,4 +18,7 @@ export const upsertAgentConfigSchema = z.object({
   salesStyle: z.string().min(1),
   rules: z.array(z.string().min(1)).default([]),
   followupConfig: followupConfigSchema,
+  // Modo de respuesta: OPEN responde a todos; ALLOWLIST solo a testNumbers (prueba).
+  replyMode: z.enum(["OPEN", "ALLOWLIST"]).default("OPEN"),
+  testNumbers: z.array(z.string().min(1)).default([]),
 });

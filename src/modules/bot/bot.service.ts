@@ -145,6 +145,10 @@ export async function buildBotConfig(companyId: string, account?: string) {
       salesStyle: agentConfig.salesStyle,
       rules: agentConfig.rules as string[],
       followupConfig: agentConfig.followupConfig ?? null,
+      replyMode: (agentConfig.replyMode as string) ?? "OPEN",
+      testNumbers: Array.isArray(agentConfig.testNumbers)
+        ? (agentConfig.testNumbers as unknown[]).filter((x): x is string => typeof x === "string")
+        : [],
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
     products: products.map((p) => mapBotProduct(p)),
