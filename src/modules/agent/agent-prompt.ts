@@ -33,6 +33,18 @@ function renderCatalog(products: BotConfig["products"]): string {
         );
       const mediaCount = p.files?.length ?? 0;
       if (mediaCount) parts.push(`   multimedia disponible: ${mediaCount} archivo(s)`);
+      if (p.productType === "physical" && p.physicalDelivery) {
+        const d = p.physicalDelivery;
+        const env: string[] = [];
+        if (d.deliveryCost) env.push(`costo envío: ${d.deliveryCost}`);
+        if (d.deliveryTime) env.push(`tiempo: ${d.deliveryTime}`);
+        if (d.pickupAvailable) env.push("recojo disponible");
+        if (d.requiresAddress === false) env.push("no requiere dirección");
+        if (env.length) parts.push(`   envío: ${env.join(" · ")}`);
+        if (d.deliveryAreas?.length) parts.push(`   zonas de envío: ${d.deliveryAreas.slice(0, 8).join(", ")}`);
+      }
+      if (p.variants?.length)
+        parts.push(`   variantes: ${p.variants.map((v) => `${v.name} (${v.options.join("/")})`).join(" | ")}`);
       return parts.join("\n");
     })
     .join("\n\n");
@@ -47,6 +59,7 @@ function renderPaymentMethods(payment: BotConfig["payment"]): string {
 
 export function buildSystemPrompt(config: BotConfig, state: ConversationState): string {
   const rules = Array.isArray(config.agent.rules) ? config.agent.rules : [];
+  const paymentMode = config.payment.paymentMode; // before_delivery | cash_on_delivery | manual
 
   return [
     config.agent.basePrompt,
@@ -63,7 +76,10 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "- Responde preguntas abiertas usando la base de conocimiento del producto (descripción, beneficios, incluye, bonos, faq, objeciones). No te limites a un guion: si el cliente pregunta algo, contéstalo.",
     "- Para mostrar imágenes/PDF/video usa la herramienta enviar_multimedia. Para dar métodos de pago usa enviar_metodos_pago (nunca escribas números de pago en texto libre).",
     "- NUNCA reveles el enlace de entrega digital antes de que el pago esté APROBADO. Puedes explicar cómo es la entrega sin dar el link.",
-    "- Para validar un pago, primero pide y usa el nombre del titular que aparece en el Yape/Plin del cliente y llama a validar_pago. Solo entrega el producto (entregar_producto) cuando validar_pago confirme APROBADO.",
+    "- Para validar un pago, primero pide y usa el nombre del titular que aparece en el Yape/Plin del cliente y llama a validar_pago. Solo entrega el producto digital (entregar_producto) cuando validar_pago confirme APROBADO.",
+    "- Productos DIGITALES: informa, cobra, valida el pago y entrega el acceso. Nunca pidas dirección ni datos de envío.",
+    "- Productos FÍSICOS: informa, ayuda a cerrar y pide los datos de entrega (nombre de quien recibe, dirección completa, referencia, cantidad y variante si el producto tiene variantes). Valida la dirección contra las zonas de envío configuradas; si está fuera de zona, dilo y ofrece alternativas (recojo si está disponible). Luego registra el pedido con registrar_pedido. Nunca envíes enlaces digitales para un físico.",
+    `- Modo de pago del negocio: *${paymentMode}*. before_delivery = cobra y valida el pago (enviar_metodos_pago + validar_pago) ANTES de registrar el pedido. cash_on_delivery = toma los datos y registra el pedido (paga contra entrega), sin cobrar antes. manual = registra el pedido y coordina el pago con un asesor.`,
     "- Si el cliente se enfría, deja en visto o tiene un carrito sin pagar, puedes programar un recordatorio con agendar_recordatorio.",
     "- Si pide hablar con una persona o hay un problema que no puedes resolver, usa derivar_humano.",
     "",

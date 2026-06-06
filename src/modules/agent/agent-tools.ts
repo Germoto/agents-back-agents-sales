@@ -22,6 +22,7 @@ import {
   claimPayment,
   updatePaymentStatus,
 } from "../public-payments/public-payments.service";
+import { createAgentOrder } from "./order.service";
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
@@ -44,6 +45,8 @@ export interface TurnContext {
   outbox: OutboxMessage[];
   /** recordatorios a crear al cerrar el turno: {type, minutes, body} */
   reminders: Array<{ type: string; minutes: number; body: string }>;
+  /** avisos a enviar al admin al cerrar el turno (pedidos, handoff, etc.) */
+  adminNotices: string[];
 }
 
 // --------------------------------------------------------------------------
@@ -227,6 +230,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       description:
         "Entrega el/los producto(s) digital(es) comprados (envía enlace e instrucciones). Solo funciona si hay un pago APROBADO para este cliente.",
       parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "registrar_pedido",
+      description:
+        "Registra un pedido de un producto FÍSICO una vez que tienes los datos de entrega. Úsalo cuando el cliente confirme la compra de un físico y te haya dado nombre y dirección (y, si aplica, la variante elegida). Para físicos con pago anticipado, valida el pago ANTES de registrar.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId", "customerName", "address"],
+        properties: {
+          productId: { type: "string" },
+          customerName: { type: "string", description: "Nombre de quien recibe" },
+          address: { type: "string", description: "Dirección completa de entrega" },
+          reference: { type: "string", description: "Referencia o indicaciones del domicilio" },
+          quantity: { type: "integer", minimum: 1 },
+          variant: { type: "string", description: "Variante/opción elegida (talla, color, etc.) si aplica" },
+          notes: { type: "string", description: "Notas adicionales del pedido" },
+        },
+      },
     },
   },
   {
@@ -460,6 +485,47 @@ export async function executeTool(
         body: `Hola 👋 ¿Cómo te fue con ${delivered.join(", ")}? Si necesitas ayuda, escríbeme. ¿Te muestro algo más del catálogo?`,
       });
       return JSON.stringify({ ok: true, delivered });
+    }
+
+    case "registrar_pedido": {
+      const product = findProductById(ctx, String(args.productId ?? ""));
+      if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
+      if (product.productType !== "physical") {
+        return JSON.stringify({ ok: false, error: "registrar_pedido es solo para productos físicos" });
+      }
+      const customerName = String(args.customerName ?? "").trim();
+      const address = String(args.address ?? "").trim();
+      if (!customerName || !address) {
+        return JSON.stringify({ ok: false, error: "faltan nombre o dirección de entrega" });
+      }
+      const variant = String(args.variant ?? "").trim();
+      const baseNotes = String(args.notes ?? "").trim();
+      const notes = [variant ? `Variante: ${variant}` : "", baseNotes].filter(Boolean).join(" | ") || undefined;
+
+      try {
+        const order = await createAgentOrder({
+          companyId: ctx.companyId,
+          customerId: ctx.customerId,
+          productId: product.id,
+          quantity: Math.max(1, Number(args.quantity ?? 1)),
+          customerName,
+          address,
+          reference: String(args.reference ?? "").trim(),
+          notes,
+        });
+        ctx.state.status = "PEDIDO_REGISTRADO";
+        ctx.state.selectedProductId = product.id;
+        ctx.adminNotices.push(
+          `🛒 Nuevo pedido ${order.orderCode}: ${order.quantity}x ${product.name} para ${customerName} (${ctx.customerPhone}). Dirección: ${address}.`,
+        );
+        return JSON.stringify({
+          ok: true,
+          orderCode: order.orderCode,
+          note: "Pedido registrado. Confirma al cliente con el código y los próximos pasos de entrega.",
+        });
+      } catch (err) {
+        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo registrar el pedido" });
+      }
     }
 
     case "agendar_recordatorio": {

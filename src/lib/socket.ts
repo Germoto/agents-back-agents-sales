@@ -21,6 +21,7 @@ export const SOCKET_EVENTS = {
   RECEIPT_UPDATED:      "receipt.updated",      // comprobante actualizado (approve/reject/validated)
   MESSAGE_NEW:          "message.new",          // nuevo mensaje de conversación (inbound u outbound del agente)
   CONVERSATION_UPDATED: "conversation.updated", // estado de conversación cambió (pausa/humano/cierre)
+  ORDER_NEW:            "order.new",            // pedido físico registrado por el agente
 } as const;
 
 class SocketService {

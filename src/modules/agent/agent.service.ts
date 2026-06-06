@@ -137,6 +137,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     state: convo.state,
     outbox: [],
     reminders: [],
+    adminNotices: [],
   };
 
   let finalText: string;
@@ -171,6 +172,20 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
 
   // Red de seguridad: si quedó esperando pago con carrito, programar abandono
   await maybeScheduleAbandonedCart(companyId, convo.customerId, convo.conversationId, ctx.state, config);
+
+  // Avisos al admin (pedidos registrados, etc.)
+  if (ctx.adminNotices.length) {
+    const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+    if (adminPhone) {
+      for (const notice of ctx.adminNotices) {
+        try {
+          await sendText(sender, adminPhone, notice);
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+  }
 
   // Derivación a humano
   if (ctx.state.status === "ASESOR_HUMANO") {
