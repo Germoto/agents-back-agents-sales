@@ -40,9 +40,18 @@ export async function getBotConfig(account: string | undefined, phone: string) {
     throw new AppError("El numero indicado no pertenece a un usuario activo con acceso a esta configuracion", 403);
   }
 
+  return buildBotConfig(matchedUser.companyId, account);
+}
+
+/**
+ * Construye el contexto del agente para una empresa ya resuelta. Lo usa tanto
+ * getBotConfig (resuelve la empresa por phone admin) como el runtime del agente
+ * (resuelve la empresa por la cuenta SMS Tools que recibió el mensaje).
+ */
+export async function buildBotConfig(companyId: string, account?: string) {
   const whatsappConfig = await prisma.whatsappConfig.findFirst({
     where: {
-      companyId: matchedUser.companyId,
+      companyId,
       isActive: true,
       ...(account ? { account } : {}),
     },
@@ -134,6 +143,7 @@ export async function getBotConfig(account: string | undefined, phone: string) {
       basePrompt: agentConfig.basePrompt,
       salesStyle: agentConfig.salesStyle,
       rules: agentConfig.rules as string[],
+      followupConfig: agentConfig.followupConfig ?? null,
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
     products: products.map((p) => mapBotProduct(p)),

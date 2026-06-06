@@ -1,3 +1,4 @@
+import { BusinessVertical } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 
@@ -15,6 +16,7 @@ export async function updateBusinessProfile(companyId: string, data: {
   name: string;
   slug: string;
   adminPhone: string;
+  vertical: BusinessVertical;
   timezone: string;
   isActive: boolean;
 }) {

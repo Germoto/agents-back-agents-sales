@@ -29,6 +29,9 @@ app.use(
     },
   }),
 );
+// SMS Tools entrega el webhook inbound como x-www-form-urlencoded con nombres
+// de campo tipo "data[wid]". Con extended:true se parsean a body.data.wid.
+app.use(express.urlencoded({ extended: true }));
 app.use(morgan("dev"));
 
 app.use("/uploads", express.static(uploadDir));

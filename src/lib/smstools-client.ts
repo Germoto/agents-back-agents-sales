@@ -283,4 +283,119 @@ export const smsTools = {
       body,
     });
   },
+
+  /**
+   * Envia un mensaje con adjunto (imagen, documento, video o audio) via WhatsApp.
+   * Usado por el agente para enviar fichas de producto, multimedia y entrega.
+   * SMS Tools acepta `type` = image|document|video|audio y la URL del recurso en
+   * `media_url` (para document tambien acepta `document_url`).
+   * @param kind     - tipo de adjunto
+   * @param mediaUrl - URL publica del recurso
+   * @param caption  - texto opcional que acompaña al adjunto
+   */
+  async sendMedia(
+    creds: SmsToolsCredentials,
+    account: string,
+    to: string,
+    kind: "image" | "document" | "video" | "audio",
+    mediaUrl: string,
+    caption?: string,
+  ): Promise<SmsToolsMessage> {
+    const base = deriveApiBase(creds.apiUrl);
+    const body = new URLSearchParams();
+    body.set("secret", creds.secret);
+    body.set("account", account);
+    body.set("recipient", to);
+    body.set("type", kind);
+    body.set("media_url", mediaUrl);
+    if (kind === "document") body.set("document_url", mediaUrl);
+    if (caption) body.set("message", caption);
+    return smsToolsRequest<SmsToolsMessage>(base, "/send/whatsapp", {
+      method: "POST",
+      body,
+    });
+  },
 };
+
+// -------------------------------------------------------------------------
+// Parseo del webhook inbound de SMS Tools (mensajes entrantes de WhatsApp).
+// SMS Tools envia el payload con nombres de campo variables segun version;
+// normalizamos con cadenas de fallback igual que hacia el workflow n8n.
+// -------------------------------------------------------------------------
+export type InboundMessage = {
+  /** id del mensaje en SMS Tools (idempotencia) */
+  messageId: string | null;
+  /** numero del CLIENTE que escribe, normalizado a digitos */
+  fromPhone: string | null;
+  /** numero del NEGOCIO (cuenta WhatsApp que recibio el mensaje); identifica al tenant */
+  businessPhone: string | null;
+  /** unique del account SMS Tools si viene en el payload (suele no venir en inbound) */
+  account: string | null;
+  /** texto del mensaje (puede ser caption de un adjunto) */
+  text: string;
+  /** tipo detectado */
+  type: "text" | "image" | "video" | "document" | "audio";
+  /** URL del adjunto si lo hay */
+  mediaUrl: string | null;
+  /** true si el mensaje lo emitio el propio negocio (eco/saliente): ignorar */
+  fromMe: boolean;
+  /** payload crudo para auditoria */
+  raw: unknown;
+};
+
+/**
+ * Busca un campo probando, para cada nombre base: data.<base>, el campo plano
+ * con notacion de corchetes "data[<base>]" en el body, y body.<base>. Cubre
+ * tanto el payload x-www-form-urlencoded de SMS Tools (data[wid]=...) ya
+ * parseado a body.data.wid, como variantes JSON y planas.
+ */
+function field(
+  body: Record<string, any>,
+  data: Record<string, any>,
+  bases: string[],
+): string | null {
+  for (const base of bases) {
+    for (const candidate of [data?.[base], body?.[`data[${base}]`], body?.[base]]) {
+      if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+      if (typeof candidate === "number") return String(candidate);
+    }
+  }
+  return null;
+}
+
+export function parseInboundWebhook(raw: unknown): InboundMessage {
+  const body = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
+  const data = (body.data && typeof body.data === "object" ? body.data : {}) as Record<string, any>;
+
+  const messageId = field(body, data, ["id", "messageId", "message_id", "wamid", "uid", "msgid"]);
+
+  // Cliente (remitente): NO usar wid (ese es el negocio).
+  const fromRaw = field(body, data, ["phone", "from", "sender", "wa_id", "number", "remoteJid"]);
+  const fromPhone = fromRaw ? fromRaw.replace(/\D/g, "") || null : null;
+
+  // Negocio (cuenta que recibio): wid/emitter es el numero propio del negocio.
+  const businessRaw = field(body, data, ["wid", "emitter", "to", "receiver"]);
+  const businessPhone = businessRaw ? businessRaw.replace(/\D/g, "") || null : null;
+
+  const account = field(body, data, ["account", "unique", "device"]);
+
+  const text = field(body, data, ["message", "text", "body", "caption", "conversation"]) ?? "";
+
+  const mediaUrl = field(body, data, [
+    "media_url", "mediaUrl", "url", "image", "file_url", "download_url", "attachment", "media", "file", "document_url",
+  ]);
+
+  const rawType = (field(body, data, ["type", "message_type", "messageType", "msgtype", "msg_type"]) ?? "").toLowerCase();
+  let type: InboundMessage["type"] = "text";
+  if (rawType.includes("image") || rawType.includes("photo")) type = "image";
+  else if (rawType.includes("video")) type = "video";
+  else if (rawType.includes("doc") || rawType.includes("pdf") || rawType.includes("file")) type = "document";
+  else if (rawType.includes("audio") || rawType.includes("voice") || rawType.includes("ptt")) type = "audio";
+  else if (mediaUrl) type = "image"; // adjunto sin tipo claro -> asumimos imagen (comprobante)
+
+  const fromMeRaw = (field(body, data, ["fromMe", "from_me", "self", "outgoing", "direction"]) ?? "").toLowerCase();
+  const fromMe =
+    fromMeRaw === "true" || fromMeRaw === "1" || fromMeRaw === "yes" || fromMeRaw === "outgoing" || fromMeRaw === "sent";
+
+  return { messageId, fromPhone, businessPhone, account, text, type, mediaUrl, fromMe, raw };
+}

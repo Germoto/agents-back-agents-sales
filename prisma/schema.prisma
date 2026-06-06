@@ -61,22 +61,67 @@ enum ProductFileType {
   OTHER
 }
 
+// Rubro / vertical del negocio. Fase 1 solo cabea INFOPRODUCT; el resto queda
+// listo en el modelo de datos para fases posteriores.
+enum BusinessVertical {
+  INFOPRODUCT
+  PHYSICAL_GOODS
+  RESTAURANT
+  STREAMER
+  SERVICE
+  OTHER
+}
+
+// Estado de una conversación viva del agente con un cliente.
+enum ConversationStatus {
+  OPEN
+  HUMAN
+  CLOSED
+}
+
+// Estado del carrito multi-producto.
+enum CartStatus {
+  OPEN
+  CHECKED_OUT
+  ABANDONED
+}
+
+// Tipos de recordatorio/seguimiento programado.
+enum ScheduledMessageType {
+  ABANDONED_CART
+  LEFT_ON_READ
+  OFFER_COUNTDOWN
+  POST_SALE
+  CUSTOM
+}
+
+enum ScheduledMessageStatus {
+  PENDING
+  SENT
+  CANCELLED
+  FAILED
+}
+
 model Company {
-  id               String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name             String
-  slug             String               @unique
-  adminPhone       String
-  timezone         String               @default("America/Lima")
-  isActive         Boolean              @default(true)
-  createdAt        DateTime             @default(now())
-  updatedAt        DateTime             @updatedAt
-  users            User[]
-  agentConfig      AgentConfig?
-  whatsappConfig   WhatsappConfig?
-  paymentConfig    PaymentConfig?
-  products         Product[]
-  customers        Customer[]
-  messages         ConversationMessage[]
+  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String
+  slug              String                @unique
+  adminPhone        String
+  vertical          BusinessVertical      @default(INFOPRODUCT)
+  timezone          String                @default("America/Lima")
+  isActive          Boolean               @default(true)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  users             User[]
+  agentConfig       AgentConfig?
+  whatsappConfig    WhatsappConfig?
+  paymentConfig     PaymentConfig?
+  products          Product[]
+  customers         Customer[]
+  messages          ConversationMessage[]
+  conversations     Conversation[]
+  carts             Cart[]
+  scheduledMessages ScheduledMessage[]
   orders            Order[]
   digitalSales      DigitalSale[]
   paymentReceipts   PaymentReceipt[]
@@ -99,17 +144,20 @@ model User {
 }
 
 model AgentConfig {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId   String   @unique @db.Uuid
-  openaiModel String   @default("gpt-4o-mini")
-  openaiApiKey String?
-  temperature Decimal  @default(0.25) @db.Decimal(4, 2)
-  basePrompt  String
-  salesStyle  String
-  rules       Json
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String   @unique @db.Uuid
+  openaiModel    String   @default("gpt-4o-mini")
+  openaiApiKey   String?
+  temperature    Decimal  @default(0.25) @db.Decimal(4, 2)
+  basePrompt     String
+  salesStyle     String
+  rules          Json
+  // Config de recordatorios/seguimientos (horas de abandono, dejado en visto,
+  // ventana de timer de oferta, plantillas). Null = usar defaults del agente.
+  followupConfig Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
 model WhatsappConfig {
@@ -153,90 +201,94 @@ model PaymentMethod {
 }
 
 model Product {
-  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId         String             @db.Uuid
-  slug              String
-  active            Boolean            @default(true)
-  productType       ProductType
-  name              String
-  price             String
-  regularPrice      String?
-  stock             Int?
-  shortDescription  String
-  fullDescription   String
-  deliveryMethod    String?
-  support           String?
-  sortOrder         Int                @default(0)
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
-  company           Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  aliases           ProductAlias[]
-  benefits          ProductBenefit[]
-  includes          ProductInclude[]
-  bonuses           ProductBonus[]
-  faqs              ProductFaq[]
-  objections        ProductObjection[]
-  files             ProductFile[]
-  digitalDelivery   DigitalDelivery?
-  physicalDelivery  PhysicalDelivery?
-  variants          ProductVariant[]
-  customers         Customer[]
-  messages          ConversationMessage[]
-  orders            Order[]
-  digitalSales      DigitalSale[]
-  paymentReceipts   PaymentReceipt[]
+  id               String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId        String                @db.Uuid
+  slug             String
+  active           Boolean               @default(true)
+  productType      ProductType
+  name             String
+  price            String
+  regularPrice     String?
+  stock            Int?
+  shortDescription String
+  fullDescription  String
+  deliveryMethod   String?
+  support          String?
+  // Atributos flexibles por rubro (ej. duración/nivel infoproducto; ingredientes
+  // restaurante). Los campos estructurados se mantienen; esto los complementa.
+  attributes       Json?
+  sortOrder        Int                   @default(0)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  company          Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  aliases          ProductAlias[]
+  benefits         ProductBenefit[]
+  includes         ProductInclude[]
+  bonuses          ProductBonus[]
+  faqs             ProductFaq[]
+  objections       ProductObjection[]
+  files            ProductFile[]
+  digitalDelivery  DigitalDelivery?
+  physicalDelivery PhysicalDelivery?
+  variants         ProductVariant[]
+  customers        Customer[]
+  messages         ConversationMessage[]
+  cartItems        CartItem[]
+  orders           Order[]
+  digitalSales     DigitalSale[]
+  paymentReceipts  PaymentReceipt[]
 
   @@unique([companyId, slug])
   @@index([companyId, active, sortOrder])
 }
 
 model ProductAlias {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId String   @db.Uuid
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String  @db.Uuid
   value     String
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ProductBenefit {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId String   @db.Uuid
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String  @db.Uuid
   value     String
   sortOrder Int
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ProductInclude {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId String   @db.Uuid
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String  @db.Uuid
   value     String
   sortOrder Int
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ProductBonus {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId String   @db.Uuid
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String  @db.Uuid
   value     String
   sortOrder Int
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ProductFaq {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId String   @db.Uuid
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String  @db.Uuid
   question  String
   answer    String
   sortOrder Int
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ProductObjection {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId String   @db.Uuid
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String  @db.Uuid
   question  String
   answer    String
   sortOrder Int
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ProductFile {
@@ -259,31 +311,31 @@ model ProductFile {
 }
 
 model DigitalDelivery {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId    String   @unique @db.Uuid
+  id           String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId    String  @unique @db.Uuid
   link         String
   instructions String
-  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product      Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model PhysicalDelivery {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId       String   @unique @db.Uuid
-  requiresAddress Boolean  @default(true)
+  id              String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId       String  @unique @db.Uuid
+  requiresAddress Boolean @default(true)
   deliveryCost    String?
   deliveryTime    String?
-  pickupAvailable Boolean  @default(false)
+  pickupAvailable Boolean @default(false)
   deliveryAreas   Json
-  product         Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product         Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ProductVariant {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId String   @db.Uuid
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String  @db.Uuid
   name      String
   options   Json
   sortOrder Int
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model Customer {
@@ -301,6 +353,9 @@ model Customer {
   company           Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
   selectedProduct   Product?              @relation(fields: [selectedProductId], references: [id], onDelete: SetNull)
   messages          ConversationMessage[]
+  conversations     Conversation[]
+  carts             Cart[]
+  scheduledMessages ScheduledMessage[]
   orders            Order[]
   digitalSales      DigitalSale[]
   paymentReceipts   PaymentReceipt[]
@@ -310,20 +365,105 @@ model Customer {
 }
 
 model ConversationMessage {
-  id         String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId  String           @db.Uuid
-  customerId String           @db.Uuid
-  productId  String?          @db.Uuid
-  role       ConversationRole
-  message    String?
-  mediaUrl   String?
-  rawPayload Json?
-  createdAt  DateTime         @default(now())
-  company    Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  product    Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String           @db.Uuid
+  customerId     String           @db.Uuid
+  conversationId String?          @db.Uuid
+  productId      String?          @db.Uuid
+  role           ConversationRole
+  message        String?
+  mediaUrl       String?
+  rawPayload     Json?
+  createdAt      DateTime         @default(now())
+  company        Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer       Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation   Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  product        Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   @@index([companyId, customerId, createdAt])
+  @@index([conversationId, createdAt])
+}
+
+// Conversación viva del agente con un cliente (reemplaza el staticData de n8n).
+// `state` guarda el equivalente al customer.* del workflow: selectedProductId,
+// flags de pago, lastPaymentPromptAt, pendingAction, etc.
+model Conversation {
+  id            String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId     String                @db.Uuid
+  customerId    String                @db.Uuid
+  channel       String                @default("whatsapp")
+  status        ConversationStatus    @default(OPEN)
+  state         Json                  @default("{}")
+  lastInboundId String? // id del último mensaje de SMS Tools (idempotencia)
+  botPaused     Boolean               @default(false)
+  openedAt      DateTime              @default(now())
+  lastMessageAt DateTime              @default(now())
+  closedAt      DateTime?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  company       Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer      Customer              @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  messages      ConversationMessage[]
+
+  @@unique([companyId, customerId, channel])
+  @@index([companyId, lastMessageAt])
+}
+
+// Carrito multi-producto. Al cerrar la venta se poblan PaymentReceipt.productIds.
+model Cart {
+  id         String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String     @db.Uuid
+  customerId String     @db.Uuid
+  status     CartStatus @default(OPEN)
+  totalText  String?
+  expiresAt  DateTime?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  company    Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  items      CartItem[]
+
+  @@index([companyId, status])
+  @@index([customerId, status])
+}
+
+model CartItem {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cartId         String   @db.Uuid
+  productId      String   @db.Uuid
+  quantity       Int      @default(1)
+  variantChoices Json?
+  unitPriceText  String?
+  createdAt      DateTime @default(now())
+  cart           Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, productId])
+  @@index([cartId])
+}
+
+// Recordatorios/seguimientos programados. El worker node-cron escanea
+// (status, sendAt) cada minuto y los envía vía SMS Tools.
+model ScheduledMessage {
+  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String                 @db.Uuid
+  customerId     String                 @db.Uuid
+  conversationId String?                @db.Uuid
+  type           ScheduledMessageType
+  status         ScheduledMessageStatus @default(PENDING)
+  sendAt         DateTime
+  sentAt         DateTime?
+  body           String
+  mediaUrl       String?
+  metadata       Json?
+  failureReason  String?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  company        Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer       Customer               @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([status, sendAt])
+  @@index([companyId, customerId, status])
 }
 
 model Order {
@@ -366,43 +506,43 @@ model DigitalSale {
 }
 
 model PaymentReceipt {
-  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId       String        @db.Uuid
-  customerId      String?       @db.Uuid
-  productId       String?       @db.Uuid
-  productIds      String[]      @default([]) @db.Uuid
-  orderId         String?
-  digitalSaleId   String?       @db.Uuid
-  mediaUrl        String?
-  amountExpected  String        // mantenido por compatibilidad; mirror de amountPaid
-  amountPaid      String?       // monto realmente recibido del origen
-  currency        String        @default("PEN")
-  status          ReceiptStatus
-  rejectionReason String?
-  source          String?       // "validpay", "manual", etc.
-  externalId      String?       // id del pago en el sistema externo (idempotencia)
-  payerName       String?       // nombre del pagador reportado por el origen
-  paymentSource   String?       // "yape", "plin", "transferencia", etc.
-  payerPhone      String?       // teléfono o últimos dígitos si el origen los emite
-  operationCode   String?       // código de operación bancaria si aplica
-  reference       String?       // referencia libre del origen
-  occurredAt      DateTime?     // momento en que ocurrió el pago según el origen
-  validatedAt     DateTime?     // momento en que se aprobó/rechazó
-  validationNote  String?       // nota libre de quien validó (n8n / admin)
-  validationMode  String?       // "AUTO" | "MANUAL"
-  matchScore      Int?          // 0-100 score con que n8n lo cerró
-  matchStrategy   String?       // ej: "amount_name_time"
+  id                    String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId             String         @db.Uuid
+  customerId            String?        @db.Uuid
+  productId             String?        @db.Uuid
+  productIds            String[]       @default([]) @db.Uuid
+  orderId               String?
+  digitalSaleId         String?        @db.Uuid
+  mediaUrl              String?
+  amountExpected        String // mantenido por compatibilidad; mirror de amountPaid
+  amountPaid            String? // monto realmente recibido del origen
+  currency              String         @default("PEN")
+  status                ReceiptStatus
+  rejectionReason       String?
+  source                String? // "validpay", "manual", etc.
+  externalId            String? // id del pago en el sistema externo (idempotencia)
+  payerName             String? // nombre del pagador reportado por el origen
+  paymentSource         String? // "yape", "plin", "transferencia", etc.
+  payerPhone            String? // teléfono o últimos dígitos si el origen los emite
+  operationCode         String? // código de operación bancaria si aplica
+  reference             String? // referencia libre del origen
+  occurredAt            DateTime? // momento en que ocurrió el pago según el origen
+  validatedAt           DateTime? // momento en que se aprobó/rechazó
+  validationNote        String? // nota libre de quien validó (n8n / admin)
+  validationMode        String? // "AUTO" | "MANUAL"
+  matchScore            Int? // 0-100 score con que n8n lo cerró
+  matchStrategy         String? // ej: "amount_name_time"
   matchedPayerNameInput String? // nombre que envió el cliente vs el del comprobante
-  metadata        Json?         // extras: conversationKey, waPhone, cartTotal, expectedAmount, etc.
-  claimedBy       String?       // identificador de la ejecución n8n que reclamó el pago
-  claimedUntil    DateTime?     // timestamp hasta el cual el claim es válido
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  company         Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  customer        Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  product         Product?      @relation(fields: [productId], references: [id], onDelete: SetNull)
-  digitalSale     DigitalSale?  @relation(fields: [digitalSaleId], references: [id], onDelete: SetNull)
-  webhookEvents   WebhookEvent[]
+  metadata              Json? // extras: conversationKey, waPhone, cartTotal, expectedAmount, etc.
+  claimedBy             String? // identificador de la ejecución n8n que reclamó el pago
+  claimedUntil          DateTime? // timestamp hasta el cual el claim es válido
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  company               Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer              Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  product               Product?       @relation(fields: [productId], references: [id], onDelete: SetNull)
+  digitalSale           DigitalSale?   @relation(fields: [digitalSaleId], references: [id], onDelete: SetNull)
+  webhookEvents         WebhookEvent[]
 
   @@unique([source, externalId])
   @@index([companyId, createdAt])
@@ -412,15 +552,15 @@ model PaymentReceipt {
 }
 
 model WebhookEndpoint {
-  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId      String   @db.Uuid
-  source         String   // "validpay", "mercadopago", "custom"
-  secret         String   // plain text (almacenado en zona de confianza, igual que Stripe)
-  active         Boolean  @default(true)
-  autoApprove    Boolean  @default(true)
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String    @db.Uuid
+  source         String // "validpay", "mercadopago", "custom"
+  secret         String // plain text (almacenado en zona de confianza, igual que Stripe)
+  active         Boolean   @default(true)
+  autoApprove    Boolean   @default(true)
   description    String?
-  validpayApiKey String?  // API Key de ValidPay para notificar de vuelta al aprobar (source=validpay)
-  createdAt      DateTime @default(now())
+  validpayApiKey String? // API Key de ValidPay para notificar de vuelta al aprobar (source=validpay)
+  createdAt      DateTime  @default(now())
   lastUsedAt     DateTime?
 
   company Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -438,7 +578,7 @@ model WebhookEvent {
   externalId String
   eventType  String   @default("")
   payload    Json
-  status     String   // RECEIVED, PROCESSED, FAILED, DUPLICATE
+  status     String // RECEIVED, PROCESSED, FAILED, DUPLICATE
   error      String?
   receiptId  String?  @db.Uuid
   receivedAt DateTime @default(now())

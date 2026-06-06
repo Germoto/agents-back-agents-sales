@@ -17,8 +17,10 @@ import { prisma } from "./prisma";
 
 // Eventos emitidos por el servidor al frontend
 export const SOCKET_EVENTS = {
-  RECEIPT_NEW:     "receipt.new",      // nuevo comprobante creado (vía webhook)
-  RECEIPT_UPDATED: "receipt.updated",  // comprobante actualizado (approve/reject/validated)
+  RECEIPT_NEW:          "receipt.new",          // nuevo comprobante creado (vía webhook)
+  RECEIPT_UPDATED:      "receipt.updated",      // comprobante actualizado (approve/reject/validated)
+  MESSAGE_NEW:          "message.new",          // nuevo mensaje de conversación (inbound u outbound del agente)
+  CONVERSATION_UPDATED: "conversation.updated", // estado de conversación cambió (pausa/humano/cierre)
 } as const;
 
 class SocketService {

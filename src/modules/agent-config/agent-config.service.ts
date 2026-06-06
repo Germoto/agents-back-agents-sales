@@ -10,6 +10,7 @@ function mapAgentConfig(config: {
   basePrompt: string;
   salesStyle: string;
   rules: unknown;
+  followupConfig?: unknown;
   createdAt: Date;
   updatedAt: Date;
 } | null) {
@@ -21,6 +22,7 @@ function mapAgentConfig(config: {
     ...config,
     temperature: Number(config.temperature),
     rules: Array.isArray(config.rules) ? config.rules.filter((item): item is string => typeof item === "string") : [],
+    followupConfig: config.followupConfig ?? null,
   };
 }
 
@@ -36,17 +38,24 @@ export async function upsertAgentConfig(companyId: string, data: {
   basePrompt: string;
   salesStyle: string;
   rules: string[];
+  followupConfig?: Record<string, number> | null;
 }) {
+  const { followupConfig, ...rest } = data;
+  const followupValue: Prisma.InputJsonValue | typeof Prisma.JsonNull =
+    followupConfig == null ? Prisma.JsonNull : (followupConfig as Prisma.InputJsonValue);
+
   const config = await prisma.agentConfig.upsert({
     where: { companyId },
     update: {
-      ...data,
+      ...rest,
       temperature: data.temperature.toString(),
+      followupConfig: followupValue,
     },
     create: {
       companyId,
-      ...data,
+      ...rest,
       temperature: data.temperature.toString(),
+      followupConfig: followupValue,
     },
   });
 
