@@ -9,7 +9,7 @@ import { env } from "../../config/env";
 type ProductPayload = {
   slug: string;
   active: boolean;
-  productType: "DIGITAL" | "PHYSICAL";
+  productType?: "DIGITAL" | "PHYSICAL";
   name: string;
   price: string;
   regularPrice?: string | null;
@@ -21,6 +21,7 @@ type ProductPayload = {
   attributes?: Record<string, string> | null;
   category?: string | null;
   verticalData?: Record<string, unknown> | null;
+  reminderConfig?: Record<string, unknown> | null;
   sortOrder: number;
   aliases: string[];
   benefits: Array<{ value: string; sortOrder: number }>;
@@ -53,6 +54,22 @@ type ProductPayload = {
   } | null;
   variants: Array<{ name: string; options: string[]; sortOrder: number }>;
 };
+
+// El tipo (mecanismo de entrega) se deriva del rubro de la empresa; para OTHER se
+// respeta lo enviado por el cliente.
+async function resolveProductType(
+  companyId: string,
+  payloadType?: "DIGITAL" | "PHYSICAL",
+): Promise<"DIGITAL" | "PHYSICAL"> {
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { vertical: true },
+  });
+  const v = company?.vertical;
+  if (v === "RESTAURANT" || v === "PHYSICAL_GOODS") return "PHYSICAL";
+  if (v === "INFOPRODUCT" || v === "STREAMER" || v === "SERVICE") return "DIGITAL";
+  return payloadType ?? "DIGITAL"; // OTHER
+}
 
 async function ensureProductBelongsToCompany(companyId: string, productId: string) {
   const product = await prisma.product.findFirst({
@@ -247,13 +264,14 @@ export async function getProduct(companyId: string, productId: string) {
 }
 
 export async function createProduct(companyId: string, payload: ProductPayload) {
+  const productType = await resolveProductType(companyId, payload.productType);
   const product = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const created = await tx.product.create({
       data: {
         companyId,
         slug: payload.slug,
         active: payload.active,
-        productType: payload.productType,
+        productType,
         name: payload.name,
         price: payload.price,
         regularPrice: payload.regularPrice ?? null,
@@ -265,6 +283,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
         category: payload.category ?? null,
         verticalData: payload.verticalData == null ? Prisma.JsonNull : (payload.verticalData as Prisma.InputJsonValue),
+        reminderConfig: payload.reminderConfig == null ? Prisma.JsonNull : (payload.reminderConfig as Prisma.InputJsonValue),
         sortOrder: payload.sortOrder,
       },
     });
@@ -282,6 +301,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
 
 export async function updateProduct(companyId: string, productId: string, payload: ProductPayload) {
   await ensureProductBelongsToCompany(companyId, productId);
+  const productType = await resolveProductType(companyId, payload.productType);
 
   const product = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.product.update({
@@ -289,7 +309,7 @@ export async function updateProduct(companyId: string, productId: string, payloa
       data: {
         slug: payload.slug,
         active: payload.active,
-        productType: payload.productType,
+        productType,
         name: payload.name,
         price: payload.price,
         regularPrice: payload.regularPrice ?? null,
@@ -301,6 +321,7 @@ export async function updateProduct(companyId: string, productId: string, payloa
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
         category: payload.category ?? null,
         verticalData: payload.verticalData == null ? Prisma.JsonNull : (payload.verticalData as Prisma.InputJsonValue),
+        reminderConfig: payload.reminderConfig == null ? Prisma.JsonNull : (payload.reminderConfig as Prisma.InputJsonValue),
         sortOrder: payload.sortOrder,
       },
     });

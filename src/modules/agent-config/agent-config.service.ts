@@ -44,7 +44,7 @@ export async function upsertAgentConfig(companyId: string, data: {
   basePrompt: string;
   salesStyle: string;
   rules: string[];
-  followupConfig?: Record<string, number> | null;
+  followupConfig?: Record<string, unknown> | null;
   replyMode?: string;
   testNumbers?: string[];
 }) {

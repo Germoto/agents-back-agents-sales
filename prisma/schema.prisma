@@ -116,6 +116,9 @@ model Company {
   slug              String                @unique
   adminPhone        String
   vertical          BusinessVertical      @default(INFOPRODUCT)
+  // Config de entrega a nivel negocio (restaurante/físico): { cost, time, areas[],
+  // pickupAvailable, requiresAddress }. El agente la usa para todos los productos.
+  deliveryConfig    Json?
   timezone          String                @default("America/Lima")
   isActive          Boolean               @default(true)
   createdAt         DateTime              @default(now())
@@ -235,6 +238,9 @@ model Product {
   // Datos estructurados del rubro (vertical pack), validados por schema según
   // Company.vertical. Ej. streaming: { billingPeriod, tier, screens, quality }.
   verticalData     Json?
+  // Override opcional de recordatorios por producto y por tipo:
+  // { <tipo>: { message?, mediaUrl? } }. Si existe, gana sobre la plantilla del negocio.
+  reminderConfig   Json?
   sortOrder        Int                   @default(0)
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt

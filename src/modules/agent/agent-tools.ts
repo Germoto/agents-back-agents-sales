@@ -542,12 +542,7 @@ export async function executeTool(
         return JSON.stringify({ ok: false, error: "No se encontró entrega digital configurada para el producto pagado." });
       }
       ctx.state.status = "ENTREGADO";
-      // Recordatorio post-venta a las 24h
-      ctx.reminders.push({
-        type: "POST_SALE",
-        minutes: 60 * 24,
-        body: `Hola 👋 ¿Cómo te fue con ${delivered.join(", ")}? Si necesitas ayuda, escríbeme. ¿Te muestro algo más del catálogo?`,
-      });
+      // El recordatorio post-venta se programa automáticamente (plantilla configurada).
       return JSON.stringify({ ok: true, delivered });
     }
 

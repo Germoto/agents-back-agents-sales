@@ -154,11 +154,25 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
   const paymentMode = config.payment.paymentMode; // before_delivery | cash_on_delivery | manual
   const vertical = (config.business as { vertical?: string }).vertical;
 
+  // Entrega a nivel negocio (restaurante): se aplica a todos los productos.
+  const biz = config.business as { deliveryConfig?: Record<string, unknown> | null };
+  const d = biz.deliveryConfig;
+  let deliveryLine = "";
+  if ((vertical === "RESTAURANT" || vertical === "PHYSICAL_GOODS") && d) {
+    const parts: string[] = [];
+    if (d.cost) parts.push(`costo: ${d.cost}`);
+    if (d.time) parts.push(`tiempo: ${d.time}`);
+    if (d.pickupAvailable) parts.push("recojo en local disponible");
+    if (Array.isArray(d.areas) && d.areas.length) parts.push(`zonas: ${(d.areas as string[]).slice(0, 10).join(", ")}`);
+    if (parts.length) deliveryLine = `Entrega del negocio (aplica a todo el catálogo): ${parts.join(" · ")}. Valida la dirección del cliente contra estas zonas.`;
+  }
+
   return [
     config.agent.basePrompt,
     "",
     `Negocio: ${config.business.name}. Estilo comercial: ${config.agent.salesStyle}.`,
     `Rubro del negocio: ${vertical ?? "INFOPRODUCT"}. ${verticalGuidance(vertical)}`,
+    ...(deliveryLine ? [deliveryLine] : []),
     "",
     "Reglas del negocio configuradas por el dueño:",
     ...rules.map((r) => `- ${r}`),

@@ -98,12 +98,15 @@ export async function buildBotConfig(companyId: string, account?: string) {
     throw new AppError("Falta PaymentConfig para esta empresa", 422);
   }
 
+  // Validación de entrega rubro-aware: digitales (infoproducto/streaming) requieren
+  // link; físico requiere entrega por producto; restaurante usa la entrega del
+  // negocio (no por plato); servicio no requiere entrega (reserva del agente).
+  const vertical = whatsappConfig.company.vertical;
   for (const product of products) {
-    if (product.productType === "DIGITAL" && !product.digitalDelivery?.link) {
+    if ((vertical === "INFOPRODUCT" || vertical === "STREAMER") && product.productType === "DIGITAL" && !product.digitalDelivery?.link) {
       throw new AppError(`El producto digital ${product.slug} no tiene digitalDelivery.link`, 422);
     }
-
-    if (product.productType === "PHYSICAL" && !product.physicalDelivery) {
+    if (vertical === "PHYSICAL_GOODS" && product.productType === "PHYSICAL" && !product.physicalDelivery) {
       throw new AppError(`El producto fisico ${product.slug} no tiene physicalDelivery`, 422);
     }
   }
@@ -115,6 +118,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
       name: whatsappConfig.company.name,
       adminPhone: whatsappConfig.company.adminPhone,
       vertical: whatsappConfig.company.vertical,
+      deliveryConfig: (whatsappConfig.company.deliveryConfig ?? null) as Record<string, unknown> | null,
       timezone: whatsappConfig.company.timezone,
     },
     openai: {

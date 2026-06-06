@@ -25,6 +25,7 @@ import type { TurnContext, OutboxMessage } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
 import { scheduleReminder, cancelPendingReminders, minutesFromNow } from "../scheduler/scheduler.service";
+import { resolveReminderTemplate, type ReminderType } from "./reminder-templates";
 
 interface FollowupConfig {
   abandonedCartHours?: number;
@@ -196,8 +197,9 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     });
   }
 
-  // Red de seguridad: si quedó esperando pago con carrito, programar abandono
-  await maybeScheduleAbandonedCart(companyId, convo.customerId, convo.conversationId, ctx.state, config);
+  // Recordatorios automáticos (con plantillas configuradas): abandono de carrito,
+  // dejado en visto y post-venta.
+  await scheduleAutoReminders(companyId, convo.customerId, convo.conversationId, ctx.state, config);
 
   // Avisos al admin (pedidos registrados, etc.)
   if (ctx.adminNotices.length) {
@@ -269,30 +271,66 @@ function toReminderType(value: string): ScheduledMessageType {
   return ScheduledMessageType.CUSTOM;
 }
 
-async function maybeScheduleAbandonedCart(
+async function getCustomerName(customerId: string): Promise<string> {
+  const c = await prisma.customer.findUnique({ where: { id: customerId }, select: { name: true } });
+  return c?.name ?? "";
+}
+
+/**
+ * Programa los recordatorios automáticos según el estado, usando las plantillas
+ * configuradas (texto + imagen + variables) del negocio y el override por producto.
+ */
+async function scheduleAutoReminders(
   companyId: string,
   customerId: string,
   conversationId: string,
   state: ConversationState,
   config: Awaited<ReturnType<typeof buildBotConfig>>,
 ): Promise<void> {
-  if (state.status !== "ESPERANDO_PAGO") return;
   const cart = await summarizeCart(companyId, customerId);
-  if (!cart.items.length && !state.selectedProductId) return;
+  const pid = cart.items[0]?.productId ?? state.selectedProductId ?? null;
+  const product = pid ? config.products.find((p) => p.id === pid || p.slug === pid) : undefined;
+  const vars = {
+    nombre: await getCustomerName(customerId),
+    producto: product?.name,
+    total: cart.items.length ? cart.totalText : undefined,
+    negocio: config.business.name,
+  };
+  const followup = config.agent.followupConfig;
+  const productReminder = (product as { reminderConfig?: unknown } | undefined)?.reminderConfig;
 
-  const followup = (config as any).agent?.followupConfig as FollowupConfig | undefined;
-  const hours = followup?.abandonedCartHours ?? 6;
+  const schedule = async (type: ReminderType, smType: ScheduledMessageType) => {
+    const tpl = resolveReminderTemplate(followup, type, productReminder, vars);
+    if (!tpl.enabled || !tpl.message) return;
+    await scheduleReminder({
+      companyId,
+      customerId,
+      conversationId,
+      type: smType,
+      sendAt: minutesFromNow(tpl.delayMinutes),
+      body: tpl.message,
+      mediaUrl: tpl.mediaUrl,
+    });
+  };
 
-  await scheduleReminder({
-    companyId,
-    customerId,
-    conversationId,
-    type: ScheduledMessageType.ABANDONED_CART,
-    sendAt: minutesFromNow(hours * 60),
-    body:
-      `Hola 👋 vi que quedó pendiente tu compra${cart.totalText && cart.items.length ? ` por ${cart.totalText}` : ""}. ` +
-      `¿Te ayudo a completarla? Sigue disponible 🙌`,
-  });
+  const status = state.status ?? "";
+
+  // Post-venta: tras entregar / cerrar.
+  if (status === "ENTREGADO") {
+    await schedule("postSale", ScheduledMessageType.POST_SALE);
+    return;
+  }
+
+  // Estados terminales/humano: no programar seguimiento de silencio.
+  if (["PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status)) return;
+
+  // Abandono de carrito: esperando pago con carrito/producto.
+  if (status === "ESPERANDO_PAGO" && (cart.items.length || state.selectedProductId)) {
+    await schedule("abandonedCart", ScheduledMessageType.ABANDONED_CART);
+  }
+
+  // Dejado en visto: el cliente escribió y el bot respondió; si no contesta, seguimos.
+  await schedule("leftOnRead", ScheduledMessageType.LEFT_ON_READ);
 }
 
 async function notifyAdmin(

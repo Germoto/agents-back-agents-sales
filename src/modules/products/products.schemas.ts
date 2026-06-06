@@ -33,7 +33,8 @@ const productFileSchema = z.object({
 export const productBodySchema = z.object({
   slug: z.string().min(1),
   active: z.boolean().default(true),
-  productType: z.enum(["DIGITAL", "PHYSICAL"]),
+  // Opcional: el backend lo deriva de Company.vertical. Para OTHER se respeta el enviado.
+  productType: z.enum(["DIGITAL", "PHYSICAL"]).optional(),
   name: z.string().min(1),
   price: z.string().min(1),
   regularPrice: z.string().nullable().optional(),
@@ -49,6 +50,8 @@ export const productBodySchema = z.object({
   // Datos del vertical pack (estructura depende del rubro). Validación laxa aquí;
   // la UI construye la forma correcta según Company.vertical.
   verticalData: z.record(z.string(), z.unknown()).nullable().optional(),
+  // Override de recordatorios por producto y tipo: { <tipo>: { message?, mediaUrl? } }.
+  reminderConfig: z.record(z.string(), z.unknown()).nullable().optional(),
   sortOrder: z.coerce.number().int().min(0).default(0),
   aliases: z.array(z.string().min(1)).default([]),
   benefits: z.array(orderedValueSchema).default([]),
@@ -69,23 +72,10 @@ export const productBodySchema = z.object({
     deliveryAreas: z.array(z.string().min(1)).default([]),
   }).nullable().optional(),
   variants: z.array(productVariantSchema).default([]),
-}).superRefine((data, ctx) => {
-  if (data.productType === "DIGITAL" && !data.digitalDelivery?.link) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "Un producto digital debe tener digitalDelivery.link",
-      path: ["digitalDelivery", "link"],
-    });
-  }
-
-  if (data.productType === "PHYSICAL" && !data.physicalDelivery) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "Un producto fisico debe tener physicalDelivery",
-      path: ["physicalDelivery"],
-    });
-  }
 });
+// Nota: el requisito de entrega (digital/físico) ya no se valida aquí; pasa a ser
+// rubro-aware en bot.service.buildBotConfig (restaurante usa entrega del negocio,
+// servicio no requiere entrega, etc.).
 
 export const productIdParamsSchema = z.object({
   id: z.string().uuid(),

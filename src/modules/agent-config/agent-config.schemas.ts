@@ -1,11 +1,27 @@
 import { z } from "zod";
 
+// Plantilla de recordatorio por tipo: activar, demora (min), texto e imagen.
+const reminderTemplateSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    delayMinutes: z.coerce.number().min(1).max(100000).optional(),
+    message: z.string().optional(),
+    mediaUrl: z.string().nullable().optional(),
+  })
+  .optional();
+
 // Config de recordatorios/seguimientos que consume el agente y el scheduler.
+// Forma nueva: por tipo. Se mantiene laxa para compatibilidad con datos viejos.
 export const followupConfigSchema = z
   .object({
-    abandonedCartHours: z.coerce.number().min(0).max(720).optional(),
-    leftOnReadMinutes: z.coerce.number().min(0).max(10080).optional(),
-    offerCountdownHours: z.coerce.number().min(0).max(720).optional(),
+    abandonedCart: reminderTemplateSchema,
+    leftOnRead: reminderTemplateSchema,
+    offerCountdown: reminderTemplateSchema,
+    postSale: reminderTemplateSchema,
+    // compat: campos viejos (se ignoran si vienen los nuevos)
+    abandonedCartHours: z.coerce.number().optional(),
+    leftOnReadMinutes: z.coerce.number().optional(),
+    offerCountdownHours: z.coerce.number().optional(),
   })
   .nullable()
   .optional();
