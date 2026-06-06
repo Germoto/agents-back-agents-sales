@@ -9,7 +9,9 @@
 import { Prisma, ConversationRole } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { env } from "../../config/env";
+import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { loadWhatsappSender, sendText } from "./outbound";
 import type { ChatMessage } from "../../lib/openai";
 
 /** Estado conversacional persistido en Conversation.state (equivalente al customer.* de n8n). */
@@ -172,6 +174,28 @@ export async function listConversations(companyId: string, limit = 50) {
     customer: c.customer,
     lastMessage: c.messages[0] ?? null,
   }));
+}
+
+/** Envía un mensaje manual (humano/asesor) al cliente por WhatsApp y lo registra. */
+export async function sendHumanReply(companyId: string, conversationId: string, message: string) {
+  const convo = await prisma.conversation.findFirst({
+    where: { id: conversationId, companyId },
+    select: { id: true, customerId: true, customer: { select: { phone: true } } },
+  });
+  if (!convo) throw new AppError("Conversación no encontrada", 404);
+
+  const sender = await loadWhatsappSender(companyId);
+  if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
+
+  const to = convo.customer.phone.replace(/\D/g, "");
+  await sendText(sender, to, message);
+  await recordMessage({
+    companyId,
+    customerId: convo.customerId,
+    conversationId,
+    role: "ADMIN",
+    message,
+  });
 }
 
 export async function listConversationMessages(

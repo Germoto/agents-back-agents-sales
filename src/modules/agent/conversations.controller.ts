@@ -1,9 +1,11 @@
 import { Request, Response } from "express";
 import { asyncHandler } from "../../lib/async-handler";
+import { AppError } from "../../lib/app-error";
 import {
   listConversations,
   listConversationMessages,
   setBotPaused,
+  sendHumanReply,
 } from "./conversation.service";
 
 export const listConversationsController = asyncHandler(async (req: Request, res: Response) => {
@@ -23,4 +25,12 @@ export const pauseConversationController = asyncHandler(async (req: Request, res
   const paused = req.body?.paused !== false; // default true
   await setBotPaused(companyId, String(req.params.id), paused);
   res.json({ success: true, data: { paused } });
+});
+
+export const replyConversationController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const message = String(req.body?.message ?? "").trim();
+  if (!message) throw new AppError("El mensaje no puede estar vacío", 400);
+  await sendHumanReply(companyId, String(req.params.id), message);
+  res.json({ success: true });
 });

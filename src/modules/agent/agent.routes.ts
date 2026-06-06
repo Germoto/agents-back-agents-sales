@@ -6,6 +6,7 @@ import {
   listConversationsController,
   listMessagesController,
   pauseConversationController,
+  replyConversationController,
 } from "./conversations.controller";
 import { listBookingsController, updateBookingStatusController } from "./bookings.controller";
 
@@ -19,6 +20,7 @@ router.post("/inbound", optionalAgentApiKey, inboundController);
 router.get("/conversations", requireAuth, listConversationsController);
 router.get("/conversations/:id/messages", requireAuth, listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
+router.post("/conversations/:id/reply", requireAuth, replyConversationController);
 
 // Reservas de servicios (panel)
 router.get("/bookings", requireAuth, listBookingsController);
