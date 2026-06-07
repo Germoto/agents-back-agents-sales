@@ -127,6 +127,22 @@ function findProductById(ctx: TurnContext, productId: string): BotProduct | unde
   return ctx.config.products.find((p) => p.id === productId || p.slug === productId);
 }
 
+/** Ficha customer-facing de un producto con los campos configurados (paso 3). */
+function renderProductFicha(p: BotProduct): string {
+  const price = p.priceText ?? p.price;
+  const priceLine = p.regularPriceText
+    ? `💰 *${price}*  ~antes ${p.regularPriceText}~`
+    : `💰 *${price}*`;
+  const parts: string[] = [`*${p.name}*`];
+  const desc = (p.fullDescription || p.shortDescription || "").trim();
+  if (desc) parts.push(desc);
+  if (p.benefits?.length) parts.push(`*Lo que logras:*\n${p.benefits.join("\n")}`);
+  if (p.includes?.length) parts.push(`*Incluye:*\n${p.includes.join("\n")}`);
+  if (p.bonuses?.length) parts.push(`*Bonos:*\n${p.bonuses.join("\n")}`);
+  parts.push(priceLine);
+  return parts.join("\n\n");
+}
+
 /** Catálogo customer-facing (sin ids/alias), agrupado por categoría si existe. */
 function renderCustomerCatalog(products: BotProduct[]): string {
   const line = (p: BotProduct) => {
@@ -162,6 +178,20 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         additionalProperties: false,
         required: ["query"],
         properties: { query: { type: "string", description: "Texto del cliente para identificar el producto" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "enviar_ficha",
+      description:
+        "Envía al cliente la ficha del producto con su descripción, beneficios, qué incluye y bonos (tal como están configurados). Úsalo para PRESENTAR un producto cuando el cliente lo elige o pregunta por él, ANTES de enviar la multimedia.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId"],
+        properties: { productId: { type: "string", description: "id del producto" } },
       },
     },
   },
@@ -397,6 +427,14 @@ export async function executeTool(
           hasMedia: (product.files?.length ?? 0) > 0,
         },
       });
+    }
+
+    case "enviar_ficha": {
+      const product = findProductById(ctx, String(args.productId ?? ""));
+      if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
+      ctx.state.selectedProductId = product.id;
+      ctx.outbox.push({ kind: "text", text: renderProductFicha(product) });
+      return JSON.stringify({ ok: true, sent: true, nota: "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) al cliente. NO la repitas en tu texto final." });
     }
 
     case "enviar_catalogo": {
