@@ -407,7 +407,7 @@ export async function executeTool(
         kind: "text",
         text: `📋 *${ctx.config.business.name}* — esto es lo que tenemos:\n\n${body}\n\n¿Cuál te interesa? Te cuento más. 😊`,
       });
-      return JSON.stringify({ ok: true, count: products.length });
+      return JSON.stringify({ ok: true, count: products.length, sent: true, nota: "Ya envié el catálogo al cliente. NO repitas la lista en tu texto final; deja el texto vacío o cierra con una sola frase breve." });
     }
 
     case "enviar_multimedia": {
@@ -428,7 +428,7 @@ export async function executeTool(
           caption: f.description || undefined,
         });
       }
-      return JSON.stringify({ ok: true, sent: Math.min(files.length, 6) });
+      return JSON.stringify({ ok: true, sent: Math.min(files.length, 6), nota: "Ya envié los archivos (con su texto) al cliente. NO repitas ni describas su contenido en tu texto final; cierra breve o deja el texto vacío." });
     }
 
     case "agregar_carrito": {
@@ -484,7 +484,7 @@ export async function executeTool(
       ctx.outbox.push({ kind: "text", text });
       ctx.state.status = "ESPERANDO_PAGO";
       ctx.state.lastPaymentPromptAt = new Date().toISOString();
-      return JSON.stringify({ ok: true, amount: amountText });
+      return JSON.stringify({ ok: true, amount: amountText, sent: true, nota: "Ya envié el monto y los métodos de pago al cliente. NO los repitas en tu texto final; cierra breve o deja el texto vacío." });
     }
 
     case "validar_pago": {
