@@ -222,8 +222,10 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   // Enviar adjuntos/mensajes acumulados por las herramientas, en orden
   await flushOutbox(sender, inbound.fromPhone, ctx.outbox, ctx);
 
-  // Enviar y registrar el texto final
+  // Enviar y registrar el texto final (tras una pausa si ya se envió algo, para
+  // que llegue DESPUÉS de la multimedia).
   if (finalText) {
+    if (ctx.outbox.length) await sleep(OUTBOX_GAP_MS);
     await deliver(sender, inbound.fromPhone, { kind: "text", text: finalText }, ctx);
   }
 
@@ -266,14 +268,22 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   }
 }
 
+// Pausa entre envíos para preservar el ORDEN en WhatsApp (sin esto, mensajes y
+// adjuntos enviados muy rápido pueden reordenarse o limitarse por rate).
+const OUTBOX_GAP_MS = 900;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function flushOutbox(
   sender: WhatsappSender,
   to: string,
   outbox: OutboxMessage[],
   ctx: TurnContext,
 ): Promise<void> {
-  for (const msg of outbox) {
-    await deliver(sender, to, msg, ctx);
+  for (let i = 0; i < outbox.length; i++) {
+    await deliver(sender, to, outbox[i], ctx);
+    if (i < outbox.length - 1) await sleep(OUTBOX_GAP_MS);
   }
 }
 

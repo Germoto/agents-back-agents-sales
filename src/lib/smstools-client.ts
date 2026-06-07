@@ -287,11 +287,17 @@ export const smsTools = {
   /**
    * Envia un mensaje con adjunto (imagen, documento, video o audio) via WhatsApp.
    * Usado por el agente para enviar fichas de producto, multimedia y entrega.
-   * SMS Tools acepta `type` = image|document|video|audio y la URL del recurso en
-   * `media_url` (para document tambien acepta `document_url`).
-   * @param kind     - tipo de adjunto
+   *
+   * Formato del endpoint /send/whatsapp (replica el flujo probado de n8n):
+   *  - imagen/video/audio → type="media",  media_type=<image|video|audio>, media_url
+   *  - documento/pdf      → type="document", document_url, document_name, document_type
+   * Se envia como multipart/form-data (la API lo exige para adjuntos). El `type`
+   * NO es el kind directo: con `type=image` el gateway ignora el adjunto y manda
+   * solo el caption como texto.
+   * @param kind     - tipo de adjunto (image|document|video|audio)
    * @param mediaUrl - URL publica del recurso
    * @param caption  - texto opcional que acompaña al adjunto
+   * @param fileName - nombre del archivo (documentos); se deriva del URL si falta
    */
   async sendMedia(
     creds: SmsToolsCredentials,
@@ -300,22 +306,44 @@ export const smsTools = {
     kind: "image" | "document" | "video" | "audio",
     mediaUrl: string,
     caption?: string,
+    fileName?: string,
   ): Promise<SmsToolsMessage> {
     const base = deriveApiBase(creds.apiUrl);
-    const body = new URLSearchParams();
-    body.set("secret", creds.secret);
-    body.set("account", account);
-    body.set("recipient", to);
-    body.set("type", kind);
-    body.set("media_url", mediaUrl);
-    if (kind === "document") body.set("document_url", mediaUrl);
-    if (caption) body.set("message", caption);
+    const form = new FormData();
+    form.set("secret", creds.secret);
+    form.set("account", account);
+    form.set("recipient", to);
+    if (caption) form.set("message", caption);
+
+    if (kind === "document") {
+      const name = (fileName && fileName.trim()) || guessFileNameFromUrl(mediaUrl, "documento.pdf");
+      form.set("type", "document");
+      form.set("document_url", mediaUrl);
+      form.set("document_name", name);
+      form.set("document_type", name.toLowerCase().endsWith(".pdf") ? "pdf" : "file");
+    } else {
+      form.set("type", "media");
+      form.set("media_type", kind); // image | video | audio
+      form.set("media_url", mediaUrl);
+    }
+
     return smsToolsRequest<SmsToolsMessage>(base, "/send/whatsapp", {
       method: "POST",
-      body,
+      body: form,
     });
   },
 };
+
+/** Deriva un nombre de archivo legible desde una URL (para document_name). */
+function guessFileNameFromUrl(url: string, fallback: string): string {
+  try {
+    const path = new URL(url).pathname;
+    const last = path.split("/").pop() ?? "";
+    return decodeURIComponent(last) || fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 // -------------------------------------------------------------------------
 // Parseo del webhook inbound de SMS Tools (mensajes entrantes de WhatsApp).
