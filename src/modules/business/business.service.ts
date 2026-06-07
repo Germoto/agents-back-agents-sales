@@ -1,6 +1,7 @@
 import { BusinessVertical, Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import { getEnabledVerticals } from "../platform-config/platform-config.service";
 
 export async function getBusinessProfile(companyId: string) {
   const company = await prisma.company.findUnique({
@@ -13,7 +14,14 @@ export async function getBusinessProfile(companyId: string) {
   }
 
   const { _count, ...rest } = company;
-  return { ...rest, productCount: _count.products };
+  // Rubros que el cliente puede elegir = habilitados globalmente ∪ su rubro actual
+  // (para que su selección actual nunca desaparezca del selector aunque luego se
+  // deshabilite globalmente).
+  const enabled = await getEnabledVerticals();
+  const enabledVerticals = enabled.includes(rest.vertical)
+    ? enabled
+    : [...enabled, rest.vertical];
+  return { ...rest, productCount: _count.products, enabledVerticals };
 }
 
 export interface DeliveryConfigInput {
@@ -49,6 +57,19 @@ export async function updateBusinessProfile(companyId: string, data: {
       409,
       { code: "VERTICAL_LOCKED" },
     );
+  }
+
+  // Solo se puede cambiar a un rubro habilitado por el superadmin (no aplica si no
+  // cambia el rubro, para no bloquear ediciones de empresas con rubro ya deshabilitado).
+  if (data.vertical !== existing.vertical) {
+    const enabled = await getEnabledVerticals();
+    if (!enabled.includes(data.vertical)) {
+      throw new AppError(
+        "Ese rubro no está disponible. Elige uno de los rubros habilitados.",
+        409,
+        { code: "VERTICAL_NOT_ENABLED" },
+      );
+    }
   }
 
   const { deliveryConfig, ...rest } = data;

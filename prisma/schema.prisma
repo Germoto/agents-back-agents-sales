@@ -140,6 +140,15 @@ model Company {
   webhookEndpoints  WebhookEndpoint[]
 }
 
+// Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
+// habilitados globalmente: el selector de rubro de cada cliente solo muestra
+// estos. Fila única con id="global".
+model PlatformConfig {
+  id               String             @id @default("global")
+  enabledVerticals BusinessVertical[]
+  updatedAt        DateTime           @updatedAt
+}
+
 model User {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId    String   @db.Uuid

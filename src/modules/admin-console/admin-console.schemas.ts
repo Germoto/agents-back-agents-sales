@@ -1,4 +1,9 @@
 import { z } from "zod";
+import { businessVerticalSchema } from "../business/business.schemas";
+
+export const updateVerticalsSchema = z.object({
+  enabledVerticals: z.array(businessVerticalSchema).min(1, "Debes habilitar al menos un rubro."),
+});
 
 export const superadminLoginSchema = z.object({
   phone: z.string().min(6).max(20),

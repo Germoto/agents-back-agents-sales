@@ -6,17 +6,20 @@ import { validate } from "../../middlewares/validate";
 import {
   createClientController,
   deleteClientController,
+  getVerticalsController,
   impersonateClientController,
   listClientsController,
   superadminLoginController,
   superadminMeController,
   updateClientStatusController,
+  updateVerticalsController,
 } from "./admin-console.controller";
 import {
   clientIdParamsSchema,
   createClientSchema,
   superadminLoginSchema,
   updateClientStatusSchema,
+  updateVerticalsSchema,
 } from "./admin-console.schemas";
 
 const router = Router();
@@ -45,6 +48,16 @@ router.post(
   requireRole("SUPERADMIN"),
   validate({ params: clientIdParamsSchema }),
   asyncHandler(impersonateClientController),
+);
+
+// Config global de plataforma: rubros habilitados para todos los clientes.
+router.get("/config/verticals", requireAuth, requireRole("SUPERADMIN"), asyncHandler(getVerticalsController));
+router.put(
+  "/config/verticals",
+  requireAuth,
+  requireRole("SUPERADMIN"),
+  validate({ body: updateVerticalsSchema }),
+  asyncHandler(updateVerticalsController),
 );
 
 export default router;

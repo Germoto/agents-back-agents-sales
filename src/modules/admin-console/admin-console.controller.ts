@@ -8,6 +8,11 @@ import {
   loginSuperadmin,
   updateClientStatus,
 } from "./admin-console.service";
+import {
+  VERTICALS,
+  getEnabledVerticals,
+  setEnabledVerticals,
+} from "../platform-config/platform-config.service";
 
 export async function superadminLoginController(req: Request, res: Response) {
   const result = await loginSuperadmin(req.body.phone, req.body.password);
@@ -52,4 +57,14 @@ export async function impersonateClientController(req: Request, res: Response) {
   const superadminId = req.user!.id;
   const result = await impersonateClientAdmin(superadminId, companyId);
   return res.json(result);
+}
+
+export async function getVerticalsController(_req: Request, res: Response) {
+  const enabled = await getEnabledVerticals();
+  return res.json({ all: VERTICALS, enabled });
+}
+
+export async function updateVerticalsController(req: Request, res: Response) {
+  const enabled = await setEnabledVerticals(req.body.enabledVerticals);
+  return res.json({ all: VERTICALS, enabled });
 }
