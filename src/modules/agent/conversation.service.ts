@@ -124,6 +124,8 @@ export async function recordMessage(opts: {
   mediaUrl?: string | null;
   productId?: string | null;
   rawPayload?: Prisma.InputJsonValue;
+  gatewayId?: string | null;
+  deliveryStatus?: string | null;
 }): Promise<void> {
   const created = await prisma.conversationMessage.create({
     data: {
@@ -134,6 +136,8 @@ export async function recordMessage(opts: {
       message: opts.message ?? null,
       mediaUrl: opts.mediaUrl ?? null,
       productId: opts.productId ?? null,
+      gatewayId: opts.gatewayId ?? null,
+      deliveryStatus: opts.deliveryStatus ?? null,
       ...(opts.rawPayload !== undefined ? { rawPayload: opts.rawPayload } : {}),
     },
     select: { id: true, role: true, message: true, mediaUrl: true, createdAt: true },

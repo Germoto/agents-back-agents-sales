@@ -3,6 +3,7 @@ import { env } from "./config/env";
 import { app } from "./app";
 import { socketService } from "./lib/socket";
 import { startScheduler } from "./modules/scheduler/scheduler.worker";
+import { startDeliveryStatusWorker } from "./modules/agent/delivery-status.worker";
 
 const httpServer = createServer(app);
 
@@ -13,4 +14,6 @@ httpServer.listen(env.PORT, () => {
   console.log(`Server running on port ${env.PORT} (HTTP + WebSocket)`);
   // Worker de recordatorios/seguimientos (node-cron, in-process)
   startScheduler();
+  // Worker de estado de entrega: reintenta mensajes que el gateway marcó failed
+  startDeliveryStatusWorker();
 });

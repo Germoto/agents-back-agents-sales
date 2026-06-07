@@ -400,6 +400,11 @@ model ConversationMessage {
   message        String?
   mediaUrl       String?
   rawPayload     Json?
+  // Tracking de entrega vía gateway WhatsApp (SMS Tools). gatewayId = messageId del
+  // envío; deliveryStatus: null=no rastreado, "pending"|"sent"|"failed".
+  gatewayId       String?
+  deliveryStatus  String?
+  deliveryRetries Int             @default(0)
   createdAt      DateTime         @default(now())
   company        Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
   customer       Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
@@ -408,6 +413,7 @@ model ConversationMessage {
 
   @@index([companyId, customerId, createdAt])
   @@index([conversationId, createdAt])
+  @@index([deliveryStatus, createdAt])
 }
 
 // Conversación viva del agente con un cliente (reemplaza el staticData de n8n).

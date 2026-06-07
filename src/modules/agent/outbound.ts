@@ -35,17 +35,30 @@ export function mediaKindFor(type: string): "image" | "document" | "video" | "au
   return "document"; // pdf y otros
 }
 
+export interface SendResult {
+  /** id del mensaje en el gateway (data.messageId del envío), para rastrear su estado. */
+  gatewayId: string | null;
+}
+
+/** Extrae el id del gateway de la respuesta del envío (messageId, con fallback a id). */
+function gatewayIdOf(res: unknown): string | null {
+  const r = (res ?? {}) as Record<string, unknown>;
+  const v = r.messageId ?? r.id;
+  return v != null && v !== "" ? String(v) : null;
+}
+
 export async function sendText(
   sender: WhatsappSender,
   to: string,
   message: string,
-): Promise<void> {
-  await smsTools.sendMessage(
+): Promise<SendResult> {
+  const res = await smsTools.sendMessage(
     { apiUrl: sender.apiUrl, secret: sender.secret },
     sender.account,
     to,
     message,
   );
+  return { gatewayId: gatewayIdOf(res) };
 }
 
 export async function sendMedia(
@@ -54,8 +67,8 @@ export async function sendMedia(
   kind: "image" | "document" | "video" | "audio",
   mediaUrl: string,
   caption?: string,
-): Promise<void> {
-  await smsTools.sendMedia(
+): Promise<SendResult> {
+  const res = await smsTools.sendMedia(
     { apiUrl: sender.apiUrl, secret: sender.secret },
     sender.account,
     to,
@@ -63,4 +76,5 @@ export async function sendMedia(
     mediaUrl,
     caption,
   );
+  return { gatewayId: gatewayIdOf(res) };
 }

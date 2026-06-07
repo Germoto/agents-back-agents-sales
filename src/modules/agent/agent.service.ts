@@ -295,7 +295,7 @@ async function deliver(
 ): Promise<void> {
   try {
     if (msg.kind === "media" && msg.mediaUrl) {
-      await sendMedia(sender, to, msg.mediaKind ?? "image", msg.mediaUrl, msg.caption);
+      const r = await sendMedia(sender, to, msg.mediaKind ?? "image", msg.mediaUrl, msg.caption);
       await recordMessage({
         companyId: ctx.companyId,
         customerId: ctx.customerId,
@@ -303,15 +303,19 @@ async function deliver(
         role: "ASSISTANT",
         message: msg.caption ?? null,
         mediaUrl: msg.mediaUrl,
+        gatewayId: r.gatewayId,
+        deliveryStatus: r.gatewayId ? "pending" : null,
       });
     } else if (msg.text) {
-      await sendText(sender, to, msg.text);
+      const r = await sendText(sender, to, msg.text);
       await recordMessage({
         companyId: ctx.companyId,
         customerId: ctx.customerId,
         conversationId: ctx.conversationId,
         role: "ASSISTANT",
         message: msg.text,
+        gatewayId: r.gatewayId,
+        deliveryStatus: r.gatewayId ? "pending" : null,
       });
     }
   } catch (err) {
