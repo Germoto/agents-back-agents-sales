@@ -127,6 +127,26 @@ function findProductById(ctx: TurnContext, productId: string): BotProduct | unde
   return ctx.config.products.find((p) => p.id === productId || p.slug === productId);
 }
 
+/** Catálogo customer-facing (sin ids/alias), agrupado por categoría si existe. */
+function renderCustomerCatalog(products: BotProduct[]): string {
+  const line = (p: BotProduct) => {
+    const price = p.priceText ?? p.price;
+    const desc = p.shortDescription ? ` — ${p.shortDescription}` : "";
+    return `• *${p.name}* (${price})${desc}`;
+  };
+  const hasCat = products.some((p) => p.category && p.category.trim());
+  if (!hasCat) return products.map(line).join("\n");
+  const groups = new Map<string, BotProduct[]>();
+  for (const p of products) {
+    const c = p.category?.trim() || "Otros";
+    if (!groups.has(c)) groups.set(c, []);
+    groups.get(c)!.push(p);
+  }
+  const sections: string[] = [];
+  for (const [cat, items] of groups) sections.push(`*${cat}*\n${items.map(line).join("\n")}`);
+  return sections.join("\n\n");
+}
+
 // --------------------------------------------------------------------------
 // Definiciones de herramientas (schema para OpenAI)
 // --------------------------------------------------------------------------
@@ -143,6 +163,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         required: ["query"],
         properties: { query: { type: "string", description: "Texto del cliente para identificar el producto" } },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "enviar_catalogo",
+      description:
+        "Envía al cliente el catálogo/lista de productos (agrupado por categoría). Úsalo cuando el cliente salude por primera vez, pregunte qué vendes / qué tienes, o pida ver opciones.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
     },
   },
   {
@@ -370,6 +399,17 @@ export async function executeTool(
       });
     }
 
+    case "enviar_catalogo": {
+      const products = ctx.config.products;
+      if (!products.length) return JSON.stringify({ ok: false, error: "no hay productos en el catálogo" });
+      const body = renderCustomerCatalog(products);
+      ctx.outbox.push({
+        kind: "text",
+        text: `📋 *${ctx.config.business.name}* — esto es lo que tenemos:\n\n${body}\n\n¿Cuál te interesa? Te cuento más. 😊`,
+      });
+      return JSON.stringify({ ok: true, count: products.length });
+    }
+
     case "enviar_multimedia": {
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
@@ -467,13 +507,17 @@ export async function executeTool(
       } as any);
 
       const top = candidates[0];
-      // Aprobar si hay coincidencia razonable (monto o nombre)
-      if (!top || (top as any).matchScore < 30) {
+      const reasons: string[] = ((top as any)?.matchReasons ?? []) as string[];
+      const nameMatched = reasons.includes("payer_name_exact") || reasons.includes("payer_name_similar");
+      // El NOMBRE del titular es condición NECESARIA: el monto por sí solo no
+      // aprueba (antes un nombre cualquiera pasaba si coincidía el importe).
+      if (!top || !nameMatched) {
         ctx.state.status = "ESPERANDO_VALIDACION";
         return JSON.stringify({
           ok: false,
           approved: false,
-          reason: "No se encontró un comprobante que coincida todavía. Pide al cliente que espere un momento o que envíe la captura del pago.",
+          reason:
+            "El nombre del titular no coincide con ningún comprobante recibido. NO apruebes el pago. Pide al cliente el nombre EXACTO que figura en su Yape/Plin (o que reenvíe la captura). Si insiste y no coincide, ofrece derivar a un asesor con derivar_humano.",
         });
       }
 

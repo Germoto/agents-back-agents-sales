@@ -17,6 +17,8 @@ import {
   buildHistory,
   saveState,
   setBotPaused,
+  sendHumanReply,
+  findConversationByCustomerPhone,
   type ConversationState,
 } from "./conversation.service";
 import { loadWhatsappSender, sendText, sendMedia, type WhatsappSender } from "./outbound";
@@ -104,6 +106,15 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   } catch (err) {
     console.error("[agent] buildBotConfig falló:", err instanceof Error ? err.message : err);
     return; // sin config (p.ej. falta openaiApiKey) no podemos responder
+  }
+
+  // Comandos del dueño (canal de control = número de notificación de pago). Si el
+  // mensaje viene de ese número y es un comando, se procesa y NO se corre el agente.
+  const ownerPhone = (config as any).payment?.notification?.whatsappPhone as string | null | undefined;
+  if (ownerPhone && isPhoneAllowed(inbound.fromPhone, [ownerPhone])) {
+    const handled = await handleOwnerCommand(companyId, config, inbound);
+    if (handled) return;
+    // Si no era comando, el dueño puede probar el bot como un cliente más (sigue el flujo).
   }
 
   // Modo de respuesta: en ALLOWLIST (modo prueba) el agente solo responde a los
@@ -342,13 +353,97 @@ async function notifyAdmin(
   const adminPhone = config.payment.notification?.whatsappPhone || config.business.adminPhone;
   if (!adminPhone) return;
   const to = adminPhone.replace(/\D/g, "");
+  const num = customerPhone.replace(/\D/g, "");
   try {
     await sendText(
       sender,
       to,
-      `🔔 Un cliente (${customerPhone}) necesita atención humana.\nMotivo: ${String(reason ?? "—")}`,
+      `🔔 Un cliente (${customerPhone}) necesita atención humana.\n` +
+        `Motivo: ${String(reason ?? "—")}\n\n` +
+        `El bot quedó pausado para este cliente. Para atenderlo tú:\n` +
+        `• Responder: *${num} tu mensaje*\n` +
+        `• Reactivar el bot: *BOT ${num}*\n` +
+        `(También puedes atenderlo desde la web, en Conversaciones.)`,
     );
   } catch {
     /* best-effort */
   }
+}
+
+/**
+ * Procesa un comando del dueño enviado por WhatsApp (canal = número de notificación).
+ * Devuelve true si era un comando (y ya se actuó); false si era texto normal.
+ * Comandos: HUMANO/PAUSAR/ASESOR <num> [msg], BOT/REANUDAR/ACTIVAR <num>,
+ * ESTADO <num>, y relay "<num> mensaje".
+ */
+async function handleOwnerCommand(
+  companyId: string,
+  config: Awaited<ReturnType<typeof buildBotConfig>>,
+  inbound: InboundMessage,
+): Promise<boolean> {
+  const text = (inbound.text ?? "").trim();
+  if (!text) return false;
+
+  const sender = await loadWhatsappSender(companyId);
+  if (!sender) return false;
+  const ownerTo = (config.payment.notification?.whatsappPhone ?? "").replace(/\D/g, "");
+  const reply = async (msg: string) => {
+    try {
+      await sendText(sender, ownerTo, msg);
+    } catch {
+      /* best-effort */
+    }
+  };
+
+  const m = text.match(/^(HUMANO|PAUSAR|ASESOR|BOT|REANUDAR|ACTIVAR|ESTADO)\s*\+?(\d{8,15})?\s*([\s\S]*)$/i);
+  if (m) {
+    const cmd = m[1].toUpperCase();
+    const num = m[2];
+    const rest = (m[3] ?? "").trim();
+    if (!num) {
+      await reply(`Indica el número del cliente. Ej: *${cmd} 51999888777*`);
+      return true;
+    }
+    const convo = await findConversationByCustomerPhone(companyId, num);
+    if (!convo) {
+      await reply(`No encontré una conversación con ${num}.`);
+      return true;
+    }
+    if (["HUMANO", "PAUSAR", "ASESOR"].includes(cmd)) {
+      await setBotPaused(companyId, convo.id, true);
+      if (rest) await sendHumanReply(companyId, convo.id, rest);
+      await reply(
+        `✅ Tomaste el control de ${num}. El bot quedó pausado.\n` +
+          `Respóndele con: *${num} tu mensaje*\nReactivar el bot: *BOT ${num}*`,
+      );
+      return true;
+    }
+    if (["BOT", "REANUDAR", "ACTIVAR"].includes(cmd)) {
+      await setBotPaused(companyId, convo.id, false);
+      await reply(`✅ Bot reactivado para ${num}. El agente vuelve a responder.`);
+      return true;
+    }
+    if (cmd === "ESTADO") {
+      await reply(`Estado de ${num}: ${convo.botPaused ? "ATENCIÓN HUMANA (bot pausado)" : "BOT ACTIVO"}.`);
+      return true;
+    }
+  }
+
+  // Relay: "<num> mensaje" → responder al cliente (toma control si hace falta)
+  const r = text.match(/^\+?(\d{8,15})\s+([\s\S]+)$/);
+  if (r) {
+    const num = r[1];
+    const msg = r[2].trim();
+    const convo = await findConversationByCustomerPhone(companyId, num);
+    if (!convo) {
+      await reply(`No encontré una conversación con ${num}.`);
+      return true;
+    }
+    if (!convo.botPaused) await setBotPaused(companyId, convo.id, true);
+    await sendHumanReply(companyId, convo.id, msg);
+    return true;
+  }
+
+  // No es un comando: el dueño puede usar el bot como cliente.
+  return false;
 }

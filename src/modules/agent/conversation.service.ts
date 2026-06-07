@@ -198,6 +198,59 @@ export async function sendHumanReply(companyId: string, conversationId: string, 
   });
 }
 
+/** Resuelve una conversación (whatsapp) por el teléfono del cliente. */
+export async function findConversationByCustomerPhone(companyId: string, phone: string) {
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length < 8) return null;
+  let cust = await prisma.customer.findFirst({
+    where: { companyId, phone: `+${digits}` },
+    select: { id: true, phone: true },
+  });
+  if (!cust) {
+    cust = await prisma.customer.findFirst({
+      where: { companyId, phone: { contains: digits.slice(-9) } },
+      select: { id: true, phone: true },
+    });
+  }
+  if (!cust) return null;
+  const convo = await prisma.conversation.findFirst({
+    where: { companyId, customerId: cust.id, channel: "whatsapp" },
+    select: { id: true, botPaused: true, status: true },
+  });
+  return convo
+    ? { id: convo.id, botPaused: convo.botPaused, status: convo.status, customerPhone: cust.phone }
+    : null;
+}
+
+/** Teléfono del cliente de una conversación. */
+export async function getConversationCustomerPhone(
+  companyId: string,
+  conversationId: string,
+): Promise<string | null> {
+  const convo = await prisma.conversation.findFirst({
+    where: { id: conversationId, companyId },
+    select: { customer: { select: { phone: true } } },
+  });
+  return convo?.customer.phone ?? null;
+}
+
+/** Envía un aviso al WhatsApp del dueño (número de notificación de pago). */
+export async function notifyOwner(companyId: string, message: string): Promise<void> {
+  const pay = await prisma.paymentConfig.findUnique({
+    where: { companyId },
+    select: { notificationPhone: true },
+  });
+  const ownerPhone = (pay?.notificationPhone ?? "").replace(/\D/g, "");
+  if (!ownerPhone) return;
+  const sender = await loadWhatsappSender(companyId);
+  if (!sender) return;
+  try {
+    await sendText(sender, ownerPhone, message);
+  } catch {
+    /* best-effort */
+  }
+}
+
 export async function listConversationMessages(
   companyId: string,
   conversationId: string,

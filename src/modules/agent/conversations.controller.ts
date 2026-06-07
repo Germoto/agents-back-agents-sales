@@ -6,6 +6,8 @@ import {
   listConversationMessages,
   setBotPaused,
   sendHumanReply,
+  getConversationCustomerPhone,
+  notifyOwner,
 } from "./conversation.service";
 
 export const listConversationsController = asyncHandler(async (req: Request, res: Response) => {
@@ -22,8 +24,23 @@ export const listMessagesController = asyncHandler(async (req: Request, res: Res
 
 export const pauseConversationController = asyncHandler(async (req: Request, res: Response) => {
   const companyId = req.user!.companyId;
+  const conversationId = String(req.params.id);
   const paused = req.body?.paused !== false; // default true
-  await setBotPaused(companyId, String(req.params.id), paused);
+  await setBotPaused(companyId, conversationId, paused);
+
+  // Avisar al WhatsApp del dueño para que pueda atender desde el cel en paralelo.
+  const phone = await getConversationCustomerPhone(companyId, conversationId);
+  if (phone) {
+    const num = phone.replace(/\D/g, "");
+    await notifyOwner(
+      companyId,
+      paused
+        ? `🟡 Tomaste el control de ${num} desde la web. El bot está pausado.\n` +
+            `Responde desde tu WhatsApp con: *${num} tu mensaje*\nReactivar el bot: *BOT ${num}*`
+        : `🟢 Bot reactivado para ${num}. El agente vuelve a responder.`,
+    );
+  }
+
   res.json({ success: true, data: { paused } });
 });
 
