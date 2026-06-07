@@ -198,6 +198,27 @@ export async function sendHumanReply(companyId: string, conversationId: string, 
   });
 }
 
+/**
+ * Reinicia el contexto de una conversación (para pruebas / comando "reset" del
+ * cliente): borra historial, carrito y estado; reactiva el bot.
+ */
+export async function resetConversation(
+  companyId: string,
+  conversationId: string,
+  customerId: string,
+): Promise<void> {
+  await prisma.conversationMessage.deleteMany({ where: { companyId, conversationId } });
+  await prisma.cart.deleteMany({ where: { companyId, customerId } });
+  await prisma.conversation.update({
+    where: { id: conversationId },
+    data: { state: {}, status: "OPEN", botPaused: false, lastInboundId: null },
+  });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
+    conversationId,
+    reset: true,
+  });
+}
+
 /** Resuelve una conversación (whatsapp) por el teléfono del cliente. */
 export async function findConversationByCustomerPhone(companyId: string, phone: string) {
   const digits = phone.replace(/\D/g, "");

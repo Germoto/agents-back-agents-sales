@@ -19,6 +19,7 @@ import {
   setBotPaused,
   sendHumanReply,
   findConversationByCustomerPhone,
+  resetConversation,
   type ConversationState,
 } from "./conversation.service";
 import { loadWhatsappSender, sendText, sendMedia, type WhatsappSender } from "./outbound";
@@ -47,6 +48,12 @@ function isPhoneAllowed(fromPhone: string, allow: string[]): boolean {
     }
   }
   return false;
+}
+
+/** Comando del cliente para limpiar el contexto y probar de cero (como en n8n). */
+function isResetCommand(text: string | null | undefined): boolean {
+  const t = (text ?? "").trim().toLowerCase();
+  return t === "reset" || t === "/reset" || t === "reiniciar" || t === "reinicia";
 }
 
 async function resolveCompanyByAccount(account: string | null): Promise<string | null> {
@@ -132,6 +139,32 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
 
   // Idempotencia: si ya procesamos este messageId, no repetir
   if (inbound.messageId && convo.lastInboundId === inbound.messageId) {
+    return;
+  }
+
+  // Comando "reset" del cliente: limpia historial/carrito/estado para probar de cero.
+  if (isResetCommand(inbound.text)) {
+    await markInboundProcessed(convo.conversationId, inbound.messageId);
+    await resetConversation(companyId, convo.conversationId, convo.customerId);
+    await cancelPendingReminders(companyId, convo.customerId, [
+      ScheduledMessageType.ABANDONED_CART,
+      ScheduledMessageType.LEFT_ON_READ,
+      ScheduledMessageType.OFFER_COUNTDOWN,
+      ScheduledMessageType.POST_SALE,
+      ScheduledMessageType.CUSTOM,
+    ]);
+    const sender = await loadWhatsappSender(companyId);
+    if (sender) {
+      try {
+        await sendText(
+          sender,
+          inbound.fromPhone,
+          "♻️ Listo, reinicié nuestra conversación. Empecemos de cero 🙂 ¿En qué te ayudo?",
+        );
+      } catch {
+        /* best-effort */
+      }
+    }
     return;
   }
 
