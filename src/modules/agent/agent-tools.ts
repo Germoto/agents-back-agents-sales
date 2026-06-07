@@ -433,6 +433,11 @@ export async function executeTool(
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
       ctx.state.selectedProductId = product.id;
+      const presented = Array.isArray(ctx.state.presentedProductIds) ? ctx.state.presentedProductIds : [];
+      if (presented.includes(product.id)) {
+        return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la ficha de este producto en esta conversación. NO la reenvíes; responde la consulta del cliente directamente con la base de conocimiento (faq, objeciones, descripción)." });
+      }
+      ctx.state.presentedProductIds = [...presented, product.id];
       ctx.outbox.push({ kind: "text", text: renderProductFicha(product) });
       return JSON.stringify({ ok: true, sent: true, nota: "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) al cliente. NO la repitas en tu texto final." });
     }
@@ -451,6 +456,10 @@ export async function executeTool(
     case "enviar_multimedia": {
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
+      const mediaSent = Array.isArray(ctx.state.mediaSentProductIds) ? ctx.state.mediaSentProductIds : [];
+      if (mediaSent.includes(product.id)) {
+        return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la multimedia de este producto en esta conversación. NO la reenvíes; responde la consulta del cliente directamente." });
+      }
       const wanted = String(args.kind ?? "all");
       const files = (product.files ?? []).filter((f) => {
         if (wanted === "all") return true;
@@ -466,6 +475,7 @@ export async function executeTool(
           caption: f.description || undefined,
         });
       }
+      ctx.state.mediaSentProductIds = [...mediaSent, product.id];
       return JSON.stringify({ ok: true, sent: Math.min(files.length, 6), nota: "Ya envié los archivos (con su texto) al cliente. NO repitas ni describas su contenido en tu texto final; cierra breve o deja el texto vacío." });
     }
 

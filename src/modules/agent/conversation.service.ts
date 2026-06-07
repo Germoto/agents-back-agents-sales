@@ -21,6 +21,10 @@ export interface ConversationState {
   lastPaymentPromptAt?: string | null;
   pendingAction?: string | null;
   offerExpiresAt?: string | null;
+  /** Productos cuya ficha ya se envió en esta conversación (evita reenviarla). */
+  presentedProductIds?: string[];
+  /** Productos cuya multimedia ya se envió en esta conversación. */
+  mediaSentProductIds?: string[];
   [key: string]: unknown;
 }
 
