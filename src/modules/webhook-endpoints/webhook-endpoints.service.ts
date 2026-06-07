@@ -97,14 +97,23 @@ export async function deleteWebhookEndpoint(companyId: string, id: string) {
   return { ok: true };
 }
 
-export async function listEndpointEvents(companyId: string, endpointId: string, limit = 50) {
+export async function listEndpointEvents(
+  companyId: string,
+  endpointId: string,
+  page = 1,
+  limit = 20,
+) {
   const existing = await prisma.webhookEndpoint.findFirst({ where: { id: endpointId, companyId } });
   if (!existing) throw new AppError("Endpoint no encontrado", 404);
 
-  return prisma.webhookEvent.findMany({
+  const take = Math.min(Math.max(limit, 1), 100);
+  const skip = Math.max(page - 1, 0) * take;
+  // Pedimos take+1 para saber si hay página siguiente sin un count extra.
+  const rows = await prisma.webhookEvent.findMany({
     where: { endpointId },
     orderBy: { receivedAt: "desc" },
-    take: Math.min(limit, 100),
+    skip,
+    take: take + 1,
     select: {
       id: true,
       source: true,
@@ -116,4 +125,6 @@ export async function listEndpointEvents(companyId: string, endpointId: string, 
       receivedAt: true,
     },
   });
+  const hasMore = rows.length > take;
+  return { items: hasMore ? rows.slice(0, take) : rows, hasMore };
 }

@@ -26,15 +26,24 @@ export const followupConfigSchema = z
   .nullable()
   .optional();
 
-export const upsertAgentConfigSchema = z.object({
+// Núcleo de Agente IA (modelo + prompt). Recordatorios y modo de respuesta se
+// guardan por separado (módulos Recordatorios y Pruebas) para no pisarlos.
+export const coreAgentConfigSchema = z.object({
   openaiModel: z.string().min(1).default("gpt-4o-mini"),
   openaiApiKey: z.string().min(1, "openaiApiKey es obligatoria"),
   temperature: z.coerce.number().min(0).max(2).default(0.25),
   basePrompt: z.string().min(1),
   salesStyle: z.string().min(1),
   rules: z.array(z.string().min(1)).default([]),
+});
+
+// PUT /agent-config/reminders — solo followupConfig.
+export const remindersConfigSchema = z.object({
   followupConfig: followupConfigSchema,
-  // Modo de respuesta: OPEN responde a todos; ALLOWLIST solo a testNumbers (prueba).
+});
+
+// PUT /agent-config/reply-mode — solo modo de respuesta (módulo Pruebas).
+export const replyModeConfigSchema = z.object({
   replyMode: z.enum(["OPEN", "ALLOWLIST"]).default("OPEN"),
   testNumbers: z.array(z.string().min(1)).default([]),
 });

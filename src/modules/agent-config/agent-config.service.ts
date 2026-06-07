@@ -37,6 +37,8 @@ export async function getAgentConfig(companyId: string) {
   return mapAgentConfig(config);
 }
 
+// Guarda solo el NÚCLEO (modelo + prompt). NO toca followupConfig/replyMode/
+// testNumbers: esos se manejan en sus propios endpoints (Recordatorios y Pruebas).
 export async function upsertAgentConfig(companyId: string, data: {
   openaiModel: string;
   openaiApiKey: string;
@@ -44,34 +46,49 @@ export async function upsertAgentConfig(companyId: string, data: {
   basePrompt: string;
   salesStyle: string;
   rules: string[];
-  followupConfig?: Record<string, unknown> | null;
-  replyMode?: string;
-  testNumbers?: string[];
 }) {
-  const { followupConfig, testNumbers, replyMode, ...rest } = data;
-  const followupValue: Prisma.InputJsonValue | typeof Prisma.JsonNull =
-    followupConfig == null ? Prisma.JsonNull : (followupConfig as Prisma.InputJsonValue);
-  const testNumbersValue: Prisma.InputJsonValue = (testNumbers ?? []) as Prisma.InputJsonValue;
-  const replyModeValue = replyMode === "ALLOWLIST" ? "ALLOWLIST" : "OPEN";
-
+  const core = {
+    openaiModel: data.openaiModel,
+    openaiApiKey: data.openaiApiKey,
+    temperature: data.temperature.toString(),
+    basePrompt: data.basePrompt,
+    salesStyle: data.salesStyle,
+    rules: data.rules as Prisma.InputJsonValue,
+  };
   const config = await prisma.agentConfig.upsert({
     where: { companyId },
-    update: {
-      ...rest,
-      temperature: data.temperature.toString(),
-      followupConfig: followupValue,
-      replyMode: replyModeValue,
-      testNumbers: testNumbersValue,
-    },
-    create: {
-      companyId,
-      ...rest,
-      temperature: data.temperature.toString(),
-      followupConfig: followupValue,
-      replyMode: replyModeValue,
-      testNumbers: testNumbersValue,
+    update: core,
+    create: { companyId, ...core },
+  });
+  return mapAgentConfig(config);
+}
+
+// Actualiza solo los recordatorios (followupConfig). El registro ya existe (onboarding).
+export async function updateAgentReminders(
+  companyId: string,
+  followupConfig: Record<string, unknown> | null,
+) {
+  const value: Prisma.InputJsonValue | typeof Prisma.JsonNull =
+    followupConfig == null ? Prisma.JsonNull : (followupConfig as Prisma.InputJsonValue);
+  const config = await prisma.agentConfig.update({
+    where: { companyId },
+    data: { followupConfig: value },
+  });
+  return mapAgentConfig(config);
+}
+
+// Actualiza solo el modo de respuesta (módulo Pruebas).
+export async function updateAgentReplyMode(
+  companyId: string,
+  replyMode: string,
+  testNumbers: string[],
+) {
+  const config = await prisma.agentConfig.update({
+    where: { companyId },
+    data: {
+      replyMode: replyMode === "ALLOWLIST" ? "ALLOWLIST" : "OPEN",
+      testNumbers: (testNumbers ?? []) as Prisma.InputJsonValue,
     },
   });
-
   return mapAgentConfig(config);
 }

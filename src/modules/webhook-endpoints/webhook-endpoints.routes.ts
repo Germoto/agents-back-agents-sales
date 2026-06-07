@@ -85,9 +85,10 @@ router.get(
   validate({ params: idParamsSchema }),
   asyncHandler(async (req: Request, res: Response) => {
     const companyId = req.user!.companyId;
-    const limit = req.query.limit ? Number(req.query.limit) : 50;
-    const data = await listEndpointEvents(companyId, String(req.params.id), limit);
-    res.json({ success: true, data });
+    const page = req.query.page ? Number(req.query.page) : 1;
+    const limit = req.query.limit ? Number(req.query.limit) : 20;
+    const { items, hasMore } = await listEndpointEvents(companyId, String(req.params.id), page, limit);
+    res.json({ success: true, data: items, hasMore });
   }),
 );
 
