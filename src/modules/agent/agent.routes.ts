@@ -7,6 +7,8 @@ import {
   listMessagesController,
   pauseConversationController,
   replyConversationController,
+  resetConversationController,
+  setStateController,
 } from "./conversations.controller";
 import { listBookingsController, updateBookingStatusController } from "./bookings.controller";
 
@@ -21,6 +23,8 @@ router.get("/conversations", requireAuth, listConversationsController);
 router.get("/conversations/:id/messages", requireAuth, listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);
+router.post("/conversations/:id/reset", requireAuth, resetConversationController);
+router.post("/conversations/:id/state", requireAuth, setStateController);
 
 // Reservas de servicios (panel)
 router.get("/bookings", requireAuth, listBookingsController);

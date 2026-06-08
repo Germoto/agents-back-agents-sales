@@ -165,6 +165,7 @@ export async function listConversations(companyId: string, limit = 50) {
       id: true,
       status: true,
       botPaused: true,
+      state: true,
       lastMessageAt: true,
       customer: { select: { id: true, phone: true, name: true } },
       messages: {
@@ -178,10 +179,53 @@ export async function listConversations(companyId: string, limit = 50) {
     id: c.id,
     status: c.status,
     botPaused: c.botPaused,
+    // Etapa del embudo (state.status). Distinto de `status` (OPEN/HUMAN/CLOSED).
+    funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
     lastMessageAt: c.lastMessageAt,
     customer: c.customer,
     lastMessage: c.messages[0] ?? null,
   }));
+}
+
+/**
+ * Setea/corrige el estado del embudo (state.status) y opcionalmente limpia el
+ * producto seleccionado. Mergea sobre el state actual (no borra historial). Sirve
+ * para que, tras un asesor humano, el bot retome con el estado correcto.
+ */
+export async function setConversationState(
+  companyId: string,
+  conversationId: string,
+  patch: { status?: string; clearSelectedProduct?: boolean },
+): Promise<ConversationState> {
+  const convo = await prisma.conversation.findFirst({
+    where: { id: conversationId, companyId },
+    select: { state: true },
+  });
+  if (!convo) throw new AppError("Conversación no encontrada", 404);
+  const state = ((convo.state as ConversationState) ?? {}) as ConversationState;
+  if (patch.status !== undefined) state.status = patch.status;
+  if (patch.clearSelectedProduct) state.selectedProductId = null;
+  await prisma.conversation.update({
+    where: { id: conversationId },
+    data: { state: state as Prisma.InputJsonValue },
+  });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
+    conversationId,
+    stateUpdated: true,
+  });
+  return state;
+}
+
+/** customerId de una conversación (para reset/cancelar recordatorios desde el panel). */
+export async function getConversationCustomerId(
+  companyId: string,
+  conversationId: string,
+): Promise<string | null> {
+  const convo = await prisma.conversation.findFirst({
+    where: { id: conversationId, companyId },
+    select: { customerId: true },
+  });
+  return convo?.customerId ?? null;
 }
 
 /** Envía un mensaje manual (humano/asesor) al cliente por WhatsApp y lo registra. */
@@ -293,18 +337,23 @@ export async function listConversationMessages(
   });
 }
 
-/** Construye el historial (ultimos N turnos) en formato OpenAI. */
+/**
+ * Construye el historial (ultimos N turnos) en formato OpenAI. Incluye los
+ * mensajes del ASESOR HUMANO (rol ADMIN), mapeados como "assistant", para que el
+ * bot tenga continuidad de lo que se conversó durante el control humano.
+ */
 export async function buildHistory(conversationId: string): Promise<ChatMessage[]> {
   const limit = env.AGENT_HISTORY_LIMIT;
   const rows = await prisma.conversationMessage.findMany({
-    where: { conversationId, role: { in: ["USER", "ASSISTANT"] } },
+    where: { conversationId, role: { in: ["USER", "ASSISTANT", "ADMIN"] } },
     orderBy: { createdAt: "desc" },
     take: limit,
     select: { role: true, message: true, mediaUrl: true },
   });
   rows.reverse();
   return rows.map((r) => {
-    const role: "user" | "assistant" = r.role === "ASSISTANT" ? "assistant" : "user";
+    // ADMIN (humano) cuenta como lado del negocio = assistant; USER = cliente.
+    const role: "user" | "assistant" = r.role === "USER" ? "user" : "assistant";
     let content = r.message ?? "";
     if (!content && r.mediaUrl) content = "[el cliente envió un archivo adjunto]";
     return { role, content };
