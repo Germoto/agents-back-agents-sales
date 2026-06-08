@@ -536,6 +536,15 @@ export async function executeTool(
     }
 
     case "validar_pago": {
+      // Guard de secuencia: no se puede validar si nunca se enviaron los métodos de
+      // pago al cliente (no tendría cómo pagar). Evita que el bot pida el nombre y
+      // valide saltándose enviar_metodos_pago.
+      if (!ctx.state.lastPaymentPromptAt) {
+        return JSON.stringify({
+          ok: false,
+          error: "Aún no enviaste los métodos de pago al cliente. Usa primero enviar_metodos_pago; recién cuando el cliente diga que pagó, pídele el nombre del titular y valida.",
+        });
+      }
       const payerName = String(args.payerName ?? "").trim();
       if (!payerName) return JSON.stringify({ ok: false, error: "falta el nombre del titular" });
 
