@@ -187,35 +187,6 @@ export async function listConversations(companyId: string, limit = 50) {
   }));
 }
 
-/**
- * Setea/corrige el estado del embudo (state.status) y opcionalmente limpia el
- * producto seleccionado. Mergea sobre el state actual (no borra historial). Sirve
- * para que, tras un asesor humano, el bot retome con el estado correcto.
- */
-export async function setConversationState(
-  companyId: string,
-  conversationId: string,
-  patch: { status?: string; clearSelectedProduct?: boolean },
-): Promise<ConversationState> {
-  const convo = await prisma.conversation.findFirst({
-    where: { id: conversationId, companyId },
-    select: { state: true },
-  });
-  if (!convo) throw new AppError("Conversación no encontrada", 404);
-  const state = ((convo.state as ConversationState) ?? {}) as ConversationState;
-  if (patch.status !== undefined) state.status = patch.status;
-  if (patch.clearSelectedProduct) state.selectedProductId = null;
-  await prisma.conversation.update({
-    where: { id: conversationId },
-    data: { state: state as Prisma.InputJsonValue },
-  });
-  socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
-    conversationId,
-    stateUpdated: true,
-  });
-  return state;
-}
-
 /** customerId de una conversación (para reset/cancelar recordatorios desde el panel). */
 export async function getConversationCustomerId(
   companyId: string,

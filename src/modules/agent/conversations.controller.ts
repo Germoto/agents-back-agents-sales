@@ -9,23 +9,10 @@ import {
   sendHumanReply,
   getConversationCustomerPhone,
   getConversationCustomerId,
-  setConversationState,
   resetConversation,
   notifyOwner,
 } from "./conversation.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
-
-// Etapas del embudo que un admin puede setear a mano (state.status).
-const SETTABLE_FUNNEL_STATUSES = [
-  "NUEVO",
-  "ESPERANDO_PAGO",
-  "ESPERANDO_VALIDACION",
-  "PAGADO",
-  "ENTREGADO",
-  "PEDIDO_REGISTRADO",
-  "RESERVA_SOLICITADA",
-  "ASESOR_HUMANO",
-];
 
 export const listConversationsController = asyncHandler(async (req: Request, res: Response) => {
   const companyId = req.user!.companyId;
@@ -85,20 +72,4 @@ export const resetConversationController = asyncHandler(async (req: Request, res
     ScheduledMessageType.CUSTOM,
   ]);
   res.json({ success: true });
-});
-
-// Setear/corregir el estado del embudo (state.status) sin borrar el historial.
-export const setStateController = asyncHandler(async (req: Request, res: Response) => {
-  const companyId = req.user!.companyId;
-  const conversationId = String(req.params.id);
-  const status = req.body?.status as string | undefined;
-  const clearSelectedProduct = req.body?.clearSelectedProduct === true;
-  if (status !== undefined && !SETTABLE_FUNNEL_STATUSES.includes(status)) {
-    throw new AppError("Estado no válido", 400);
-  }
-  if (status === undefined && !clearSelectedProduct) {
-    throw new AppError("Nada que actualizar", 400);
-  }
-  const state = await setConversationState(companyId, conversationId, { status, clearSelectedProduct });
-  res.json({ success: true, data: { status: state.status ?? null } });
 });
