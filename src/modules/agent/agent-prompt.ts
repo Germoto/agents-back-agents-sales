@@ -81,14 +81,15 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
       `   objeciones: ${p.objections.slice(0, 4).map((o) => `${o.question} -> ${o.answer}`).join(" | ")}`,
     );
   if (p.files?.length) {
-    // Listamos cada archivo con su id, tipo y descripción para que el modelo
-    // pueda responder desde esas descripciones y enviar SOLO el archivo que
-    // corresponda (enviar_multimedia con fileIds=[id]).
+    // Listamos cada archivo con su id, tipo, descripción y si entra en la
+    // presentación inicial. Así el modelo puede responder desde esas descripciones
+    // y enviar SOLO el archivo que corresponda (enviar_multimedia con fileIds=[id]).
     const fileLines = p.files.slice(0, 8).map((f) => {
       const desc = (f.description ?? "").replace(/\s+/g, " ").trim().slice(0, 90);
-      return `[${f.id}] ${f.type}${desc ? ` — ${desc}` : ""}`;
+      const tag = (f as { showInPresentation?: boolean }).showInPresentation === false ? "on-demand" : "presentación";
+      return `[${f.id}] ${f.type} (${tag})${desc ? ` — ${desc}` : ""}`;
     });
-    parts.push(`   multimedia (envía solo el que aplique con enviar_multimedia fileIds=[id]):\n     ${fileLines.join("\n     ")}`);
+    parts.push(`   multimedia — en la presentación inicial, enviar_multimedia (sin fileIds) manda solo los marcados "presentación"; los "on-demand" se envían solo si el cliente los pide o su consulta se relaciona, usando enviar_multimedia fileIds=[id]:\n     ${fileLines.join("\n     ")}`);
   }
   if (p.productType === "physical" && p.physicalDelivery) {
     const d = p.physicalDelivery;

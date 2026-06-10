@@ -493,19 +493,21 @@ export async function executeTool(
         return JSON.stringify({ ok: true, sent: Math.min(files.length, 6), nota: "Ya reenvié el/los archivo(s) pedido(s) al cliente. NO describas su contenido en tu texto final; cierra breve o deja el texto vacío." });
       }
 
-      // Envío BULK por tipo (presentación inicial): con guard para no re-dumpear
-      // todo en cada seguimiento. Para reenviar algo puntual, usa fileIds.
+      // Envío BULK (presentación/info inicial): solo los archivos marcados para la
+      // presentación (showInPresentation). Con guard para no re-dumpear todo en
+      // cada seguimiento. Para enviar algo puntual (marcado o no), usa fileIds.
       const mediaSent = Array.isArray(ctx.state.mediaSentProductIds) ? ctx.state.mediaSentProductIds : [];
       if (mediaSent.includes(product.id)) {
-        return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la multimedia de este producto. Si el cliente pide un archivo puntual o su consulta se relaciona con uno, reenvíalo con enviar_multimedia pasando su fileId en `fileIds`; si no, responde su consulta directamente sin reenviar todo." });
+        return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la multimedia de presentación de este producto. Si el cliente pide un archivo puntual o su consulta se relaciona con uno, reenvíalo con enviar_multimedia pasando su fileId en `fileIds`; si no, responde su consulta directamente sin reenviar todo." });
       }
       const wanted = String(args.kind ?? "all");
       const files = allFiles.filter((f) => {
+        if (!f.showInPresentation) return false; // fuera de la presentación: solo on-demand vía fileIds
         if (wanted === "all") return true;
         if (wanted === "pdf") return f.type === "pdf";
         return f.type === wanted;
       });
-      if (!files.length) return JSON.stringify({ ok: false, error: "el producto no tiene multimedia de ese tipo" });
+      if (!files.length) return JSON.stringify({ ok: true, sent: 0, nota: "Este producto no tiene archivos marcados para la presentación inicial. No envíes multimedia ahora; si el cliente pide un archivo específico, búscalo en la lista del catálogo y mándalo con fileIds." });
       for (const f of files.slice(0, 6)) {
         ctx.outbox.push({
           kind: "media",

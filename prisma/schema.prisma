@@ -337,6 +337,10 @@ model ProductFile {
   size         Int             @default(0)
   description  String          @default("")
   sortOrder    Int             @default(0)
+  // Si true, el archivo se incluye en la presentación/info inicial del producto
+  // (envío bulk). Si false, queda disponible solo on-demand (el bot lo manda por
+  // fileIds cuando el cliente lo pide o la consulta se relaciona con él).
+  showInPresentation Boolean    @default(true)
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
   product      Product         @relation(fields: [productId], references: [id], onDelete: Cascade)

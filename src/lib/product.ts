@@ -80,6 +80,7 @@ export function mapAdminProduct(product: ProductWithRelations) {
       size: file.size,
       description: file.description,
       sortOrder: file.sortOrder,
+      showInPresentation: file.showInPresentation,
     })),
     digitalDelivery: product.digitalDelivery,
     physicalDelivery: product.physicalDelivery
@@ -151,6 +152,7 @@ export function mapBotProduct(
       originalName: file.originalName || null,
       description: file.description,
       sortOrder: file.sortOrder,
+      showInPresentation: file.showInPresentation,
     })),
     digitalDelivery:
       product.productType === "DIGITAL"

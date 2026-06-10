@@ -28,6 +28,8 @@ const productFileSchema = z.object({
   size: z.coerce.number().int().min(0).default(0),
   description: z.string().default(""),
   sortOrder: z.coerce.number().int().min(0).default(0),
+  // Incluir en la presentación/info inicial del producto (envío bulk). Default true.
+  showInPresentation: z.boolean().default(true),
 });
 
 export const productBodySchema = z.object({

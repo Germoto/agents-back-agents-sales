@@ -40,6 +40,7 @@ type ProductPayload = {
     size: number;
     description: string;
     sortOrder: number;
+    showInPresentation?: boolean;
   }>;
   digitalDelivery?: {
     link?: string;
@@ -131,6 +132,7 @@ async function syncProductFiles(
       size: file.size ?? 0,
       description: file.description ?? "",
       sortOrder: file.sortOrder ?? 0,
+      showInPresentation: file.showInPresentation ?? true,
     } satisfies Prisma.ProductFileUncheckedUpdateInput;
 
     if (file.id && existingById.has(file.id)) {
