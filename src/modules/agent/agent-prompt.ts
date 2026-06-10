@@ -80,8 +80,16 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
     parts.push(
       `   objeciones: ${p.objections.slice(0, 4).map((o) => `${o.question} -> ${o.answer}`).join(" | ")}`,
     );
-  const mediaCount = p.files?.length ?? 0;
-  if (mediaCount) parts.push(`   multimedia disponible: ${mediaCount} archivo(s)`);
+  if (p.files?.length) {
+    // Listamos cada archivo con su id, tipo y descripción para que el modelo
+    // pueda responder desde esas descripciones y enviar SOLO el archivo que
+    // corresponda (enviar_multimedia con fileIds=[id]).
+    const fileLines = p.files.slice(0, 8).map((f) => {
+      const desc = (f.description ?? "").replace(/\s+/g, " ").trim().slice(0, 90);
+      return `[${f.id}] ${f.type}${desc ? ` — ${desc}` : ""}`;
+    });
+    parts.push(`   multimedia (envía solo el que aplique con enviar_multimedia fileIds=[id]):\n     ${fileLines.join("\n     ")}`);
+  }
   if (p.productType === "physical" && p.physicalDelivery) {
     const d = p.physicalDelivery;
     const env: string[] = [];
@@ -184,11 +192,12 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "- Usa SOLO el catálogo entregado. No inventes productos, precios, stock, bonos, garantías, métodos de pago ni zonas de envío. Si un dato puntual no está, dilo con naturalidad y ayuda con lo que sí sabes (NO derives por esto).",
     "- Usa enviar_catalogo SOLO cuando el cliente pida ver opciones EN GENERAL (qué vendes, qué tienes, muéstrame todo) o cuando no logres identificar a qué producto se refiere. Si el cliente NOMBRA o pide info de un producto específico (aunque salude a la vez, ej. 'hola quiero info del pack mundial'), identifícalo con buscar_producto y ve DIRECTO a su ficha; NO le mandes el catálogo. Si el negocio tiene un solo producto, NUNCA mandes el catálogo: preséntalo directo.",
     "- La PRIMERA vez que el cliente muestra interés en un producto (lo elige o pregunta por él), preséntalo en esta SECUENCIA: 1) enviar_ficha (descripción, beneficios, qué incluye y bonos configurados); 2) enviar_multimedia (fotos/PDF/video); 3) cierre breve preguntando si quiere comprarlo. No mandes los archivos sueltos sin la ficha; si son varios, prioriza la muestra y lo más persuasivo (no satures).",
-    "- Para preguntas POSTERIORES sobre un producto que YA presentaste (mira 'presented' en el estado), responde DIRECTAMENTE la duda con la base de conocimiento (descripción, beneficios, incluye, faq, objeciones). NO reenvíes la ficha ni la multimedia salvo que el cliente lo pida explícitamente.",
+    "- Para preguntas POSTERIORES sobre un producto que YA presentaste (mira 'presented' en el estado), responde DIRECTAMENTE la duda con la base de conocimiento (descripción, beneficios, incluye, faq, objeciones). NO reenvíes la ficha completa ni TODA la multimedia. PERO si el cliente RE-pide un archivo/muestra (ej. 'reenvíame el archivo', 'mándame la muestra de nuevo'), o su consulta se relaciona con un archivo concreto, SÍ envíaselo: usa enviar_multimedia con `fileIds` apuntando SOLO a ese archivo (nunca respondas 'ya te lo envié antes' negándote a reenviar).",
+    "- Cada producto trae sus archivos listados en el catálogo con un id y una descripción. Usa esas descripciones para responder consultas; cuando lo que pregunta el cliente coincide con un archivo (ej. una muestra, una guía, un demo), envía SOLO ese archivo con enviar_multimedia fileIds=[id] junto a tu respuesta.",
     "- NO agregues al carrito ni envíes métodos de pago solo porque el cliente mencione o pregunte por un producto. Primero preséntalo y resuelve sus dudas/objeciones con la base de conocimiento (faq, objeciones, beneficios). Agrega al carrito (agregar_carrito) o cobra (enviar_metodos_pago) SOLO cuando el cliente confirme que quiere comprarlo.",
     "- Puedes ofrecer y vender MÚLTIPLES productos del catálogo. Usa el carrito si el cliente quiere más de uno.",
     "- Responde preguntas abiertas usando la base de conocimiento del producto (descripción, beneficios, incluye, bonos, faq, objeciones). No te limites a un guion: si el cliente pregunta algo, contéstalo.",
-    "- Para mostrar imágenes/PDF/video usa la herramienta enviar_multimedia. Para dar métodos de pago usa enviar_metodos_pago (nunca escribas números de pago en texto libre).",
+    "- Para mostrar archivos (imágenes, PDF, video, audio u otros) usa la herramienta enviar_multimedia; ella los envía con el formato correcto según el tipo. Para dar métodos de pago usa enviar_metodos_pago (nunca escribas números de pago en texto libre).",
     "- NUNCA reveles el enlace de entrega digital antes de que el pago esté APROBADO. Puedes explicar cómo es la entrega sin dar el link.",
     "- SECUENCIA DE PAGO (obligatoria): cuando el cliente confirme que quiere comprar, lo PRIMERO es usar enviar_metodos_pago — esa herramienta ya le envía el monto y los datos de pago. NUNCA pidas el nombre del titular ni llames a validar_pago si todavía no enviaste los métodos de pago en esta conversación (el cliente no tendría cómo pagar). No mezcles los pasos: no pidas el nombre 'para enviarte los métodos'; los métodos los manda la herramienta, no el nombre. Recién DESPUÉS de enviarlos, espera a que el cliente diga que ya pagó y entonces pídele el nombre del titular que aparece en su Yape/Plin y llama a validar_pago. Solo entrega el producto digital (entregar_producto) cuando validar_pago confirme APROBADO.",
     "- Productos DIGITALES: informa, cobra, valida el pago y entrega el acceso. Nunca pidas dirección ni datos de envío.",

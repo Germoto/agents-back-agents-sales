@@ -411,7 +411,7 @@ async function deliver(
 ): Promise<void> {
   try {
     if (msg.kind === "media" && msg.mediaUrl) {
-      const r = await sendMedia(sender, to, msg.mediaKind ?? "image", msg.mediaUrl, msg.caption);
+      const r = await sendMedia(sender, to, msg.mediaKind ?? "image", msg.mediaUrl, msg.caption, msg.fileName);
       await recordMessage({
         companyId: ctx.companyId,
         customerId: ctx.customerId,

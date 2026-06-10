@@ -145,8 +145,10 @@ export function mapBotProduct(
       sortOrder: variant.sortOrder,
     })),
     files: product.files.map((file) => ({
+      id: file.id,
       type: file.type.toLowerCase(),
       url: file.url,
+      originalName: file.originalName || null,
       description: file.description,
       sortOrder: file.sortOrder,
     })),

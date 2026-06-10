@@ -34,6 +34,8 @@ export interface OutboxMessage {
   mediaUrl?: string;
   mediaKind?: "image" | "document" | "video" | "audio";
   caption?: string;
+  /** nombre original del archivo (documentos): se usa como document_name en SMS Tools. */
+  fileName?: string;
 }
 
 export interface TurnContext {
@@ -209,14 +211,19 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "enviar_multimedia",
       description:
-        "Envía al cliente los archivos (imágenes, PDF, video) de un producto. Úsalo cuando pida fotos, ficha, material o pruebas visuales.",
+        "Envía al cliente los archivos (imágenes, PDF, video, audio u otros) de un producto. Úsalo cuando pida fotos, una muestra, ficha o material; también cuando el cliente RE-pida un archivo que ya enviaste (reenvíaselo) o cuando su consulta se relacione con un archivo concreto: en ese caso envía SOLO ese archivo pasando su id en `fileIds`. Cada archivo y su descripción están en el catálogo del producto.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["productId"],
         properties: {
           productId: { type: "string", description: "id del producto" },
-          kind: { type: "string", enum: ["image", "pdf", "video", "all"], description: "tipo de archivo; 'all' envía todos" },
+          fileIds: {
+            type: "array",
+            items: { type: "string" },
+            description: "ids de los archivos concretos a enviar (de la lista de multimedia del producto). Úsalo para enviar SOLO el/los archivo(s) que el cliente pide o que se relacionan con su consulta; si lo pasas, se envían esos sin importar si ya se enviaron antes.",
+          },
+          kind: { type: "string", enum: ["image", "pdf", "video", "audio", "all"], description: "filtra por tipo cuando NO indicas fileIds; 'all' envía todos" },
         },
       },
     },
@@ -425,6 +432,11 @@ export async function executeTool(
           faqs: product.faqs,
           objections: product.objections,
           hasMedia: (product.files?.length ?? 0) > 0,
+          media: (product.files ?? []).slice(0, 8).map((f) => ({
+            id: f.id,
+            type: f.type,
+            description: f.description ?? null,
+          })),
         },
       });
     }
@@ -456,12 +468,39 @@ export async function executeTool(
     case "enviar_multimedia": {
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
+      const allFiles = product.files ?? [];
+
+      // Envío TARGETED: el modelo indica archivos concretos (los que el cliente
+      // pide o que se relacionan con su consulta). Se envían siempre, sin guard
+      // (cubre reenvíos explícitos y el "manda solo ese archivo").
+      const requestedIds = Array.isArray(args.fileIds)
+        ? args.fileIds.map((x: unknown) => String(x)).filter(Boolean)
+        : [];
+      if (requestedIds.length) {
+        const files = allFiles.filter((f) => requestedIds.includes(f.id));
+        if (!files.length) {
+          return JSON.stringify({ ok: false, error: "no encontré ese archivo en el producto; revisa los ids de multimedia del catálogo" });
+        }
+        for (const f of files.slice(0, 6)) {
+          ctx.outbox.push({
+            kind: "media",
+            mediaUrl: f.url,
+            mediaKind: mediaKindFor(f.type), // image|video|audio → media; pdf/other → document
+            caption: f.description || undefined,
+            fileName: f.originalName || undefined,
+          });
+        }
+        return JSON.stringify({ ok: true, sent: Math.min(files.length, 6), nota: "Ya reenvié el/los archivo(s) pedido(s) al cliente. NO describas su contenido en tu texto final; cierra breve o deja el texto vacío." });
+      }
+
+      // Envío BULK por tipo (presentación inicial): con guard para no re-dumpear
+      // todo en cada seguimiento. Para reenviar algo puntual, usa fileIds.
       const mediaSent = Array.isArray(ctx.state.mediaSentProductIds) ? ctx.state.mediaSentProductIds : [];
       if (mediaSent.includes(product.id)) {
-        return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la multimedia de este producto en esta conversación. NO la reenvíes; responde la consulta del cliente directamente." });
+        return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la multimedia de este producto. Si el cliente pide un archivo puntual o su consulta se relaciona con uno, reenvíalo con enviar_multimedia pasando su fileId en `fileIds`; si no, responde su consulta directamente sin reenviar todo." });
       }
       const wanted = String(args.kind ?? "all");
-      const files = (product.files ?? []).filter((f) => {
+      const files = allFiles.filter((f) => {
         if (wanted === "all") return true;
         if (wanted === "pdf") return f.type === "pdf";
         return f.type === wanted;
@@ -473,6 +512,7 @@ export async function executeTool(
           mediaUrl: f.url,
           mediaKind: mediaKindFor(f.type),
           caption: f.description || undefined,
+          fileName: f.originalName || undefined,
         });
       }
       ctx.state.mediaSentProductIds = [...mediaSent, product.id];

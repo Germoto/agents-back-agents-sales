@@ -67,6 +67,7 @@ export async function sendMedia(
   kind: "image" | "document" | "video" | "audio",
   mediaUrl: string,
   caption?: string,
+  fileName?: string,
 ): Promise<SendResult> {
   const res = await smsTools.sendMedia(
     { apiUrl: sender.apiUrl, secret: sender.secret },
@@ -75,6 +76,7 @@ export async function sendMedia(
     kind,
     mediaUrl,
     caption,
+    fileName,
   );
   return { gatewayId: gatewayIdOf(res) };
 }
