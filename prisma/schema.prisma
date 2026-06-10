@@ -365,6 +365,8 @@ model DigitalDelivery {
   // Producto a ofrecer (cross-sell) tras entregar; se resuelve contra el catálogo
   // en runtime (sin FK formal: si el producto se borra, se ignora).
   crossSellProductId String? @db.Uuid
+  // Mensaje con el que se ofrece el relacionado. Vacío => línea automática.
+  crossSellPitch     String  @default("")
   product      Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 

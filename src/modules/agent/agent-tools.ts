@@ -734,16 +734,23 @@ export async function executeTool(
         if (crossId) {
           const cross = findProductById(ctx, crossId);
           if (cross && cross.id !== p.id) {
-            const price = cross.priceText ?? cross.price;
-            const desc = (cross.shortDescription ?? "").trim();
-            ctx.outbox.push({
-              kind: "text",
-              text:
-                `🎁 Además, podría interesarte *${cross.name}*` +
-                (desc ? ` — ${desc}` : "") +
-                (price ? ` (${price})` : "") +
-                `. ¿Te cuento más?`,
-            });
+            // Mensaje configurado por el dueño (para que conecte con sus mensajes
+            // adicionales). Si está vacío, se usa la línea automática.
+            const pitch = (dd.crossSellPitch ?? "").trim();
+            if (pitch) {
+              ctx.outbox.push({ kind: "text", text: pitch });
+            } else {
+              const price = cross.priceText ?? cross.price;
+              const desc = (cross.shortDescription ?? "").trim();
+              ctx.outbox.push({
+                kind: "text",
+                text:
+                  `🎁 Además, podría interesarte *${cross.name}*` +
+                  (desc ? ` — ${desc}` : "") +
+                  (price ? ` (${price})` : "") +
+                  `. ¿Te cuento más?`,
+              });
+            }
             offeredCrossSell = true;
             // Contexto para el siguiente turno: el agente sabe qué producto ofreció.
             ctx.state.offeredCrossSellProductId = cross.id;

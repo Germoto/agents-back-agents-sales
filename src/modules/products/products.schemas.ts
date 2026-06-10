@@ -85,6 +85,7 @@ export const productBodySchema = z.object({
     followupMediaUrl: z.string().optional().default(""),
     followupMediaType: z.string().optional().default(""),
     crossSellProductId: z.string().uuid().nullable().optional(),
+    crossSellPitch: z.string().optional().default(""),
   }).nullable().optional(),
   physicalDelivery: z.object({
     requiresAddress: z.boolean().default(true),
