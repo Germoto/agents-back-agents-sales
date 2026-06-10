@@ -198,6 +198,8 @@ export function mapBotProduct(
             followupMessages: normalizeFollowups(product.digitalDelivery),
             crossSellProductId: product.digitalDelivery?.crossSellProductId ?? null,
             crossSellPitch: product.digitalDelivery?.crossSellPitch ?? null,
+            crossSellPitchMediaUrl: product.digitalDelivery?.crossSellPitchMediaUrl ?? null,
+            crossSellPitchMediaType: product.digitalDelivery?.crossSellPitchMediaType ?? null,
           }
         : null,
     physicalDelivery:

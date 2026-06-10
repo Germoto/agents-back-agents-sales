@@ -735,9 +735,17 @@ export async function executeTool(
           const cross = findProductById(ctx, crossId);
           if (cross && cross.id !== p.id) {
             // Mensaje configurado por el dueño (para que conecte con sus mensajes
-            // adicionales). Si está vacío, se usa la línea automática.
+            // adicionales). Puede llevar multimedia. Si todo está vacío, línea automática.
             const pitch = (dd.crossSellPitch ?? "").trim();
-            if (pitch) {
+            const pitchMedia = (dd.crossSellPitchMediaUrl ?? "").trim();
+            if (pitchMedia) {
+              ctx.outbox.push({
+                kind: "media",
+                mediaUrl: pitchMedia,
+                mediaKind: mediaKindFor(dd.crossSellPitchMediaType || ""),
+                caption: pitch || undefined,
+              });
+            } else if (pitch) {
               ctx.outbox.push({ kind: "text", text: pitch });
             } else {
               const price = cross.priceText ?? cross.price;

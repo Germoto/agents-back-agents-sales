@@ -367,6 +367,9 @@ model DigitalDelivery {
   crossSellProductId String? @db.Uuid
   // Mensaje con el que se ofrece el relacionado. Vacío => línea automática.
   crossSellPitch     String  @default("")
+  // Multimedia opcional del mensaje de enganche (se envía con el pitch como caption).
+  crossSellPitchMediaUrl  String @default("")
+  crossSellPitchMediaType String @default("")
   product      Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
