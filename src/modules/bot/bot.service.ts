@@ -99,12 +99,13 @@ export async function buildBotConfig(companyId: string, account?: string) {
   }
 
   // Validación de entrega rubro-aware: digitales (infoproducto/streaming) requieren
-  // link; físico requiere entrega por producto; restaurante usa la entrega del
-  // negocio (no por plato); servicio no requiere entrega (reserva del agente).
+  // el mensaje de entrega (instructions; el link va dentro); físico requiere entrega
+  // por producto; restaurante usa la entrega del negocio (no por plato); servicio no
+  // requiere entrega (reserva del agente).
   const vertical = whatsappConfig.company.vertical;
   for (const product of products) {
-    if ((vertical === "INFOPRODUCT" || vertical === "STREAMER") && product.productType === "DIGITAL" && !product.digitalDelivery?.link) {
-      throw new AppError(`El producto digital ${product.slug} no tiene digitalDelivery.link`, 422);
+    if ((vertical === "INFOPRODUCT" || vertical === "STREAMER") && product.productType === "DIGITAL" && !product.digitalDelivery?.instructions?.trim()) {
+      throw new AppError(`El producto digital ${product.slug} no tiene mensaje de entrega configurado`, 422);
     }
     if (vertical === "PHYSICAL_GOODS" && product.productType === "PHYSICAL" && !product.physicalDelivery) {
       throw new AppError(`El producto fisico ${product.slug} no tiene physicalDelivery`, 422);
