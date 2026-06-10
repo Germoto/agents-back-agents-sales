@@ -175,6 +175,11 @@ function renderProductFicha(p: BotProduct): string {
   return parts.join("\n\n");
 }
 
+/** Productos visibles en el catálogo (excluye los marcados como secundarios). */
+function catalogProducts(products: BotProduct[]): BotProduct[] {
+  return products.filter((p) => (p as { showInCatalog?: boolean }).showInCatalog !== false);
+}
+
 /** Catálogo customer-facing (sin ids/alias), agrupado por categoría si existe. */
 function renderCustomerCatalog(products: BotProduct[]): string {
   const line = (p: BotProduct) => {
@@ -496,7 +501,8 @@ export async function executeTool(
     }
 
     case "enviar_catalogo": {
-      const products = ctx.config.products;
+      // Solo productos visibles en catálogo (excluye los secundarios/oculto).
+      const products = catalogProducts(ctx.config.products);
       if (!products.length) return JSON.stringify({ ok: false, error: "no hay productos en el catálogo" });
       const body = renderCustomerCatalog(products);
       ctx.outbox.push({
@@ -739,6 +745,8 @@ export async function executeTool(
                 `. ¿Te cuento más?`,
             });
             offeredCrossSell = true;
+            // Contexto para el siguiente turno: el agente sabe qué producto ofreció.
+            ctx.state.offeredCrossSellProductId = cross.id;
           }
         }
 

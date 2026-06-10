@@ -230,6 +230,9 @@ model Product {
   companyId        String                @db.Uuid
   slug             String
   active           Boolean               @default(true)
+  // Visibilidad en el catálogo. Un producto puede estar activo (vendible) pero
+  // oculto del catálogo: solo se ofrece como relacionado (cross-sell) o si lo nombran.
+  showInCatalog    Boolean               @default(true)
   productType      ProductType
   name             String
   price            String

@@ -9,6 +9,7 @@ import { env } from "../../config/env";
 type ProductPayload = {
   slug: string;
   active: boolean;
+  showInCatalog?: boolean;
   productType?: "DIGITAL" | "PHYSICAL";
   name: string;
   price: string;
@@ -292,6 +293,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         companyId,
         slug: payload.slug,
         active: payload.active,
+        showInCatalog: payload.showInCatalog ?? true,
         productType,
         name: payload.name,
         price: payload.price,
@@ -330,6 +332,7 @@ export async function updateProduct(companyId: string, productId: string, payloa
       data: {
         slug: payload.slug,
         active: payload.active,
+        showInCatalog: payload.showInCatalog ?? true,
         productType,
         name: payload.name,
         price: payload.price,
@@ -372,4 +375,14 @@ export async function toggleProductActive(companyId: string, productId: string) 
     data: { active: !current.active },
   });
   return { id: updated.id, active: updated.active };
+}
+
+export async function toggleProductShowInCatalog(companyId: string, productId: string) {
+  await ensureProductBelongsToCompany(companyId, productId);
+  const current = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+  const updated = await prisma.product.update({
+    where: { id: productId },
+    data: { showInCatalog: !current.showInCatalog },
+  });
+  return { id: updated.id, showInCatalog: updated.showInCatalog };
 }

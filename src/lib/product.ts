@@ -69,6 +69,7 @@ export function mapAdminProduct(product: ProductWithRelations) {
     companyId: product.companyId,
     slug: product.slug,
     active: product.active,
+    showInCatalog: product.showInCatalog,
     productType: product.productType,
     name: product.name,
     price: product.price,
@@ -145,6 +146,7 @@ export function mapBotProduct(
     slug: product.slug,           // identificador amigable para conversación / URL
     code: product.slug,           // alias de slug, para uso en n8n
     active: product.active,
+    showInCatalog: product.showInCatalog,
     productType: product.productType.toLowerCase(),
     name: product.name,
     aliases: product.aliases.map((item) => item.value),

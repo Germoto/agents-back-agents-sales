@@ -25,6 +25,8 @@ export interface ConversationState {
   presentedProductIds?: string[];
   /** Productos cuya multimedia ya se envió en esta conversación. */
   mediaSentProductIds?: string[];
+  /** Producto relacionado (cross-sell) ofrecido tras la última entrega; da contexto al agente. */
+  offeredCrossSellProductId?: string | null;
   [key: string]: unknown;
 }
 

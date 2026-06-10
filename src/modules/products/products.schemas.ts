@@ -35,6 +35,7 @@ const productFileSchema = z.object({
 export const productBodySchema = z.object({
   slug: z.string().min(1),
   active: z.boolean().default(true),
+  showInCatalog: z.boolean().default(true),
   // Opcional: el backend lo deriva de Company.vertical. Para OTHER se respeta el enviado.
   productType: z.enum(["DIGITAL", "PHYSICAL"]).optional(),
   name: z.string().min(1),

@@ -62,10 +62,11 @@ function renderVerticalData(vertical: string | undefined, vData: unknown): strin
 }
 
 function renderProduct(p: BotProduct, index: number, vertical: string | undefined): string {
+  const secundario = (p as { showInCatalog?: boolean }).showInCatalog === false;
   const parts = [
     `${index + 1}. [${p.id}] ${p.name} — ${p.priceText ?? p.price}${
       p.regularPriceText ? ` (antes ${p.regularPriceText})` : ""
-    } · ${p.productType}`,
+    } · ${p.productType}${secundario ? " · [SECUNDARIO: NO lo ofrezcas en el catálogo ni cuando pregunten qué vendes; solo preséntalo si el cliente lo nombra o si se ofreció como producto relacionado tras una compra]" : ""}`,
     `   ${p.shortDescription}`,
   ];
   if (p.aliases?.length) parts.push(`   alias: ${p.aliases.join(", ")}`);
@@ -192,6 +193,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "- Tono: cierra sin presionar ni mendigar. Evita coletillas pegajosas o ansiosas tipo '¿quieres que te espere?', '¿te lo aparto?', '¿sigues ahí?'. Tras enviar los métodos de pago, basta con quedar atento (o dejar el texto vacío); no insistas.",
     "- Usa SOLO el catálogo entregado. No inventes productos, precios, stock, bonos, garantías, métodos de pago ni zonas de envío. Si un dato puntual no está, dilo con naturalidad y ayuda con lo que sí sabes (NO derives por esto).",
     "- Usa enviar_catalogo SOLO cuando el cliente pida ver opciones EN GENERAL (qué vendes, qué tienes, muéstrame todo) o cuando no logres identificar a qué producto se refiere. Si el cliente NOMBRA o pide info de un producto específico (aunque salude a la vez, ej. 'hola quiero info del pack mundial'), identifícalo con buscar_producto y ve DIRECTO a su ficha; NO le mandes el catálogo. Si el negocio tiene un solo producto, NUNCA mandes el catálogo: preséntalo directo.",
+    "- Productos marcados [SECUNDARIO] NO se ofrecen en el catálogo ni cuando el cliente pregunta qué vendes: NO los menciones ahí. Solo puedes presentarlos si el cliente los nombra explícitamente o si se ofrecieron como producto relacionado tras una compra (cross-sell). En esos casos preséntalos normal con enviar_ficha.",
     "- La PRIMERA vez que el cliente muestra interés en un producto (lo elige o pregunta por él), preséntalo con enviar_ficha: esa herramienta YA le envía, en un solo paso, la ficha (descripción, beneficios, qué incluye y bonos configurados) JUNTO con la multimedia de presentación (fotos/PDF/muestra marcados para la presentación). NO necesitas llamar enviar_multimedia aparte para presentar: con enviar_ficha basta. Luego cierra con UNA frase breve preguntando si lo quiere comprar.",
     "- Para preguntas POSTERIORES sobre un producto que YA presentaste (mira 'presented' en el estado), responde DIRECTAMENTE la duda con la base de conocimiento (descripción, beneficios, incluye, faq, objeciones). NO reenvíes la ficha completa ni TODA la multimedia. PERO si el cliente RE-pide un archivo/muestra (ej. 'reenvíame el archivo', 'mándame la muestra de nuevo'), o su consulta se relaciona con un archivo concreto, SÍ envíaselo: usa enviar_multimedia con `fileIds` apuntando SOLO a ese archivo (nunca respondas 'ya te lo envié antes' negándote a reenviar).",
     "- Cada producto trae sus archivos listados en el catálogo con un id y una descripción. Usa esas descripciones para responder consultas; cuando lo que pregunta el cliente coincide con un archivo (ej. una muestra, una guía, un demo), envía SOLO ese archivo con enviar_multimedia fileIds=[id] junto a tu respuesta.",
@@ -218,7 +220,14 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
       selectedProductId: state.selectedProductId ?? null,
       pendingAction: state.pendingAction ?? null,
       presented: Array.isArray(state.presentedProductIds) ? state.presentedProductIds : [],
+      offeredCrossSell: (() => {
+        const id = state.offeredCrossSellProductId;
+        if (!id) return null;
+        const cp = config.products.find((p) => p.id === id || p.slug === id);
+        return cp ? { id: cp.id, name: cp.name } : { id };
+      })(),
     })}`,
+    "- Si en el estado hay 'offeredCrossSell', significa que YA ofreciste ese producto relacionado tras la entrega. Si el cliente acepta o pregunta por él (ej. 'sí', 'cuéntame', '¿qué incluye?'), preséntalo con enviar_ficha y sigue el flujo normal (resuelve dudas, cobra con enviar_metodos_pago, etc.). Habla con secuencia respecto a esa oferta y mantente abierto.",
     "",
     "Tu respuesta final (texto sin herramientas) es lo que el cliente leerá como cierre del turno. IMPORTANTE: las herramientas que ENVÍAN contenido al cliente (enviar_catalogo, enviar_multimedia, enviar_metodos_pago) ya se lo mostraron — NO repitas ese contenido en tu texto final. Tras usarlas, escribe a lo sumo UNA frase breve de cierre o una pregunta; si la herramienta ya dijo todo, deja el texto final vacío. Solo si NO usaste ninguna herramienta que envíe contenido, responde con un mensaje claro y completo.",
   ].join("\n");
