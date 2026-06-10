@@ -73,6 +73,7 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
   if (vd) parts.push(`   ${vertical === "STREAMER" ? "plan" : "detalle"}: ${vd}`);
   if (p.benefits?.length) parts.push(`   beneficios: ${p.benefits.slice(0, 5).join("; ")}`);
   if (p.includes?.length) parts.push(`   incluye: ${p.includes.slice(0, 5).join("; ")}`);
+  if (p.bonuses?.length) parts.push(`   bonos: ${p.bonuses.slice(0, 6).join("; ")}`);
   if (p.faqs?.length)
     parts.push(`   faq: ${p.faqs.slice(0, 4).map((f) => `${f.question} -> ${f.answer}`).join(" | ")}`);
   if (p.objections?.length)
