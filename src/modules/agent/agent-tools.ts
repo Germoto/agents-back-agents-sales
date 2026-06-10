@@ -129,6 +129,36 @@ function findProductById(ctx: TurnContext, productId: string): BotProduct | unde
   return ctx.config.products.find((p) => p.id === productId || p.slug === productId);
 }
 
+/**
+ * Empuja al outbox la multimedia de PRESENTACIÓN del producto (archivos marcados
+ * `showInPresentation`), respetando el guard `mediaSentProductIds` para no
+ * re-dumpearla en seguimientos. Devuelve cuántos archivos encoló. Se usa tanto
+ * desde `enviar_ficha` (acople determinista ficha+media) como desde el envío BULK
+ * de `enviar_multimedia`, para que el modelo no pueda "olvidar" mandar la media.
+ */
+function pushPresentationMedia(ctx: TurnContext, product: BotProduct, kind: string = "all"): number {
+  const mediaSent = Array.isArray(ctx.state.mediaSentProductIds) ? ctx.state.mediaSentProductIds : [];
+  if (mediaSent.includes(product.id)) return 0;
+  const files = (product.files ?? []).filter((f) => {
+    if (!f.showInPresentation) return false; // fuera de la presentación: solo on-demand vía fileIds
+    if (kind === "all") return true;
+    if (kind === "pdf") return f.type === "pdf";
+    return f.type === kind;
+  });
+  if (!files.length) return 0;
+  for (const f of files.slice(0, 6)) {
+    ctx.outbox.push({
+      kind: "media",
+      mediaUrl: f.url,
+      mediaKind: mediaKindFor(f.type), // image|video|audio → media; pdf/other → document
+      caption: f.description || undefined,
+      fileName: f.originalName || undefined,
+    });
+  }
+  ctx.state.mediaSentProductIds = [...mediaSent, product.id];
+  return Math.min(files.length, 6);
+}
+
 /** Ficha customer-facing de un producto con los campos configurados (paso 3). */
 function renderProductFicha(p: BotProduct): string {
   const price = p.priceText ?? p.price;
@@ -451,7 +481,18 @@ export async function executeTool(
       }
       ctx.state.presentedProductIds = [...presented, product.id];
       ctx.outbox.push({ kind: "text", text: renderProductFicha(product) });
-      return JSON.stringify({ ok: true, sent: true, nota: "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) al cliente. NO la repitas en tu texto final." });
+      // Acople determinista: adjuntamos AQUÍ mismo la multimedia de presentación
+      // (showInPresentation) en lugar de depender de que el modelo encadene
+      // enviar_multimedia después (a veces lo omitía → la ficha llegaba sin media).
+      const fichaMedia = pushPresentationMedia(ctx, product);
+      return JSON.stringify({
+        ok: true,
+        sent: true,
+        mediaSent: fichaMedia,
+        nota: fichaMedia
+          ? "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) Y la multimedia de presentación al cliente. NO los repitas ni describas su contenido en tu texto final; cierra con UNA frase breve preguntando si lo quiere."
+          : "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) al cliente. NO la repitas en tu texto final.",
+      });
     }
 
     case "enviar_catalogo": {
@@ -500,25 +541,9 @@ export async function executeTool(
       if (mediaSent.includes(product.id)) {
         return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la multimedia de presentación de este producto. Si el cliente pide un archivo puntual o su consulta se relaciona con uno, reenvíalo con enviar_multimedia pasando su fileId en `fileIds`; si no, responde su consulta directamente sin reenviar todo." });
       }
-      const wanted = String(args.kind ?? "all");
-      const files = allFiles.filter((f) => {
-        if (!f.showInPresentation) return false; // fuera de la presentación: solo on-demand vía fileIds
-        if (wanted === "all") return true;
-        if (wanted === "pdf") return f.type === "pdf";
-        return f.type === wanted;
-      });
-      if (!files.length) return JSON.stringify({ ok: true, sent: 0, nota: "Este producto no tiene archivos marcados para la presentación inicial. No envíes multimedia ahora; si el cliente pide un archivo específico, búscalo en la lista del catálogo y mándalo con fileIds." });
-      for (const f of files.slice(0, 6)) {
-        ctx.outbox.push({
-          kind: "media",
-          mediaUrl: f.url,
-          mediaKind: mediaKindFor(f.type),
-          caption: f.description || undefined,
-          fileName: f.originalName || undefined,
-        });
-      }
-      ctx.state.mediaSentProductIds = [...mediaSent, product.id];
-      return JSON.stringify({ ok: true, sent: Math.min(files.length, 6), nota: "Ya envié los archivos (con su texto) al cliente. NO repitas ni describas su contenido en tu texto final; cierra breve o deja el texto vacío." });
+      const sentCount = pushPresentationMedia(ctx, product, String(args.kind ?? "all"));
+      if (!sentCount) return JSON.stringify({ ok: true, sent: 0, nota: "Este producto no tiene archivos marcados para la presentación inicial. No envíes multimedia ahora; si el cliente pide un archivo específico, búscalo en la lista del catálogo y mándalo con fileIds." });
+      return JSON.stringify({ ok: true, sent: sentCount, nota: "Ya envié los archivos (con su texto) al cliente. NO repitas ni describas su contenido en tu texto final; cierra breve o deja el texto vacío." });
     }
 
     case "agregar_carrito": {
