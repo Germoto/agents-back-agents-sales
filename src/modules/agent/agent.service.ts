@@ -8,6 +8,7 @@
 
 import { ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { env } from "../../config/env";
 import { buildBotConfig } from "../bot/bot.service";
 import type { InboundMessage } from "../../lib/smstools-client";
 import {
@@ -20,6 +21,7 @@ import {
   sendHumanReply,
   findConversationByCustomerPhone,
   resetConversation,
+  getConversationRuntime,
   type ConversationState,
 } from "./conversation.service";
 import { loadWhatsappSender, sendText, sendMedia, type WhatsappSender } from "./outbound";
@@ -191,21 +193,135 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     return;
   }
 
+  // No respondemos inline: agendamos el turno con debounce para JUNTAR la ráfaga
+  // de mensajes del cliente (escribe en varios mensajes seguidos) y responder UNA
+  // sola vez. El mensaje ya quedó persistido arriba, así que cuando el turno corra
+  // buildHistory incluirá toda la ráfaga.
+  scheduleTurn({
+    companyId,
+    conversationId: convo.conversationId,
+    customerId: convo.customerId,
+    customerPhone: inbound.fromPhone,
+    account: inbound.account ?? null,
+  });
+}
+
+// -------------------------------------------------------------------------
+// Debounce + serialización por conversación
+// -------------------------------------------------------------------------
+// Cada inbound persiste su mensaje al instante (idempotencia incluida) y agenda
+// un turno. El turno se dispara `AGENT_DEBOUNCE_MS` después del ÚLTIMO mensaje
+// (el temporizador se reinicia con cada mensaje nuevo). Además, solo corre UN
+// turno por conversación a la vez: si llega un mensaje mientras se está
+// respondiendo, se marca `dirty` y se re-agenda al terminar. Así una ráfaga de N
+// mensajes produce 1 respuesta (a lo sumo 2 si algo entra durante el turno).
+//
+// Nota: el estado vive en memoria (single-instance). Si el proceso se reinicia
+// dentro de la ventana, el último turno podría quedar sin responder; como los
+// mensajes están persistidos, el siguiente inbound del cliente lo re-dispara con
+// el historial completo. Para multi-instancia habría que mover el lock a Postgres.
+
+interface TurnJob {
+  companyId: string;
+  conversationId: string;
+  customerId: string;
+  customerPhone: string;
+  account: string | null;
+}
+
+interface PendingTurn {
+  timer: NodeJS.Timeout | null;
+  running: boolean;
+  dirty: boolean;
+  job: TurnJob;
+}
+
+const pendingTurns = new Map<string, PendingTurn>();
+
+function scheduleTurn(job: TurnJob): void {
+  const key = job.conversationId;
+  let p = pendingTurns.get(key);
+  if (!p) {
+    p = { timer: null, running: false, dirty: false, job };
+    pendingTurns.set(key, p);
+  } else {
+    p.job = job; // refresca los datos del último mensaje
+  }
+
+  // Si ya hay un turno corriendo, no rearmamos el timer ahora: marcamos que llegó
+  // algo nuevo y al terminar el turno se re-agenda.
+  if (p.running) {
+    p.dirty = true;
+    return;
+  }
+
+  if (p.timer) clearTimeout(p.timer);
+  p.timer = setTimeout(() => {
+    void fireTurn(key);
+  }, env.AGENT_DEBOUNCE_MS);
+}
+
+async function fireTurn(key: string): Promise<void> {
+  const p = pendingTurns.get(key);
+  if (!p) return;
+  p.timer = null;
+  p.running = true;
+  p.dirty = false;
+
+  try {
+    await processConversationTurn(p.job);
+  } catch (err) {
+    console.error("[agent] processConversationTurn falló:", err instanceof Error ? err.message : err);
+  } finally {
+    p.running = false;
+    // ¿Llegaron mensajes mientras respondíamos? Re-agendamos otra ventana.
+    if (p.dirty) {
+      p.dirty = false;
+      p.timer = setTimeout(() => {
+        void fireTurn(key);
+      }, env.AGENT_DEBOUNCE_MS);
+    } else {
+      pendingTurns.delete(key);
+    }
+  }
+}
+
+/**
+ * Corre un turno del agente para una conversación. Recarga config y estado
+ * frescos (el turno está desfasado del inbound) y responde una sola vez con todo
+ * el historial acumulado.
+ */
+async function processConversationTurn(job: TurnJob): Promise<void> {
+  const { companyId, conversationId, customerId, customerPhone, account } = job;
+
+  // Estado fresco: pudo haber cambiado (p.ej. el dueño pausó el bot entre medio).
+  const runtime = await getConversationRuntime(conversationId);
+  if (!runtime) return;
+  if (runtime.botPaused) return;
+
+  let config;
+  try {
+    config = await buildBotConfig(companyId, account ?? undefined);
+  } catch (err) {
+    console.error("[agent] buildBotConfig (turno) falló:", err instanceof Error ? err.message : err);
+    return;
+  }
+
   const sender = await loadWhatsappSender(companyId);
   if (!sender) {
     console.warn(`[agent] empresa ${companyId} sin WhatsappConfig activa con account`);
     return;
   }
 
-  const history = await buildHistory(convo.conversationId);
+  const history = await buildHistory(conversationId);
 
   const ctx: TurnContext = {
     companyId,
-    customerId: convo.customerId,
-    conversationId: convo.conversationId,
-    customerPhone: inbound.fromPhone,
+    customerId,
+    conversationId,
+    customerPhone,
     config,
-    state: convo.state,
+    state: runtime.state,
     outbox: [],
     reminders: [],
     adminNotices: [],
@@ -220,23 +336,23 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   }
 
   // Enviar adjuntos/mensajes acumulados por las herramientas, en orden
-  await flushOutbox(sender, inbound.fromPhone, ctx.outbox, ctx);
+  await flushOutbox(sender, customerPhone, ctx.outbox, ctx);
 
   // Enviar y registrar el texto final (tras una pausa si ya se envió algo, para
   // que llegue DESPUÉS de la multimedia).
   if (finalText) {
     if (ctx.outbox.length) await sleep(OUTBOX_GAP_MS);
-    await deliver(sender, inbound.fromPhone, { kind: "text", text: finalText }, ctx);
+    await deliver(sender, customerPhone, { kind: "text", text: finalText }, ctx);
   }
 
-  await saveState(convo.conversationId, ctx.state);
+  await saveState(conversationId, ctx.state);
 
   // Recordatorios solicitados por el modelo
   for (const r of ctx.reminders) {
     await scheduleReminder({
       companyId,
-      customerId: convo.customerId,
-      conversationId: convo.conversationId,
+      customerId,
+      conversationId,
       type: toReminderType(r.type),
       sendAt: minutesFromNow(r.minutes),
       body: r.body,
@@ -245,7 +361,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
 
   // Recordatorios automáticos (con plantillas configuradas): abandono de carrito,
   // dejado en visto y post-venta.
-  await scheduleAutoReminders(companyId, convo.customerId, convo.conversationId, ctx.state, config);
+  await scheduleAutoReminders(companyId, customerId, conversationId, ctx.state, config);
 
   // Avisos al admin (pedidos registrados, etc.)
   if (ctx.adminNotices.length) {
@@ -263,8 +379,8 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
 
   // Derivación a humano
   if (ctx.state.status === "ASESOR_HUMANO") {
-    await setBotPaused(companyId, convo.conversationId, true);
-    await notifyAdmin(sender, config, inbound.fromPhone, ctx.state.pendingAction);
+    await setBotPaused(companyId, conversationId, true);
+    await notifyAdmin(sender, config, customerPhone, ctx.state.pendingAction);
   }
 }
 

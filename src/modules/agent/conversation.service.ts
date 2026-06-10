@@ -187,6 +187,21 @@ export async function listConversations(companyId: string, limit = 50) {
   }));
 }
 
+/**
+ * Estado runtime fresco de una conversación (para el turno debounced del agente,
+ * que corre desfasado del inbound y debe leer el estado más reciente).
+ */
+export async function getConversationRuntime(
+  conversationId: string,
+): Promise<{ state: ConversationState; botPaused: boolean } | null> {
+  const c = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: { state: true, botPaused: true },
+  });
+  if (!c) return null;
+  return { state: (c.state as ConversationState) ?? {}, botPaused: c.botPaused };
+}
+
 /** customerId de una conversación (para reset/cancelar recordatorios desde el panel). */
 export async function getConversationCustomerId(
   companyId: string,
