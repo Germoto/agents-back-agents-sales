@@ -34,7 +34,18 @@ app.use(
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan("dev"));
 
-app.use("/uploads", express.static(uploadDir));
+app.use(
+  "/uploads",
+  (_req, res, next) => {
+    // Permitir incrustar /uploads (p.ej. PDF en el iframe del panel) desde el
+    // front (otro origen). helmet pone X-Frame-Options: SAMEORIGIN y CSP
+    // frame-ancestors 'self', que bloquean el visor. Archivos públicos.
+    res.removeHeader("X-Frame-Options");
+    res.removeHeader("Content-Security-Policy");
+    next();
+  },
+  express.static(uploadDir),
+);
 
 app.get("/health", (_req, res) => {
   res.json({ success: true, status: "ok" });
