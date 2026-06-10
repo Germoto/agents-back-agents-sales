@@ -353,7 +353,9 @@ model DigitalDelivery {
   productId    String  @unique @db.Uuid
   link         String
   instructions String
-  // Mensaje adicional opcional que se envía después de la entrega (media + texto).
+  // Mensajes adicionales opcionales tras la entrega: array de {message,mediaUrl,mediaType}.
+  followupMessages  Json    @default("[]")
+  // Legacy (single) — conservados por compat; el array de arriba es la fuente de verdad.
   followupMessage   String  @default("")
   followupMediaUrl  String  @default("")
   followupMediaType String  @default("")

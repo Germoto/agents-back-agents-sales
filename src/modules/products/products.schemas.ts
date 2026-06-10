@@ -68,7 +68,18 @@ export const productBodySchema = z.object({
   digitalDelivery: z.object({
     link: z.string().optional().default(""),
     instructions: z.string().optional().default(""),
-    // Mensaje adicional opcional tras la entrega (media + texto) y cross-sell.
+    // Mensajes adicionales opcionales tras la entrega (cada uno media + texto) y cross-sell.
+    followupMessages: z
+      .array(
+        z.object({
+          message: z.string().optional().default(""),
+          mediaUrl: z.string().optional().default(""),
+          mediaType: z.string().optional().default(""),
+        }),
+      )
+      .optional()
+      .default([]),
+    // Legacy single (compat; el front ya no los envía).
     followupMessage: z.string().optional().default(""),
     followupMediaUrl: z.string().optional().default(""),
     followupMediaType: z.string().optional().default(""),

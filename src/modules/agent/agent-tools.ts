@@ -695,6 +695,7 @@ export async function executeTool(
         : [];
 
       const delivered: string[] = [];
+      let offeredCrossSell = false;
       for (const id of ids) {
         const p = findProductById(ctx, id);
         const dd = p?.digitalDelivery;
@@ -703,18 +704,21 @@ export async function executeTool(
         if (!p || p.productType !== "digital" || !dd?.instructions?.trim()) continue;
         ctx.outbox.push({ kind: "text", text: dd.instructions.trim() });
 
-        // (b) Mensaje adicional opcional: cualquier multimedia + texto.
-        const followText = (dd.followupMessage ?? "").trim();
-        const followMedia = (dd.followupMediaUrl ?? "").trim();
-        if (followMedia) {
-          ctx.outbox.push({
-            kind: "media",
-            mediaUrl: followMedia,
-            mediaKind: mediaKindFor(dd.followupMediaType || ""),
-            caption: followText || undefined,
-          });
-        } else if (followText) {
-          ctx.outbox.push({ kind: "text", text: followText });
+        // (b) Mensajes adicionales opcionales: cada uno con multimedia y/o texto, en
+        // orden, como mensajes separados.
+        for (const f of dd.followupMessages ?? []) {
+          const text = (f.message ?? "").trim();
+          const media = (f.mediaUrl ?? "").trim();
+          if (media) {
+            ctx.outbox.push({
+              kind: "media",
+              mediaUrl: media,
+              mediaKind: mediaKindFor(f.mediaType || ""),
+              caption: text || undefined,
+            });
+          } else if (text) {
+            ctx.outbox.push({ kind: "text", text });
+          }
         }
 
         // (c) Cross-sell opcional: ofrecer otro producto del catálogo (si existe y
@@ -734,6 +738,7 @@ export async function executeTool(
                 (price ? ` (${price})` : "") +
                 `. ¿Te cuento más?`,
             });
+            offeredCrossSell = true;
           }
         }
 
@@ -747,7 +752,10 @@ export async function executeTool(
       return JSON.stringify({
         ok: true,
         delivered,
-        nota: "Ya envié al cliente el mensaje de entrega (con el acceso), y si estaban configurados, el mensaje adicional y la oferta de otro producto. NO repitas el link ni la oferta en tu texto final; cierra con UNA frase breve de agradecimiento o deja el texto vacío.",
+        offeredCrossSell,
+        nota: offeredCrossSell
+          ? "Ya entregué el acceso, los mensajes adicionales y al final ofrecí otro producto con una pregunta abierta ('¿Te cuento más?'). NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO para que la conversación quede ABIERTA en esa oferta y el cliente pueda responder."
+          : "Ya entregué el acceso y los mensajes adicionales configurados (suelen incluir el saludo/agradecimiento). NO repitas el link ni vuelvas a agradecer; deja tu texto final VACÍO. Mantente disponible, no cierres la conversación.",
       });
     }
 

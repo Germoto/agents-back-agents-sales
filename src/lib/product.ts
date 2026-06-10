@@ -29,6 +29,40 @@ function jsonArrayToStrings(value: Prisma.JsonValue | null | undefined) {
   return value.filter((item): item is string => typeof item === "string");
 }
 
+export interface FollowupMessage {
+  message: string;
+  mediaUrl: string;
+  mediaType: string;
+}
+
+/**
+ * Normaliza los mensajes adicionales de entrega a un array de {message,mediaUrl,mediaType}.
+ * Lee el JSON `followupMessages`; si está vacío pero hay un single legacy (fila no
+ * migrada), sintetiza un elemento. Descarta entradas sin texto ni media.
+ */
+function normalizeFollowups(dd: ProductWithRelations["digitalDelivery"]): FollowupMessage[] {
+  const out: FollowupMessage[] = [];
+  const raw = dd?.followupMessages;
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const o = item as Record<string, unknown>;
+      const message = typeof o.message === "string" ? o.message : "";
+      const mediaUrl = typeof o.mediaUrl === "string" ? o.mediaUrl : "";
+      const mediaType = typeof o.mediaType === "string" ? o.mediaType : "";
+      if (message.trim() || mediaUrl.trim()) out.push({ message, mediaUrl, mediaType });
+    }
+  }
+  if (!out.length && dd && (dd.followupMessage?.trim() || dd.followupMediaUrl?.trim())) {
+    out.push({
+      message: dd.followupMessage ?? "",
+      mediaUrl: dd.followupMediaUrl ?? "",
+      mediaType: dd.followupMediaType ?? "",
+    });
+  }
+  return out;
+}
+
 export function mapAdminProduct(product: ProductWithRelations) {
   return {
     id: product.id,
@@ -159,9 +193,7 @@ export function mapBotProduct(
         ? {
             link: product.digitalDelivery?.link ?? null,
             instructions: product.digitalDelivery?.instructions ?? null,
-            followupMessage: product.digitalDelivery?.followupMessage ?? null,
-            followupMediaUrl: product.digitalDelivery?.followupMediaUrl ?? null,
-            followupMediaType: product.digitalDelivery?.followupMediaType ?? null,
+            followupMessages: normalizeFollowups(product.digitalDelivery),
             crossSellProductId: product.digitalDelivery?.crossSellProductId ?? null,
           }
         : null,

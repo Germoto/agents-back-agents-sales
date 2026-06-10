@@ -45,6 +45,7 @@ type ProductPayload = {
   digitalDelivery?: {
     link?: string;
     instructions?: string;
+    followupMessages?: { message?: string; mediaUrl?: string; mediaType?: string }[];
     followupMessage?: string;
     followupMediaUrl?: string;
     followupMediaType?: string;
@@ -222,6 +223,14 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
     const dd = {
       link: payload.digitalDelivery.link ?? "",
       instructions: payload.digitalDelivery.instructions ?? "",
+      followupMessages: (payload.digitalDelivery.followupMessages ?? [])
+        .map((m) => ({
+          message: (m.message ?? "").trim(),
+          mediaUrl: (m.mediaUrl ?? "").trim(),
+          mediaType: (m.mediaType ?? "").trim(),
+        }))
+        .filter((m) => m.message || m.mediaUrl),
+      // Legacy single: el front ya no los envía → quedan en "".
       followupMessage: payload.digitalDelivery.followupMessage ?? "",
       followupMediaUrl: payload.digitalDelivery.followupMediaUrl ?? "",
       followupMediaType: payload.digitalDelivery.followupMediaType ?? "",
