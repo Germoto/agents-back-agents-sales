@@ -68,6 +68,11 @@ export const productBodySchema = z.object({
   digitalDelivery: z.object({
     link: z.string().optional().default(""),
     instructions: z.string().optional().default(""),
+    // Mensaje adicional opcional tras la entrega (media + texto) y cross-sell.
+    followupMessage: z.string().optional().default(""),
+    followupMediaUrl: z.string().optional().default(""),
+    followupMediaType: z.string().optional().default(""),
+    crossSellProductId: z.string().uuid().nullable().optional(),
   }).nullable().optional(),
   physicalDelivery: z.object({
     requiresAddress: z.boolean().default(true),

@@ -159,6 +159,10 @@ export function mapBotProduct(
         ? {
             link: product.digitalDelivery?.link ?? null,
             instructions: product.digitalDelivery?.instructions ?? null,
+            followupMessage: product.digitalDelivery?.followupMessage ?? null,
+            followupMediaUrl: product.digitalDelivery?.followupMediaUrl ?? null,
+            followupMediaType: product.digitalDelivery?.followupMediaType ?? null,
+            crossSellProductId: product.digitalDelivery?.crossSellProductId ?? null,
           }
         : null,
     physicalDelivery:

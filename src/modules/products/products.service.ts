@@ -45,6 +45,10 @@ type ProductPayload = {
   digitalDelivery?: {
     link?: string;
     instructions?: string;
+    followupMessage?: string;
+    followupMediaUrl?: string;
+    followupMediaType?: string;
+    crossSellProductId?: string | null;
   } | null;
   physicalDelivery?: {
     requiresAddress: boolean;
@@ -218,6 +222,10 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
     const dd = {
       link: payload.digitalDelivery.link ?? "",
       instructions: payload.digitalDelivery.instructions ?? "",
+      followupMessage: payload.digitalDelivery.followupMessage ?? "",
+      followupMediaUrl: payload.digitalDelivery.followupMediaUrl ?? "",
+      followupMediaType: payload.digitalDelivery.followupMediaType ?? "",
+      crossSellProductId: payload.digitalDelivery.crossSellProductId ?? null,
     };
     await tx.digitalDelivery.upsert({
       where: { productId },

@@ -697,13 +697,46 @@ export async function executeTool(
       const delivered: string[] = [];
       for (const id of ids) {
         const p = findProductById(ctx, id);
-        if (!p || p.productType !== "digital" || !p.digitalDelivery?.link) continue;
-        ctx.outbox.push({
-          kind: "text",
-          text:
-            `✅ *${p.name}*\n\nAcceso:\n${p.digitalDelivery.link}\n\n` +
-            (p.digitalDelivery.instructions ? `Instrucciones:\n${p.digitalDelivery.instructions}` : ""),
-        });
+        const dd = p?.digitalDelivery;
+        // El mensaje de entrega ahora son las instrucciones tal cual (el dueño pega
+        // el link dentro). Guard: requiere instrucciones (antes era el link).
+        if (!p || p.productType !== "digital" || !dd?.instructions?.trim()) continue;
+        ctx.outbox.push({ kind: "text", text: dd.instructions.trim() });
+
+        // (b) Mensaje adicional opcional: cualquier multimedia + texto.
+        const followText = (dd.followupMessage ?? "").trim();
+        const followMedia = (dd.followupMediaUrl ?? "").trim();
+        if (followMedia) {
+          ctx.outbox.push({
+            kind: "media",
+            mediaUrl: followMedia,
+            mediaKind: mediaKindFor(dd.followupMediaType || ""),
+            caption: followText || undefined,
+          });
+        } else if (followText) {
+          ctx.outbox.push({ kind: "text", text: followText });
+        }
+
+        // (c) Cross-sell opcional: ofrecer otro producto del catálogo (si existe y
+        // está activo, y no es el mismo que se entregó). Solo una oferta; el agente
+        // maneja el interés del cliente en los turnos siguientes.
+        const crossId = dd.crossSellProductId ?? null;
+        if (crossId) {
+          const cross = findProductById(ctx, crossId);
+          if (cross && cross.id !== p.id) {
+            const price = cross.priceText ?? cross.price;
+            const desc = (cross.shortDescription ?? "").trim();
+            ctx.outbox.push({
+              kind: "text",
+              text:
+                `🎁 Además, podría interesarte *${cross.name}*` +
+                (desc ? ` — ${desc}` : "") +
+                (price ? ` (${price})` : "") +
+                `. ¿Te cuento más?`,
+            });
+          }
+        }
+
         delivered.push(p.name);
       }
       if (!delivered.length) {
@@ -711,7 +744,11 @@ export async function executeTool(
       }
       ctx.state.status = "ENTREGADO";
       // El recordatorio post-venta se programa automáticamente (plantilla configurada).
-      return JSON.stringify({ ok: true, delivered });
+      return JSON.stringify({
+        ok: true,
+        delivered,
+        nota: "Ya envié al cliente el mensaje de entrega (con el acceso), y si estaban configurados, el mensaje adicional y la oferta de otro producto. NO repitas el link ni la oferta en tu texto final; cierra con UNA frase breve de agradecimiento o deja el texto vacío.",
+      });
     }
 
     case "registrar_pedido": {
