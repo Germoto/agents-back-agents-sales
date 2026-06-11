@@ -124,6 +124,7 @@ export async function recordMessage(opts: {
   role: ConversationRole;
   message?: string | null;
   mediaUrl?: string | null;
+  mediaType?: string | null;
   productId?: string | null;
   rawPayload?: Prisma.InputJsonValue;
   gatewayId?: string | null;
@@ -137,12 +138,13 @@ export async function recordMessage(opts: {
       role: opts.role,
       message: opts.message ?? null,
       mediaUrl: opts.mediaUrl ?? null,
+      mediaType: opts.mediaType ?? null,
       productId: opts.productId ?? null,
       gatewayId: opts.gatewayId ?? null,
       deliveryStatus: opts.deliveryStatus ?? null,
       ...(opts.rawPayload !== undefined ? { rawPayload: opts.rawPayload } : {}),
     },
-    select: { id: true, role: true, message: true, mediaUrl: true, createdAt: true },
+    select: { id: true, role: true, message: true, mediaUrl: true, mediaType: true, createdAt: true },
   });
   socketService.emitToCompany(opts.companyId, SOCKET_EVENTS.MESSAGE_NEW, {
     conversationId: opts.conversationId,
@@ -151,6 +153,7 @@ export async function recordMessage(opts: {
     role: created.role,
     message: created.message,
     mediaUrl: created.mediaUrl,
+    mediaType: created.mediaType,
     createdAt: created.createdAt,
   });
 }
@@ -321,7 +324,7 @@ export async function listConversationMessages(
     where: { companyId, conversationId },
     orderBy: { createdAt: "asc" },
     take: limit,
-    select: { id: true, role: true, message: true, mediaUrl: true, createdAt: true },
+    select: { id: true, role: true, message: true, mediaUrl: true, mediaType: true, createdAt: true },
   });
 }
 

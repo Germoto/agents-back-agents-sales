@@ -178,6 +178,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     role: "USER",
     message: inbound.text || null,
     mediaUrl: inbound.mediaUrl,
+    mediaType: inbound.mediaUrl && inbound.type !== "text" ? inbound.type : null,
     rawPayload: inbound.raw as any,
   });
   await markInboundProcessed(convo.conversationId, inbound.messageId);
@@ -419,6 +420,7 @@ async function deliver(
         role: "ASSISTANT",
         message: msg.caption ?? null,
         mediaUrl: msg.mediaUrl,
+        mediaType: msg.mediaKind ?? "image",
         gatewayId: r.gatewayId,
         deliveryStatus: r.gatewayId ? "pending" : null,
       });

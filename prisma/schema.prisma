@@ -138,6 +138,8 @@ model Company {
   digitalSales      DigitalSale[]
   paymentReceipts   PaymentReceipt[]
   webhookEndpoints  WebhookEndpoint[]
+  quickReplies         QuickReply[]
+  quickReplyCategories QuickReplyCategory[]
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -432,6 +434,9 @@ model ConversationMessage {
   role           ConversationRole
   message        String?
   mediaUrl       String?
+  // Tipo del adjunto ("image"|"video"|"audio"|"document") para render correcto en
+  // el panel; null en históricos o texto (el frontend infiere por extensión).
+  mediaType      String?
   rawPayload     Json?
   // Tracking de entrega vía gateway WhatsApp (SMS Tools). gatewayId = messageId del
   // envío; deliveryStatus: null=no rastreado, "pending"|"sent"|"failed".
@@ -472,6 +477,39 @@ model Conversation {
 
   @@unique([companyId, customerId, channel])
   @@index([companyId, lastMessageAt])
+}
+
+// Categoría de respuestas rápidas (estilo etiquetas de Google Keep, por tenant).
+model QuickReplyCategory {
+  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId    String       @db.Uuid
+  name         String
+  sortOrder    Int          @default(0)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  company      Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  quickReplies QuickReply[]
+
+  @@unique([companyId, name])
+  @@index([companyId, sortOrder])
+}
+
+// Respuesta rápida del panel de conversaciones: secuencia ordenada de mensajes
+// (texto/imagen/video/audio/documento) que el admin envía con un click.
+// `messages`: [{ type: "text"|"image"|"video"|"audio"|"document", text?, mediaUrl?, fileName? }]
+model QuickReply {
+  id         String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String              @db.Uuid
+  categoryId String?             @db.Uuid
+  title      String
+  messages   Json
+  usageCount Int                 @default(0)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+  company    Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  category   QuickReplyCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, updatedAt])
 }
 
 // Carrito multi-producto. Al cerrar la venta se poblan PaymentReceipt.productIds.

@@ -12,6 +12,7 @@ import digitalSalesRoutes from "../modules/digital-sales/digital-sales.routes";
 import receiptsRoutes from "../modules/receipts/receipts.routes";
 import botRoutes from "../modules/bot/bot.routes";
 import agentRoutes from "../modules/agent/agent.routes";
+import quickRepliesRoutes from "../modules/quick-replies/quick-replies.routes";
 import adminConsoleRoutes from "../modules/admin-console/admin-console.routes";
 import webhookEndpointsRoutes from "../modules/webhook-endpoints/webhook-endpoints.routes";
 import webhooksRoutes from "../modules/webhooks/webhooks.routes";
@@ -33,6 +34,8 @@ router.use("/receipts", receiptsRoutes);
 router.use("/bot", botRoutes);
 // Webhook inbound del agente autónomo (reemplaza n8n)
 router.use("/agent", agentRoutes);
+// Respuestas rápidas del panel de conversaciones
+router.use("/quick-replies", quickRepliesRoutes);
 router.use("/control-room-7m4x", adminConsoleRoutes);
 // Gestión de endpoints de webhook (CRUD para admins)
 router.use("/webhook-endpoints", webhookEndpointsRoutes);
