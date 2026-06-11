@@ -24,9 +24,11 @@ import {
   getConversationRuntime,
   type ConversationState,
 } from "./conversation.service";
-import { loadWhatsappSender, sendText, sendMedia, type WhatsappSender } from "./outbound";
+import { loadWhatsappSender, sendText, type WhatsappSender } from "./outbound";
 import { runAgentTurn } from "./agent-runtime";
-import type { TurnContext, OutboxMessage } from "./agent-tools";
+import { deliver, flushOutbox, sleep, OUTBOX_GAP_MS } from "./delivery";
+import { runFlowTurn, buildRealFlowIO, trailingUserText } from "../flows/flow-engine";
+import type { TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
 import { scheduleReminder, cancelPendingReminders, minutesFromNow, secondsFromNow } from "../scheduler/scheduler.service";
@@ -183,10 +185,12 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   });
   await markInboundProcessed(convo.conversationId, inbound.messageId);
 
-  // El cliente respondió => cancelar follow-ups de silencio/abandono pendientes
+  // El cliente respondió => cancelar follow-ups de silencio/abandono pendientes.
+  // En modo FLOW también los timeouts de bloque (el motor los re-arma si aplica).
   await cancelPendingReminders(companyId, convo.customerId, [
     ScheduledMessageType.LEFT_ON_READ,
     ScheduledMessageType.ABANDONED_CART,
+    ...((config as any).business?.botMode === "FLOW" ? [ScheduledMessageType.FLOW_TIMEOUT] : []),
   ]);
 
   // Si la conversación está en manos de un humano, el bot no responde
@@ -328,6 +332,18 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     adminNotices: [],
   };
 
+  // Modo FLOW: corre el motor de flujos guiados en lugar del agente IA. El motor
+  // envía todo por su propio IO (deliver) y deja el estado en ctx.state.
+  if (config.business.botMode === "FLOW") {
+    try {
+      await runFlowTurn(buildRealFlowIO(ctx, sender), trailingUserText(history), history);
+    } catch (err) {
+      console.error("[flows] runFlowTurn falló:", err instanceof Error ? err.message : err);
+    }
+    await saveState(conversationId, ctx.state);
+    return;
+  }
+
   let finalText: string;
   try {
     finalText = await runAgentTurn(ctx, history);
@@ -382,62 +398,6 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
   if (ctx.state.status === "ASESOR_HUMANO") {
     await setBotPaused(companyId, conversationId, true);
     await notifyAdmin(sender, config, customerPhone, ctx.state.pendingAction);
-  }
-}
-
-// Pausa entre envíos para preservar el ORDEN en WhatsApp (sin esto, mensajes y
-// adjuntos enviados muy rápido pueden reordenarse o limitarse por rate).
-const OUTBOX_GAP_MS = 900;
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function flushOutbox(
-  sender: WhatsappSender,
-  to: string,
-  outbox: OutboxMessage[],
-  ctx: TurnContext,
-): Promise<void> {
-  for (let i = 0; i < outbox.length; i++) {
-    await deliver(sender, to, outbox[i], ctx);
-    if (i < outbox.length - 1) await sleep(OUTBOX_GAP_MS);
-  }
-}
-
-async function deliver(
-  sender: WhatsappSender,
-  to: string,
-  msg: OutboxMessage,
-  ctx: TurnContext,
-): Promise<void> {
-  try {
-    if (msg.kind === "media" && msg.mediaUrl) {
-      const r = await sendMedia(sender, to, msg.mediaKind ?? "image", msg.mediaUrl, msg.caption, msg.fileName);
-      await recordMessage({
-        companyId: ctx.companyId,
-        customerId: ctx.customerId,
-        conversationId: ctx.conversationId,
-        role: "ASSISTANT",
-        message: msg.caption ?? null,
-        mediaUrl: msg.mediaUrl,
-        mediaType: msg.mediaKind ?? "image",
-        gatewayId: r.gatewayId,
-        deliveryStatus: r.gatewayId ? "pending" : null,
-      });
-    } else if (msg.text) {
-      const r = await sendText(sender, to, msg.text);
-      await recordMessage({
-        companyId: ctx.companyId,
-        customerId: ctx.customerId,
-        conversationId: ctx.conversationId,
-        role: "ASSISTANT",
-        message: msg.text,
-        gatewayId: r.gatewayId,
-        deliveryStatus: r.gatewayId ? "pending" : null,
-      });
-    }
-  } catch (err) {
-    console.error("[agent] error enviando WhatsApp:", err instanceof Error ? err.message : err);
   }
 }
 

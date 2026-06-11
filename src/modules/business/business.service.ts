@@ -38,6 +38,7 @@ export async function updateBusinessProfile(companyId: string, data: {
   adminPhone: string;
   vertical: BusinessVertical;
   timezone: string;
+  botMode?: "AI" | "FLOW";
   isActive: boolean;
   deliveryConfig?: DeliveryConfigInput | null;
 }) {

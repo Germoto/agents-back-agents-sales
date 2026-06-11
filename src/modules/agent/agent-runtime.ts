@@ -18,6 +18,10 @@ const FALLBACK_TEXT =
  * los adjuntos y acciones quedan acumulados en ctx.outbox / ctx.reminders.
  */
 export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Promise<string> {
+  // En modo FLOW buildBotConfig no exige apiKey; el agente IA sí la necesita.
+  const apiKey = ctx.config.openai.apiKey;
+  if (!apiKey) throw new Error("Falta openaiApiKey para esta empresa");
+
   const messages: ChatMessage[] = [
     { role: "system", content: buildSystemPrompt(ctx.config, ctx.state) },
     ...history,
@@ -25,7 +29,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await chatCompletion({
-      apiKey: ctx.config.openai.apiKey,
+      apiKey,
       model: ctx.config.openai.model,
       temperature: ctx.config.openai.temperature,
       messages,
@@ -59,7 +63,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
 
   // Si agotó iteraciones, fuerza un cierre en texto sin herramientas
   const closing = await chatCompletion({
-    apiKey: ctx.config.openai.apiKey,
+    apiKey,
     model: ctx.config.openai.model,
     temperature: ctx.config.openai.temperature,
     messages: [

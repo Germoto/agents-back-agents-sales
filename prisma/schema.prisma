@@ -93,6 +93,7 @@ enum ScheduledMessageType {
   OFFER_COUNTDOWN
   POST_SALE
   CUSTOM
+  FLOW_TIMEOUT
 }
 
 enum ScheduledMessageStatus {
@@ -120,6 +121,9 @@ model Company {
   // pickupAvailable, requiresAddress }. El agente la usa para todos los productos.
   deliveryConfig    Json?
   timezone          String                @default("America/Lima")
+  // Modo de operación del bot: "AI" (agente IA abierto) | "FLOW" (chatbot de
+  // flujos guiados). Excluyentes: en modo FLOW el agente IA no responde.
+  botMode           String                @default("AI")
   isActive          Boolean               @default(true)
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
@@ -145,6 +149,7 @@ model Company {
   crmCards             CrmCard[]
   customerTags         CustomerTag[]
   customerDeals        CustomerDeal[]
+  chatFlows            ChatFlow[]
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -615,6 +620,26 @@ model CustomerDeal {
   customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   @@index([companyId, customerId])
+}
+
+// Flujo guiado de chatbot (alternativa al agente IA; Company.botMode = "FLOW").
+// nodes/edges en formato React Flow; trigger = disparadores del flujo.
+model ChatFlow {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String   @db.Uuid
+  name        String
+  description String   @default("")
+  isActive    Boolean  @default(false)
+  trigger     Json     @default("{}")
+  nodes       Json     @default("[]")
+  edges       Json     @default("[]")
+  viewport    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, name])
+  @@index([companyId, isActive])
 }
 
 // Carrito multi-producto. Al cerrar la venta se poblan PaymentReceipt.productIds.

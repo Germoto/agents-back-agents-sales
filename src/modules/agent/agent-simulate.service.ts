@@ -10,6 +10,7 @@ import { prisma } from "../../lib/prisma";
 import { buildBotConfig } from "../bot/bot.service";
 import { runAgentTurn } from "./agent-runtime";
 import { buildHistory, saveState, resetConversation, type ConversationState } from "./conversation.service";
+import { runFlowTurn, trailingUserText, type FlowIO, type FlowTraceEntry } from "../flows/flow-engine";
 import type { TurnContext, OutboxMessage } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveReminderSequence, type ReminderType } from "./reminder-templates";
@@ -101,7 +102,7 @@ function outboxText(m: OutboxMessage): string {
 export async function simulateTurn(
   companyId: string,
   message: string,
-): Promise<{ replies: SimMessage[]; reminders: SimReminderPreview[] }> {
+): Promise<{ replies: SimMessage[]; reminders: SimReminderPreview[]; trace?: FlowTraceEntry[] }> {
   const config = await buildBotConfig(companyId);
   const sim = await loadSimConversation(companyId);
 
@@ -111,6 +112,60 @@ export async function simulateTurn(
   });
 
   const history = await buildHistory(sim.conversationId);
+
+  // Modo FLOW: el simulador corre el motor de flujos real, sin enviar por
+  // WhatsApp ni programar timeouts/recordatorios (se anotan en el trace).
+  if (config.business.botMode === "FLOW") {
+    const replies: SimMessage[] = [];
+    const trace: FlowTraceEntry[] = [];
+    const persistReply = async (m: OutboxMessage) => {
+      const text = outboxText(m);
+      await prisma.conversationMessage.create({
+        data: {
+          companyId,
+          customerId: sim.customerId,
+          conversationId: sim.conversationId,
+          role: "ASSISTANT",
+          message: text || null,
+          mediaUrl: m.mediaUrl ?? null,
+          mediaType: m.kind === "media" ? m.mediaKind ?? "image" : null,
+        },
+      });
+      replies.push({ role: "assistant", text, mediaUrl: m.mediaUrl ?? null, mediaKind: m.mediaKind ?? null });
+    };
+    const io: FlowIO = {
+      companyId,
+      customerId: sim.customerId,
+      conversationId: sim.conversationId,
+      customerPhone: SIM_PHONE,
+      customerName: "Cliente de prueba",
+      timezone: config.business.timezone,
+      state: sim.state,
+      emit: persistReply,
+      notifyOwner: async (text) => {
+        trace.push({ nodeId: "-", type: "handoff", event: `notify-owner: ${text.slice(0, 80)}` });
+      },
+      pauseBot: async () => {
+        trace.push({ nodeId: "-", type: "handoff", event: "bot-paused (simulado)" });
+      },
+      scheduleTimeout: async (_flowId, nodeId, minutes) => {
+        trace.push({ nodeId, type: "timeout", event: `se programaría timeout de ${minutes} min` });
+      },
+      cancelTimeouts: async () => {},
+      scheduleReminderMsg: async (minutes, body) => {
+        trace.push({ nodeId: "-", type: "reminder", event: `se programaría recordatorio en ${minutes} min: ${body.slice(0, 60)}` });
+      },
+      simulate: true,
+      trace,
+    };
+    try {
+      await runFlowTurn(io, trailingUserText(history), history);
+    } catch (err) {
+      console.error("[simulate] runFlowTurn falló:", err instanceof Error ? err.message : err);
+    }
+    await saveState(sim.conversationId, io.state);
+    return { replies, reminders: [], trace };
+  }
   const ctx: TurnContext = {
     companyId,
     customerId: sim.customerId,

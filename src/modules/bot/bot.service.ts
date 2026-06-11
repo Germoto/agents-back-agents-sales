@@ -90,7 +90,11 @@ export async function buildBotConfig(companyId: string, account?: string) {
     throw new AppError("Falta AgentConfig para esta empresa", 422);
   }
 
-  if (!agentConfig.openaiApiKey) {
+  // En modo FLOW (chatbot de flujos guiados) no se usa OpenAI ni el catálogo
+  // del agente: no exigimos apiKey ni configuración de entrega por producto.
+  const botMode = (whatsappConfig.company.botMode as "AI" | "FLOW") ?? "AI";
+
+  if (!agentConfig.openaiApiKey && botMode !== "FLOW") {
     throw new AppError("Falta openaiApiKey para esta empresa", 422);
   }
 
@@ -103,7 +107,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
   // por producto; restaurante usa la entrega del negocio (no por plato); servicio no
   // requiere entrega (reserva del agente).
   const vertical = whatsappConfig.company.vertical;
-  for (const product of products) {
+  for (const product of botMode === "FLOW" ? [] : products) {
     if ((vertical === "INFOPRODUCT" || vertical === "STREAMER") && product.productType === "DIGITAL" && !product.digitalDelivery?.instructions?.trim()) {
       throw new AppError(`El producto digital ${product.slug} no tiene mensaje de entrega configurado`, 422);
     }
@@ -121,6 +125,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
       vertical: whatsappConfig.company.vertical,
       deliveryConfig: (whatsappConfig.company.deliveryConfig ?? null) as Record<string, unknown> | null,
       timezone: whatsappConfig.company.timezone,
+      botMode,
     },
     openai: {
       model: agentConfig.openaiModel,

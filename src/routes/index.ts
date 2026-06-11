@@ -14,6 +14,7 @@ import botRoutes from "../modules/bot/bot.routes";
 import agentRoutes from "../modules/agent/agent.routes";
 import quickRepliesRoutes from "../modules/quick-replies/quick-replies.routes";
 import crmRoutes from "../modules/crm/crm.routes";
+import flowsRoutes from "../modules/flows/flows.routes";
 import adminConsoleRoutes from "../modules/admin-console/admin-console.routes";
 import webhookEndpointsRoutes from "../modules/webhook-endpoints/webhook-endpoints.routes";
 import webhooksRoutes from "../modules/webhooks/webhooks.routes";
@@ -39,6 +40,8 @@ router.use("/agent", agentRoutes);
 router.use("/quick-replies", quickRepliesRoutes);
 // CRM kanban (tableros, etiquetas internas, valores de negocio)
 router.use("/crm", crmRoutes);
+// Flujos guiados de chatbot (alternativa al agente IA)
+router.use("/flows", flowsRoutes);
 router.use("/control-room-7m4x", adminConsoleRoutes);
 // Gestión de endpoints de webhook (CRUD para admins)
 router.use("/webhook-endpoints", webhookEndpointsRoutes);

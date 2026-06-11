@@ -5,10 +5,11 @@
  */
 
 import cron from "node-cron";
-import { ScheduledMessageStatus } from "@prisma/client";
+import { ScheduledMessageStatus, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { loadWhatsappSender, sendText, sendMedia, mediaKindFor } from "../agent/outbound";
 import { recordMessage } from "../agent/conversation.service";
+import { resumeFlowOnTimeout } from "../flows/flow-engine";
 import type { WhatsappSender } from "../agent/outbound";
 
 const BATCH = 50;
@@ -46,6 +47,13 @@ async function processDue(): Promise<void> {
     if (claim.count === 0) continue;
 
     try {
+      // Timeout de bloque de flujo: no envía un mensaje fijo, reanuda el motor
+      // por la rama "sin responder" del bloque que quedó esperando.
+      if (msg.type === ScheduledMessageType.FLOW_TIMEOUT) {
+        await resumeFlowOnTimeout(msg);
+        continue;
+      }
+
       if (!senderCache.has(msg.companyId)) {
         senderCache.set(msg.companyId, await loadWhatsappSender(msg.companyId));
       }
