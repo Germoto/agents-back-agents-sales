@@ -50,6 +50,9 @@ export interface TurnContext {
   reminders: Array<{ type: string; minutes: number; body: string }>;
   /** avisos a enviar al admin al cerrar el turno (pedidos, handoff, etc.) */
   adminNotices: string[];
+  /** modo simulación (Pruebas): los tools que escriben datos compartidos/reales
+   * (validar_pago, registrar pedidos, reservas) se stubean para no afectar datos. */
+  simulate?: boolean;
 }
 
 // --------------------------------------------------------------------------
@@ -626,6 +629,14 @@ export async function executeTool(
       const payerName = String(args.payerName ?? "").trim();
       if (!payerName) return JSON.stringify({ ok: false, error: "falta el nombre del titular" });
 
+      // SIMULACIÓN: no tocar PaymentReceipt reales; aprobar de frente para mostrar el flujo.
+      if (ctx.simulate) {
+        const cartSim = await summarizeCart(ctx.companyId, ctx.customerId);
+        if (cartSim.items.length) await checkoutCart(ctx.companyId, ctx.customerId, cartSim.totalText);
+        ctx.state.status = "PAGADO";
+        return JSON.stringify({ ok: true, approved: true, note: "(simulación) Pago aprobado. Ahora entrega el producto con entregar_producto." });
+      }
+
       // Monto esperado: total del carrito o precio del producto seleccionado
       const cart = await summarizeCart(ctx.companyId, ctx.customerId);
       let expected: number | undefined = cart.total > 0 ? cart.total : undefined;
@@ -687,23 +698,36 @@ export async function executeTool(
     }
 
     case "entregar_producto": {
-      // Verificar que exista un pago aprobado reciente para este cliente
-      const approved = await prisma.paymentReceipt.findFirst({
-        where: { companyId: ctx.companyId, customerId: ctx.customerId, status: "APROBADO" },
-        orderBy: { validatedAt: "desc" },
-        select: { id: true, productIds: true, productId: true },
-      });
-      if (!approved) {
-        return JSON.stringify({ ok: false, error: "No hay un pago aprobado para este cliente. No entregues nada todavía." });
+      // En SIMULACIÓN no hay PaymentReceipt real: entregar según carrito/seleccionado.
+      let ids: string[];
+      if (ctx.simulate) {
+        const cartSim = await summarizeCart(ctx.companyId, ctx.customerId);
+        ids = cartSim.productIds.length
+          ? cartSim.productIds
+          : ctx.state.selectedProductId
+          ? [ctx.state.selectedProductId]
+          : [];
+        if (!ids.length) {
+          return JSON.stringify({ ok: false, error: "(simulación) No hay un producto seleccionado para entregar." });
+        }
+      } else {
+        // Verificar que exista un pago aprobado reciente para este cliente
+        const approved = await prisma.paymentReceipt.findFirst({
+          where: { companyId: ctx.companyId, customerId: ctx.customerId, status: "APROBADO" },
+          orderBy: { validatedAt: "desc" },
+          select: { id: true, productIds: true, productId: true },
+        });
+        if (!approved) {
+          return JSON.stringify({ ok: false, error: "No hay un pago aprobado para este cliente. No entregues nada todavía." });
+        }
+        ids = approved.productIds?.length
+          ? approved.productIds
+          : approved.productId
+          ? [approved.productId]
+          : ctx.state.selectedProductId
+          ? [ctx.state.selectedProductId]
+          : [];
       }
-
-      const ids = approved.productIds?.length
-        ? approved.productIds
-        : approved.productId
-        ? [approved.productId]
-        : ctx.state.selectedProductId
-        ? [ctx.state.selectedProductId]
-        : [];
 
       const delivered: string[] = [];
       let offeredCrossSell = false;
@@ -793,6 +817,11 @@ export async function executeTool(
       if (product.productType !== "physical") {
         return JSON.stringify({ ok: false, error: "registrar_pedido es solo para productos físicos" });
       }
+      if (ctx.simulate) {
+        ctx.state.status = "PEDIDO_REGISTRADO";
+        ctx.state.selectedProductId = product.id;
+        return JSON.stringify({ ok: true, orderCode: "SIM-0001", note: "(simulación) Pedido registrado. Confirma al cliente con el código y los próximos pasos." });
+      }
       const customerName = String(args.customerName ?? "").trim();
       const address = String(args.address ?? "").trim();
       if (!customerName || !address) {
@@ -836,6 +865,11 @@ export async function executeTool(
       if (!customerName || !address) {
         return JSON.stringify({ ok: false, error: "faltan nombre o dirección/recojo" });
       }
+      if (ctx.simulate) {
+        await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
+        ctx.state.status = "PEDIDO_REGISTRADO";
+        return JSON.stringify({ ok: true, orderCode: "SIM-0001", total: cart.totalText, note: "(simulación) Pedido registrado. Confirma con el código y el total." });
+      }
       try {
         const order = await createOrderFromCart({
           companyId: ctx.companyId,
@@ -870,6 +904,11 @@ export async function executeTool(
       if (!product) return JSON.stringify({ ok: false, error: "servicio no encontrado" });
       const requestedText = String(args.requestedText ?? "").trim();
       if (!requestedText) return JSON.stringify({ ok: false, error: "falta el horario solicitado" });
+      if (ctx.simulate) {
+        ctx.state.status = "RESERVA_SOLICITADA";
+        ctx.state.selectedProductId = product.id;
+        return JSON.stringify({ ok: true, bookingId: "SIM-0001", note: "(simulación) Reserva registrada. Un asesor confirmará el horario." });
+      }
       try {
         const booking = await createBooking({
           companyId: ctx.companyId,

@@ -160,7 +160,7 @@ export async function recordMessage(opts: {
 // -------------------------------------------------------------------------
 export async function listConversations(companyId: string, limit = 50) {
   const rows = await prisma.conversation.findMany({
-    where: { companyId },
+    where: { companyId, channel: "whatsapp" }, // excluye la conversación del simulador (canal "sim")
     orderBy: { lastMessageAt: "desc" },
     take: limit,
     select: {
