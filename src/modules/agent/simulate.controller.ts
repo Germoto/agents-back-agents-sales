@@ -12,7 +12,7 @@ export const simulateTurnController = asyncHandler(async (req: Request, res: Res
   const message = String(req.body?.message ?? "").trim();
   if (!message) throw new AppError("El mensaje no puede estar vacío", 400);
   const result = await simulateTurn(req.user!.companyId, message);
-  res.json({ success: true, data: result.replies });
+  res.json({ success: true, data: result });
 });
 
 export const simulateResetController = asyncHandler(async (req: Request, res: Response) => {

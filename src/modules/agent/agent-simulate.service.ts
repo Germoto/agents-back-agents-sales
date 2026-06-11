@@ -11,6 +11,8 @@ import { buildBotConfig } from "../bot/bot.service";
 import { runAgentTurn } from "./agent-runtime";
 import { buildHistory, saveState, resetConversation, type ConversationState } from "./conversation.service";
 import type { TurnContext, OutboxMessage } from "./agent-tools";
+import { summarizeCart } from "./cart.service";
+import { resolveReminderSequence, type ReminderType } from "./reminder-templates";
 
 const SIM_PHONE = "SIMULADOR"; // identidad del "cliente" de simulación (no es un número real)
 
@@ -19,6 +21,60 @@ export interface SimMessage {
   text: string;
   mediaUrl?: string | null;
   mediaKind?: string | null;
+}
+
+export interface SimReminderPreview {
+  type: ReminderType;
+  label: string;
+  steps: Array<{ delaySeconds: number; text: string; mediaUrl?: string | null }>;
+}
+
+const REMINDER_LABEL: Record<ReminderType, string> = {
+  abandonedCart: "Abandono de carrito",
+  leftOnRead: "Dejado en visto",
+};
+
+/**
+ * Calcula (sin programar ni enviar) qué secuencias de recordatorios dispararía el
+ * estado actual, para mostrarlas como vista previa en el simulador. Misma lógica de
+ * disparo que scheduleAutoReminders.
+ */
+async function previewReminders(
+  companyId: string,
+  customerId: string,
+  state: ConversationState,
+  config: Awaited<ReturnType<typeof buildBotConfig>>,
+): Promise<SimReminderPreview[]> {
+  const status = state.status ?? "";
+  if (["ENTREGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status)) return [];
+
+  const cart = await summarizeCart(companyId, customerId);
+  const pid = cart.items[0]?.productId ?? state.selectedProductId ?? null;
+  const product = pid ? config.products.find((p) => p.id === pid || p.slug === pid) : undefined;
+  const vars = {
+    nombre: "",
+    producto: product?.name,
+    total: cart.items.length ? cart.totalText : undefined,
+    negocio: config.business.name,
+  };
+  const followup = config.agent.followupConfig;
+  const productReminder = (product as { reminderConfig?: unknown } | undefined)?.reminderConfig;
+
+  const types: ReminderType[] = [];
+  if (status === "ESPERANDO_PAGO" && (cart.items.length || state.selectedProductId)) types.push("abandonedCart");
+  types.push("leftOnRead");
+
+  const out: SimReminderPreview[] = [];
+  for (const type of types) {
+    const seq = resolveReminderSequence(followup, type, productReminder, vars);
+    if (!seq.enabled || !seq.steps.length) continue;
+    out.push({
+      type,
+      label: REMINDER_LABEL[type],
+      steps: seq.steps.map((s) => ({ delaySeconds: s.delaySeconds, text: s.message, mediaUrl: s.mediaUrl })),
+    });
+  }
+  return out;
 }
 
 async function loadSimConversation(companyId: string) {
@@ -42,7 +98,10 @@ function outboxText(m: OutboxMessage): string {
 }
 
 /** Procesa un mensaje del "cliente" simulado y devuelve las respuestas del bot. */
-export async function simulateTurn(companyId: string, message: string): Promise<{ replies: SimMessage[] }> {
+export async function simulateTurn(
+  companyId: string,
+  message: string,
+): Promise<{ replies: SimMessage[]; reminders: SimReminderPreview[] }> {
   const config = await buildBotConfig(companyId);
   const sim = await loadSimConversation(companyId);
 
@@ -96,7 +155,8 @@ export async function simulateTurn(companyId: string, message: string): Promise<
   }
 
   await saveState(sim.conversationId, ctx.state);
-  return { replies };
+  const reminders = await previewReminders(companyId, sim.customerId, ctx.state, config);
+  return { replies, reminders };
 }
 
 /** Mensajes actuales de la conversación de simulación (para cargar el chat al abrir). */
