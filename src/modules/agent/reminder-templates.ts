@@ -69,7 +69,10 @@ export function substituteVars(text: string, vars: ReminderVars): string {
     .replace(/\{producto\}/gi, vars.producto || "tu pedido")
     .replace(/\{total\}/gi, vars.total || "")
     .replace(/\{negocio\}/gi, vars.negocio || "")
-    .replace(/\s{2,}/g, " ")
+    // Colapsa solo espacios/tabs horizontales (NO los saltos de línea) y limpia
+    // espacios al final de cada línea, para preservar el formato configurado.
+    .replace(/[^\S\n]{2,}/g, " ")
+    .replace(/[^\S\n]+\n/g, "\n")
     .trim();
 }
 

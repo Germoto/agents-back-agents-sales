@@ -45,6 +45,7 @@ export const productBodySchema = z.object({
   shortDescription: z.string().min(1),
   // Opcional: varios rubros (restaurante/streaming) no usan descripción completa.
   fullDescription: z.string().optional().default(""),
+  presentationMessage: z.string().nullable().optional(),
   deliveryMethod: z.string().nullable().optional(),
   support: z.string().nullable().optional(),
   // Atributos flexibles por rubro (clave→valor). Ej. restaurante: {ingredientes, tiempo_preparacion};

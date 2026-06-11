@@ -17,6 +17,7 @@ type ProductPayload = {
   stock?: number | null;
   shortDescription: string;
   fullDescription?: string;
+  presentationMessage?: string | null;
   deliveryMethod?: string | null;
   support?: string | null;
   attributes?: Record<string, string> | null;
@@ -307,6 +308,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         stock: payload.stock ?? null,
         shortDescription: payload.shortDescription,
         fullDescription: payload.fullDescription ?? "",
+        presentationMessage: payload.presentationMessage ?? null,
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
@@ -346,6 +348,7 @@ export async function updateProduct(companyId: string, productId: string, payloa
         stock: payload.stock ?? null,
         shortDescription: payload.shortDescription,
         fullDescription: payload.fullDescription ?? "",
+        presentationMessage: payload.presentationMessage ?? null,
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),

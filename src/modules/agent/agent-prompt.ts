@@ -69,6 +69,11 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
     } · ${p.productType}${secundario ? " · [SECUNDARIO: NO lo ofrezcas en el catálogo ni cuando pregunten qué vendes; solo preséntalo si el cliente lo nombra o si se ofreció como producto relacionado tras una compra]" : ""}`,
     `   ${p.shortDescription}`,
   ];
+  // Descripción completa como base de conocimiento (si aporta algo más que la corta).
+  const fullDesc = (p.fullDescription ?? "").replace(/\s+/g, " ").trim();
+  if (fullDesc && fullDesc !== (p.shortDescription ?? "").trim()) {
+    parts.push(`   detalle: ${fullDesc.slice(0, 600)}`);
+  }
   if (p.aliases?.length) parts.push(`   alias: ${p.aliases.join(", ")}`);
   const vd = renderVerticalData(vertical, p.verticalData);
   if (vd) parts.push(`   ${vertical === "STREAMER" ? "plan" : "detalle"}: ${vd}`);

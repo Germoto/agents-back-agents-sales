@@ -485,7 +485,12 @@ export async function executeTool(
         return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la ficha de este producto en esta conversación. NO la reenvíes; responde la consulta del cliente directamente con la base de conocimiento (faq, objeciones, descripción)." });
       }
       ctx.state.presentedProductIds = [...presented, product.id];
-      ctx.outbox.push({ kind: "text", text: renderProductFicha(product) });
+      // Si el dueño configuró un mensaje de presentación, se envía TAL CUAL (respeta
+      // saltos de línea); si no, el bot arma la ficha con los campos estructurados.
+      const fichaText = (product as { presentationMessage?: string | null }).presentationMessage?.trim()
+        ? (product as { presentationMessage?: string | null }).presentationMessage!.trim()
+        : renderProductFicha(product);
+      ctx.outbox.push({ kind: "text", text: fichaText });
       // Acople determinista: adjuntamos AQUÍ mismo la multimedia de presentación
       // (showInPresentation) en lugar de depender de que el modelo encadene
       // enviar_multimedia después (a veces lo omitía → la ficha llegaba sin media).

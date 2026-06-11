@@ -240,6 +240,9 @@ model Product {
   stock            Int?
   shortDescription String
   fullDescription  String
+  // Mensaje de presentación que el bot envía TAL CUAL al presentar el producto
+  // (si está vacío, el bot arma la ficha con los campos estructurados).
+  presentationMessage String?
   deliveryMethod   String?
   support          String?
   // Atributos flexibles libres por rubro (clave→valor). Complemento opcional.
