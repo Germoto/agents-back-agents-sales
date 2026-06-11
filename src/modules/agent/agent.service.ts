@@ -186,11 +186,14 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   await markInboundProcessed(convo.conversationId, inbound.messageId);
 
   // El cliente respondió => cancelar follow-ups de silencio/abandono pendientes.
-  // En modo FLOW también los timeouts de bloque (el motor los re-arma si aplica).
+  // En modo FLOW también los timeouts de bloque y los recordatorios del flujo
+  // (CUSTOM): si el cliente vuelve a escribir, el flujo decide de nuevo.
   await cancelPendingReminders(companyId, convo.customerId, [
     ScheduledMessageType.LEFT_ON_READ,
     ScheduledMessageType.ABANDONED_CART,
-    ...((config as any).business?.botMode === "FLOW" ? [ScheduledMessageType.FLOW_TIMEOUT] : []),
+    ...((config as any).business?.botMode === "FLOW"
+      ? [ScheduledMessageType.FLOW_TIMEOUT, ScheduledMessageType.CUSTOM]
+      : []),
   ]);
 
   // Si la conversación está en manos de un humano, el bot no responde

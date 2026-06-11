@@ -103,6 +103,8 @@ export interface FlowControlData {
 }
 
 export interface HandoffData {
+  /** Mensaje que se le envía al CLIENTE antes de pausar el bot (ej. "en un momento te atiende un asesor"). */
+  clientText?: string;
   /** Aviso al dueño; default genérico. */
   notifyText?: string;
 }

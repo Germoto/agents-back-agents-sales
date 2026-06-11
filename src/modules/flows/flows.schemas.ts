@@ -79,6 +79,7 @@ const flowControlData = z.object({
 });
 
 const handoffData = z.object({
+  clientText: z.string().max(2000).optional(),
   notifyText: z.string().max(1000).optional(),
 });
 

@@ -225,33 +225,50 @@ function renderListMenu(data: ListData, io: FlowIO): string {
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/**
+ * Candidatos de matching: el texto completo y cada línea por separado. El
+ * debounce junta la ráfaga del cliente con "\n" (p.ej. "2\npor qué no
+ * respondes"), así que la opción puede venir en cualquier línea.
+ */
+function candidateInputs(inbound: string): string[] {
+  const whole = normalize(inbound);
+  const lines = inbound
+    .split(/\n+/)
+    .map((l) => normalize(l))
+    .filter(Boolean);
+  return [...new Set([whole, ...lines])].filter(Boolean);
+}
+
 function matchAnswersOption(data: AnswersData, inbound: string): string | null {
-  const input = normalize(inbound);
-  if (!input) return null;
+  const candidates = candidateInputs(inbound);
+  if (!candidates.length) return null;
   for (const opt of data.options ?? []) {
     const target = normalize(opt.detectText ?? "");
     if (!target) continue;
     const mode = opt.detectMode ?? "contains";
-    const ok =
-      mode === "equals"
-        ? input === target
-        : mode === "starts_with"
-          ? input.startsWith(target)
-          : mode === "ends_with"
-            ? input.endsWith(target)
-            : input.includes(target);
-    if (ok) return opt.id;
+    for (const input of candidates) {
+      const ok =
+        mode === "equals"
+          ? input === target
+          : mode === "starts_with"
+            ? input.startsWith(target)
+            : mode === "ends_with"
+              ? input.endsWith(target)
+              : input.includes(target);
+      if (ok) return opt.id;
+    }
   }
   return null;
 }
 
 function matchListOption(data: ListData, inbound: string): string | null {
-  const input = normalize(inbound);
-  if (!input) return null;
+  const candidates = candidateInputs(inbound);
+  if (!candidates.length) return null;
   const flat = flattenListOptions(data);
-  // 1) por número global ("2", "2.", "opción 2")
-  const numMatch = input.match(/^(?:opcion\s*)?(\d{1,2})\.?$/);
-  if (numMatch) {
+  // 1) por número global ("2", "2.", "opción 2", "2 por favor")
+  for (const input of candidates) {
+    const numMatch = input.match(/^(?:opcion\s*)?(\d{1,2})\.?(?:\s|$)/);
+    if (!numMatch) continue;
     const n = Number(numMatch[1]);
     const byNumber = flat.find((o) => o.number === n);
     if (byNumber) return byNumber.id;
@@ -260,8 +277,10 @@ function matchListOption(data: ListData, inbound: string): string | null {
   for (const opt of flat) {
     const label = normalize(opt.label ?? "");
     if (!label) continue;
-    if (input === label) return opt.id;
-    if (label.length >= 3 && input.includes(label)) return opt.id;
+    for (const input of candidates) {
+      if (input === label) return opt.id;
+      if (label.length >= 3 && input.includes(label)) return opt.id;
+    }
   }
   return null;
 }
@@ -578,6 +597,12 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
 
       case "handoff": {
         const data = node.data as HandoffData;
+        // Mensaje al cliente antes de pausar (ej. "en un momento te atiende un asesor")
+        if (data.clientText?.trim()) {
+          if (emitted > 0) await pause(io);
+          await io.emit({ kind: "text", text: renderTemplate(data.clientText.trim(), io) });
+          emitted++;
+        }
         const num = io.customerPhone.replace(/\D/g, "");
         const text =
           data.notifyText?.trim()
