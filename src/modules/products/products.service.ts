@@ -24,7 +24,7 @@ type ProductPayload = {
   category?: string | null;
   verticalData?: Record<string, unknown> | null;
   reminderConfig?: Record<string, unknown> | null;
-  sortOrder: number;
+  sortOrder?: number;
   aliases: string[];
   benefits: Array<{ value: string; sortOrder: number }>;
   includes: Array<{ value: string; sortOrder: number }>;
@@ -295,6 +295,12 @@ export async function getProduct(companyId: string, productId: string) {
 export async function createProduct(companyId: string, payload: ProductPayload) {
   const productType = await resolveProductType(companyId, payload.productType);
   const product = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    // El orden ya no se teclea: se auto-asigna al final (max + 1) salvo que venga explícito.
+    let sortOrder = payload.sortOrder;
+    if (sortOrder == null) {
+      const last = await tx.product.aggregate({ where: { companyId }, _max: { sortOrder: true } });
+      sortOrder = (last._max.sortOrder ?? -1) + 1;
+    }
     const created = await tx.product.create({
       data: {
         companyId,
@@ -315,7 +321,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         category: payload.category ?? null,
         verticalData: payload.verticalData == null ? Prisma.JsonNull : (payload.verticalData as Prisma.InputJsonValue),
         reminderConfig: payload.reminderConfig == null ? Prisma.JsonNull : (payload.reminderConfig as Prisma.InputJsonValue),
-        sortOrder: payload.sortOrder,
+        sortOrder,
       },
     });
 
@@ -355,7 +361,8 @@ export async function updateProduct(companyId: string, productId: string, payloa
         category: payload.category ?? null,
         verticalData: payload.verticalData == null ? Prisma.JsonNull : (payload.verticalData as Prisma.InputJsonValue),
         reminderConfig: payload.reminderConfig == null ? Prisma.JsonNull : (payload.reminderConfig as Prisma.InputJsonValue),
-        sortOrder: payload.sortOrder,
+        // El orden se gestiona desde la lista (drag); no se pisa al editar si no viene.
+        ...(payload.sortOrder != null ? { sortOrder: payload.sortOrder } : {}),
       },
     });
 
@@ -373,6 +380,23 @@ export async function updateProduct(companyId: string, productId: string, payloa
 export async function deleteProduct(companyId: string, productId: string) {
   await ensureProductBelongsToCompany(companyId, productId);
   await prisma.product.delete({ where: { id: productId } });
+  return { success: true };
+}
+
+/** Reordena los productos: sortOrder = posición en `ids`. Valida pertenencia. */
+export async function reorderProducts(companyId: string, ids: string[]) {
+  if (!ids.length) return { success: true };
+  const owned = await prisma.product.findMany({
+    where: { id: { in: ids }, companyId },
+    select: { id: true },
+  });
+  const ownedIds = new Set(owned.map((p) => p.id));
+  const valid = ids.filter((id) => ownedIds.has(id));
+  await prisma.$transaction(
+    valid.map((id, index) =>
+      prisma.product.update({ where: { id }, data: { sortOrder: index } }),
+    ),
+  );
   return { success: true };
 }
 

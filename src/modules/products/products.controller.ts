@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { createProduct, deleteProduct, getProduct, listProducts, toggleProductActive, toggleProductShowInCatalog, updateProduct } from "./products.service";
+import { createProduct, deleteProduct, getProduct, listProducts, reorderProducts, toggleProductActive, toggleProductShowInCatalog, updateProduct } from "./products.service";
 
 export async function listProductsController(req: Request, res: Response) {
   const products = await listProducts(req.user!.companyId);
@@ -33,5 +33,11 @@ export async function toggleProductActiveController(req: Request, res: Response)
 
 export async function toggleProductCatalogController(req: Request, res: Response) {
   const result = await toggleProductShowInCatalog(req.user!.companyId, String(req.params.id));
+  return res.json(result);
+}
+
+export async function reorderProductsController(req: Request, res: Response) {
+  const ids = Array.isArray(req.body?.ids) ? (req.body.ids as unknown[]).map(String) : [];
+  const result = await reorderProducts(req.user!.companyId, ids);
   return res.json(result);
 }

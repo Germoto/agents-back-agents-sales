@@ -57,7 +57,9 @@ export const productBodySchema = z.object({
   verticalData: z.record(z.string(), z.unknown()).nullable().optional(),
   // Override de recordatorios por producto y tipo: { <tipo>: { message?, mediaUrl? } }.
   reminderConfig: z.record(z.string(), z.unknown()).nullable().optional(),
-  sortOrder: z.coerce.number().int().min(0).default(0),
+  // Orden ya NO se teclea: en create se auto-asigna (append) y en la lista se reordena
+  // arrastrando. Opcional para compat.
+  sortOrder: z.coerce.number().int().min(0).optional(),
   aliases: z.array(z.string().min(1)).default([]),
   benefits: z.array(orderedValueSchema).default([]),
   includes: z.array(orderedValueSchema).default([]),
