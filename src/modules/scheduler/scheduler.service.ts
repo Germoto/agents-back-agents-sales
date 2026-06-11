@@ -16,7 +16,8 @@ export async function scheduleReminder(opts: {
   mediaUrl?: string | null;
   metadata?: Prisma.InputJsonValue;
 }): Promise<void> {
-  if (!opts.body.trim()) return;
+  // Permitir recordatorios solo-multimedia (sin texto): basta con body o mediaUrl.
+  if (!opts.body.trim() && !opts.mediaUrl) return;
   await prisma.scheduledMessage.create({
     data: {
       companyId: opts.companyId,
@@ -53,4 +54,8 @@ export async function cancelPendingReminders(
 
 export function minutesFromNow(minutes: number): Date {
   return new Date(Date.now() + minutes * 60 * 1000);
+}
+
+export function secondsFromNow(seconds: number): Date {
+  return new Date(Date.now() + seconds * 1000);
 }

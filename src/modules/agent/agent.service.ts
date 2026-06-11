@@ -29,8 +29,8 @@ import { runAgentTurn } from "./agent-runtime";
 import type { TurnContext, OutboxMessage } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
-import { scheduleReminder, cancelPendingReminders, minutesFromNow } from "../scheduler/scheduler.service";
-import { resolveReminderTemplate, type ReminderType } from "./reminder-templates";
+import { scheduleReminder, cancelPendingReminders, minutesFromNow, secondsFromNow } from "../scheduler/scheduler.service";
+import { resolveReminderSequence, type ReminderType } from "./reminder-templates";
 
 interface FollowupConfig {
   abandonedCartHours?: number;
@@ -473,38 +473,38 @@ async function scheduleAutoReminders(
   const followup = config.agent.followupConfig;
   const productReminder = (product as { reminderConfig?: unknown } | undefined)?.reminderConfig;
 
-  const schedule = async (type: ReminderType, smType: ScheduledMessageType) => {
-    const tpl = resolveReminderTemplate(followup, type, productReminder, vars);
-    if (!tpl.enabled || !tpl.message) return;
-    await scheduleReminder({
-      companyId,
-      customerId,
-      conversationId,
-      type: smType,
-      sendAt: minutesFromNow(tpl.delayMinutes),
-      body: tpl.message,
-      mediaUrl: tpl.mediaUrl,
-    });
+  // Programa TODA la secuencia (varios mensajes) de un tipo: un ScheduledMessage por
+  // step, cada uno con su delay (absoluto desde ahora) y su contenido.
+  const scheduleSeq = async (type: ReminderType, smType: ScheduledMessageType) => {
+    const seq = resolveReminderSequence(followup, type, productReminder, vars);
+    if (!seq.enabled) return;
+    for (const step of seq.steps) {
+      await scheduleReminder({
+        companyId,
+        customerId,
+        conversationId,
+        type: smType,
+        sendAt: secondsFromNow(step.delaySeconds),
+        body: step.message,
+        mediaUrl: step.mediaUrl,
+        metadata: step.mediaType ? { mediaType: step.mediaType } : undefined,
+      });
+    }
   };
 
   const status = state.status ?? "";
 
-  // Post-venta: tras entregar / cerrar.
-  if (status === "ENTREGADO") {
-    await schedule("postSale", ScheduledMessageType.POST_SALE);
-    return;
-  }
-
-  // Estados terminales/humano: no programar seguimiento de silencio.
-  if (["PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status)) return;
+  // Estados terminales/humano/entregado: no programar seguimiento (el post-venta lo
+  // cubren los mensajes adicionales tras la entrega del Paso 5).
+  if (["ENTREGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status)) return;
 
   // Abandono de carrito: esperando pago con carrito/producto.
   if (status === "ESPERANDO_PAGO" && (cart.items.length || state.selectedProductId)) {
-    await schedule("abandonedCart", ScheduledMessageType.ABANDONED_CART);
+    await scheduleSeq("abandonedCart", ScheduledMessageType.ABANDONED_CART);
   }
 
   // Dejado en visto: el cliente escribió y el bot respondió; si no contesta, seguimos.
-  await schedule("leftOnRead", ScheduledMessageType.LEFT_ON_READ);
+  await scheduleSeq("leftOnRead", ScheduledMessageType.LEFT_ON_READ);
 }
 
 async function notifyAdmin(

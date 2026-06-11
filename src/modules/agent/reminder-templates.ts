@@ -1,19 +1,26 @@
 /**
- * Plantillas de recordatorios (por tipo) con variables.
+ * Secuencias de recordatorios (por tipo) con variables.
  *
- * Resuelve el contenido a enviar combinando: defaults → plantilla del negocio
- * (AgentConfig.followupConfig) → override por producto (Product.reminderConfig).
- * Sustituye variables {nombre} {producto} {total} {negocio}. Compatible con la
- * forma vieja de followupConfig (solo horas/minutos).
+ * Cada tipo puede tener VARIOS mensajes (steps), cada uno con su propio delay
+ * (en segundos) y contenido (texto + multimedia). Resuelve combinando:
+ * defaults → plantilla del negocio (AgentConfig.followupConfig) → override por
+ * producto (Product.reminderConfig). Sustituye {nombre} {producto} {total}
+ * {negocio}. Compatible con la forma vieja (un solo mensaje: delayMinutes/message/
+ * mediaUrl) → se normaliza a 1 step.
  */
 
-export type ReminderType = "abandonedCart" | "leftOnRead" | "offerCountdown" | "postSale";
+export type ReminderType = "abandonedCart" | "leftOnRead";
 
-export interface ReminderTemplate {
-  enabled: boolean;
-  delayMinutes: number;
+export interface ReminderStep {
+  delaySeconds: number;
   message: string;
   mediaUrl: string | null;
+  mediaType: string;
+}
+
+export interface ReminderSequence {
+  enabled: boolean;
+  steps: ReminderStep[];
 }
 
 export interface ReminderVars {
@@ -23,30 +30,28 @@ export interface ReminderVars {
   negocio?: string;
 }
 
-const DEFAULTS: Record<ReminderType, ReminderTemplate> = {
+const DEFAULTS: Record<ReminderType, ReminderSequence> = {
   abandonedCart: {
     enabled: true,
-    delayMinutes: 360,
-    message: "Hola {nombre} 👋 vi que quedó pendiente tu compra de {producto}. ¿Te ayudo a completarla? Sigue disponible 🙌",
-    mediaUrl: null,
+    steps: [
+      {
+        delaySeconds: 6 * 3600,
+        message: "Hola {nombre} 👋 vi que quedó pendiente tu compra de {producto}. ¿Te ayudo a completarla? Sigue disponible 🙌",
+        mediaUrl: null,
+        mediaType: "",
+      },
+    ],
   },
   leftOnRead: {
     enabled: false,
-    delayMinutes: 60,
-    message: "Hola {nombre} 👋 ¿seguimos? Cualquier duda sobre {producto} te ayudo encantado.",
-    mediaUrl: null,
-  },
-  offerCountdown: {
-    enabled: false,
-    delayMinutes: 1440,
-    message: "⏳ Tu oferta de {producto} está por vencer. ¿La aprovechas ahora?",
-    mediaUrl: null,
-  },
-  postSale: {
-    enabled: true,
-    delayMinutes: 1440,
-    message: "Hola {nombre} 👋 ¿cómo te fue con {producto}? Si necesitas algo aquí estoy. ¿Te muestro algo más del catálogo?",
-    mediaUrl: null,
+    steps: [
+      {
+        delaySeconds: 3600,
+        message: "Hola {nombre} 👋 ¿seguimos? Cualquier duda sobre {producto} te ayudo encantado.",
+        mediaUrl: null,
+        mediaType: "",
+      },
+    ],
   },
 };
 
@@ -54,12 +59,8 @@ function asObj(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-// Compatibilidad con la forma vieja: { abandonedCartHours, leftOnReadMinutes, offerCountdownHours }
-function legacyDelay(followup: Record<string, unknown>, type: ReminderType): number | undefined {
-  if (type === "abandonedCart" && typeof followup.abandonedCartHours === "number") return followup.abandonedCartHours * 60;
-  if (type === "leftOnRead" && typeof followup.leftOnReadMinutes === "number") return followup.leftOnReadMinutes;
-  if (type === "offerCountdown" && typeof followup.offerCountdownHours === "number") return followup.offerCountdownHours * 60;
-  return undefined;
+function boolOf(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 export function substituteVars(text: string, vars: ReminderVars): string {
@@ -73,48 +74,72 @@ export function substituteVars(text: string, vars: ReminderVars): string {
 }
 
 /**
- * Resuelve la plantilla final para un tipo. `productReminderConfig` es el
- * Product.reminderConfig (override por producto), opcional.
+ * Extrae los steps de una config por tipo. Soporta la forma nueva ({steps:[...]})
+ * y la vieja (un solo recordatorio: {delayMinutes, message, mediaUrl}). Devuelve
+ * null si no hay nada usable. Descarta steps sin texto ni multimedia.
  */
-export function resolveReminderTemplate(
+function stepsFrom(cfg: Record<string, unknown>): ReminderStep[] | null {
+  const raw = cfg.steps;
+  if (Array.isArray(raw)) {
+    const steps: ReminderStep[] = [];
+    for (const item of raw) {
+      const s = asObj(item);
+      const delaySeconds =
+        typeof s.delaySeconds === "number"
+          ? s.delaySeconds
+          : typeof s.delayMinutes === "number"
+          ? s.delayMinutes * 60
+          : 0;
+      const message = typeof s.message === "string" ? s.message : "";
+      const mediaUrl = typeof s.mediaUrl === "string" && s.mediaUrl.trim() ? s.mediaUrl : null;
+      const mediaType = typeof s.mediaType === "string" ? s.mediaType : "";
+      if (message.trim() || mediaUrl) {
+        steps.push({ delaySeconds: Math.max(1, Math.round(delaySeconds)), message, mediaUrl, mediaType });
+      }
+    }
+    return steps.length ? steps : null;
+  }
+  // Forma vieja: un solo recordatorio.
+  const hasLegacy =
+    typeof cfg.delayMinutes === "number" ||
+    (typeof cfg.message === "string" && cfg.message.trim()) ||
+    (typeof cfg.mediaUrl === "string" && cfg.mediaUrl.trim());
+  if (hasLegacy) {
+    const delayMinutes = typeof cfg.delayMinutes === "number" ? cfg.delayMinutes : 60;
+    return [
+      {
+        delaySeconds: Math.max(1, Math.round(delayMinutes * 60)),
+        message: typeof cfg.message === "string" ? cfg.message : "",
+        mediaUrl: typeof cfg.mediaUrl === "string" && cfg.mediaUrl.trim() ? cfg.mediaUrl : null,
+        mediaType: "",
+      },
+    ];
+  }
+  return null;
+}
+
+/**
+ * Resuelve la SECUENCIA final (enabled + steps con variables substituidas) para
+ * un tipo. `productReminderConfig` es el override por producto, opcional.
+ * Precedencia de steps: producto → tenant → default. `enabled` se resuelve por
+ * separado (override.enabled ?? tenant.enabled ?? default) para poder desactivar
+ * desde el producto.
+ */
+export function resolveReminderSequence(
   followupConfig: unknown,
   type: ReminderType,
   productReminderConfig?: unknown,
   vars: ReminderVars = {},
-): ReminderTemplate {
-  const followup = asObj(followupConfig);
-  const tenant = asObj(followup[type]);
+): ReminderSequence {
   const override = asObj(asObj(productReminderConfig)[type]);
+  const tenant = asObj(asObj(followupConfig)[type]);
   const def = DEFAULTS[type];
 
-  const enabled =
-    typeof override.enabled === "boolean"
-      ? (override.enabled as boolean)
-      : typeof tenant.enabled === "boolean"
-      ? (tenant.enabled as boolean)
-      : // forma vieja: si había un delay configurado, lo consideramos activo
-        legacyDelay(followup, type) !== undefined || def.enabled;
-
-  const delayMinutes =
-    (typeof override.delayMinutes === "number" && override.delayMinutes) ||
-    (typeof tenant.delayMinutes === "number" && tenant.delayMinutes) ||
-    legacyDelay(followup, type) ||
-    def.delayMinutes;
-
-  const rawMessage =
-    (typeof override.message === "string" && override.message.trim() && override.message) ||
-    (typeof tenant.message === "string" && tenant.message.trim() && tenant.message) ||
-    def.message;
-
-  const mediaUrl =
-    (typeof override.mediaUrl === "string" && override.mediaUrl.trim() && override.mediaUrl) ||
-    (typeof tenant.mediaUrl === "string" && tenant.mediaUrl.trim() && tenant.mediaUrl) ||
-    null;
+  const enabled = boolOf(override.enabled) ?? boolOf(tenant.enabled) ?? def.enabled;
+  const steps = stepsFrom(override) ?? stepsFrom(tenant) ?? def.steps;
 
   return {
     enabled,
-    delayMinutes: Math.max(1, delayMinutes),
-    message: substituteVars(rawMessage, vars),
-    mediaUrl,
+    steps: steps.map((s) => ({ ...s, message: substituteVars(s.message, vars) })),
   };
 }

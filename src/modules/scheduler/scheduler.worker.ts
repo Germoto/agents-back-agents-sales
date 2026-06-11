@@ -54,7 +54,9 @@ async function processDue(): Promise<void> {
 
       const to = msg.customer.phone.replace(/\D/g, "");
       if (msg.mediaUrl) {
-        await sendMedia(sender, to, mediaKindFor("image"), msg.mediaUrl, msg.body);
+        // El tipo de media va en metadata (image|video|audio|pdf); default image.
+        const mediaType = (msg.metadata as { mediaType?: string } | null)?.mediaType || "image";
+        await sendMedia(sender, to, mediaKindFor(mediaType), msg.mediaUrl, msg.body);
       } else {
         await sendText(sender, to, msg.body);
       }
