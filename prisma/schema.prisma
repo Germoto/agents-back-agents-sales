@@ -140,6 +140,11 @@ model Company {
   webhookEndpoints  WebhookEndpoint[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
+  crms                 Crm[]
+  crmColumns           CrmColumn[]
+  crmCards             CrmCard[]
+  customerTags         CustomerTag[]
+  customerDeals        CustomerDeal[]
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -420,6 +425,9 @@ model Customer {
   orders            Order[]
   digitalSales      DigitalSale[]
   paymentReceipts   PaymentReceipt[]
+  crmCards          CrmCard[]
+  tagLinks          CustomerTagLink[]
+  deals             CustomerDeal[]
 
   @@unique([companyId, phone])
   @@index([companyId, lastInteractionAt])
@@ -510,6 +518,103 @@ model QuickReply {
   category   QuickReplyCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
 
   @@index([companyId, updatedAt])
+}
+
+// ---------------------------------------------------------------------------
+// CRM kanban: tableros (Crm) con columnas (CrmColumn) y placements (CrmCard).
+// El "Inbox" del tablero es virtual: clientes con conversación SIN CrmCard en
+// ese CRM. Un cliente puede estar en columnas distintas en CRMs distintos.
+// ---------------------------------------------------------------------------
+
+model Crm {
+  id          String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String      @db.Uuid
+  name        String
+  description String?
+  color       String      @default("#6366f1")
+  sortOrder   Int         @default(0)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  company     Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  columns     CrmColumn[]
+  cards       CrmCard[]
+
+  @@unique([companyId, name])
+  @@index([companyId, sortOrder])
+}
+
+model CrmColumn {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  crmId     String    @db.Uuid
+  companyId String    @db.Uuid
+  name      String
+  color     String?
+  sortOrder Int       @default(0)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  crm       Crm       @relation(fields: [crmId], references: [id], onDelete: Cascade)
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  cards     CrmCard[]
+
+  @@index([crmId, sortOrder])
+}
+
+model CrmCard {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String    @db.Uuid
+  crmId      String    @db.Uuid
+  columnId   String    @db.Uuid
+  customerId String    @db.Uuid
+  sortOrder  Int       @default(0)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  crm        Crm       @relation(fields: [crmId], references: [id], onDelete: Cascade)
+  column     CrmColumn @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([crmId, customerId])
+  @@index([columnId, sortOrder])
+}
+
+// Etiquetas internas de clientes (no hay acceso a etiquetas de WA Business).
+model CustomerTag {
+  id        String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String            @db.Uuid
+  name      String
+  color     String            @default("#22c55e")
+  createdAt DateTime          @default(now())
+  company   Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  links     CustomerTagLink[]
+
+  @@unique([companyId, name])
+}
+
+model CustomerTagLink {
+  customerId String      @db.Uuid
+  tagId      String      @db.Uuid
+  createdAt  DateTime    @default(now())
+  customer   Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tag        CustomerTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([customerId, tagId])
+  @@index([tagId])
+}
+
+// "Valor del negocio": montos manuales por cliente que suman al total de la
+// tarjeta del CRM (además de los PaymentReceipt aprobados).
+model CustomerDeal {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String   @db.Uuid
+  customerId  String   @db.Uuid
+  description String
+  amount      Decimal  @db.Decimal(12, 2)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, customerId])
 }
 
 // Carrito multi-producto. Al cerrar la venta se poblan PaymentReceipt.productIds.

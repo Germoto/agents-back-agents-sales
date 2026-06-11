@@ -23,6 +23,7 @@ export const SOCKET_EVENTS = {
   CONVERSATION_UPDATED: "conversation.updated", // estado de conversación cambió (pausa/humano/cierre)
   ORDER_NEW:            "order.new",            // pedido físico registrado por el agente
   BOOKING_NEW:          "booking.new",          // reserva de servicio registrada por el agente
+  CRM_UPDATED:          "crm.updated",          // tablero CRM cambió (move/columnas/CRUD)
 } as const;
 
 class SocketService {
