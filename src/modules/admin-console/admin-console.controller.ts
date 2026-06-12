@@ -9,9 +9,12 @@ import {
   updateClientStatus,
 } from "./admin-console.service";
 import {
+  LANDING_SCENES,
   VERTICALS,
   getEnabledVerticals,
+  getLandingScene,
   setEnabledVerticals,
+  setLandingScene,
 } from "../platform-config/platform-config.service";
 
 export async function superadminLoginController(req: Request, res: Response) {
@@ -67,4 +70,14 @@ export async function getVerticalsController(_req: Request, res: Response) {
 export async function updateVerticalsController(req: Request, res: Response) {
   const enabled = await setEnabledVerticals(req.body.enabledVerticals);
   return res.json({ all: VERTICALS, enabled });
+}
+
+export async function getLandingSceneController(_req: Request, res: Response) {
+  const scene = await getLandingScene();
+  return res.json({ all: LANDING_SCENES, scene });
+}
+
+export async function updateLandingSceneController(req: Request, res: Response) {
+  const scene = await setLandingScene(req.body.scene);
+  return res.json({ all: LANDING_SCENES, scene });
 }

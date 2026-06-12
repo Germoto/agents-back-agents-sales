@@ -31,3 +31,7 @@ export const clientIdParamsSchema = z.object({
 export const updateClientStatusSchema = z.object({
   isActive: z.boolean(),
 });
+
+export const updateLandingSceneSchema = z.object({
+  scene: z.string().min(2).max(40),
+});

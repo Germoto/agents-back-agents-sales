@@ -6,12 +6,14 @@ import { validate } from "../../middlewares/validate";
 import {
   createClientController,
   deleteClientController,
+  getLandingSceneController,
   getVerticalsController,
   impersonateClientController,
   listClientsController,
   superadminLoginController,
   superadminMeController,
   updateClientStatusController,
+  updateLandingSceneController,
   updateVerticalsController,
 } from "./admin-console.controller";
 import {
@@ -19,6 +21,7 @@ import {
   createClientSchema,
   superadminLoginSchema,
   updateClientStatusSchema,
+  updateLandingSceneSchema,
   updateVerticalsSchema,
 } from "./admin-console.schemas";
 
@@ -58,6 +61,16 @@ router.put(
   requireRole("SUPERADMIN"),
   validate({ body: updateVerticalsSchema }),
   asyncHandler(updateVerticalsController),
+);
+
+// Config global de plataforma: animación 3D del landing público.
+router.get("/config/landing", requireAuth, requireRole("SUPERADMIN"), asyncHandler(getLandingSceneController));
+router.put(
+  "/config/landing",
+  requireAuth,
+  requireRole("SUPERADMIN"),
+  validate({ body: updateLandingSceneSchema }),
+  asyncHandler(updateLandingSceneController),
 );
 
 export default router;

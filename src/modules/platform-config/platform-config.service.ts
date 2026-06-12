@@ -36,6 +36,35 @@ export async function getEnabledVerticals(): Promise<BusinessVertical[]> {
   return created.enabledVerticals;
 }
 
+// Animaciones disponibles para el landing público (Three.js en el frontend).
+export const LANDING_SCENES: { value: string; label: string }[] = [
+  { value: "constelacion", label: "Constelación (icosaedro + partículas)" },
+  { value: "ondas", label: "Ondas (malla de partículas en movimiento)" },
+  { value: "nebulosa", label: "Nebulosa (espiral de partículas)" },
+];
+
+const LANDING_SCENE_VALUES = LANDING_SCENES.map((s) => s.value);
+
+export async function getLandingScene(): Promise<string> {
+  const config = await prisma.platformConfig.findUnique({
+    where: { id: PLATFORM_CONFIG_ID },
+    select: { landingScene: true },
+  });
+  return config?.landingScene ?? "constelacion";
+}
+
+export async function setLandingScene(scene: string): Promise<string> {
+  if (!LANDING_SCENE_VALUES.includes(scene)) {
+    throw new AppError("Animación de landing no válida.", 400);
+  }
+  const config = await prisma.platformConfig.upsert({
+    where: { id: PLATFORM_CONFIG_ID },
+    update: { landingScene: scene },
+    create: { id: PLATFORM_CONFIG_ID, enabledVerticals: ALL_VERTICALS, landingScene: scene },
+  });
+  return config.landingScene;
+}
+
 /**
  * Actualiza la lista global de rubros habilitados. Exige al menos uno.
  */

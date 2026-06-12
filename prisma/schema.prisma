@@ -160,6 +160,7 @@ model Company {
 model PlatformConfig {
   id               String             @id @default("global")
   enabledVerticals BusinessVertical[]
+  landingScene     String             @default("constelacion")
   updatedAt        DateTime           @updatedAt
 }
 

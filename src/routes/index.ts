@@ -20,6 +20,7 @@ import adminConsoleRoutes from "../modules/admin-console/admin-console.routes";
 import webhookEndpointsRoutes from "../modules/webhook-endpoints/webhook-endpoints.routes";
 import webhooksRoutes from "../modules/webhooks/webhooks.routes";
 import publicPaymentsRoutes from "../modules/public-payments/public-payments.routes";
+import platformConfigPublicRoutes from "../modules/platform-config/platform-config.routes";
 
 const router = Router();
 
@@ -53,5 +54,7 @@ router.use("/webhooks", webhooksRoutes);
 // API pública para n8n (consulta y actualización de comprobantes; sin token,
 // resuelve company por phone admin igual que /api/bot/config)
 router.use("/public/payments", publicPaymentsRoutes);
+// Config pública del landing (animación 3D elegida por el superadmin)
+router.use("/public/landing", platformConfigPublicRoutes);
 
 export default router;
