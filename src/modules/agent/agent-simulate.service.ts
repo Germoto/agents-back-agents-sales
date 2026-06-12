@@ -17,6 +17,17 @@ import { resolveReminderSequence, type ReminderType } from "./reminder-templates
 
 const SIM_PHONE = "SIMULADOR"; // identidad del "cliente" de simulación (no es un número real)
 
+/**
+ * Modo del simulador. "AI" simula SOLO el agente IA y "FLOW" solo los flujos,
+ * sin importar el botMode de la empresa. Cada modo usa su propia conversación
+ * (canal "sim" vs "sim-flow") para que no se mezclen historial ni estado.
+ */
+export type SimMode = "AI" | "FLOW";
+
+function simChannel(mode: SimMode): string {
+  return mode === "FLOW" ? "sim-flow" : "sim";
+}
+
 export interface SimMessage {
   role: "user" | "assistant";
   text: string;
@@ -78,7 +89,8 @@ async function previewReminders(
   return out;
 }
 
-async function loadSimConversation(companyId: string) {
+async function loadSimConversation(companyId: string, mode: SimMode) {
+  const channel = simChannel(mode);
   const customer = await prisma.customer.upsert({
     where: { companyId_phone: { companyId, phone: SIM_PHONE } },
     update: {},
@@ -86,9 +98,9 @@ async function loadSimConversation(companyId: string) {
     select: { id: true },
   });
   const convo = await prisma.conversation.upsert({
-    where: { companyId_customerId_channel: { companyId, customerId: customer.id, channel: "sim" } },
+    where: { companyId_customerId_channel: { companyId, customerId: customer.id, channel } },
     update: {},
-    create: { companyId, customerId: customer.id, channel: "sim", state: {} },
+    create: { companyId, customerId: customer.id, channel, state: {} },
     select: { id: true, state: true },
   });
   return { customerId: customer.id, conversationId: convo.id, state: (convo.state as ConversationState) ?? {} };
@@ -98,13 +110,19 @@ function outboxText(m: OutboxMessage): string {
   return m.kind === "media" ? (m.caption ?? "") : (m.text ?? "");
 }
 
-/** Procesa un mensaje del "cliente" simulado y devuelve las respuestas del bot. */
+/**
+ * Procesa un mensaje del "cliente" simulado y devuelve las respuestas del bot.
+ * `modeParam` fuerza qué se simula ("AI" = agente IA aunque la empresa esté en
+ * modo flujos, y viceversa); si no viene, se usa el botMode de la empresa.
+ */
 export async function simulateTurn(
   companyId: string,
   message: string,
+  modeParam?: SimMode,
 ): Promise<{ replies: SimMessage[]; reminders: SimReminderPreview[]; trace?: FlowTraceEntry[] }> {
   const config = await buildBotConfig(companyId);
-  const sim = await loadSimConversation(companyId);
+  const mode: SimMode = modeParam ?? (config.business.botMode === "FLOW" ? "FLOW" : "AI");
+  const sim = await loadSimConversation(companyId, mode);
 
   // Persistir el mensaje del cliente (para el historial del turno).
   await prisma.conversationMessage.create({
@@ -115,7 +133,7 @@ export async function simulateTurn(
 
   // Modo FLOW: el simulador corre el motor de flujos real, sin enviar por
   // WhatsApp ni programar timeouts/recordatorios (se anotan en el trace).
-  if (config.business.botMode === "FLOW") {
+  if (mode === "FLOW") {
     const replies: SimMessage[] = [];
     const trace: FlowTraceEntry[] = [];
     const persistReply = async (m: OutboxMessage) => {
@@ -215,8 +233,9 @@ export async function simulateTurn(
 }
 
 /** Mensajes actuales de la conversación de simulación (para cargar el chat al abrir). */
-export async function getSimMessages(companyId: string): Promise<SimMessage[]> {
-  const sim = await loadSimConversation(companyId);
+export async function getSimMessages(companyId: string, modeParam?: SimMode): Promise<SimMessage[]> {
+  const mode: SimMode = modeParam ?? "AI";
+  const sim = await loadSimConversation(companyId, mode);
   const rows = await prisma.conversationMessage.findMany({
     where: { companyId, conversationId: sim.conversationId, role: { in: ["USER", "ASSISTANT"] } },
     orderBy: { createdAt: "asc" },
@@ -231,7 +250,8 @@ export async function getSimMessages(companyId: string): Promise<SimMessage[]> {
 }
 
 /** Reinicia la conversación de simulación (historial, carrito y estado). */
-export async function resetSim(companyId: string): Promise<void> {
-  const sim = await loadSimConversation(companyId);
+export async function resetSim(companyId: string, modeParam?: SimMode): Promise<void> {
+  const mode: SimMode = modeParam ?? "AI";
+  const sim = await loadSimConversation(companyId, mode);
   await resetConversation(companyId, sim.conversationId, sim.customerId);
 }

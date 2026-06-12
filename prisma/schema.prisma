@@ -51,6 +51,8 @@ enum ReceiptStatus {
   EN_REVISION
   APROBADO
   RECHAZADO
+  // Pago real pero ajeno a una venta (otros): no sincroniza con ValidPay
+  IGNORADO
 }
 
 enum ProductFileType {

@@ -7,3 +7,8 @@ export const receiptIdParamsSchema = z.object({
 export const rejectReceiptSchema = z.object({
   rejectionReason: z.string().min(1),
 });
+
+export const approveReceiptSchema = z.object({
+  // Asociar el comprobante a un producto al aprobarlo manualmente (opcional)
+  productId: z.string().uuid().nullable().optional(),
+});

@@ -62,11 +62,31 @@ export async function applyReceiptApproval(
   return updated;
 }
 
-export async function approveReceipt(companyId: string, receiptId: string) {
+export async function approveReceipt(
+  companyId: string,
+  receiptId: string,
+  productId?: string | null,
+) {
   const receipt = await findReceipt(companyId, receiptId);
 
+  // Asociar a un producto al aprobar (opcional, solo productos de la empresa)
+  if (productId) {
+    const product = await prisma.product.findFirst({
+      where: { id: productId, companyId },
+      select: { id: true },
+    });
+    if (!product) throw new AppError("Producto no encontrado", 404);
+  }
+
   const updated = await prisma.$transaction(async (tx) => {
-    return applyReceiptApproval(tx, receipt.id, receipt.digitalSaleId);
+    const approved = await applyReceiptApproval(tx, receipt.id, receipt.digitalSaleId);
+    if (productId) {
+      return tx.paymentReceipt.update({
+        where: { id: receipt.id },
+        data: { productId },
+      });
+    }
+    return approved;
   });
 
   // Notificar a ValidPay de forma asíncrona (best-effort) si el receipt viene de ValidPay
@@ -101,6 +121,28 @@ async function notifyValidPayApproval(companyId: string, externalId: string): Pr
   if (!endpoint?.validpayApiKey) return; // Sin API Key configurada, silencio
 
   await validatePaymentInValidPay(endpoint.validpayApiKey, externalId);
+}
+
+/**
+ * Marca un comprobante como IGNORADO ("otros"): es un pago real pero ajeno a
+ * una venta. NO notifica a ValidPay ni toca la venta digital asociada.
+ */
+export async function ignoreReceipt(companyId: string, receiptId: string) {
+  const receipt = await findReceipt(companyId, receiptId);
+
+  const updated = await prisma.paymentReceipt.update({
+    where: { id: receipt.id },
+    data: { status: "IGNORADO", rejectionReason: null },
+  });
+
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
+    id: updated.id,
+    status: updated.status,
+    source: updated.source,
+    externalId: updated.externalId,
+  });
+
+  return updated;
 }
 
 export async function deleteReceipt(companyId: string, receiptId: string) {
