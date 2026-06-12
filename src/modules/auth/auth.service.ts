@@ -1,4 +1,5 @@
 import bcrypt from "bcrypt";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { signAccessToken } from "../../lib/jwt";
@@ -36,6 +37,7 @@ export async function login(phone: string, password: string) {
       name: user.name,
       phone: user.phone,
       companyId: user.companyId,
+      uiTheme: user.uiTheme,
     },
   };
 }
@@ -50,6 +52,7 @@ export async function getAuthenticatedUser(userId: string) {
       companyId: true,
       role: true,
       isActive: true,
+      uiTheme: true,
       createdAt: true,
       updatedAt: true,
     },
@@ -59,5 +62,14 @@ export async function getAuthenticatedUser(userId: string) {
     throw new AppError("Usuario no encontrado", 404);
   }
 
+  return user;
+}
+
+export async function updateUiTheme(userId: string, theme: Record<string, unknown>) {
+  const user = await prisma.user.update({
+    where: { id: userId },
+    data: { uiTheme: theme as Prisma.InputJsonValue },
+    select: { uiTheme: true },
+  });
   return user;
 }
