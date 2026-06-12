@@ -516,6 +516,8 @@ model QuickReply {
   categoryId String?             @db.Uuid
   title      String
   messages   Json
+  // Acciones al enviar: { tagIds: string[], crmId?: string, crmColumnId?: string }
+  actions    Json?
   usageCount Int                 @default(0)
   createdAt  DateTime            @default(now())
   updatedAt  DateTime            @updatedAt

@@ -14,10 +14,22 @@ export const quickReplyMessageSchema = z
 
 export type QuickReplyMessageInput = z.infer<typeof quickReplyMessageSchema>;
 
+/** Acciones que se ejecutan tras enviar la respuesta rápida. */
+export const quickReplyActionsSchema = z.object({
+  // Etiquetas internas que se le AÑADEN al cliente
+  tagIds: z.array(z.string().uuid()).max(20).default([]),
+  // Mover al cliente a una pestaña de un CRM (ambos o ninguno)
+  crmId: z.string().uuid().nullable().optional(),
+  crmColumnId: z.string().uuid().nullable().optional(),
+});
+
+export type QuickReplyActionsInput = z.infer<typeof quickReplyActionsSchema>;
+
 export const upsertQuickReplySchema = z.object({
   title: z.string().trim().min(1, "Título requerido").max(120),
   categoryId: z.string().uuid().nullable().optional(),
   messages: z.array(quickReplyMessageSchema).min(1, "Agrega al menos un mensaje").max(10),
+  actions: quickReplyActionsSchema.nullable().optional(),
 });
 
 export const upsertCategorySchema = z.object({

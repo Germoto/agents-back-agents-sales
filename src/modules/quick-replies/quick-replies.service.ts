@@ -9,9 +9,11 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { loadWhatsappSender, sendText, sendMedia } from "../agent/outbound";
 import { recordMessage, setBotPaused } from "../agent/conversation.service";
-import type { QuickReplyMessageInput } from "./quick-replies.schemas";
+import { moveCard } from "../crm/crm.service";
+import type { QuickReplyMessageInput, QuickReplyActionsInput } from "./quick-replies.schemas";
 
 const quickReplySelect = {
   id: true,
@@ -19,6 +21,7 @@ const quickReplySelect = {
   categoryId: true,
   category: { select: { id: true, name: true } },
   messages: true,
+  actions: true,
   usageCount: true,
   updatedAt: true,
 } satisfies Prisma.QuickReplySelect;
@@ -91,10 +94,20 @@ export async function listQuickReplies(companyId: string) {
   });
 }
 
-export async function createQuickReply(
-  companyId: string,
-  data: { title: string; categoryId?: string | null; messages: QuickReplyMessageInput[] },
-) {
+type UpsertQuickReplyData = {
+  title: string;
+  categoryId?: string | null;
+  messages: QuickReplyMessageInput[];
+  actions?: QuickReplyActionsInput | null;
+};
+
+function actionsValue(actions: QuickReplyActionsInput | null | undefined) {
+  if (!actions) return Prisma.JsonNull;
+  const empty = !actions.tagIds?.length && !actions.crmId && !actions.crmColumnId;
+  return empty ? Prisma.JsonNull : (actions as unknown as Prisma.InputJsonValue);
+}
+
+export async function createQuickReply(companyId: string, data: UpsertQuickReplyData) {
   await assertCategoryOwned(companyId, data.categoryId);
   return prisma.quickReply.create({
     data: {
@@ -102,16 +115,13 @@ export async function createQuickReply(
       title: data.title,
       categoryId: data.categoryId ?? null,
       messages: data.messages as unknown as Prisma.InputJsonValue,
+      actions: actionsValue(data.actions),
     },
     select: quickReplySelect,
   });
 }
 
-export async function updateQuickReply(
-  companyId: string,
-  id: string,
-  data: { title: string; categoryId?: string | null; messages: QuickReplyMessageInput[] },
-) {
+export async function updateQuickReply(companyId: string, id: string, data: UpsertQuickReplyData) {
   const existing = await prisma.quickReply.findFirst({ where: { id, companyId } });
   if (!existing) throw new AppError("Respuesta rápida no encontrada", 404);
   await assertCategoryOwned(companyId, data.categoryId);
@@ -121,6 +131,7 @@ export async function updateQuickReply(
       title: data.title,
       categoryId: data.categoryId ?? null,
       messages: data.messages as unknown as Prisma.InputJsonValue,
+      actions: actionsValue(data.actions),
     },
     select: quickReplySelect,
   });
@@ -156,7 +167,7 @@ export async function sendQuickReply(
 ): Promise<SendQuickReplyResult> {
   const quickReply = await prisma.quickReply.findFirst({
     where: { id: quickReplyId, companyId },
-    select: { id: true, messages: true },
+    select: { id: true, messages: true, actions: true },
   });
   if (!quickReply) throw new AppError("Respuesta rápida no encontrada", 404);
 
@@ -218,5 +229,46 @@ export async function sendQuickReply(
     data: { usageCount: { increment: 1 } },
   });
 
+  // Acciones post-envío (best-effort): etiquetar al cliente y/o moverlo a un CRM
+  await applyQuickReplyActions(
+    companyId,
+    convo.customerId,
+    quickReply.actions as QuickReplyActionsInput | null,
+  );
+
   return { sentCount, total: messages.length, ...(failedAtIndex !== undefined ? { failedAtIndex } : {}) };
+}
+
+/** Etiqueta al cliente y/o lo mueve a una pestaña de un CRM tras enviar. */
+async function applyQuickReplyActions(
+  companyId: string,
+  customerId: string,
+  actions: QuickReplyActionsInput | null,
+): Promise<void> {
+  if (!actions) return;
+  try {
+    if (actions.tagIds?.length) {
+      // Solo etiquetas de la empresa (por si la respuesta quedó apuntando a tags borradas)
+      const owned = await prisma.customerTag.findMany({
+        where: { companyId, id: { in: actions.tagIds } },
+        select: { id: true },
+      });
+      if (owned.length) {
+        await prisma.customerTagLink.createMany({
+          data: owned.map((tag) => ({ customerId, tagId: tag.id })),
+          skipDuplicates: true,
+        });
+        socketService.emitToCompany(companyId, SOCKET_EVENTS.CRM_UPDATED, { crmId: null });
+      }
+    }
+    if (actions.crmId && actions.crmColumnId) {
+      await moveCard(companyId, actions.crmId, {
+        customerId,
+        toColumnId: actions.crmColumnId,
+      });
+    }
+  } catch (err) {
+    // No romper el envío por una acción (CRM/columna borrada, etc.)
+    console.error("[quick-replies] acciones post-envío fallaron:", err instanceof Error ? err.message : err);
+  }
 }

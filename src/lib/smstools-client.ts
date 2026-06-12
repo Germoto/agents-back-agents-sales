@@ -414,16 +414,34 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
   ]);
 
   const rawType = (field(body, data, ["type", "message_type", "messageType", "msgtype", "msg_type"]) ?? "").toLowerCase();
+  // SMS Tools marca los mensajes de texto como "chat"/"text"; en esos casos el
+  // payload igual trae campos url/image (p.ej. foto de perfil) que NO son un
+  // adjunto del mensaje — no deben tratarse como multimedia.
+  const isExplicitText = rawType === "chat" || rawType === "text" || rawType.includes("conversation");
   let type: InboundMessage["type"] = "text";
-  if (rawType.includes("image") || rawType.includes("photo")) type = "image";
-  else if (rawType.includes("video")) type = "video";
-  else if (rawType.includes("doc") || rawType.includes("pdf") || rawType.includes("file")) type = "document";
-  else if (rawType.includes("audio") || rawType.includes("voice") || rawType.includes("ptt")) type = "audio";
-  else if (mediaUrl) type = "image"; // adjunto sin tipo claro -> asumimos imagen (comprobante)
+  if (!isExplicitText) {
+    if (rawType.includes("image") || rawType.includes("photo")) type = "image";
+    else if (rawType.includes("video")) type = "video";
+    else if (rawType.includes("doc") || rawType.includes("pdf") || rawType.includes("file")) type = "document";
+    else if (rawType.includes("audio") || rawType.includes("voice") || rawType.includes("ptt")) type = "audio";
+    else if (!rawType && mediaUrl) type = "image"; // adjunto sin tipo claro -> asumimos imagen (comprobante)
+  }
 
   const fromMeRaw = (field(body, data, ["fromMe", "from_me", "self", "outgoing", "direction"]) ?? "").toLowerCase();
   const fromMe =
     fromMeRaw === "true" || fromMeRaw === "1" || fromMeRaw === "yes" || fromMeRaw === "outgoing" || fromMeRaw === "sent";
 
-  return { messageId, fromPhone, businessPhone, account, text, type, mediaUrl, fromMe, raw };
+  // Solo conservar mediaUrl cuando el mensaje ES multimedia (evita guardar
+  // URLs basura en mensajes de texto, que el panel renderizaría rotas).
+  return {
+    messageId,
+    fromPhone,
+    businessPhone,
+    account,
+    text,
+    type,
+    mediaUrl: type === "text" ? null : mediaUrl,
+    fromMe,
+    raw,
+  };
 }
