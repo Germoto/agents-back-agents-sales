@@ -41,6 +41,8 @@ export const LANDING_SCENES: { value: string; label: string }[] = [
   { value: "constelacion", label: "Constelación (icosaedro + partículas)" },
   { value: "ondas", label: "Ondas (malla de partículas en movimiento)" },
   { value: "nebulosa", label: "Nebulosa (espiral de partículas)" },
+  { value: "tunel", label: "Túnel (warp de partículas hacia la cámara)" },
+  { value: "lluvia", label: "Lluvia digital (partículas cayendo)" },
 ];
 
 const LANDING_SCENE_VALUES = LANDING_SCENES.map((s) => s.value);
