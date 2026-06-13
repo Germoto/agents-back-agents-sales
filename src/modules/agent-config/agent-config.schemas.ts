@@ -53,6 +53,7 @@ export const replyModeConfigSchema = z.object({
 });
 
 // PUT /agent-config/muted-numbers — números en atención humana forzada.
+// Límite alto para permitir importaciones masivas desde Excel/CSV.
 export const mutedNumbersConfigSchema = z.object({
-  mutedNumbers: z.array(z.string().trim().regex(/^\+?\d{6,20}$/, "Número inválido")).max(500).default([]),
+  mutedNumbers: z.array(z.string().trim().regex(/^\+?\d{6,20}$/, "Número inválido")).max(5000).default([]),
 });
