@@ -60,11 +60,15 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     // cliente ya se gestionó por fuera (auto-validación), para no tapar ese
     // mensaje con el genérico "tuve un problema".
     const final = (res.content ?? "").trim();
-    // En contexto de pago (se acaba de leer un comprobante o ya se auto-gestionó),
-    // NUNCA mandes el genérico "tuve un problema": taparía la validación del pago.
+    // NUNCA mandes el genérico "tuve un problema" cuando el último mensaje del
+    // cliente fue una IMAGEN (el modelo no la ve; el comprobante se gestiona
+    // aparte), ni en contexto de pago: taparía la validación.
     const recent = (iso?: string | null) => (iso ? Date.now() - new Date(iso).getTime() < 90 * 1000 : false);
+    const lastUser = [...history].reverse().find((m) => m.role === "user");
+    const lastWasMedia =
+      typeof lastUser?.content === "string" && lastUser.content.includes("[el cliente envió una imagen");
     const paymentCtx = recent(ctx.state.receiptAutoHandledAt) || recent(ctx.state.lastReceipt?.at);
-    return final || (ctx.outbox.length || paymentCtx ? "" : FALLBACK_TEXT);
+    return final || (ctx.outbox.length || paymentCtx || lastWasMedia ? "" : FALLBACK_TEXT);
   }
 
   // Si agotó iteraciones, fuerza un cierre en texto sin herramientas

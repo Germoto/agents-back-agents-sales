@@ -395,13 +395,13 @@ export async function tryApprovePayment(opts: {
     };
   }
 
-  // (b) Sin ninguna señal útil: pedir el nombre o la captura.
+  // (b) Sin ninguna señal útil: pedir el nombre del titular de SU Yape/Plin.
   if (!payerName && !codes.length) {
     return {
       approved: false,
       kind: "needs_info",
       customerMessage:
-        "Para validar tu pago, dime el nombre del titular de tu Yape/Plin (desde donde pagaste) o reenvíame la captura del comprobante 🙏",
+        "¡Gracias! Para validar tu pago, dime por favor el *nombre del titular* de tu Yape o Plin (la cuenta DESDE donde hiciste el pago) 🙏",
     };
   }
 
@@ -934,10 +934,11 @@ export async function executeTool(
         return JSON.stringify({ ok: true, approved: true, note: "(simulación) Pago aprobado. Ahora entrega el producto con entregar_producto." });
       }
 
-      // Si la imagen del comprobante ya se auto-gestionó hace poco (validación
-      // determinista al llegar la imagen), no dupliques: deja que eso resuelva.
+      // Si la imagen del comprobante ya se auto-gestionó hace poco Y el cliente NO
+      // está aportando un nombre nuevo ahora, no dupliques: deja que eso resuelva.
+      // (Si el cliente escribe un nombre, sí lo procesamos aunque haya imagen.)
       const autoAt = ctx.state.receiptAutoHandledAt ? new Date(ctx.state.receiptAutoHandledAt).getTime() : 0;
-      if (autoAt && Date.now() - autoAt < 90 * 1000) {
+      if (autoAt && Date.now() - autoAt < 90 * 1000 && !String(args.payerName ?? "").trim()) {
         return JSON.stringify({ ok: true, note: "El comprobante que mandó el cliente ya se está validando automáticamente. NO agregues texto ni vuelvas a validar/entregar; deja tu texto final vacío." });
       }
 
