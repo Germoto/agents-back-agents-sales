@@ -215,10 +215,14 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   });
   await markInboundProcessed(convo.conversationId, inbound.messageId);
 
-  // Comprobante de pago (imagen): si el negocio cobra, cualquier imagen entrante
-  // se intenta leer como comprobante (la mayoría lo son en una venta). handleReceiptImage
-  // lo valida/entrega o pide el dato, de forma determinista (no depende del modelo).
-  if (inbound.mediaUrl && inbound.type === "image" && (config as any).payment?.enabled) {
+  // Comprobante de pago (imagen): si el negocio cobra, cualquier adjunto entrante
+  // se intenta leer como comprobante. handleReceiptImage lo valida/entrega o pide
+  // el dato, de forma determinista (no depende del modelo).
+  const paymentsEnabled = !!(config as any).payment?.enabled;
+  console.log(
+    `[agent] inbound de ${inbound.fromPhone}: type=${inbound.type} media=${inbound.mediaUrl ? "yes" : "no"} textLen=${(inbound.text ?? "").trim().length} pay=${paymentsEnabled} payCtx=${isPaymentContext(convo.state)}`,
+  );
+  if (inbound.mediaUrl && inbound.type !== "text" && paymentsEnabled) {
     await handleReceiptImage(companyId, config, convo, inbound);
   }
 

@@ -408,31 +408,51 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
   const account = field(body, data, ["account", "unique", "device"]);
 
   const text = field(body, data, ["message", "text", "body", "caption", "conversation"]) ?? "";
+  const hasText = text.trim().length > 0;
 
-  const mediaUrl = field(body, data, [
-    "media_url", "mediaUrl", "url", "image", "file_url", "download_url", "attachment", "media", "file", "document_url",
+  // Campos ADJUNTO-específicos: si vienen, es un adjunto real (nunca foto de perfil).
+  const attachmentUrl = field(body, data, [
+    "media_url", "mediaUrl", "file_url", "download_url", "attachment", "document_url", "media",
   ]);
+  // Campos AMBIGUOS: SMS Tools manda la foto de perfil del remitente en image/url
+  // en TODOS los inbound (incluidos los de texto) → solo son adjunto si NO hay texto.
+  const ambiguousUrl = field(body, data, ["image", "url", "file", "photo", "picture"]);
 
   const rawType = (field(body, data, ["type", "message_type", "messageType", "msgtype", "msg_type"]) ?? "").toLowerCase();
-  // SMS Tools marca los mensajes de texto como "chat"/"text"; en esos casos el
-  // payload igual trae campos url/image (p.ej. foto de perfil) que NO son un
-  // adjunto del mensaje — no deben tratarse como multimedia.
-  const isExplicitText = rawType === "chat" || rawType === "text" || rawType.includes("conversation");
+  const typeFromRaw = (): InboundMessage["type"] | null => {
+    if (rawType.includes("image") || rawType.includes("photo") || rawType.includes("sticker")) return "image";
+    if (rawType.includes("video")) return "video";
+    if (rawType.includes("doc") || rawType.includes("pdf")) return "document";
+    if (rawType.includes("audio") || rawType.includes("voice") || rawType.includes("ptt")) return "audio";
+    return null;
+  };
+
+  // Detección robusta (no depende del valor exacto de data[type] de SMS Tools):
+  // 1) tipo media explícito → ese tipo; 2) campo adjunto-específico → media aunque
+  // haya caption; 3) campo ambiguo SIN texto → es una imagen sola (comprobante).
+  const explicitMediaType = typeFromRaw();
   let type: InboundMessage["type"] = "text";
-  if (!isExplicitText) {
-    if (rawType.includes("image") || rawType.includes("photo")) type = "image";
-    else if (rawType.includes("video")) type = "video";
-    else if (rawType.includes("doc") || rawType.includes("pdf") || rawType.includes("file")) type = "document";
-    else if (rawType.includes("audio") || rawType.includes("voice") || rawType.includes("ptt")) type = "audio";
-    else if (!rawType && mediaUrl) type = "image"; // adjunto sin tipo claro -> asumimos imagen (comprobante)
+  let mediaUrl: string | null = null;
+  if (explicitMediaType) {
+    type = explicitMediaType;
+    mediaUrl = attachmentUrl ?? ambiguousUrl;
+  } else if (attachmentUrl) {
+    type = "image";
+    mediaUrl = attachmentUrl;
+  } else if (ambiguousUrl && !hasText) {
+    type = "image"; // imagen sola (sin texto): el url/image es el adjunto, no la foto de perfil
+    mediaUrl = ambiguousUrl;
   }
 
   const fromMeRaw = (field(body, data, ["fromMe", "from_me", "self", "outgoing", "direction"]) ?? "").toLowerCase();
   const fromMe =
     fromMeRaw === "true" || fromMeRaw === "1" || fromMeRaw === "yes" || fromMeRaw === "outgoing" || fromMeRaw === "sent";
 
-  // Solo conservar mediaUrl cuando el mensaje ES multimedia (evita guardar
-  // URLs basura en mensajes de texto, que el panel renderizaría rotas).
+  // Diagnóstico: qué tipo trae SMS Tools y qué detectamos (sin volcar datos).
+  console.log(
+    `[inbound] rawType="${rawType}" detected=${type} media=${mediaUrl ? "yes" : "no"} hasText=${hasText} keys=${Object.keys(data).join(",") || Object.keys(body).join(",")}`,
+  );
+
   return {
     messageId,
     fromPhone,
