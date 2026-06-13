@@ -390,17 +390,17 @@ export async function tryApprovePayment(opts: {
       approved: false,
       kind: "confusion",
       customerMessage:
-        "Ese es el titular de NUESTRA cuenta 🙂 (a quién le pagaste), no el tuyo. Para validar tu pago mándame el *número de operación* de tu comprobante (o el nombre del titular de TU Yape/Plin, desde donde pagaste).",
+        "Ese es el titular de NUESTRA cuenta 🙂 (a quién le pagaste), no el tuyo. Para validar tu pago necesito el nombre del titular de TU Yape/Plin (desde donde pagaste) o que me reenvíes la captura del comprobante.",
     };
   }
 
-  // (b) Sin ninguna señal útil: pedir el N° de operación o el nombre.
+  // (b) Sin ninguna señal útil: pedir el nombre o la captura.
   if (!payerName && !codes.length) {
     return {
       approved: false,
       kind: "needs_info",
       customerMessage:
-        "Para validar tu pago, mándame el *número de operación* que aparece en tu comprobante (o el nombre del titular de tu Yape/Plin) 🙏",
+        "Para validar tu pago, dime el nombre del titular de tu Yape/Plin (desde donde pagaste) o reenvíame la captura del comprobante 🙏",
     };
   }
 

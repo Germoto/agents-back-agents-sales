@@ -60,9 +60,11 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     // cliente ya se gestionó por fuera (auto-validación), para no tapar ese
     // mensaje con el genérico "tuve un problema".
     const final = (res.content ?? "").trim();
-    const autoAt = ctx.state.receiptAutoHandledAt ? new Date(ctx.state.receiptAutoHandledAt).getTime() : 0;
-    const receiptHandled = autoAt && Date.now() - autoAt < 90 * 1000;
-    return final || (ctx.outbox.length || receiptHandled ? "" : FALLBACK_TEXT);
+    // En contexto de pago (se acaba de leer un comprobante o ya se auto-gestionó),
+    // NUNCA mandes el genérico "tuve un problema": taparía la validación del pago.
+    const recent = (iso?: string | null) => (iso ? Date.now() - new Date(iso).getTime() < 90 * 1000 : false);
+    const paymentCtx = recent(ctx.state.receiptAutoHandledAt) || recent(ctx.state.lastReceipt?.at);
+    return final || (ctx.outbox.length || paymentCtx ? "" : FALLBACK_TEXT);
   }
 
   // Si agotó iteraciones, fuerza un cierre en texto sin herramientas

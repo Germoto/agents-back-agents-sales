@@ -35,7 +35,6 @@ import { resolveCompanyIdByPhone } from "../public-payments/public-payments.serv
 import {
   scheduleReminder,
   cancelPendingReminders,
-  schedulePaymentRecheck,
   minutesFromNow,
   secondsFromNow,
 } from "../scheduler/scheduler.service";
@@ -638,53 +637,39 @@ async function handleReceiptImage(
     }
   }
 
-  // 3) Auto-validación determinista (N° de operación como llave).
-  const codes = [receipt?.operationNumber, receipt?.securityCode]
+  // 3) Auto-entrega SOLO si se puede aprobar al INSTANTE (código de seguridad
+  // Yape→Yape que ya matchea). Si no, NO hacemos nada más: el turno del modelo
+  // (debounced) resuelve — puede usar también el nombre si el cliente lo escribió,
+  // y agenda el reintento/tranquiliza con sus mensajes deterministas.
+  const codes = [receipt?.securityCode, receipt?.operationNumber]
     .map((c) => (c ?? "").trim())
     .filter(Boolean) as string[];
-  if (!codes.length) return; // sin código legible: lo maneja el turno del modelo
-
-  const result = await tryApprovePayment({
-    companyId,
-    customerId: convo.customerId,
-    conversationId: convo.conversationId,
-    customerPhone: fromPhone,
-    config,
-    state: convo.state,
-    codes,
-    deliver: true,
-  });
-  convo.state.receiptAutoHandledAt = new Date().toISOString();
+  if (!codes.length) return;
 
   try {
+    const result = await tryApprovePayment({
+      companyId,
+      customerId: convo.customerId,
+      conversationId: convo.conversationId,
+      customerPhone: fromPhone,
+      config,
+      state: convo.state,
+      codes,
+      deliver: true,
+    });
     if (result.approved && result.deliveryOutbox?.length) {
+      convo.state.receiptAutoHandledAt = new Date().toISOString();
       if (result.customerMessage && to) await sendText(sender, to, result.customerMessage);
       await flushOutbox(sender, to, result.deliveryOutbox, {
         companyId,
         customerId: convo.customerId,
         conversationId: convo.conversationId,
       });
-    } else if (!result.approved && result.shouldRecheck) {
-      if (result.customerMessage && to) await sendText(sender, to, result.customerMessage);
-      await schedulePaymentRecheck({
-        companyId,
-        customerId: convo.customerId,
-        conversationId: convo.conversationId,
-        sendAt: new Date(Date.now() + 60 * 1000),
-        expectedAmount: undefined,
-        operationCode: codes[0],
-        customerPhone: fromPhone,
-        receiptMediaUrl: imageUrl,
-      });
-      convo.state.pendingRecheckAt = new Date().toISOString();
-    } else if (!result.approved && result.customerMessage && to) {
-      // confusión / falta dato / monto distinto
-      await sendText(sender, to, result.customerMessage);
     }
+    await saveState(convo.conversationId, convo.state);
   } catch (err) {
     console.warn("[agent] auto-validación de comprobante falló:", err instanceof Error ? err.message : err);
   }
-  await saveState(convo.conversationId, convo.state);
 }
 
 /**

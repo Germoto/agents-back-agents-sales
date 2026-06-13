@@ -196,6 +196,16 @@ function levenshtein(a: string, b: string): number {
   return dp[b.length];
 }
 
+function digitsOnly(value: unknown): string {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+/** Extrae el código de seguridad de un payerName tipo "Thalia Pei (cód: 934)". */
+function extractCod(name: unknown): string | null {
+  const m = String(name ?? "").match(/c[oó]d\.?\s*:?\s*(\d{2,6})/i);
+  return m ? m[1] : null;
+}
+
 function nameSimilarity(input: string, target: string): "exact" | "similar" | "no" {
   const a = normalizeName(input);
   const b = normalizeName(target);
@@ -271,27 +281,22 @@ export async function matchPayments(companyId: string, body: MatchBody) {
       }
     }
 
-    // N°/código de operación (leído del comprobante con visión): llave fuerte. Se
-    // comparan TODOS los códigos provistos (N° de operación + código de seguridad)
-    // contra operationCode/reference/payerName del receipt (ValidPay puede guardar
-    // el N° de operación en cualquiera de esos campos).
+    // CÓDIGO DE SEGURIDAD del comprobante (solo Yape→Yape): llave fuerte. ValidPay
+    // lo reporta DENTRO del payerName con el formato "Nombre (cód: 934)". Se compara
+    // el código leído del comprobante (vía visión) contra ese cód (extraído del
+    // payerName) — y, por las dudas, contra operationCode/reference — con match
+    // EXACTO (sin substrings, para no generar falsos positivos).
     const allCodes = [
       ...(body.operationCode ? [body.operationCode] : []),
       ...(body.operationCodes ?? []),
     ]
       .map((c) => String(c).replace(/\D/g, ""))
-      .filter((c) => c.length >= 3);
+      .filter((c) => c.length >= 2);
     if (allCodes.length) {
-      const fields = [r.operationCode, r.reference, r.payerName].map((x) =>
-        String(x ?? "").replace(/\D/g, ""),
+      const targets = [extractCod(r.payerName), digitsOnly(r.operationCode), digitsOnly(r.reference)].filter(
+        (t): t is string => !!t && t.length >= 2,
       );
-      const hit = allCodes.some((code) =>
-        fields.some(
-          (f) =>
-            f.length >= 3 &&
-            (f === code || (code.length >= 5 && f.includes(code)) || (f.length >= 5 && code.includes(f))),
-        ),
-      );
+      const hit = allCodes.some((code) => targets.some((t) => t === code));
       if (hit) {
         score += 60;
         reasons.push("operation_code_exact");

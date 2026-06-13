@@ -18,9 +18,10 @@ export interface ReceiptData {
 const SYSTEM =
   "Eres un lector de comprobantes de pago de Yape y Plin (Perú). Devuelves SOLO JSON. " +
   "Lee la imagen y extrae: el monto pagado (amountText, ej. 'S/ 5.00'); la hora/fecha que aparezca " +
-  "(time, texto tal cual); el NÚMERO DE OPERACIÓN (operationNumber, el numerito largo que rotula " +
-  "'Nro de operación' / 'N° de operación' / 'código de operación' — está en TODOS los comprobantes); y " +
-  "el CÓDIGO DE SEGURIDAD (securityCode) solo si aparece rotulado así (suele ser de 3 dígitos en Yape→Yape). " +
+  "(time, texto tal cual); el CÓDIGO DE SEGURIDAD (securityCode), que aparece SOLO en transferencias " +
+  "Yape→Yape, rotulado 'código de seguridad' o 'cód' (suele ser de 3 dígitos, ej. 'código de seguridad: 934' " +
+  "→ devuelve '934'); si NO aparece un código de seguridad, securityCode = null. Además, el NÚMERO DE " +
+  "OPERACIÓN (operationNumber, el numerito largo rotulado 'Nro de operación'). " +
   "NO inventes ni infieras el nombre de quien paga: la constancia muestra al DESTINATARIO (a quién se le pagó), " +
   "no al pagador. Si un dato no aparece, usa null.";
 
