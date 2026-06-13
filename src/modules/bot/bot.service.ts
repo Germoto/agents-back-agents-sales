@@ -162,6 +162,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
       mutedNumbers: Array.isArray(agentConfig.mutedNumbers)
         ? (agentConfig.mutedNumbers as unknown[]).filter((x): x is string => typeof x === "string")
         : [],
+      muteAfterSale: agentConfig.muteAfterSale ?? true,
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
     products: products.map((p) => mapBotProduct(p)),

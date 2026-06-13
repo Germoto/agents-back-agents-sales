@@ -23,7 +23,11 @@ export async function updateRemindersController(req: Request, res: Response) {
 }
 
 export async function updateMutedNumbersController(req: Request, res: Response) {
-  const config = await updateAgentMutedNumbers(req.user!.companyId, req.body.mutedNumbers ?? []);
+  const config = await updateAgentMutedNumbers(
+    req.user!.companyId,
+    req.body.mutedNumbers ?? [],
+    req.body.muteAfterSale,
+  );
   return res.json(config);
 }
 

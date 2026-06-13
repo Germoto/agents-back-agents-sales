@@ -199,6 +199,10 @@ model AgentConfig {
   // Números en atención humana forzada: el bot nunca les responde; su
   // conversación pasa automáticamente a HUMANO (botPaused).
   mutedNumbers   Json?
+  // Tras entregar una venta, si el catálogo tiene UN solo producto y no se
+  // ofreció enganche (cross-sell), pasar al cliente a la lista de atención
+  // humana automáticamente. Activado por defecto.
+  muteAfterSale  Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

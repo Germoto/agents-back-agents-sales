@@ -14,6 +14,7 @@ function mapAgentConfig(config: {
   replyMode?: string;
   testNumbers?: unknown;
   mutedNumbers?: unknown;
+  muteAfterSale?: boolean;
   createdAt: Date;
   updatedAt: Date;
 } | null) {
@@ -33,6 +34,7 @@ function mapAgentConfig(config: {
     mutedNumbers: Array.isArray(config.mutedNumbers)
       ? config.mutedNumbers.filter((item): item is string => typeof item === "string")
       : [],
+    muteAfterSale: config.muteAfterSale ?? true,
   };
 }
 
@@ -81,12 +83,19 @@ export async function updateAgentReminders(
   return mapAgentConfig(config);
 }
 
-// Actualiza solo la lista de números en atención humana forzada.
-export async function updateAgentMutedNumbers(companyId: string, mutedNumbers: string[]) {
+// Actualiza solo la lista de números en atención humana forzada (+flag post-venta).
+export async function updateAgentMutedNumbers(
+  companyId: string,
+  mutedNumbers: string[],
+  muteAfterSale?: boolean,
+) {
   const normalized = [...new Set((mutedNumbers ?? []).map((n) => n.replace(/\D/g, "")).filter(Boolean))];
   const config = await prisma.agentConfig.update({
     where: { companyId },
-    data: { mutedNumbers: normalized as Prisma.InputJsonValue },
+    data: {
+      mutedNumbers: normalized as Prisma.InputJsonValue,
+      ...(typeof muteAfterSale === "boolean" ? { muteAfterSale } : {}),
+    },
   });
   return mapAgentConfig(config);
 }

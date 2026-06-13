@@ -9,6 +9,7 @@ import { prisma } from "../../lib/prisma";
 import type { ToolDefinition } from "../../lib/openai";
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
+import { setBotPaused } from "./conversation.service";
 import { mediaKindFor } from "./outbound";
 import {
   addToCart,
@@ -53,6 +54,45 @@ export interface TurnContext {
   /** modo simulación (Pruebas): los tools que escriben datos compartidos/reales
    * (validar_pago, registrar pedidos, reservas) se stubean para no afectar datos. */
   simulate?: boolean;
+}
+
+/**
+ * Tras una entrega exitosa, si la empresa tiene UN solo producto en el catálogo
+ * del bot y no se ofreció enganche, agrega al cliente a la lista de atención
+ * humana (AgentConfig.mutedNumbers) y pausa el bot. Controlado por el flag
+ * `muteAfterSale` (default ON). Best-effort: nunca rompe la entrega.
+ */
+async function maybeMuteAfterSale(ctx: TurnContext): Promise<void> {
+  try {
+    const agentCfg = (ctx.config as any).agent ?? {};
+    if (agentCfg.muteAfterSale === false) return;
+    const products = ctx.config.products ?? [];
+    if (products.length !== 1) return;
+    const digits = ctx.customerPhone.replace(/\D/g, "");
+    if (!digits) return;
+
+    const cfg = await prisma.agentConfig.findUnique({
+      where: { companyId: ctx.companyId },
+      select: { mutedNumbers: true },
+    });
+    const list = Array.isArray(cfg?.mutedNumbers)
+      ? (cfg!.mutedNumbers as unknown[]).filter((x): x is string => typeof x === "string")
+      : [];
+    if (!list.includes(digits)) {
+      await prisma.agentConfig.update({
+        where: { companyId: ctx.companyId },
+        data: { mutedNumbers: [...list, digits] },
+      });
+    }
+    await setBotPaused(ctx.companyId, ctx.conversationId, true);
+    ctx.adminNotices.push(
+      `✅ Venta entregada a ${ctx.customerPhone}. Pasé el chat a atención humana automáticamente ` +
+        `(catálogo de 1 producto, sin producto de enganche). Lo ves en Agente IA → Atención humana.`,
+    );
+    console.log(`[agent] muteAfterSale: ${digits} agregado a atención humana (company=${ctx.companyId})`);
+  } catch (err) {
+    console.warn("[agent] muteAfterSale falló (se ignora):", err instanceof Error ? err.message : err);
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -800,6 +840,15 @@ export async function executeTool(
         return JSON.stringify({ ok: false, error: "No se encontró entrega digital configurada para el producto pagado." });
       }
       ctx.state.status = "ENTREGADO";
+
+      // Cierre total: si el catálogo tiene UN solo producto y no se ofreció
+      // enganche, no queda nada más que vender — pasar al cliente a la lista de
+      // atención humana (flag muteAfterSale, default ON). El mensaje de entrega
+      // de ESTE turno sale normal; el mute aplica desde el siguiente inbound.
+      if (!ctx.simulate && !offeredCrossSell) {
+        await maybeMuteAfterSale(ctx);
+      }
+
       // El recordatorio post-venta se programa automáticamente (plantilla configurada).
       return JSON.stringify({
         ok: true,

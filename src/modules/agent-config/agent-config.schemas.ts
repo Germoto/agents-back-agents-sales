@@ -56,4 +56,7 @@ export const replyModeConfigSchema = z.object({
 // Límite alto para permitir importaciones masivas desde Excel/CSV.
 export const mutedNumbersConfigSchema = z.object({
   mutedNumbers: z.array(z.string().trim().regex(/^\+?\d{6,20}$/, "Número inválido")).max(5000).default([]),
+  // Flag: auto-pasar a atención humana tras entregar una venta (catálogo de 1
+  // producto sin enganche). Opcional para no pisarlo al guardar solo la lista.
+  muteAfterSale: z.boolean().optional(),
 });
