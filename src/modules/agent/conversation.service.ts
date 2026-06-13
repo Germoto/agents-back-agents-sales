@@ -40,6 +40,8 @@ export interface ConversationState {
   pendingRecheckAt?: string | null;
   /** La auto-validación (al llegar la imagen) ya gestionó el pago; el turno del modelo no debe re-hacerlo. */
   receiptAutoHandledAt?: string | null;
+  /** Intentos fallidos de validación por falta de dato (Plin sin nombre): tras 3 se deriva a un asesor. */
+  paymentAttempts?: number;
   [key: string]: unknown;
 }
 

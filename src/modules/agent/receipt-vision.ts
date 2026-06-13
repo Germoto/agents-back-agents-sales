@@ -19,9 +19,9 @@ const SYSTEM =
   "Eres un lector de comprobantes de pago de Yape y Plin (Perú). Devuelves SOLO JSON. " +
   "Lee la imagen y extrae: el monto pagado (amountText, ej. 'S/ 5.00'); la hora/fecha que aparezca " +
   "(time, texto tal cual); el CÓDIGO DE SEGURIDAD (securityCode), que aparece SOLO en transferencias " +
-  "Yape→Yape, rotulado 'código de seguridad' o 'cód' (suele ser de 3 dígitos, ej. 'código de seguridad: 934' " +
-  "→ devuelve '934'); si NO aparece un código de seguridad, securityCode = null. Además, el NÚMERO DE " +
-  "OPERACIÓN (operationNumber, el numerito largo rotulado 'Nro de operación'). " +
+  "Yape→Yape, rotulado 'CÓDIGO DE SEGURIDAD' o 'cód'. Suele ser de 3 dígitos y puede mostrarse en casillas " +
+  "separadas (ej. '0 7 3' → devuelve '073'; conserva el cero inicial). Si NO aparece un código de seguridad, " +
+  "securityCode = null. Además, el NÚMERO DE OPERACIÓN (operationNumber, el numerito largo rotulado 'Nro de operación'). " +
   "NO inventes ni infieras el nombre de quien paga: la constancia muestra al DESTINATARIO (a quién se le pagó), " +
   "no al pagador. Si un dato no aparece, usa null.";
 

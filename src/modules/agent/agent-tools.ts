@@ -357,6 +357,7 @@ export async function tryApprovePayment(opts: {
     }
     if (cart.items.length) await checkoutCart(companyId, customerId, cart.totalText);
     state.pendingRecheckAt = null;
+    state.paymentAttempts = 0;
 
     if (opts.deliver) {
       const { outbox, delivered, offeredCrossSellId } = buildDeliveryOutbox(config, productIds);
@@ -941,8 +942,9 @@ export async function executeTool(
       }
 
       const payerName = String(args.payerName ?? "").trim();
-      // Señales del comprobante leído (visión): N° de operación + código de seguridad.
-      const codes = [ctx.state.lastReceipt?.operationNumber, ctx.state.lastReceipt?.securityCode]
+      // La llave es el CÓDIGO DE SEGURIDAD (solo Yape→Yape); ValidPay lo manda como
+      // "Nombre (cód: xxx)". En otros casos no hay código → se valida por nombre.
+      const codes = [ctx.state.lastReceipt?.securityCode]
         .map((c) => (c ?? "").trim())
         .filter(Boolean) as string[];
 
@@ -976,10 +978,10 @@ export async function executeTool(
         return JSON.stringify({ ok: true, approved: true, note: "Pago aprobado. Ahora entrega el producto con entregar_producto." });
       }
 
-      // No aprobado: ya tengo el mensaje listo para el cliente → lo envío yo y le
-      // digo al modelo que no agregue texto. Si es timing, agendo el reintento.
-      if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
-      if (result.shouldRecheck) {
+      // TIMING (hay un dato pero el comprobante aún no entró): reintento en 2º plano
+      // a +60s; si no aparece, el worker deriva a un asesor. Mensaje tranquilizador.
+      if (result.kind === "timing") {
+        if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
         const recheckedRecently =
           ctx.state.pendingRecheckAt &&
           Date.now() - new Date(ctx.state.pendingRecheckAt).getTime() < 3 * 60 * 1000;
@@ -997,8 +999,26 @@ export async function executeTool(
           });
           ctx.state.pendingRecheckAt = new Date().toISOString();
         }
+        return JSON.stringify({ ok: true, approved: false, kind: "timing", note: "Ya le respondí al cliente (estoy validando). NO agregues texto ni apruebes; deja tu texto final vacío." });
       }
-      return JSON.stringify({ ok: true, approved: false, kind: result.kind, note: "Ya le respondí al cliente sobre su pago. NO agregues texto ni apruebes; deja tu texto final vacío." });
+
+      // FALTA DATO (confusión / sin nombre / monto distinto): pedir el dato al
+      // cliente, pero SIN insistir mucho — tras 3 intentos sin lograrlo, derivar a
+      // un asesor (no hacer dar vueltas al cliente).
+      const attempts = (Number(ctx.state.paymentAttempts) || 0) + 1;
+      ctx.state.paymentAttempts = attempts;
+      if (attempts >= 3) {
+        ctx.state.status = "ASESOR_HUMANO";
+        ctx.state.pendingAction = "HUMAN: no se pudo validar el pago automáticamente (3 intentos)";
+        ctx.state.paymentAttempts = 0;
+        ctx.outbox.push({
+          kind: "text",
+          text: "Voy a pasar tu caso a un asesor para validar tu pago cuanto antes 🙏 En un momentito te confirma. ¡Gracias por tu paciencia!",
+        });
+        return JSON.stringify({ ok: true, approved: false, derived: true, note: "Derivado a un asesor tras 3 intentos de validación. Deja tu texto final vacío." });
+      }
+      if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
+      return JSON.stringify({ ok: true, approved: false, kind: result.kind, note: "Ya le respondí al cliente pidiéndole el dato para validar. NO agregues texto ni apruebes; deja tu texto final vacío." });
     }
 
     case "entregar_producto": {

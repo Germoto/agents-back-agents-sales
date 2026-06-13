@@ -495,12 +495,8 @@ export async function recheckPayment(msg: {
     if (!sender) return;
     const to = (md.customerPhone ?? "").replace(/\D/g, "");
 
-    // Códigos: del estado (lo que leyó la visión) + lo que vino en la metadata.
-    const codes = [
-      state.lastReceipt?.operationNumber,
-      state.lastReceipt?.securityCode,
-      md.operationCode,
-    ]
+    // Llave = código de seguridad (Yape→Yape). El N° de operación no lo guarda ValidPay.
+    const codes = [state.lastReceipt?.securityCode, md.operationCode]
       .map((c) => (c ?? "").trim())
       .filter(Boolean) as string[];
 
@@ -641,7 +637,9 @@ async function handleReceiptImage(
   // Yape→Yape que ya matchea). Si no, NO hacemos nada más: el turno del modelo
   // (debounced) resuelve — puede usar también el nombre si el cliente lo escribió,
   // y agenda el reintento/tranquiliza con sus mensajes deterministas.
-  const codes = [receipt?.securityCode, receipt?.operationNumber]
+  // La llave es el CÓDIGO DE SEGURIDAD (solo Yape→Yape). Sin él no se auto-valida
+  // por código: lo resuelve el turno del modelo (por nombre) o se deriva.
+  const codes = [receipt?.securityCode]
     .map((c) => (c ?? "").trim())
     .filter(Boolean) as string[];
   if (!codes.length) return;
