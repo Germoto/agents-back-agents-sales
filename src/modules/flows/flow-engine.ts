@@ -816,6 +816,8 @@ function buildWhatsappFlowIO(opts: WhatsappIOOpts): FlowIO {
         type: ScheduledMessageType.CUSTOM,
         sendAt: minutesFromNow(minutes),
         body,
+        // Recordatorios de flujo también respetan el horario hábil del tenant.
+        timezone: opts.timezone,
       });
     },
   };

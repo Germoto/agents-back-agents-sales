@@ -21,11 +21,20 @@ const reminderSequenceSchema = z
   })
   .optional();
 
+// Franja horaria (hora local del tenant) en que se permiten enviar recordatorios.
+const quietHoursSchema = z
+  .object({
+    startHour: z.coerce.number().int().min(0).max(23),
+    endHour: z.coerce.number().int().min(1).max(24),
+  })
+  .optional();
+
 // Config de recordatorios/seguimientos que consume el agente y el scheduler.
 export const followupConfigSchema = z
   .object({
     abandonedCart: reminderSequenceSchema,
     leftOnRead: reminderSequenceSchema,
+    quietHours: quietHoursSchema,
   })
   .nullable()
   .optional();

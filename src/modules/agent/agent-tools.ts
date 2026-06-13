@@ -25,6 +25,29 @@ import {
 } from "../public-payments/public-payments.service";
 import { createAgentOrder, createOrderFromCart } from "./order.service";
 import { createBooking } from "./booking.service";
+import { schedulePaymentRecheck } from "../scheduler/scheduler.service";
+
+/** Comparación laxa de nombres (acentos/orden) para detectar confusión de titular. */
+function looseNameNorm(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function sameHolder(input: string, holder: string): boolean {
+  const a = looseNameNorm(input);
+  const b = looseNameNorm(holder);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const ta = new Set(a.split(" ").filter((t) => t.length >= 3));
+  const tb = new Set(b.split(" ").filter((t) => t.length >= 3));
+  let common = 0;
+  for (const t of ta) if (tb.has(t)) common++;
+  return common >= 2; // ≥2 nombres/apellidos en común = es nuestro titular
+}
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
@@ -170,6 +193,66 @@ export function matchProduct(query: string, products: BotProduct[]): BotProduct 
 
 function findProductById(ctx: TurnContext, productId: string): BotProduct | undefined {
   return ctx.config.products.find((p) => p.id === productId || p.slug === productId);
+}
+
+/**
+ * Arma los mensajes de entrega digital (instrucciones + mensajes adicionales +
+ * cross-sell) para los productos dados. Pura (no depende de TurnContext): la usa
+ * `entregar_producto` (empuja a ctx.outbox) y `recheckPayment` (los envía por el
+ * sender desde el worker). Devuelve el outbox, los nombres entregados y el id del
+ * producto de cross-sell ofrecido (si hubo).
+ */
+export function buildDeliveryOutbox(
+  config: BotConfig,
+  productIds: string[],
+): { outbox: OutboxMessage[]; delivered: string[]; offeredCrossSellId: string | null } {
+  const find = (id: string) => config.products.find((p) => p.id === id || p.slug === id);
+  const outbox: OutboxMessage[] = [];
+  const delivered: string[] = [];
+  let offeredCrossSellId: string | null = null;
+
+  for (const id of productIds) {
+    const p = find(id);
+    const dd = p?.digitalDelivery;
+    if (!p || p.productType !== "digital" || !dd?.instructions?.trim()) continue;
+    outbox.push({ kind: "text", text: dd.instructions.trim() });
+
+    for (const f of dd.followupMessages ?? []) {
+      const text = (f.message ?? "").trim();
+      const media = (f.mediaUrl ?? "").trim();
+      if (media) {
+        outbox.push({ kind: "media", mediaUrl: media, mediaKind: mediaKindFor(f.mediaType || ""), caption: text || undefined });
+      } else if (text) {
+        outbox.push({ kind: "text", text });
+      }
+    }
+
+    const crossId = dd.crossSellProductId ?? null;
+    if (crossId) {
+      const cross = find(crossId);
+      if (cross && cross.id !== p.id) {
+        const pitch = (dd.crossSellPitch ?? "").trim();
+        const pitchMedia = (dd.crossSellPitchMediaUrl ?? "").trim();
+        if (pitchMedia) {
+          outbox.push({ kind: "media", mediaUrl: pitchMedia, mediaKind: mediaKindFor(dd.crossSellPitchMediaType || ""), caption: pitch || undefined });
+        } else if (pitch) {
+          outbox.push({ kind: "text", text: pitch });
+        } else {
+          const price = cross.priceText ?? cross.price;
+          const desc = (cross.shortDescription ?? "").trim();
+          outbox.push({
+            kind: "text",
+            text: `🎁 Además, podría interesarte *${cross.name}*` + (desc ? ` — ${desc}` : "") + (price ? ` (${price})` : "") + `. ¿Te cuento más?`,
+          });
+        }
+        offeredCrossSellId = cross.id;
+      }
+    }
+
+    delivered.push(p.name);
+  }
+
+  return { outbox, delivered, offeredCrossSellId };
 }
 
 /**
@@ -686,24 +769,67 @@ export async function executeTool(
         if (Number.isFinite(n) && n > 0) expected = n;
       }
 
+      // Código de seguridad/operación leído del comprobante (visión): llave fuerte.
+      const receiptCode = (ctx.state.lastReceipt?.securityCode ?? "").trim() || undefined;
+
       const candidates = await matchPayments(ctx.companyId, {
         payerName,
         amountPaid: expected,
+        operationCode: receiptCode,
         limit: 5,
       } as any);
 
       const top = candidates[0];
       const reasons: string[] = ((top as any)?.matchReasons ?? []) as string[];
+      const codeMatched = reasons.includes("operation_code_exact");
       const nameMatched = reasons.includes("payer_name_exact") || reasons.includes("payer_name_similar");
-      // El NOMBRE del titular es condición NECESARIA: el monto por sí solo no
-      // aprueba (antes un nombre cualquiera pasaba si coincidía el importe).
-      if (!top || !nameMatched) {
+      // Aprueba si coincide el CÓDIGO (llave fuerte, no requiere nombre) o el
+      // NOMBRE del titular. El monto por sí solo no aprueba.
+      const matched = Boolean(top) && (codeMatched || nameMatched);
+
+      if (!matched) {
         ctx.state.status = "ESPERANDO_VALIDACION";
+
+        // (a) El cliente mandó el nombre de NUESTRO titular (lo leyó de la captura,
+        // que muestra el destino). Corrige con amabilidad; no apruebes ni reintentes.
+        const holders = ((ctx.config.payment?.methods ?? []) as Array<{ holder?: string }>)
+          .map((m) => m.holder ?? "")
+          .filter(Boolean);
+        if (payerName && holders.some((h) => sameHolder(payerName, h))) {
+          return JSON.stringify({
+            ok: false,
+            approved: false,
+            reason:
+              "Ese es el titular de NUESTRA cuenta (a quién le pagó), no el suyo. La captura del comprobante muestra nuestro nombre, no el de él. Explícaselo con amabilidad y pídele el CÓDIGO de la operación (en Yape suele salir como 'código: xxx') o el nombre del titular de SU Yape/Plin, desde donde hizo el pago. NO apruebes.",
+          });
+        }
+
+        // (b) Timing: el comprobante puede no haber llegado aún. Reintento en 2º
+        // plano a +60s; si al minuto no aparece, se deriva a un asesor. Tranquiliza,
+        // no rechaces ni des a entender que desconfías.
+        const recheckedRecently =
+          ctx.state.pendingRecheckAt &&
+          Date.now() - new Date(ctx.state.pendingRecheckAt).getTime() < 3 * 60 * 1000;
+        if (!ctx.simulate && !recheckedRecently) {
+          await schedulePaymentRecheck({
+            companyId: ctx.companyId,
+            customerId: ctx.customerId,
+            conversationId: ctx.conversationId,
+            sendAt: new Date(Date.now() + 60 * 1000),
+            payerName: payerName || undefined,
+            expectedAmount: expected,
+            operationCode: receiptCode,
+            customerPhone: ctx.customerPhone,
+            receiptMediaUrl: ctx.state.lastReceipt?.mediaUrl ?? undefined,
+          });
+          ctx.state.pendingRecheckAt = new Date().toISOString();
+        }
         return JSON.stringify({
           ok: false,
           approved: false,
+          pending: true,
           reason:
-            "El nombre del titular no coincide con ningún comprobante recibido. NO apruebes el pago. Pide al cliente el nombre EXACTO que figura en su Yape/Plin (o que reenvíe la captura). Si insiste y no coincide, ofrece derivar a un asesor con derivar_humano.",
+            "Todavía no encuentro el comprobante (puede tardar un momento en entrar al sistema). NO digas que está mal ni que no existe ni que el nombre no coincide. Dile con calma y seguridad que estás validando su pago automáticamente y que en un momentito le confirmas. No vuelvas a pedir el nombre con ansiedad.",
         });
       }
 
@@ -734,6 +860,7 @@ export async function executeTool(
 
       if (cart.items.length) await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
       ctx.state.status = "PAGADO";
+      ctx.state.pendingRecheckAt = null;
       return JSON.stringify({ ok: true, approved: true, note: "Pago aprobado. Ahora entrega el producto con entregar_producto." });
     }
 
@@ -769,72 +896,12 @@ export async function executeTool(
           : [];
       }
 
-      const delivered: string[] = [];
-      let offeredCrossSell = false;
-      for (const id of ids) {
-        const p = findProductById(ctx, id);
-        const dd = p?.digitalDelivery;
-        // El mensaje de entrega ahora son las instrucciones tal cual (el dueño pega
-        // el link dentro). Guard: requiere instrucciones (antes era el link).
-        if (!p || p.productType !== "digital" || !dd?.instructions?.trim()) continue;
-        ctx.outbox.push({ kind: "text", text: dd.instructions.trim() });
-
-        // (b) Mensajes adicionales opcionales: cada uno con multimedia y/o texto, en
-        // orden, como mensajes separados.
-        for (const f of dd.followupMessages ?? []) {
-          const text = (f.message ?? "").trim();
-          const media = (f.mediaUrl ?? "").trim();
-          if (media) {
-            ctx.outbox.push({
-              kind: "media",
-              mediaUrl: media,
-              mediaKind: mediaKindFor(f.mediaType || ""),
-              caption: text || undefined,
-            });
-          } else if (text) {
-            ctx.outbox.push({ kind: "text", text });
-          }
-        }
-
-        // (c) Cross-sell opcional: ofrecer otro producto del catálogo (si existe y
-        // está activo, y no es el mismo que se entregó). Solo una oferta; el agente
-        // maneja el interés del cliente en los turnos siguientes.
-        const crossId = dd.crossSellProductId ?? null;
-        if (crossId) {
-          const cross = findProductById(ctx, crossId);
-          if (cross && cross.id !== p.id) {
-            // Mensaje configurado por el dueño (para que conecte con sus mensajes
-            // adicionales). Puede llevar multimedia. Si todo está vacío, línea automática.
-            const pitch = (dd.crossSellPitch ?? "").trim();
-            const pitchMedia = (dd.crossSellPitchMediaUrl ?? "").trim();
-            if (pitchMedia) {
-              ctx.outbox.push({
-                kind: "media",
-                mediaUrl: pitchMedia,
-                mediaKind: mediaKindFor(dd.crossSellPitchMediaType || ""),
-                caption: pitch || undefined,
-              });
-            } else if (pitch) {
-              ctx.outbox.push({ kind: "text", text: pitch });
-            } else {
-              const price = cross.priceText ?? cross.price;
-              const desc = (cross.shortDescription ?? "").trim();
-              ctx.outbox.push({
-                kind: "text",
-                text:
-                  `🎁 Además, podría interesarte *${cross.name}*` +
-                  (desc ? ` — ${desc}` : "") +
-                  (price ? ` (${price})` : "") +
-                  `. ¿Te cuento más?`,
-              });
-            }
-            offeredCrossSell = true;
-            // Contexto para el siguiente turno: el agente sabe qué producto ofreció.
-            ctx.state.offeredCrossSellProductId = cross.id;
-          }
-        }
-
-        delivered.push(p.name);
+      const { outbox: deliveryMsgs, delivered, offeredCrossSellId } = buildDeliveryOutbox(ctx.config, ids);
+      ctx.outbox.push(...deliveryMsgs);
+      const offeredCrossSell = Boolean(offeredCrossSellId);
+      if (offeredCrossSellId) {
+        // Contexto para el siguiente turno: el agente sabe qué producto ofreció.
+        ctx.state.offeredCrossSellProductId = offeredCrossSellId;
       }
       if (!delivered.length) {
         return JSON.stringify({ ok: false, error: "No se encontró entrega digital configurada para el producto pagado." });

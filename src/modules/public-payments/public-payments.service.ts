@@ -271,6 +271,27 @@ export async function matchPayments(companyId: string, body: MatchBody) {
       }
     }
 
+    // Código de seguridad/operación (leído del comprobante con visión): llave
+    // fuerte. Se compara contra operationCode/reference/payerName del receipt
+    // (ValidPay puede guardarlo en cualquiera de esos campos).
+    if (body.operationCode) {
+      const code = String(body.operationCode).replace(/\D/g, "");
+      if (code.length >= 3) {
+        const fields = [r.operationCode, r.reference, r.payerName].map((x) =>
+          String(x ?? "").replace(/\D/g, ""),
+        );
+        const hit = fields.some(
+          (f) =>
+            f.length >= 3 &&
+            (f === code || (code.length >= 5 && f.includes(code)) || (f.length >= 5 && code.includes(f))),
+        );
+        if (hit) {
+          score += 60;
+          reasons.push("operation_code_exact");
+        }
+      }
+    }
+
     if ((body.occurredFrom || body.occurredTo) && r.occurredAt) {
       const t = r.occurredAt.getTime();
       const fromOk = body.occurredFrom ? t >= new Date(body.occurredFrom).getTime() : true;

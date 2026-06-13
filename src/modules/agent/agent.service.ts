@@ -24,13 +24,19 @@ import {
   getConversationRuntime,
   type ConversationState,
 } from "./conversation.service";
-import { loadWhatsappSender, sendText, type WhatsappSender } from "./outbound";
+import { loadWhatsappSender, sendText, sendMedia, type WhatsappSender } from "./outbound";
+import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, sleep, OUTBOX_GAP_MS } from "./delivery";
 import { runFlowTurn, buildRealFlowIO, trailingUserText } from "../flows/flow-engine";
-import type { TurnContext } from "./agent-tools";
-import { summarizeCart } from "./cart.service";
-import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
+import { buildDeliveryOutbox, type TurnContext } from "./agent-tools";
+import { summarizeCart, checkoutCart } from "./cart.service";
+import {
+  resolveCompanyIdByPhone,
+  matchPayments,
+  claimPayment,
+  updatePaymentStatus,
+} from "../public-payments/public-payments.service";
 import { scheduleReminder, cancelPendingReminders, minutesFromNow, secondsFromNow } from "../scheduler/scheduler.service";
 import { resolveReminderSequence, type ReminderType } from "./reminder-templates";
 
@@ -207,6 +213,13 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     rawPayload: inbound.raw as any,
   });
   await markInboundProcessed(convo.conversationId, inbound.messageId);
+
+  // Comprobante de pago (imagen) en contexto de pago: leerlo con visión (monto,
+  // hora, código) y reenviárselo al admin como aviso, SIN pausar el bot. El bot
+  // sigue su flujo normal (pedirá el código/nombre del titular).
+  if (inbound.mediaUrl && inbound.type === "image" && isPaymentContext(convo.state)) {
+    await handleReceiptImage(companyId, config, convo, inbound);
+  }
 
   // El cliente respondió => cancelar follow-ups de silencio/abandono pendientes.
   // En modo FLOW también los timeouts de bloque y los recordatorios del flujo
@@ -390,7 +403,7 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
 
   await saveState(conversationId, ctx.state);
 
-  // Recordatorios solicitados por el modelo
+  // Recordatorios solicitados por el modelo (clampeados a horario hábil)
   for (const r of ctx.reminders) {
     await scheduleReminder({
       companyId,
@@ -399,6 +412,8 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
       type: toReminderType(r.type),
       sendAt: minutesFromNow(r.minutes),
       body: r.body,
+      timezone: config.business.timezone,
+      quietHours: (config.agent.followupConfig as { quietHours?: unknown } | null)?.quietHours,
     });
   }
 
@@ -439,6 +454,199 @@ async function getCustomerName(customerId: string): Promise<string> {
 }
 
 /**
+ * Reintento de validación de pago (lo dispara el worker del scheduler al vencer
+ * un PAYMENT_RECHECK, ~1 min después de que el cliente dijo que pagó). Si el
+ * comprobante ya entró, aprueba y ENTREGA automáticamente; si no, deriva a un
+ * asesor humano (pausa el bot, avisa al admin con la imagen) y tranquiliza al
+ * cliente. Best-effort: nunca lanza.
+ */
+export async function recheckPayment(msg: {
+  companyId: string;
+  customerId: string;
+  conversationId: string | null;
+  metadata: unknown;
+}): Promise<void> {
+  try {
+    if (!msg.conversationId) return;
+    const conversationId = msg.conversationId;
+    const md = (msg.metadata ?? {}) as {
+      payerName?: string | null;
+      expectedAmount?: number | null;
+      operationCode?: string | null;
+      customerPhone?: string;
+      receiptMediaUrl?: string | null;
+    };
+
+    // Idempotencia: si el propio turno del cliente ya aprobó/entregó, o ya está
+    // en manos de un humano, no hacer nada.
+    const runtime = await getConversationRuntime(conversationId);
+    if (!runtime) return;
+    const state = runtime.state ?? {};
+    const status = (state.status as string) ?? "";
+    if (status === "PAGADO" || status === "ENTREGADO" || runtime.botPaused) return;
+
+    let config: Awaited<ReturnType<typeof buildBotConfig>>;
+    try {
+      config = await buildBotConfig(msg.companyId);
+    } catch {
+      return;
+    }
+    const sender = await loadWhatsappSender(msg.companyId);
+    if (!sender) return;
+    const to = (md.customerPhone ?? "").replace(/\D/g, "");
+
+    const candidates = await matchPayments(msg.companyId, {
+      payerName: md.payerName ?? undefined,
+      amountPaid: md.expectedAmount ?? undefined,
+      operationCode: md.operationCode ?? undefined,
+      limit: 5,
+    } as any);
+    const top = candidates[0] as any;
+    const reasons: string[] = (top?.matchReasons ?? []) as string[];
+    const matched =
+      Boolean(top) &&
+      (reasons.includes("operation_code_exact") ||
+        reasons.includes("payer_name_exact") ||
+        reasons.includes("payer_name_similar"));
+
+    if (matched) {
+      const cart = await summarizeCart(msg.companyId, msg.customerId);
+      const productIds = cart.productIds.length
+        ? cart.productIds
+        : state.selectedProductId
+        ? [state.selectedProductId as string]
+        : [];
+      try {
+        await claimPayment(msg.companyId, top.id, { claimedBy: "agent", claimTtlSeconds: 120 } as any);
+        await updatePaymentStatus(msg.companyId, top.id, {
+          status: "APROBADO",
+          validationMode: "AUTO",
+          matchScore: top.matchScore,
+          matchStrategy: reasons.join("+") || "agent_recheck",
+          matchedPayerNameInput: md.payerName ?? "",
+          customerPhone: md.customerPhone,
+          productIds,
+        } as any);
+      } catch {
+        /* puede estar en revisión; igual intentamos entregar */
+      }
+      if (cart.items.length) await checkoutCart(msg.companyId, msg.customerId, cart.totalText);
+
+      if (to) {
+        try {
+          await sendText(sender, to, "¡Pago confirmado! ✅ Te entrego tu acceso ahora mismo 👇");
+        } catch {
+          /* best-effort */
+        }
+      }
+      const { outbox, offeredCrossSellId } = buildDeliveryOutbox(config, productIds);
+      await flushOutbox(sender, to, outbox, {
+        companyId: msg.companyId,
+        customerId: msg.customerId,
+        conversationId,
+      });
+      state.status = "ENTREGADO";
+      state.pendingRecheckAt = null;
+      if (offeredCrossSellId) state.offeredCrossSellProductId = offeredCrossSellId;
+      await saveState(conversationId, state as ConversationState);
+      console.log(`[agent] recheckPayment: aprobado y entregado (conv=${conversationId})`);
+      return;
+    }
+
+    // Sin match tras 1 min → derivar a un asesor humano y tranquilizar al cliente.
+    await setBotPaused(msg.companyId, conversationId, true);
+    state.pendingRecheckAt = null;
+    await saveState(conversationId, state as ConversationState);
+    if (to) {
+      try {
+        await sendText(
+          sender,
+          to,
+          "Estoy verificando tu pago con un asesor para confirmarlo cuanto antes 🙏 En breve te confirmamos, ¡gracias por tu paciencia!",
+        );
+      } catch {
+        /* best-effort */
+      }
+    }
+    const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+    if (adminPhone) {
+      const caption =
+        `🔔 Pago por validar de ${md.customerPhone ?? to}. No se encontró el comprobante automáticamente tras 1 min. ` +
+        `Revísalo y confírmalo desde Comprobantes/Conversaciones. El bot quedó en atención humana para este cliente.`;
+      try {
+        if (md.receiptMediaUrl) await sendMedia(sender, adminPhone, "image", md.receiptMediaUrl, caption);
+        else await sendText(sender, adminPhone, caption);
+      } catch {
+        /* best-effort */
+      }
+    }
+    console.log(`[agent] recheckPayment: sin match → derivado a humano (conv=${conversationId})`);
+  } catch (err) {
+    console.warn("[agent] recheckPayment falló:", err instanceof Error ? err.message : err);
+  }
+}
+
+/** ¿La conversación está esperando/validando un pago? (contexto para leer comprobantes). */
+function isPaymentContext(state: ConversationState): boolean {
+  if (state.lastPaymentPromptAt) return true;
+  const s = state.status ?? "";
+  return s === "ESPERANDO_PAGO" || s === "ESPERANDO_VALIDACION";
+}
+
+/**
+ * Comprobante (imagen) recibido en contexto de pago: lo lee con visión (monto,
+ * hora, código) y lo guarda en el estado para que validar_pago use el código;
+ * además se lo reenvía al admin como aviso, SIN pausar el bot.
+ */
+async function handleReceiptImage(
+  companyId: string,
+  config: Awaited<ReturnType<typeof buildBotConfig>>,
+  convo: { conversationId: string; customerId: string; state: ConversationState },
+  inbound: InboundMessage,
+): Promise<void> {
+  const imageUrl = inbound.mediaUrl;
+  if (!imageUrl) return;
+
+  // 1) Visión (best-effort; requiere la API key del tenant).
+  const apiKey = (config as { openai?: { apiKey?: string | null } }).openai?.apiKey ?? null;
+  const model = (config as { openai?: { model?: string } }).openai?.model || "gpt-4o-mini";
+  let receipt: Awaited<ReturnType<typeof readReceiptImage>> = null;
+  if (apiKey) {
+    receipt = await readReceiptImage(apiKey, model, imageUrl);
+    if (receipt) {
+      convo.state.lastReceipt = {
+        amountText: receipt.amountText,
+        time: receipt.time,
+        securityCode: receipt.securityCode,
+        mediaUrl: imageUrl,
+        at: new Date().toISOString(),
+      };
+      await saveState(convo.conversationId, convo.state);
+    }
+  }
+
+  // 2) Reenviar el comprobante al admin (solo aviso; NO pausa el bot).
+  const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+  if (!adminPhone) return;
+  const sender = await loadWhatsappSender(companyId);
+  if (!sender) return;
+  const name = await getCustomerName(convo.customerId);
+  const datos = receipt
+    ? `Monto leído: ${receipt.amountText ?? "—"}` +
+      (receipt.securityCode ? ` · código: ${receipt.securityCode}` : "") +
+      (receipt.time ? ` · ${receipt.time}` : "")
+    : "No se pudo leer la imagen automáticamente.";
+  const caption =
+    `🧾 Comprobante recibido${name ? ` de ${name}` : ""} (${inbound.fromPhone}).\n${datos}\n` +
+    `El bot sigue atendiendo y está validando el pago.`;
+  try {
+    await sendMedia(sender, adminPhone, "image", imageUrl, caption);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
  * Programa los recordatorios automáticos según el estado, usando las plantillas
  * configuradas (texto + imagen + variables) del negocio y el override por producto.
  */
@@ -476,6 +684,8 @@ async function scheduleAutoReminders(
         body: step.message,
         mediaUrl: step.mediaUrl,
         metadata: step.mediaType ? { mediaType: step.mediaType } : undefined,
+        timezone: config.business.timezone,
+        quietHours: (followup as { quietHours?: unknown } | null)?.quietHours,
       });
     }
   };

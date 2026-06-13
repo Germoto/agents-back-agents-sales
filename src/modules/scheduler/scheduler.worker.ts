@@ -9,10 +9,28 @@ import { ScheduledMessageStatus, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { loadWhatsappSender, sendText, sendMedia, mediaKindFor } from "../agent/outbound";
 import { recordMessage } from "../agent/conversation.service";
+import { recheckPayment } from "../agent/agent.service";
 import { resumeFlowOnTimeout } from "../flows/flow-engine";
+import { clampToBusinessHours, normalizeQuietHours, type QuietHours } from "./quiet-hours";
 import type { WhatsappSender } from "../agent/outbound";
 
 const BATCH = 50;
+
+type QuietConfig = { tz: string | null; quiet: QuietHours };
+
+/** Carga (y cachea por batch) la zona horaria + ventana de horario del tenant. */
+async function getQuietConfig(companyId: string, cache: Map<string, QuietConfig>): Promise<QuietConfig> {
+  const hit = cache.get(companyId);
+  if (hit) return hit;
+  const [company, agentCfg] = await Promise.all([
+    prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } }),
+    prisma.agentConfig.findUnique({ where: { companyId }, select: { followupConfig: true } }),
+  ]);
+  const quiet = normalizeQuietHours((agentCfg?.followupConfig as { quietHours?: unknown } | null)?.quietHours);
+  const cfg: QuietConfig = { tz: company?.timezone ?? null, quiet };
+  cache.set(companyId, cfg);
+  return cfg;
+}
 let started = false;
 
 export function startScheduler(): void {
@@ -37,8 +55,27 @@ async function processDue(): Promise<void> {
   if (!due.length) return;
 
   const senderCache = new Map<string, WhatsappSender | null>();
+  const quietCache = new Map<string, QuietConfig>();
 
   for (const msg of due) {
+    // Horario hábil: los mensajes al cliente (no los timeouts internos de flujo
+    // ni los reintentos de pago, que son urgentes) no se envían fuera de la
+    // ventana del tenant; se reprograman al próximo horario válido sin
+    // reclamarlos (cubre filas viejas o creadas con anticipación).
+    if (msg.type !== ScheduledMessageType.FLOW_TIMEOUT && msg.type !== ScheduledMessageType.PAYMENT_RECHECK) {
+      const qc = await getQuietConfig(msg.companyId, quietCache);
+      if (qc.tz) {
+        const next = clampToBusinessHours(now, qc.tz, qc.quiet);
+        if (next.getTime() > now.getTime()) {
+          await prisma.scheduledMessage.updateMany({
+            where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
+            data: { sendAt: next },
+          });
+          continue;
+        }
+      }
+    }
+
     // Claim optimista: solo procede quien logra pasarlo de PENDING a SENT
     const claim = await prisma.scheduledMessage.updateMany({
       where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
@@ -51,6 +88,18 @@ async function processDue(): Promise<void> {
       // por la rama "sin responder" del bloque que quedó esperando.
       if (msg.type === ScheduledMessageType.FLOW_TIMEOUT) {
         await resumeFlowOnTimeout(msg);
+        continue;
+      }
+
+      // Reintento de validación de pago: re-corre el matching y, si aparece,
+      // aprueba y entrega; si no, deriva a un asesor (no es un mensaje fijo).
+      if (msg.type === ScheduledMessageType.PAYMENT_RECHECK) {
+        await recheckPayment({
+          companyId: msg.companyId,
+          customerId: msg.customerId,
+          conversationId: msg.conversationId,
+          metadata: msg.metadata,
+        });
         continue;
       }
 

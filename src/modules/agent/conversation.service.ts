@@ -27,6 +27,16 @@ export interface ConversationState {
   mediaSentProductIds?: string[];
   /** Producto relacionado (cross-sell) ofrecido tras la última entrega; da contexto al agente. */
   offeredCrossSellProductId?: string | null;
+  /** Datos leídos del último comprobante (visión): monto, hora, código de seguridad/operación. */
+  lastReceipt?: {
+    amountText?: string | null;
+    time?: string | null;
+    securityCode?: string | null;
+    mediaUrl?: string | null;
+    at?: string;
+  } | null;
+  /** Si hay un reintento de validación de pago agendado (evita duplicar el PAYMENT_RECHECK). */
+  pendingRecheckAt?: string | null;
   [key: string]: unknown;
 }
 
@@ -346,7 +356,7 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
     // ADMIN (humano) cuenta como lado del negocio = assistant; USER = cliente.
     const role: "user" | "assistant" = r.role === "USER" ? "user" : "assistant";
     let content = r.message ?? "";
-    if (!content && r.mediaUrl) content = "[el cliente envió un archivo adjunto]";
+    if (!content && r.mediaUrl) content = "[el cliente envió una imagen (posible comprobante de pago)]";
     return { role, content };
   });
 }

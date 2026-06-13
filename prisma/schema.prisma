@@ -96,6 +96,7 @@ enum ScheduledMessageType {
   POST_SALE
   CUSTOM
   FLOW_TIMEOUT
+  PAYMENT_RECHECK
 }
 
 enum ScheduledMessageStatus {
