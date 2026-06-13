@@ -56,9 +56,13 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     // Sin tool_calls => texto final para el cliente. Si el modelo no agrega texto
     // pero alguna herramienta ya envió contenido al cliente (outbox), devolvemos
     // "" para NO mandar un segundo mensaje redundante. El FALLBACK solo aplica
-    // cuando no se envió nada en todo el turno.
+    // cuando no se envió nada en todo el turno — y NUNCA si el comprobante del
+    // cliente ya se gestionó por fuera (auto-validación), para no tapar ese
+    // mensaje con el genérico "tuve un problema".
     const final = (res.content ?? "").trim();
-    return final || (ctx.outbox.length ? "" : FALLBACK_TEXT);
+    const autoAt = ctx.state.receiptAutoHandledAt ? new Date(ctx.state.receiptAutoHandledAt).getTime() : 0;
+    const receiptHandled = autoAt && Date.now() - autoAt < 90 * 1000;
+    return final || (ctx.outbox.length || receiptHandled ? "" : FALLBACK_TEXT);
   }
 
   // Si agotó iteraciones, fuerza un cierre en texto sin herramientas

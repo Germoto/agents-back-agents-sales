@@ -59,8 +59,10 @@ export const updateStatusParamsSchema = z.object({ id: z.string().uuid() });
 export const matchBodySchema = z.object({
   amountPaid: z.union([z.string(), z.number()]).optional(),
   payerName: z.string().trim().min(1).optional(),
-  // Código de seguridad/operación leído del comprobante (Yape→Yape). Llave fuerte.
+  // Código/N° de operación leído del comprobante. Llave fuerte. Se aceptan varios
+  // (N° de operación + código de seguridad) y matchea si CUALQUIERA coincide.
   operationCode: z.string().trim().min(1).optional(),
+  operationCodes: z.array(z.string().trim().min(1)).optional(),
   paymentSource: z.string().trim().min(1).optional(),
   occurredFrom: z.string().datetime().optional(),
   occurredTo: z.string().datetime().optional(),

@@ -27,16 +27,19 @@ export interface ConversationState {
   mediaSentProductIds?: string[];
   /** Producto relacionado (cross-sell) ofrecido tras la última entrega; da contexto al agente. */
   offeredCrossSellProductId?: string | null;
-  /** Datos leídos del último comprobante (visión): monto, hora, código de seguridad/operación. */
+  /** Datos leídos del último comprobante (visión): monto, hora, N° operación y código de seguridad. */
   lastReceipt?: {
     amountText?: string | null;
     time?: string | null;
+    operationNumber?: string | null;
     securityCode?: string | null;
     mediaUrl?: string | null;
     at?: string;
   } | null;
   /** Si hay un reintento de validación de pago agendado (evita duplicar el PAYMENT_RECHECK). */
   pendingRecheckAt?: string | null;
+  /** La auto-validación (al llegar la imagen) ya gestionó el pago; el turno del modelo no debe re-hacerlo. */
+  receiptAutoHandledAt?: string | null;
   [key: string]: unknown;
 }
 

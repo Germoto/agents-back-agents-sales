@@ -255,6 +255,180 @@ export function buildDeliveryOutbox(
   return { outbox, delivered, offeredCrossSellId };
 }
 
+// --------------------------------------------------------------------------
+// Núcleo de validación de pago (compartido por validar_pago, la auto-validación
+// al llegar la imagen, y el reintento del worker). El N° de operación / código
+// del comprobante es la llave; el nombre solo se usa si no hay imagen.
+// --------------------------------------------------------------------------
+export interface ApprovePaymentResult {
+  approved: boolean;
+  /** 'already' ya pagado; resto = motivo del no-aprobado para el mensaje. */
+  kind?: "already" | "confusion" | "needs_info" | "amount_mismatch" | "timing";
+  /** Mensaje listo para el cliente (no-aprobado, o confirmación). */
+  customerMessage?: string;
+  /** Mensajes de entrega (solo cuando deliver=true y se aprobó un digital). */
+  deliveryOutbox?: OutboxMessage[];
+  delivered?: string[];
+  offeredCrossSellId?: string | null;
+  /** Si quedó pendiente por timing (el caller decide si agenda el recheck). */
+  shouldRecheck?: boolean;
+}
+
+function parseAmountNumber(text: string | null | undefined): number | undefined {
+  if (!text) return undefined;
+  const n = Number(String(text).replace(/[^0-9.]/g, ""));
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * Intenta aprobar el pago con las señales disponibles. Si matchea (código u
+ * nombre), reclama y aprueba el comprobante; con `deliver=true` arma además la
+ * entrega del producto digital. Devuelve el resultado para que cada caller emita
+ * los mensajes (a outbox o por el sender). No agenda el recheck (lo decide el
+ * caller). No lanza.
+ */
+export async function tryApprovePayment(opts: {
+  companyId: string;
+  customerId: string;
+  conversationId: string;
+  customerPhone: string;
+  config: BotConfig;
+  state: ConversationState;
+  payerName?: string;
+  codes: string[];
+  expected?: number;
+  deliver: boolean;
+}): Promise<ApprovePaymentResult> {
+  const { companyId, customerId, config, state } = opts;
+  const payerName = (opts.payerName ?? "").trim();
+  const codes = (opts.codes ?? []).map((c) => String(c).replace(/\D/g, "")).filter((c) => c.length >= 3);
+
+  // Idempotencia: ya pagado/entregado → no re-aprobar ni re-entregar.
+  const status = state.status ?? "";
+  if (status === "PAGADO" || status === "ENTREGADO") {
+    return {
+      approved: true,
+      kind: "already",
+      customerMessage: "Tu pago ya está confirmado ✅. ¿Te ayudo con algo más?",
+    };
+  }
+
+  const cart = await summarizeCart(companyId, customerId);
+  const expected =
+    opts.expected ??
+    (cart.total > 0 ? cart.total : parseAmountNumber(findProductPrice(config, state.selectedProductId)));
+
+  const candidates = await matchPayments(companyId, {
+    payerName: payerName || undefined,
+    amountPaid: expected,
+    operationCodes: codes,
+    limit: 5,
+  } as any);
+  const top = candidates[0] as any;
+  const reasons: string[] = (top?.matchReasons ?? []) as string[];
+  const codeMatched = reasons.includes("operation_code_exact");
+  const nameMatched = reasons.includes("payer_name_exact") || reasons.includes("payer_name_similar");
+
+  if (top && (codeMatched || nameMatched)) {
+    const productIds = cart.productIds.length
+      ? cart.productIds
+      : state.selectedProductId
+      ? [state.selectedProductId]
+      : [];
+    try {
+      await claimPayment(companyId, top.id, { claimedBy: "agent", claimTtlSeconds: 120 } as any);
+      await updatePaymentStatus(companyId, top.id, {
+        status: "APROBADO",
+        validationMode: "AUTO",
+        matchScore: top.matchScore,
+        matchStrategy: reasons.join("+") || "agent_auto",
+        matchedPayerNameInput: payerName || (codes[0] ?? ""),
+        customerPhone: opts.customerPhone,
+        productIds,
+      } as any);
+    } catch {
+      return {
+        approved: false,
+        kind: "timing",
+        customerMessage:
+          "Estoy validando tu pago automáticamente 🙏 dame un momentito y te confirmo.",
+        shouldRecheck: true,
+      };
+    }
+    if (cart.items.length) await checkoutCart(companyId, customerId, cart.totalText);
+    state.pendingRecheckAt = null;
+
+    if (opts.deliver) {
+      const { outbox, delivered, offeredCrossSellId } = buildDeliveryOutbox(config, productIds);
+      if (delivered.length) {
+        state.status = "ENTREGADO";
+        if (offeredCrossSellId) state.offeredCrossSellProductId = offeredCrossSellId;
+        return {
+          approved: true,
+          deliveryOutbox: outbox,
+          delivered,
+          offeredCrossSellId,
+          customerMessage: "¡Pago confirmado! ✅ Te entrego tu acceso ahora mismo 👇",
+        };
+      }
+    }
+    // Aprobado sin entrega automática (no digital o deliver=false): el flujo del
+    // modelo continúa con entregar_producto/registrar_pedido.
+    state.status = "PAGADO";
+    return { approved: true };
+  }
+
+  // No aprobado: decidir el motivo y el mensaje al cliente.
+  state.status = "ESPERANDO_VALIDACION";
+
+  // (a) Confusión de titular: mandó NUESTRO nombre y no hay código.
+  const holders = ((config.payment?.methods ?? []) as Array<{ holder?: string }>)
+    .map((m) => m.holder ?? "")
+    .filter(Boolean);
+  if (payerName && !codes.length && holders.some((h) => sameHolder(payerName, h))) {
+    return {
+      approved: false,
+      kind: "confusion",
+      customerMessage:
+        "Ese es el titular de NUESTRA cuenta 🙂 (a quién le pagaste), no el tuyo. Para validar tu pago mándame el *número de operación* de tu comprobante (o el nombre del titular de TU Yape/Plin, desde donde pagaste).",
+    };
+  }
+
+  // (b) Sin ninguna señal útil: pedir el N° de operación o el nombre.
+  if (!payerName && !codes.length) {
+    return {
+      approved: false,
+      kind: "needs_info",
+      customerMessage:
+        "Para validar tu pago, mándame el *número de operación* que aparece en tu comprobante (o el nombre del titular de tu Yape/Plin) 🙏",
+    };
+  }
+
+  // (c) Monto distinto al esperado (lo leído no cuadra): avisar.
+  const readAmount = parseAmountNumber(state.lastReceipt?.amountText);
+  if (expected && readAmount && Math.abs(readAmount - expected) >= 0.5) {
+    return {
+      approved: false,
+      kind: "amount_mismatch",
+      customerMessage: `Veo un comprobante por S/ ${readAmount}, pero el monto a pagar es S/ ${expected}. ¿Me reenvías el comprobante correcto? 🙏`,
+    };
+  }
+
+  // (d) Timing: el comprobante puede no haber entrado aún → reintento en 2º plano.
+  return {
+    approved: false,
+    kind: "timing",
+    customerMessage: "Estoy validando tu pago automáticamente 🙏 dame un momentito y te confirmo.",
+    shouldRecheck: true,
+  };
+}
+
+function findProductPrice(config: BotConfig, productId: string | null | undefined): string | undefined {
+  if (!productId) return undefined;
+  const p = config.products.find((x) => x.id === productId || x.slug === productId);
+  return (p?.priceText ?? p?.price) || undefined;
+}
+
 /**
  * Empuja al outbox la multimedia de PRESENTACIÓN del producto (archivos marcados
  * `showInPresentation`), respetando el guard `mediaSentProductIds` para no
@@ -451,13 +625,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "validar_pago",
       description:
-        "Valida automáticamente el pago del cliente buscando un comprobante recibido que coincida por nombre del titular y monto. Devuelve si quedó APROBADO. Úsalo cuando el cliente diga que ya pagó e indique el nombre del titular de su Yape/Plin.",
+        "Valida automáticamente el pago del cliente buscando un comprobante recibido que coincida por el N° de operación / código del comprobante o por el nombre del titular y el monto. Devuelve si quedó APROBADO. Úsalo cuando el cliente diga que pagó o mande su comprobante. Si el cliente mandó la captura (ya se leyó el N° de operación), NO necesitas el nombre: llama sin payerName. El nombre solo hace falta si el cliente NO mandó imagen.",
       parameters: {
         type: "object",
         additionalProperties: false,
-        required: ["payerName"],
         properties: {
-          payerName: { type: "string", description: "Nombre del titular que aparece en el Yape/Plin del cliente" },
+          payerName: {
+            type: "string",
+            description: "Opcional. Nombre del titular del Yape/Plin de DONDE pagó el cliente (no el nuestro). Omítelo si el cliente mandó la captura del comprobante.",
+          },
         },
       },
     },
@@ -741,18 +917,15 @@ export async function executeTool(
 
     case "validar_pago": {
       // Guard de secuencia: no se puede validar si nunca se enviaron los métodos de
-      // pago al cliente (no tendría cómo pagar). Evita que el bot pida el nombre y
-      // valide saltándose enviar_metodos_pago.
+      // pago al cliente (no tendría cómo pagar).
       if (!ctx.state.lastPaymentPromptAt) {
         return JSON.stringify({
           ok: false,
-          error: "Aún no enviaste los métodos de pago al cliente. Usa primero enviar_metodos_pago; recién cuando el cliente diga que pagó, pídele el nombre del titular y valida.",
+          error: "Aún no enviaste los métodos de pago al cliente. Usa primero enviar_metodos_pago; recién cuando el cliente diga que pagó, valida con el N° de operación del comprobante o el nombre del titular.",
         });
       }
-      const payerName = String(args.payerName ?? "").trim();
-      if (!payerName) return JSON.stringify({ ok: false, error: "falta el nombre del titular" });
 
-      // SIMULACIÓN: no tocar PaymentReceipt reales; aprobar de frente para mostrar el flujo.
+      // SIMULACIÓN: no tocar PaymentReceipt reales; aprobar de frente.
       if (ctx.simulate) {
         const cartSim = await summarizeCart(ctx.companyId, ctx.customerId);
         if (cartSim.items.length) await checkoutCart(ctx.companyId, ctx.customerId, cartSim.totalText);
@@ -760,111 +933,80 @@ export async function executeTool(
         return JSON.stringify({ ok: true, approved: true, note: "(simulación) Pago aprobado. Ahora entrega el producto con entregar_producto." });
       }
 
-      // Monto esperado: total del carrito o precio del producto seleccionado
-      const cart = await summarizeCart(ctx.companyId, ctx.customerId);
-      let expected: number | undefined = cart.total > 0 ? cart.total : undefined;
-      if (expected === undefined && ctx.state.selectedProductId) {
-        const p = findProductById(ctx, ctx.state.selectedProductId);
-        const n = Number(String(p?.price ?? "").replace(/[^0-9.]/g, ""));
-        if (Number.isFinite(n) && n > 0) expected = n;
+      // Si la imagen del comprobante ya se auto-gestionó hace poco (validación
+      // determinista al llegar la imagen), no dupliques: deja que eso resuelva.
+      const autoAt = ctx.state.receiptAutoHandledAt ? new Date(ctx.state.receiptAutoHandledAt).getTime() : 0;
+      if (autoAt && Date.now() - autoAt < 90 * 1000) {
+        return JSON.stringify({ ok: true, note: "El comprobante que mandó el cliente ya se está validando automáticamente. NO agregues texto ni vuelvas a validar/entregar; deja tu texto final vacío." });
       }
 
-      // Código de seguridad/operación leído del comprobante (visión): llave fuerte.
-      const receiptCode = (ctx.state.lastReceipt?.securityCode ?? "").trim() || undefined;
+      const payerName = String(args.payerName ?? "").trim();
+      // Señales del comprobante leído (visión): N° de operación + código de seguridad.
+      const codes = [ctx.state.lastReceipt?.operationNumber, ctx.state.lastReceipt?.securityCode]
+        .map((c) => (c ?? "").trim())
+        .filter(Boolean) as string[];
 
-      const candidates = await matchPayments(ctx.companyId, {
-        payerName,
-        amountPaid: expected,
-        operationCode: receiptCode,
-        limit: 5,
-      } as any);
+      // Monto esperado (para el match y el recheck).
+      const cartVp = await summarizeCart(ctx.companyId, ctx.customerId);
+      let expectedVp: number | undefined = cartVp.total > 0 ? cartVp.total : undefined;
+      if (expectedVp === undefined && ctx.state.selectedProductId) {
+        const p = findProductById(ctx, ctx.state.selectedProductId);
+        const n = Number(String(p?.price ?? "").replace(/[^0-9.]/g, ""));
+        if (Number.isFinite(n) && n > 0) expectedVp = n;
+      }
 
-      const top = candidates[0];
-      const reasons: string[] = ((top as any)?.matchReasons ?? []) as string[];
-      const codeMatched = reasons.includes("operation_code_exact");
-      const nameMatched = reasons.includes("payer_name_exact") || reasons.includes("payer_name_similar");
-      // Aprueba si coincide el CÓDIGO (llave fuerte, no requiere nombre) o el
-      // NOMBRE del titular. El monto por sí solo no aprueba.
-      const matched = Boolean(top) && (codeMatched || nameMatched);
+      const result = await tryApprovePayment({
+        companyId: ctx.companyId,
+        customerId: ctx.customerId,
+        conversationId: ctx.conversationId,
+        customerPhone: ctx.customerPhone,
+        config: ctx.config,
+        state: ctx.state,
+        payerName: payerName || undefined,
+        codes,
+        expected: expectedVp,
+        deliver: false, // el modelo entrega con entregar_producto
+      });
 
-      if (!matched) {
-        ctx.state.status = "ESPERANDO_VALIDACION";
-
-        // (a) El cliente mandó el nombre de NUESTRO titular (lo leyó de la captura,
-        // que muestra el destino). Corrige con amabilidad; no apruebes ni reintentes.
-        const holders = ((ctx.config.payment?.methods ?? []) as Array<{ holder?: string }>)
-          .map((m) => m.holder ?? "")
-          .filter(Boolean);
-        if (payerName && holders.some((h) => sameHolder(payerName, h))) {
-          return JSON.stringify({
-            ok: false,
-            approved: false,
-            reason:
-              "Ese es el titular de NUESTRA cuenta (a quién le pagó), no el suyo. La captura del comprobante muestra nuestro nombre, no el de él. Explícaselo con amabilidad y pídele el CÓDIGO de la operación (en Yape suele salir como 'código: xxx') o el nombre del titular de SU Yape/Plin, desde donde hizo el pago. NO apruebes.",
-          });
+      if (result.approved) {
+        if (result.kind === "already") {
+          if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
+          return JSON.stringify({ ok: true, approved: true, note: "El pago ya estaba confirmado. NO vuelvas a entregar ni a validar. Ya le avisé al cliente; deja tu texto final vacío." });
         }
+        return JSON.stringify({ ok: true, approved: true, note: "Pago aprobado. Ahora entrega el producto con entregar_producto." });
+      }
 
-        // (b) Timing: el comprobante puede no haber llegado aún. Reintento en 2º
-        // plano a +60s; si al minuto no aparece, se deriva a un asesor. Tranquiliza,
-        // no rechaces ni des a entender que desconfías.
+      // No aprobado: ya tengo el mensaje listo para el cliente → lo envío yo y le
+      // digo al modelo que no agregue texto. Si es timing, agendo el reintento.
+      if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
+      if (result.shouldRecheck) {
         const recheckedRecently =
           ctx.state.pendingRecheckAt &&
           Date.now() - new Date(ctx.state.pendingRecheckAt).getTime() < 3 * 60 * 1000;
-        if (!ctx.simulate && !recheckedRecently) {
+        if (!recheckedRecently) {
           await schedulePaymentRecheck({
             companyId: ctx.companyId,
             customerId: ctx.customerId,
             conversationId: ctx.conversationId,
             sendAt: new Date(Date.now() + 60 * 1000),
             payerName: payerName || undefined,
-            expectedAmount: expected,
-            operationCode: receiptCode,
+            expectedAmount: expectedVp,
+            operationCode: codes[0],
             customerPhone: ctx.customerPhone,
             receiptMediaUrl: ctx.state.lastReceipt?.mediaUrl ?? undefined,
           });
           ctx.state.pendingRecheckAt = new Date().toISOString();
         }
-        return JSON.stringify({
-          ok: false,
-          approved: false,
-          pending: true,
-          reason:
-            "Todavía no encuentro el comprobante (puede tardar un momento en entrar al sistema). NO digas que está mal ni que no existe ni que el nombre no coincide. Dile con calma y seguridad que estás validando su pago automáticamente y que en un momentito le confirmas. No vuelvas a pedir el nombre con ansiedad.",
-        });
       }
-
-      const productIds = cart.productIds.length
-        ? cart.productIds
-        : ctx.state.selectedProductId
-        ? [ctx.state.selectedProductId]
-        : [];
-
-      try {
-        await claimPayment(ctx.companyId, (top as any).id, { claimedBy: "agent", claimTtlSeconds: 120 } as any);
-        await updatePaymentStatus(ctx.companyId, (top as any).id, {
-          status: "APROBADO",
-          validationMode: "AUTO",
-          matchScore: (top as any).matchScore,
-          matchStrategy: ((top as any).matchReasons ?? []).join("+") || "agent_auto",
-          matchedPayerNameInput: payerName,
-          customerPhone: ctx.customerPhone,
-          productIds,
-        } as any);
-      } catch (err) {
-        return JSON.stringify({
-          ok: false,
-          approved: false,
-          reason: "El comprobante no pudo cerrarse automáticamente (puede estar en revisión). Informa que un asesor lo confirmará en breve.",
-        });
-      }
-
-      if (cart.items.length) await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
-      ctx.state.status = "PAGADO";
-      ctx.state.pendingRecheckAt = null;
-      return JSON.stringify({ ok: true, approved: true, note: "Pago aprobado. Ahora entrega el producto con entregar_producto." });
+      return JSON.stringify({ ok: true, approved: false, kind: result.kind, note: "Ya le respondí al cliente sobre su pago. NO agregues texto ni apruebes; deja tu texto final vacío." });
     }
 
     case "entregar_producto": {
+      // Idempotencia: si ya se entregó (p.ej. la auto-validación de la imagen ya
+      // entregó), no volver a enviar el acceso.
+      if (!ctx.simulate && ctx.state.status === "ENTREGADO") {
+        return JSON.stringify({ ok: true, alreadyDelivered: true, note: "El acceso YA se entregó. NO lo reenvíes; deja tu texto final vacío y queda disponible para dudas." });
+      }
       // En SIMULACIÓN no hay PaymentReceipt real: entregar según carrito/seleccionado.
       let ids: string[];
       if (ctx.simulate) {

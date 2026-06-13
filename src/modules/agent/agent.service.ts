@@ -29,15 +29,16 @@ import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, sleep, OUTBOX_GAP_MS } from "./delivery";
 import { runFlowTurn, buildRealFlowIO, trailingUserText } from "../flows/flow-engine";
-import { buildDeliveryOutbox, type TurnContext } from "./agent-tools";
-import { summarizeCart, checkoutCart } from "./cart.service";
+import { tryApprovePayment, type TurnContext } from "./agent-tools";
+import { summarizeCart } from "./cart.service";
+import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
 import {
-  resolveCompanyIdByPhone,
-  matchPayments,
-  claimPayment,
-  updatePaymentStatus,
-} from "../public-payments/public-payments.service";
-import { scheduleReminder, cancelPendingReminders, minutesFromNow, secondsFromNow } from "../scheduler/scheduler.service";
+  scheduleReminder,
+  cancelPendingReminders,
+  schedulePaymentRecheck,
+  minutesFromNow,
+  secondsFromNow,
+} from "../scheduler/scheduler.service";
 import { resolveReminderSequence, type ReminderType } from "./reminder-templates";
 
 interface FollowupConfig {
@@ -495,61 +496,48 @@ export async function recheckPayment(msg: {
     if (!sender) return;
     const to = (md.customerPhone ?? "").replace(/\D/g, "");
 
-    const candidates = await matchPayments(msg.companyId, {
+    // Códigos: del estado (lo que leyó la visión) + lo que vino en la metadata.
+    const codes = [
+      state.lastReceipt?.operationNumber,
+      state.lastReceipt?.securityCode,
+      md.operationCode,
+    ]
+      .map((c) => (c ?? "").trim())
+      .filter(Boolean) as string[];
+
+    const result = await tryApprovePayment({
+      companyId: msg.companyId,
+      customerId: msg.customerId,
+      conversationId,
+      customerPhone: md.customerPhone ?? to,
+      config,
+      state,
       payerName: md.payerName ?? undefined,
-      amountPaid: md.expectedAmount ?? undefined,
-      operationCode: md.operationCode ?? undefined,
-      limit: 5,
-    } as any);
-    const top = candidates[0] as any;
-    const reasons: string[] = (top?.matchReasons ?? []) as string[];
-    const matched =
-      Boolean(top) &&
-      (reasons.includes("operation_code_exact") ||
-        reasons.includes("payer_name_exact") ||
-        reasons.includes("payer_name_similar"));
+      codes,
+      expected: md.expectedAmount ?? undefined,
+      deliver: true,
+    });
 
-    if (matched) {
-      const cart = await summarizeCart(msg.companyId, msg.customerId);
-      const productIds = cart.productIds.length
-        ? cart.productIds
-        : state.selectedProductId
-        ? [state.selectedProductId as string]
-        : [];
-      try {
-        await claimPayment(msg.companyId, top.id, { claimedBy: "agent", claimTtlSeconds: 120 } as any);
-        await updatePaymentStatus(msg.companyId, top.id, {
-          status: "APROBADO",
-          validationMode: "AUTO",
-          matchScore: top.matchScore,
-          matchStrategy: reasons.join("+") || "agent_recheck",
-          matchedPayerNameInput: md.payerName ?? "",
-          customerPhone: md.customerPhone,
-          productIds,
-        } as any);
-      } catch {
-        /* puede estar en revisión; igual intentamos entregar */
-      }
-      if (cart.items.length) await checkoutCart(msg.companyId, msg.customerId, cart.totalText);
-
-      if (to) {
+    if (result.approved && result.deliveryOutbox?.length) {
+      if (result.customerMessage && to) {
         try {
-          await sendText(sender, to, "¡Pago confirmado! ✅ Te entrego tu acceso ahora mismo 👇");
+          await sendText(sender, to, result.customerMessage);
         } catch {
           /* best-effort */
         }
       }
-      const { outbox, offeredCrossSellId } = buildDeliveryOutbox(config, productIds);
-      await flushOutbox(sender, to, outbox, {
+      await flushOutbox(sender, to, result.deliveryOutbox, {
         companyId: msg.companyId,
         customerId: msg.customerId,
         conversationId,
       });
-      state.status = "ENTREGADO";
-      state.pendingRecheckAt = null;
-      if (offeredCrossSellId) state.offeredCrossSellProductId = offeredCrossSellId;
       await saveState(conversationId, state as ConversationState);
       console.log(`[agent] recheckPayment: aprobado y entregado (conv=${conversationId})`);
+      return;
+    }
+    if (result.approved) {
+      // Aprobado pero sin entrega digital (no digital): solo persistir estado.
+      await saveState(conversationId, state as ConversationState);
       return;
     }
 
@@ -594,9 +582,12 @@ function isPaymentContext(state: ConversationState): boolean {
 }
 
 /**
- * Comprobante (imagen) recibido en contexto de pago: lo lee con visión (monto,
- * hora, código) y lo guarda en el estado para que validar_pago use el código;
- * además se lo reenvía al admin como aviso, SIN pausar el bot.
+ * Comprobante (imagen) recibido en contexto de pago. Hace TODO de forma
+ * determinista (no depende del modelo): lo lee con visión (monto, hora, N° de
+ * operación, código), se lo reenvía al admin como aviso (sin pausar), e INTENTA
+ * validar+entregar al instante usando el N° de operación. Si no puede aún
+ * (timing), tranquiliza y agenda el reintento; si falta dato, lo pide. El turno
+ * del modelo ve `receiptAutoHandledAt` y no vuelve a tocar el pago.
  */
 async function handleReceiptImage(
   companyId: string,
@@ -605,7 +596,11 @@ async function handleReceiptImage(
   inbound: InboundMessage,
 ): Promise<void> {
   const imageUrl = inbound.mediaUrl;
-  if (!imageUrl) return;
+  const fromPhone = inbound.fromPhone;
+  if (!imageUrl || !fromPhone) return;
+  const sender = await loadWhatsappSender(companyId);
+  if (!sender) return;
+  const to = fromPhone.replace(/\D/g, "");
 
   // 1) Visión (best-effort; requiere la API key del tenant).
   const apiKey = (config as { openai?: { apiKey?: string | null } }).openai?.apiKey ?? null;
@@ -617,6 +612,7 @@ async function handleReceiptImage(
       convo.state.lastReceipt = {
         amountText: receipt.amountText,
         time: receipt.time,
+        operationNumber: receipt.operationNumber,
         securityCode: receipt.securityCode,
         mediaUrl: imageUrl,
         at: new Date().toISOString(),
@@ -627,23 +623,68 @@ async function handleReceiptImage(
 
   // 2) Reenviar el comprobante al admin (solo aviso; NO pausa el bot).
   const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
-  if (!adminPhone) return;
-  const sender = await loadWhatsappSender(companyId);
-  if (!sender) return;
-  const name = await getCustomerName(convo.customerId);
-  const datos = receipt
-    ? `Monto leído: ${receipt.amountText ?? "—"}` +
-      (receipt.securityCode ? ` · código: ${receipt.securityCode}` : "") +
-      (receipt.time ? ` · ${receipt.time}` : "")
-    : "No se pudo leer la imagen automáticamente.";
-  const caption =
-    `🧾 Comprobante recibido${name ? ` de ${name}` : ""} (${inbound.fromPhone}).\n${datos}\n` +
-    `El bot sigue atendiendo y está validando el pago.`;
-  try {
-    await sendMedia(sender, adminPhone, "image", imageUrl, caption);
-  } catch {
-    /* best-effort */
+  if (adminPhone) {
+    const name = await getCustomerName(convo.customerId);
+    const datos = receipt
+      ? `Monto: ${receipt.amountText ?? "—"}` +
+        (receipt.operationNumber ? ` · op: ${receipt.operationNumber}` : "") +
+        (receipt.securityCode ? ` · código: ${receipt.securityCode}` : "")
+      : "No se pudo leer la imagen automáticamente.";
+    const caption = `🧾 Comprobante recibido${name ? ` de ${name}` : ""} (${fromPhone}).\n${datos}`;
+    try {
+      await sendMedia(sender, adminPhone, "image", imageUrl, caption);
+    } catch {
+      /* best-effort */
+    }
   }
+
+  // 3) Auto-validación determinista (N° de operación como llave).
+  const codes = [receipt?.operationNumber, receipt?.securityCode]
+    .map((c) => (c ?? "").trim())
+    .filter(Boolean) as string[];
+  if (!codes.length) return; // sin código legible: lo maneja el turno del modelo
+
+  const result = await tryApprovePayment({
+    companyId,
+    customerId: convo.customerId,
+    conversationId: convo.conversationId,
+    customerPhone: fromPhone,
+    config,
+    state: convo.state,
+    codes,
+    deliver: true,
+  });
+  convo.state.receiptAutoHandledAt = new Date().toISOString();
+
+  try {
+    if (result.approved && result.deliveryOutbox?.length) {
+      if (result.customerMessage && to) await sendText(sender, to, result.customerMessage);
+      await flushOutbox(sender, to, result.deliveryOutbox, {
+        companyId,
+        customerId: convo.customerId,
+        conversationId: convo.conversationId,
+      });
+    } else if (!result.approved && result.shouldRecheck) {
+      if (result.customerMessage && to) await sendText(sender, to, result.customerMessage);
+      await schedulePaymentRecheck({
+        companyId,
+        customerId: convo.customerId,
+        conversationId: convo.conversationId,
+        sendAt: new Date(Date.now() + 60 * 1000),
+        expectedAmount: undefined,
+        operationCode: codes[0],
+        customerPhone: fromPhone,
+        receiptMediaUrl: imageUrl,
+      });
+      convo.state.pendingRecheckAt = new Date().toISOString();
+    } else if (!result.approved && result.customerMessage && to) {
+      // confusión / falta dato / monto distinto
+      await sendText(sender, to, result.customerMessage);
+    }
+  } catch (err) {
+    console.warn("[agent] auto-validación de comprobante falló:", err instanceof Error ? err.message : err);
+  }
+  await saveState(convo.conversationId, convo.state);
 }
 
 /**

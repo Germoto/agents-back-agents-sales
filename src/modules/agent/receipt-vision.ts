@@ -9,15 +9,20 @@
 export interface ReceiptData {
   amountText: string | null;
   time: string | null;
+  /** N° de operación: está en TODOS los comprobantes (Yape/Plin). Llave principal. */
+  operationNumber: string | null;
+  /** Código de seguridad (solo Yape→Yape, 3 dígitos). Llave secundaria. */
   securityCode: string | null;
 }
 
 const SYSTEM =
   "Eres un lector de comprobantes de pago de Yape y Plin (Perú). Devuelves SOLO JSON. " +
-  "Lee la imagen y extrae: el monto pagado (amountText, ej. 'S/ 5.00'), la hora/fecha que aparezca " +
-  "(time, texto tal cual), y el código de seguridad o de operación si aparece (securityCode, ej. en " +
-  "'código de seguridad: 123' devuelve '123'). NO inventes ni infieras el nombre de quien paga (la " +
-  "constancia muestra al destinatario, no al pagador). Si un dato no aparece, usa null.";
+  "Lee la imagen y extrae: el monto pagado (amountText, ej. 'S/ 5.00'); la hora/fecha que aparezca " +
+  "(time, texto tal cual); el NÚMERO DE OPERACIÓN (operationNumber, el numerito largo que rotula " +
+  "'Nro de operación' / 'N° de operación' / 'código de operación' — está en TODOS los comprobantes); y " +
+  "el CÓDIGO DE SEGURIDAD (securityCode) solo si aparece rotulado así (suele ser de 3 dígitos en Yape→Yape). " +
+  "NO inventes ni infieras el nombre de quien paga: la constancia muestra al DESTINATARIO (a quién se le pagó), " +
+  "no al pagador. Si un dato no aparece, usa null.";
 
 const SCHEMA = {
   type: "json_schema" as const,
@@ -27,10 +32,11 @@ const SCHEMA = {
     schema: {
       type: "object",
       additionalProperties: false,
-      required: ["amountText", "time", "securityCode"],
+      required: ["amountText", "time", "operationNumber", "securityCode"],
       properties: {
         amountText: { type: ["string", "null"] },
         time: { type: ["string", "null"] },
+        operationNumber: { type: ["string", "null"] },
         securityCode: { type: ["string", "null"] },
       },
     },
@@ -74,10 +80,12 @@ export async function readReceiptImage(
     const raw = data.choices?.[0]?.message?.content;
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ReceiptData;
+    const digits = (v: unknown) => (v ? String(v).replace(/\D/g, "") || null : null);
     return {
       amountText: parsed.amountText ?? null,
       time: parsed.time ?? null,
-      securityCode: parsed.securityCode ? String(parsed.securityCode).replace(/\D/g, "") || null : null,
+      operationNumber: digits(parsed.operationNumber),
+      securityCode: digits(parsed.securityCode),
     };
   } catch (err) {
     console.warn("[receipt-vision] falló:", err instanceof Error ? err.message : err);

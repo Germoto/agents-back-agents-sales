@@ -271,24 +271,30 @@ export async function matchPayments(companyId: string, body: MatchBody) {
       }
     }
 
-    // Código de seguridad/operación (leído del comprobante con visión): llave
-    // fuerte. Se compara contra operationCode/reference/payerName del receipt
-    // (ValidPay puede guardarlo en cualquiera de esos campos).
-    if (body.operationCode) {
-      const code = String(body.operationCode).replace(/\D/g, "");
-      if (code.length >= 3) {
-        const fields = [r.operationCode, r.reference, r.payerName].map((x) =>
-          String(x ?? "").replace(/\D/g, ""),
-        );
-        const hit = fields.some(
+    // N°/código de operación (leído del comprobante con visión): llave fuerte. Se
+    // comparan TODOS los códigos provistos (N° de operación + código de seguridad)
+    // contra operationCode/reference/payerName del receipt (ValidPay puede guardar
+    // el N° de operación en cualquiera de esos campos).
+    const allCodes = [
+      ...(body.operationCode ? [body.operationCode] : []),
+      ...(body.operationCodes ?? []),
+    ]
+      .map((c) => String(c).replace(/\D/g, ""))
+      .filter((c) => c.length >= 3);
+    if (allCodes.length) {
+      const fields = [r.operationCode, r.reference, r.payerName].map((x) =>
+        String(x ?? "").replace(/\D/g, ""),
+      );
+      const hit = allCodes.some((code) =>
+        fields.some(
           (f) =>
             f.length >= 3 &&
             (f === code || (code.length >= 5 && f.includes(code)) || (f.length >= 5 && code.includes(f))),
-        );
-        if (hit) {
-          score += 60;
-          reasons.push("operation_code_exact");
-        }
+        ),
+      );
+      if (hit) {
+        score += 60;
+        reasons.push("operation_code_exact");
       }
     }
 
