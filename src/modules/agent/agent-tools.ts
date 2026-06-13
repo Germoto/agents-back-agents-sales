@@ -934,14 +934,6 @@ export async function executeTool(
         return JSON.stringify({ ok: true, approved: true, note: "(simulación) Pago aprobado. Ahora entrega el producto con entregar_producto." });
       }
 
-      // Si la imagen del comprobante ya se auto-gestionó hace poco Y el cliente NO
-      // está aportando un nombre nuevo ahora, no dupliques: deja que eso resuelva.
-      // (Si el cliente escribe un nombre, sí lo procesamos aunque haya imagen.)
-      const autoAt = ctx.state.receiptAutoHandledAt ? new Date(ctx.state.receiptAutoHandledAt).getTime() : 0;
-      if (autoAt && Date.now() - autoAt < 90 * 1000 && !String(args.payerName ?? "").trim()) {
-        return JSON.stringify({ ok: true, note: "El comprobante que mandó el cliente ya se está validando automáticamente. NO agregues texto ni vuelvas a validar/entregar; deja tu texto final vacío." });
-      }
-
       const payerName = String(args.payerName ?? "").trim();
       // La llave es el CÓDIGO DE SEGURIDAD (solo Yape→Yape); ValidPay lo manda como
       // "Nombre (cód: xxx)". En otros casos no hay código → se valida por nombre.

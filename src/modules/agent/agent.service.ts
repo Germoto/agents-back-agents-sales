@@ -35,7 +35,6 @@ import { resolveCompanyIdByPhone } from "../public-payments/public-payments.serv
 import {
   scheduleReminder,
   cancelPendingReminders,
-  schedulePaymentRecheck,
   minutesFromNow,
   secondsFromNow,
 } from "../scheduler/scheduler.service";
@@ -216,8 +215,9 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   await markInboundProcessed(convo.conversationId, inbound.messageId);
 
   // Comprobante de pago (imagen): si el negocio cobra, cualquier adjunto entrante
-  // se intenta leer como comprobante. handleReceiptImage lo valida/entrega o pide
-  // el dato, de forma determinista (no depende del modelo).
+  // se LEE con visión (side-channel) y se guarda en state.lastReceipt, y se reenvía
+  // al admin como aviso. NO responde al cliente: el AGENTE es la única voz y validará
+  // el pago en su turno (con los datos leídos) llamando a validar_pago/entregar_producto.
   const paymentsEnabled = !!(config as any).payment?.enabled;
   console.log(
     `[agent] inbound de ${inbound.fromPhone}: type=${inbound.type} media=${inbound.mediaUrl ? "yes" : "no"} textLen=${(inbound.text ?? "").trim().length} pay=${paymentsEnabled} payCtx=${isPaymentContext(convo.state)}`,
@@ -582,12 +582,13 @@ function isPaymentContext(state: ConversationState): boolean {
 }
 
 /**
- * Comprobante (imagen) recibido en contexto de pago. Hace TODO de forma
- * determinista (no depende del modelo): lo lee con visión (monto, hora, N° de
- * operación, código), se lo reenvía al admin como aviso (sin pausar), e INTENTA
- * validar+entregar al instante usando el N° de operación. Si no puede aún
- * (timing), tranquiliza y agenda el reintento; si falta dato, lo pide. El turno
- * del modelo ve `receiptAutoHandledAt` y no vuelve a tocar el pago.
+ * Comprobante (imagen) recibido. NO responde al cliente ni valida aquí: el AGENTE
+ * es la ÚNICA voz. Esto solo le da "ojos" al agente (que es texto-only):
+ *  1) lee la imagen con visión y guarda lo leído en `state.lastReceipt` (el system
+ *     prompt lo expone como `comprobanteLeido` para que el modelo valide en su turno),
+ *  2) reenvía el comprobante al admin como AVISO (sin pausar el bot).
+ * El turno del agente (debounced) verá el comprobante leído y llamará a validar_pago
+ * y, si aprueba, entregar_producto (que respeta el cierre/atención-humana post-venta).
  */
 async function handleReceiptImage(
   companyId: string,
@@ -598,168 +599,55 @@ async function handleReceiptImage(
   const imageUrl = inbound.mediaUrl;
   const fromPhone = inbound.fromPhone;
   if (!imageUrl || !fromPhone) return;
-  const sender = await loadWhatsappSender(companyId);
-  if (!sender) return;
-  const to = fromPhone.replace(/\D/g, "");
 
   // 1) Visión (best-effort; requiere la API key del tenant).
   const apiKey = (config as { openai?: { apiKey?: string | null } }).openai?.apiKey ?? null;
   const model = (config as { openai?: { model?: string } }).openai?.model || "gpt-4o-mini";
-  const receipt = apiKey ? await readReceiptImage(apiKey, model, imageUrl) : null;
-
-  // Si no se pudo leer NADA útil (ni monto ni código): si estábamos esperando un
-  // pago, probablemente es el comprobante pero no se leyó → reenvía al admin y
-  // pide el nombre (validación por nombre). Si no, no hacemos nada (imagen normal).
+  const receipt = apiKey ? await readReceiptImage(apiKey, model, imageUrl).catch(() => null) : null;
   const looksLikeReceipt = !!(receipt && (receipt.amountText || receipt.securityCode || receipt.operationNumber));
-  if (!looksLikeReceipt) {
-    if (isPaymentContext(convo.state)) {
-      const adminPhone0 = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
-      if (adminPhone0) {
-        try {
-          await sendMedia(sender, adminPhone0, "image", imageUrl, `🧾 Imagen recibida de ${fromPhone} (no se pudo leer automáticamente). Revísala.`);
-        } catch {
-          /* best-effort */
-        }
-      }
-      if (to) {
-        try {
-          await sendText(sender, to, "¡Gracias! Recibí tu comprobante 🙏 Para validarlo, dime el *nombre del titular* de tu Yape o Plin (la cuenta desde donde pagaste).");
-        } catch {
-          /* best-effort */
-        }
-      }
-      convo.state.receiptAutoHandledAt = new Date().toISOString();
-      await saveState(convo.conversationId, convo.state);
-    } else {
-      console.log(`[agent] imagen recibida de ${fromPhone}: la visión no detectó un comprobante (no se valida)`);
-    }
+
+  // Imagen que NO parece comprobante y NO estamos esperando pago: no es de pago,
+  // no la guardamos como tal ni avisamos (puede ser cualquier foto).
+  if (!looksLikeReceipt && !isPaymentContext(convo.state)) {
+    console.log(`[agent] imagen de ${fromPhone}: no parece comprobante y no hay contexto de pago (ignorada para pago)`);
     return;
   }
 
+  // 2) Guardar lo leído (aunque sea parcial / nulo) para que el AGENTE lo use en su
+  // turno y decida: con código valida solo; sin código pedirá el nombre del titular.
   convo.state.lastReceipt = {
-    amountText: receipt!.amountText,
-    time: receipt!.time,
-    operationNumber: receipt!.operationNumber,
-    securityCode: receipt!.securityCode,
+    amountText: receipt?.amountText ?? null,
+    time: receipt?.time ?? null,
+    operationNumber: receipt?.operationNumber ?? null,
+    securityCode: receipt?.securityCode ?? null,
     mediaUrl: imageUrl,
     at: new Date().toISOString(),
   };
+  await saveState(convo.conversationId, convo.state);
 
-  // 2) Reenviar el comprobante al admin (solo aviso; NO pausa el bot).
-  const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
-  if (adminPhone) {
-    const name = await getCustomerName(convo.customerId);
-    const datos =
-      `Monto: ${receipt!.amountText ?? "—"}` +
-      (receipt!.securityCode ? ` · cód: ${receipt!.securityCode}` : "") +
-      (receipt!.operationNumber ? ` · op: ${receipt!.operationNumber}` : "");
-    const caption = `🧾 Comprobante recibido${name ? ` de ${name}` : ""} (${fromPhone}).\n${datos}`;
-    try {
-      await sendMedia(sender, adminPhone, "image", imageUrl, caption);
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  // 3) Validar+entregar de forma DETERMINISTA (no depende del modelo). La llave es
-  // el CÓDIGO DE SEGURIDAD (Yape→Yape). Si no hay código y no matchea, se pide el
-  // dato / se tranquiliza / se deriva, igual que en validar_pago.
-  console.log(`[agent] comprobante de ${fromPhone}: monto=${receipt!.amountText ?? "-"} cód=${receipt!.securityCode ?? "-"}`);
-  const codes = (receipt!.securityCode ? [receipt!.securityCode.trim()] : []).filter(Boolean);
-  try {
-    const result = await tryApprovePayment({
-      companyId,
-      customerId: convo.customerId,
-      conversationId: convo.conversationId,
-      customerPhone: fromPhone,
-      config,
-      state: convo.state,
-      codes,
-      deliver: true,
-    });
-    // El turno del modelo (debounced) no debe re-tocar el pago de esta imagen.
-    convo.state.receiptAutoHandledAt = new Date().toISOString();
-
-    if (result.approved && result.deliveryOutbox?.length) {
-      if (result.customerMessage && to) await sendText(sender, to, result.customerMessage);
-      await flushOutbox(sender, to, result.deliveryOutbox, {
-        companyId,
-        customerId: convo.customerId,
-        conversationId: convo.conversationId,
-      });
-    } else if (!result.approved) {
-      await emitPaymentFollowup(companyId, result, convo, sender, to, fromPhone, codes[0], config);
-    }
-    await saveState(convo.conversationId, convo.state);
-  } catch (err) {
-    console.warn("[agent] auto-validación de comprobante falló:", err instanceof Error ? err.message : err);
-    await saveState(convo.conversationId, convo.state);
-  }
-}
-
-/**
- * Acciones tras un intento de validación NO aprobado (compartido por la imagen):
- * timing → tranquiliza + reintento +60s; confusión/falta-dato → pide el dato y, tras
- * 3 intentos, deriva a un asesor (pausa + aviso).
- */
-async function emitPaymentFollowup(
-  companyId: string,
-  result: Awaited<ReturnType<typeof tryApprovePayment>>,
-  convo: { conversationId: string; customerId: string; state: ConversationState },
-  sender: WhatsappSender,
-  to: string,
-  fromPhone: string,
-  code: string | undefined,
-  config: Awaited<ReturnType<typeof buildBotConfig>>,
-): Promise<void> {
-  const say = async (msg?: string) => {
-    if (msg && to) {
-      try {
-        await sendText(sender, to, msg);
-      } catch {
-        /* best-effort */
-      }
-    }
-  };
-
-  if (result.kind === "timing") {
-    await say(result.customerMessage);
-    const recheckedRecently =
-      convo.state.pendingRecheckAt &&
-      Date.now() - new Date(convo.state.pendingRecheckAt).getTime() < 3 * 60 * 1000;
-    if (!recheckedRecently) {
-      await schedulePaymentRecheck({
-        companyId,
-        customerId: convo.customerId,
-        conversationId: convo.conversationId,
-        sendAt: new Date(Date.now() + 60 * 1000),
-        operationCode: code,
-        customerPhone: fromPhone,
-        receiptMediaUrl: convo.state.lastReceipt?.mediaUrl ?? undefined,
-      });
-      convo.state.pendingRecheckAt = new Date().toISOString();
-    }
-    return;
-  }
-
-  // confusión / falta de dato / monto distinto: pedir, y tras 3 intentos derivar.
-  const attempts = (Number(convo.state.paymentAttempts) || 0) + 1;
-  convo.state.paymentAttempts = attempts;
-  if (attempts >= 3) {
-    convo.state.paymentAttempts = 0;
-    await setBotPaused(companyId, convo.conversationId, true);
-    await say("Voy a pasar tu caso a un asesor para validar tu pago cuanto antes 🙏 En un momentito te confirma. ¡Gracias por tu paciencia!");
+  // 3) Reenviar el comprobante al admin (solo aviso; NO pausa el bot, NO responde al cliente).
+  const sender = await loadWhatsappSender(companyId);
+  if (sender) {
     const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
     if (adminPhone) {
+      const name = await getCustomerName(convo.customerId);
+      const datos = looksLikeReceipt
+        ? `Monto: ${receipt!.amountText ?? "—"}` +
+          (receipt!.securityCode ? ` · cód: ${receipt!.securityCode}` : "") +
+          (receipt!.operationNumber ? ` · op: ${receipt!.operationNumber}` : "")
+        : "No se pudo leer automáticamente; revísalo.";
+      const caption = `🧾 Comprobante recibido${name ? ` de ${name}` : ""} (${fromPhone}).\n${datos}`;
       try {
-        await sendText(sender, adminPhone, `🔔 Cliente ${fromPhone}: no se pudo validar su pago automáticamente. El bot quedó en atención humana. Revísalo en Conversaciones.`);
+        await sendMedia(sender, adminPhone, "image", imageUrl, caption);
       } catch {
         /* best-effort */
       }
     }
-    return;
   }
-  await say(result.customerMessage);
+
+  console.log(
+    `[agent] comprobante de ${fromPhone} leído (monto=${receipt?.amountText ?? "-"} cód=${receipt?.securityCode ?? "-"}); lo validará el agente en su turno`,
+  );
 }
 
 /**
