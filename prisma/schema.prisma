@@ -196,6 +196,9 @@ model AgentConfig {
   // los números en testNumbers (modo prueba). Default OPEN.
   replyMode      String   @default("OPEN")
   testNumbers    Json?    // array de teléfonos permitidos cuando replyMode=ALLOWLIST
+  // Números en atención humana forzada: el bot nunca les responde; su
+  // conversación pasa automáticamente a HUMANO (botPaused).
+  mutedNumbers   Json?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

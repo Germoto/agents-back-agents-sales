@@ -3,6 +3,7 @@ import {
   getAgentConfig,
   upsertAgentConfig,
   updateAgentReminders,
+  updateAgentMutedNumbers,
   updateAgentReplyMode,
 } from "./agent-config.service";
 
@@ -18,6 +19,11 @@ export async function upsertAgentConfigController(req: Request, res: Response) {
 
 export async function updateRemindersController(req: Request, res: Response) {
   const config = await updateAgentReminders(req.user!.companyId, req.body.followupConfig ?? null);
+  return res.json(config);
+}
+
+export async function updateMutedNumbersController(req: Request, res: Response) {
+  const config = await updateAgentMutedNumbers(req.user!.companyId, req.body.mutedNumbers ?? []);
   return res.json(config);
 }
 

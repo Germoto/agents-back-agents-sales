@@ -6,10 +6,12 @@ import {
   getAgentConfigController,
   upsertAgentConfigController,
   updateRemindersController,
+  updateMutedNumbersController,
   updateReplyModeController,
 } from "./agent-config.controller";
 import {
   coreAgentConfigSchema,
+  mutedNumbersConfigSchema,
   remindersConfigSchema,
   replyModeConfigSchema,
 } from "./agent-config.schemas";
@@ -21,5 +23,6 @@ router.get("/", asyncHandler(getAgentConfigController));
 router.put("/", validate({ body: coreAgentConfigSchema }), asyncHandler(upsertAgentConfigController));
 router.put("/reminders", validate({ body: remindersConfigSchema }), asyncHandler(updateRemindersController));
 router.put("/reply-mode", validate({ body: replyModeConfigSchema }), asyncHandler(updateReplyModeController));
+router.put("/muted-numbers", validate({ body: mutedNumbersConfigSchema }), asyncHandler(updateMutedNumbersController));
 
 export default router;

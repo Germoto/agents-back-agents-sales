@@ -51,3 +51,8 @@ export const replyModeConfigSchema = z.object({
   replyMode: z.enum(["OPEN", "ALLOWLIST"]).default("OPEN"),
   testNumbers: z.array(z.string().min(1)).default([]),
 });
+
+// PUT /agent-config/muted-numbers — números en atención humana forzada.
+export const mutedNumbersConfigSchema = z.object({
+  mutedNumbers: z.array(z.string().trim().regex(/^\+?\d{6,20}$/, "Número inválido")).max(500).default([]),
+});

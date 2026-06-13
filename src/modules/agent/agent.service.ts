@@ -146,6 +146,29 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     return;
   }
 
+  // Números en atención humana forzada (lista del panel): el bot NUNCA les
+  // responde (ni al comando reset). El mensaje se persiste para que se vea en
+  // Conversaciones y la conversación pasa a HUMANO automáticamente.
+  const muted = ((config as any).agent?.mutedNumbers ?? []) as string[];
+  if (muted.length > 0 && isPhoneAllowed(inbound.fromPhone, muted)) {
+    await recordMessage({
+      companyId,
+      customerId: convo.customerId,
+      conversationId: convo.conversationId,
+      role: "USER",
+      message: inbound.text || null,
+      mediaUrl: inbound.mediaUrl,
+      mediaType: inbound.mediaUrl && inbound.type !== "text" ? inbound.type : null,
+      rawPayload: inbound.raw as any,
+    });
+    await markInboundProcessed(convo.conversationId, inbound.messageId);
+    if (!convo.botPaused) {
+      await setBotPaused(companyId, convo.conversationId, true);
+    }
+    console.log(`[agent] ${inbound.fromPhone} en lista de atención humana: sin respuesta del bot`);
+    return;
+  }
+
   // Comando "reset" del cliente: limpia historial/carrito/estado para probar de cero.
   if (isResetCommand(inbound.text)) {
     await markInboundProcessed(convo.conversationId, inbound.messageId);

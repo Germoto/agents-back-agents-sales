@@ -13,6 +13,7 @@ function mapAgentConfig(config: {
   followupConfig?: unknown;
   replyMode?: string;
   testNumbers?: unknown;
+  mutedNumbers?: unknown;
   createdAt: Date;
   updatedAt: Date;
 } | null) {
@@ -28,6 +29,9 @@ function mapAgentConfig(config: {
     replyMode: config.replyMode ?? "OPEN",
     testNumbers: Array.isArray(config.testNumbers)
       ? config.testNumbers.filter((item): item is string => typeof item === "string")
+      : [],
+    mutedNumbers: Array.isArray(config.mutedNumbers)
+      ? config.mutedNumbers.filter((item): item is string => typeof item === "string")
       : [],
   };
 }
@@ -73,6 +77,16 @@ export async function updateAgentReminders(
   const config = await prisma.agentConfig.update({
     where: { companyId },
     data: { followupConfig: value },
+  });
+  return mapAgentConfig(config);
+}
+
+// Actualiza solo la lista de números en atención humana forzada.
+export async function updateAgentMutedNumbers(companyId: string, mutedNumbers: string[]) {
+  const normalized = [...new Set((mutedNumbers ?? []).map((n) => n.replace(/\D/g, "")).filter(Boolean))];
+  const config = await prisma.agentConfig.update({
+    where: { companyId },
+    data: { mutedNumbers: normalized as Prisma.InputJsonValue },
   });
   return mapAgentConfig(config);
 }
