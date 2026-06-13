@@ -97,6 +97,77 @@ export async function schedulePaymentRecheck(opts: {
   });
 }
 
+/** Tipos de recordatorio "de seguimiento" (visibles/gestionables en el panel). */
+export const FOLLOWUP_TYPES: ScheduledMessageType[] = [
+  ScheduledMessageType.ABANDONED_CART,
+  ScheduledMessageType.LEFT_ON_READ,
+  ScheduledMessageType.OFFER_COUNTDOWN,
+  ScheduledMessageType.POST_SALE,
+  ScheduledMessageType.CUSTOM,
+];
+
+/** Cancela un recordatorio PENDING puntual (filtrando por empresa). Devuelve si canceló. */
+export async function cancelReminderById(companyId: string, id: string): Promise<boolean> {
+  const res = await prisma.scheduledMessage.updateMany({
+    where: { id, companyId, status: ScheduledMessageStatus.PENDING },
+    data: { status: ScheduledMessageStatus.CANCELLED },
+  });
+  return res.count > 0;
+}
+
+/**
+ * Lista los recordatorios de seguimiento PENDING de una empresa (panel "Programados").
+ * Excluye los internos (FLOW_TIMEOUT, PAYMENT_RECHECK). Filtro opcional por tipo y por
+ * texto (nombre/teléfono del cliente).
+ */
+export async function listPendingReminders(
+  companyId: string,
+  opts?: { type?: ScheduledMessageType; q?: string },
+): Promise<
+  Array<{
+    id: string;
+    type: ScheduledMessageType;
+    sendAt: Date;
+    body: string;
+    mediaUrl: string | null;
+    customerId: string;
+    conversationId: string | null;
+    customer: { name: string | null; phone: string };
+  }>
+> {
+  const q = (opts?.q ?? "").trim();
+  const rows = await prisma.scheduledMessage.findMany({
+    where: {
+      companyId,
+      status: ScheduledMessageStatus.PENDING,
+      type: opts?.type ? opts.type : { in: FOLLOWUP_TYPES },
+      ...(q
+        ? {
+            customer: {
+              OR: [
+                { name: { contains: q, mode: "insensitive" } },
+                { phone: { contains: q.replace(/\D/g, "") || q } },
+              ],
+            },
+          }
+        : {}),
+    },
+    orderBy: { sendAt: "asc" },
+    take: 500,
+    select: {
+      id: true,
+      type: true,
+      sendAt: true,
+      body: true,
+      mediaUrl: true,
+      customerId: true,
+      conversationId: true,
+      customer: { select: { name: true, phone: true } },
+    },
+  });
+  return rows;
+}
+
 export function minutesFromNow(minutes: number): Date {
   return new Date(Date.now() + minutes * 60 * 1000);
 }

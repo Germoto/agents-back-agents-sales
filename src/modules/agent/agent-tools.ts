@@ -5,6 +5,7 @@
  * runtime vacía en orden por WhatsApp; el resto sólo devuelven datos al modelo.
  */
 
+import { ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import type { ToolDefinition } from "../../lib/openai";
 import type { getBotConfig } from "../bot/bot.service";
@@ -25,7 +26,7 @@ import {
 } from "../public-payments/public-payments.service";
 import { createAgentOrder, createOrderFromCart } from "./order.service";
 import { createBooking } from "./booking.service";
-import { schedulePaymentRecheck } from "../scheduler/scheduler.service";
+import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
 
 /** Comparación laxa de nombres (acentos/orden) para detectar confusión de titular. */
 function looseNameNorm(s: string): string {
@@ -358,6 +359,18 @@ export async function tryApprovePayment(opts: {
     if (cart.items.length) await checkoutCart(companyId, customerId, cart.totalText);
     state.pendingRecheckAt = null;
     state.paymentAttempts = 0;
+
+    // Pagó: cancelar los follow-ups de abandono/silencio pendientes (ya no aplican).
+    try {
+      await cancelPendingReminders(companyId, customerId, [
+        ScheduledMessageType.ABANDONED_CART,
+        ScheduledMessageType.LEFT_ON_READ,
+        ScheduledMessageType.OFFER_COUNTDOWN,
+        ScheduledMessageType.POST_SALE,
+      ]);
+    } catch {
+      /* best-effort */
+    }
 
     if (opts.deliver) {
       const { outbox, delivered, offeredCrossSellId } = buildDeliveryOutbox(config, productIds);

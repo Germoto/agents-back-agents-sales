@@ -6,8 +6,9 @@
  * ConversationMessage que se le pasa a OpenAI cada turno.
  */
 
-import { Prisma, ConversationRole } from "@prisma/client";
+import { Prisma, ConversationRole, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { cancelPendingReminders } from "../scheduler/scheduler.service";
 import { env } from "../../config/env";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
@@ -121,14 +122,32 @@ export async function setBotPaused(
   conversationId: string,
   paused: boolean,
 ) {
-  await prisma.conversation.update({
+  const updated = await prisma.conversation.update({
     where: { id: conversationId },
     data: { botPaused: paused, status: paused ? "HUMAN" : "OPEN" },
+    select: { customerId: true },
   });
   socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
     conversationId,
     botPaused: paused,
   });
+  // Al pasar a atención humana (derivación, "tomar control" o muteado), cancelar
+  // los recordatorios de seguimiento pendientes: no queremos que un bot moleste a
+  // un cliente que ya está con una persona. PAYMENT_RECHECK se mantiene (interno).
+  if (paused) {
+    try {
+      await cancelPendingReminders(companyId, updated.customerId, [
+        ScheduledMessageType.ABANDONED_CART,
+        ScheduledMessageType.LEFT_ON_READ,
+        ScheduledMessageType.OFFER_COUNTDOWN,
+        ScheduledMessageType.POST_SALE,
+        ScheduledMessageType.CUSTOM,
+        ScheduledMessageType.FLOW_TIMEOUT,
+      ]);
+    } catch (err) {
+      console.warn("[agent] cancelar recordatorios al pausar falló:", err instanceof Error ? err.message : err);
+    }
+  }
 }
 
 /** Persiste un mensaje y emite el evento de tiempo real al panel. */

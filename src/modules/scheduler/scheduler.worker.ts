@@ -58,11 +58,45 @@ async function processDue(): Promise<void> {
   const quietCache = new Map<string, QuietConfig>();
 
   for (const msg of due) {
+    const isInternal =
+      msg.type === ScheduledMessageType.FLOW_TIMEOUT || msg.type === ScheduledMessageType.PAYMENT_RECHECK;
+
+    // Guard de negocio (red de seguridad): un recordatorio de SEGUIMIENTO no debe
+    // enviarse si el cliente ya pagó/cerró o si la conversación está en atención
+    // humana (botPaused). Cubre filas programadas ANTES de que el cliente pagara o
+    // se pausara (cuando la cancelación proactiva no alcanzó). Los internos
+    // (FLOW_TIMEOUT/PAYMENT_RECHECK) se saltan el guard: deben correr siempre.
+    if (!isInternal) {
+      const convo = msg.conversationId
+        ? await prisma.conversation.findUnique({
+            where: { id: msg.conversationId },
+            select: { botPaused: true, state: true },
+          })
+        : await prisma.conversation.findFirst({
+            where: { companyId: msg.companyId, customerId: msg.customerId },
+            orderBy: { updatedAt: "desc" },
+            select: { botPaused: true, state: true },
+          });
+      const status = ((convo?.state as { status?: string } | null)?.status ?? "").toUpperCase();
+      const closed = ["PAGADO", "ENTREGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status);
+      if (convo?.botPaused || closed) {
+        await prisma.scheduledMessage.updateMany({
+          where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
+          data: {
+            status: ScheduledMessageStatus.CANCELLED,
+            failureReason: convo?.botPaused ? "conversación en atención humana" : `cliente en estado ${status}`,
+          },
+        });
+        console.log(`[scheduler] recordatorio ${msg.type} cancelado (${convo?.botPaused ? "pausado" : status}) cliente=${msg.customerId}`);
+        continue;
+      }
+    }
+
     // Horario hábil: los mensajes al cliente (no los timeouts internos de flujo
     // ni los reintentos de pago, que son urgentes) no se envían fuera de la
     // ventana del tenant; se reprograman al próximo horario válido sin
     // reclamarlos (cubre filas viejas o creadas con anticipación).
-    if (msg.type !== ScheduledMessageType.FLOW_TIMEOUT && msg.type !== ScheduledMessageType.PAYMENT_RECHECK) {
+    if (!isInternal) {
       const qc = await getQuietConfig(msg.companyId, quietCache);
       if (qc.tz) {
         const next = clampToBusinessHours(now, qc.tz, qc.quiet);
