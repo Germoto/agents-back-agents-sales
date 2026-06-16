@@ -9,6 +9,7 @@
 
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
+import { HUMAN_AGENT_TAG } from "./conversation.service";
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
@@ -246,6 +247,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
           }
         : null,
     })}`,
+    `- En el historial, los mensajes del lado del negocio que empiezan con ${HUMAN_AGENT_TAG} los escribió un compañero HUMANO del equipo (no tú) mientras atendía al cliente; los demás mensajes del negocio (sin ese prefijo) son tuyos o seguimientos automáticos enviados en tu nombre. Trata lo que dijo el asesor humano como contexto real y vigente: respeta lo que prometió o acordó, NO lo contradigas ni repitas lo ya dicho, y continúa la conversación de forma coherente (como si retomaras un chat que dejó un compañero). No menciones estas etiquetas al cliente.`,
     "- Si en el estado 'esperandoPago' es true, YA enviaste el monto y los métodos de pago en este chat y estás esperando que el cliente pague. NO ofrezcas 'enviarte los métodos de pago' ni reinicies la venta como si recién empezara: eso confunde al cliente. Si el cliente vuelve a preguntar el monto o a qué cuenta deposita, los datos ya están más arriba: recuérdaselos brevemente (o reenvíalos con enviar_metodos_pago SIN preguntar si los quiere) y avanza al cierre pidiéndole la captura del comprobante o el nombre del titular de su Yape/Plin para validar.",
     "- Si en el estado hay 'comprobanteLeido', el cliente ya mandó la captura del pago y se leyó automáticamente. Usa esos datos para validar: llama a validar_pago (con el código si lo hay, o con el nombre del titular de SU Yape si el cliente lo dio). Recuerda que la captura muestra NUESTRO nombre (el destino), no el del cliente: NUNCA tomes ese nombre como el del pagador.",
     "- Si en el estado hay 'offeredCrossSell', significa que YA ofreciste ese producto relacionado tras la entrega. Si el cliente acepta o pregunta por él (ej. 'sí', 'cuéntame', '¿qué incluye?'), preséntalo con enviar_ficha y sigue el flujo normal (resuelve dudas, cobra con enviar_metodos_pago, etc.). Habla con secuencia respecto a esa oferta y mantente abierto.",

@@ -442,6 +442,11 @@ export async function listConversationMessages(
  * mensajes del ASESOR HUMANO (rol ADMIN), mapeados como "assistant", para que el
  * bot tenga continuidad de lo que se conversó durante el control humano.
  */
+/** Prefijo que marca, en el historial, los mensajes que escribió un asesor humano
+ *  del equipo (rol ADMIN: take-over manual o respuestas rápidas). El system prompt
+ *  explica este marcador para que el modelo no los confunda con sus propios mensajes. */
+export const HUMAN_AGENT_TAG = "「Asesor humano del equipo」";
+
 export async function buildHistory(conversationId: string): Promise<ChatMessage[]> {
   const limit = env.AGENT_HISTORY_LIMIT;
   const rows = await prisma.conversationMessage.findMany({
@@ -452,10 +457,20 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
   });
   rows.reverse();
   return rows.map((r) => {
-    // ADMIN (humano) cuenta como lado del negocio = assistant; USER = cliente.
-    const role: "user" | "assistant" = r.role === "USER" ? "user" : "assistant";
-    let content = r.message ?? "";
-    if (!content && r.mediaUrl) content = "[el cliente envió una imagen (posible comprobante de pago)]";
+    // USER = cliente. ADMIN (asesor humano/respuesta rápida) y ASSISTANT (el bot y los
+    // recordatorios) son el lado del negocio = assistant; al ADMIN le anteponemos un
+    // marcador para que el modelo sepa que lo escribió un humano, no él.
+    const isUser = r.role === "USER";
+    const isHuman = r.role === "ADMIN";
+    const role: "user" | "assistant" = isUser ? "user" : "assistant";
+
+    let content = (r.message ?? "").trim();
+    if (!content && r.mediaUrl) {
+      content = isUser
+        ? "[el cliente envió una imagen/archivo (posible comprobante de pago)]"
+        : "[se envió una imagen/archivo al cliente]";
+    }
+    if (isHuman) content = `${HUMAN_AGENT_TAG} ${content}`;
     return { role, content };
   });
 }
