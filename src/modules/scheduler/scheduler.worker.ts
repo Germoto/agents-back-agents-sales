@@ -8,6 +8,7 @@ import cron from "node-cron";
 import { ScheduledMessageStatus, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { loadWhatsappSender, sendText, sendMedia, mediaKindFor } from "../agent/outbound";
+import { applyFirma } from "../agent/firma";
 import { recordMessage } from "../agent/conversation.service";
 import { recheckPayment } from "../agent/agent.service";
 import { resumeFlowOnTimeout } from "../flows/flow-engine";
@@ -144,12 +145,13 @@ async function processDue(): Promise<void> {
       if (!sender) throw new Error("empresa sin WhatsappConfig activa");
 
       const to = msg.customer.phone.replace(/\D/g, "");
+      const body = (await applyFirma(msg.companyId, msg.body)) ?? msg.body;
       if (msg.mediaUrl) {
         // El tipo de media va en metadata (image|video|audio|pdf); default image.
         const mediaType = (msg.metadata as { mediaType?: string } | null)?.mediaType || "image";
-        await sendMedia(sender, to, mediaKindFor(mediaType), msg.mediaUrl, msg.body);
+        await sendMedia(sender, to, mediaKindFor(mediaType), msg.mediaUrl, body);
       } else {
-        await sendText(sender, to, msg.body);
+        await sendText(sender, to, body);
       }
 
       // Registrar en la conversación para que aparezca en el panel
@@ -159,7 +161,7 @@ async function processDue(): Promise<void> {
           customerId: msg.customerId,
           conversationId: msg.conversationId,
           role: "ASSISTANT",
-          message: msg.body,
+          message: body,
           mediaUrl: msg.mediaUrl,
         });
       }

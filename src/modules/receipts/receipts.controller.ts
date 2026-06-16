@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { approveReceipt, deleteReceipt, ignoreReceipt, listReceipts, rejectReceipt } from "./receipts.service";
+import { approveReceipt, deleteReceipt, getReceiptProof, ignoreReceipt, listReceipts, rejectReceipt } from "./receipts.service";
 
 export async function listReceiptsController(req: Request, res: Response) {
   const receipts = await listReceipts(req.user!.companyId, {
@@ -8,6 +8,11 @@ export async function listReceiptsController(req: Request, res: Response) {
     to: req.query.to ? String(req.query.to) : null,
   });
   return res.json(receipts);
+}
+
+export async function getReceiptProofController(req: Request, res: Response) {
+  const proof = await getReceiptProof(req.user!.companyId, String(req.params.id));
+  return res.json(proof);
 }
 
 export async function approveReceiptController(req: Request, res: Response) {

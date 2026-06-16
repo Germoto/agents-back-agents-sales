@@ -1,10 +1,9 @@
 /**
- * Firma de empresa: nombre que se antepone a los mensajes automáticos salientes
- * (agente IA + flujos). Se aplica en el choke point común `deliver()`.
+ * Firma de empresa: nombre que se antepone a TODA salida de mensajes con texto
+ * (agente IA, flujos, recordatorios, modo humano y respuestas rápidas).
  *
- * Formato WhatsApp: `*_<firma>:_*` (negrita + itálica) en su propia línea, antes
- * del texto. Los mensajes manuales del operador (respuestas rápidas, take-over)
- * NO pasan por aquí, así que no se firman.
+ * Formato WhatsApp: `*_<firma>:_*` (negrita + itálica) en su propia línea, seguida
+ * de una línea en blanco para que no quede pegada al mensaje.
  */
 
 import { prisma } from "../../lib/prisma";
@@ -47,5 +46,5 @@ export async function applyFirma(companyId: string, text: string | null | undefi
   const prefix = `*_${firma.text}:_*`;
   // Evita duplicar la firma si por alguna razón ya viene anexada.
   if (value.startsWith(prefix)) return value;
-  return `${prefix}\n${value}`;
+  return `${prefix}\n\n${value}`;
 }

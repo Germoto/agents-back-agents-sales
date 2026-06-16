@@ -11,6 +11,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { loadWhatsappSender, sendText, sendMedia } from "../agent/outbound";
+import { applyFirma } from "../agent/firma";
 import { recordMessage, setBotPaused } from "../agent/conversation.service";
 import { moveCard } from "../crm/crm.service";
 import type { QuickReplyMessageInput, QuickReplyActionsInput } from "./quick-replies.schemas";
@@ -220,16 +221,17 @@ export async function sendQuickReply(
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     try {
+      const text = (await applyFirma(companyId, msg.text)) ?? msg.text ?? null;
       const result =
         msg.type === "text"
-          ? await sendText(sender, to, msg.text ?? "")
-          : await sendMedia(sender, to, msg.type, msg.mediaUrl ?? "", msg.text, msg.fileName);
+          ? await sendText(sender, to, text ?? "")
+          : await sendMedia(sender, to, msg.type, msg.mediaUrl ?? "", text ?? undefined, msg.fileName);
       await recordMessage({
         companyId,
         customerId: convo.customerId,
         conversationId,
         role: "ADMIN",
-        message: msg.text ?? null,
+        message: text,
         mediaUrl: msg.type !== "text" ? msg.mediaUrl ?? null : null,
         mediaType: msg.type !== "text" ? msg.type : null,
         gatewayId: result.gatewayId,

@@ -13,6 +13,7 @@ import { env } from "../../config/env";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { loadWhatsappSender, sendText, sendMedia } from "./outbound";
+import { applyFirma } from "./firma";
 import type { ChatMessage } from "../../lib/openai";
 
 /** Estado conversacional persistido en Conversation.state (equivalente al customer.* de n8n). */
@@ -265,19 +266,20 @@ export async function sendHumanReply(companyId: string, conversationId: string, 
   if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
 
   const to = convo.customer.phone.replace(/\D/g, "");
-  await sendText(sender, to, message);
+  const text = (await applyFirma(companyId, message)) ?? message;
+  await sendText(sender, to, text);
   await recordMessage({
     companyId,
     customerId: convo.customerId,
     conversationId,
     role: "ADMIN",
-    message,
+    message: text,
   });
 }
 
 /**
  * Envío manual de multimedia por el operador humano (botón adjuntar del panel).
- * No pasa por la firma (es un mensaje manual, no automático).
+ * El caption (si trae texto) se firma igual que el resto de salidas.
  */
 export async function sendHumanMedia(
   companyId: string,
@@ -294,13 +296,14 @@ export async function sendHumanMedia(
   if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
 
   const to = convo.customer.phone.replace(/\D/g, "");
-  await sendMedia(sender, to, media.mediaKind, media.mediaUrl, media.caption, media.fileName);
+  const caption = (await applyFirma(companyId, media.caption)) ?? media.caption;
+  await sendMedia(sender, to, media.mediaKind, media.mediaUrl, caption, media.fileName);
   await recordMessage({
     companyId,
     customerId: convo.customerId,
     conversationId,
     role: "ADMIN",
-    message: media.caption ?? null,
+    message: caption ?? null,
     mediaUrl: media.mediaUrl,
     mediaType: media.mediaKind,
   });

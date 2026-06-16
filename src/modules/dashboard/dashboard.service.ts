@@ -61,6 +61,9 @@ export async function getDashboardStats(companyId: string) {
     validationModeGroups,
     digitalSalesTotal,
     digitalSalesDelivered,
+    crmsTotal,
+    crmColumnsTotal,
+    crmCardsTotal,
   ] = await Promise.all([
     prisma.customer.count({ where: { companyId } }),
     prisma.customer.count({ where: { companyId, createdAt: { gte: monthStart } } }),
@@ -84,6 +87,9 @@ export async function getDashboardStats(companyId: string) {
     }),
     prisma.digitalSale.count({ where: { companyId } }),
     prisma.digitalSale.count({ where: { companyId, status: "ENTREGADO" } }),
+    prisma.crm.count({ where: { companyId } }),
+    prisma.crmColumn.count({ where: { crm: { companyId } } }),
+    prisma.crmCard.count({ where: { crm: { companyId } } }),
   ]);
 
   const paymentMethods = paymentMethodGroups
@@ -204,6 +210,9 @@ export async function getDashboardStats(companyId: string) {
       digitalSalesTotal,
       digitalSalesDelivered,
       paymentMethods,
+      crmsTotal,
+      crmColumnsTotal,
+      crmCardsTotal,
     },
   };
 }

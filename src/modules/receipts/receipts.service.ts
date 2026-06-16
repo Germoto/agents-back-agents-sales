@@ -42,6 +42,66 @@ export async function listReceipts(companyId: string, filters?: ReceiptFilters) 
   });
 }
 
+const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|avif)(\?|$)/i;
+
+function isImageMedia(url: string | null, mediaType: string | null): boolean {
+  if (!url) return false;
+  if ((mediaType ?? "").toLowerCase() === "image") return true;
+  return IMAGE_EXT.test(url);
+}
+
+export type ReceiptProof = {
+  mediaUrl: string | null;
+  mediaType: string | null;
+  source: "receipt" | "chat" | null;
+};
+
+/**
+ * Imagen de la constancia de pago para mostrar en la lupa del panel. Si el
+ * comprobante trae imagen propia la usa; si no (p. ej. pagos "ValidPay · auto"
+ * confirmados por API), busca la captura que el cliente envió por WhatsApp más
+ * cercana al momento del comprobante.
+ */
+export async function getReceiptProof(companyId: string, receiptId: string): Promise<ReceiptProof> {
+  const receipt = await findReceipt(companyId, receiptId);
+  if (receipt.mediaUrl) {
+    return { mediaUrl: receipt.mediaUrl, mediaType: "image", source: "receipt" };
+  }
+  if (!receipt.customerId) return { mediaUrl: null, mediaType: null, source: null };
+
+  const pickImage = (rows: { mediaUrl: string | null; mediaType: string | null }[]): ReceiptProof | null => {
+    const hit = rows.find((m) => isImageMedia(m.mediaUrl, m.mediaType));
+    return hit ? { mediaUrl: hit.mediaUrl, mediaType: hit.mediaType ?? "image", source: "chat" } : null;
+  };
+
+  // 1) Ventana alrededor del momento del comprobante (la captura suele llegar justo antes).
+  const windowStart = new Date(receipt.createdAt.getTime() - 6 * 60 * 60 * 1000);
+  const windowEnd = new Date(receipt.createdAt.getTime() + 30 * 60 * 1000);
+  const near = await prisma.conversationMessage.findMany({
+    where: {
+      companyId,
+      customerId: receipt.customerId,
+      role: "USER",
+      mediaUrl: { not: null },
+      createdAt: { gte: windowStart, lte: windowEnd },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+    select: { mediaUrl: true, mediaType: true },
+  });
+  const nearHit = pickImage(near);
+  if (nearHit) return nearHit;
+
+  // 2) Fallback: la última imagen que envió el cliente (sin ventana de tiempo).
+  const any = await prisma.conversationMessage.findMany({
+    where: { companyId, customerId: receipt.customerId, role: "USER", mediaUrl: { not: null } },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+    select: { mediaUrl: true, mediaType: true },
+  });
+  return pickImage(any) ?? { mediaUrl: null, mediaType: null, source: null };
+}
+
 async function findReceipt(companyId: string, receiptId: string) {
   const receipt = await prisma.paymentReceipt.findFirst({
     where: { id: receiptId, companyId },
