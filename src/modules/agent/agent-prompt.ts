@@ -226,6 +226,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "",
     `Estado actual de la conversación: ${JSON.stringify({
       status: state.status ?? "NUEVO",
+      // true = ya enviaste el monto y los métodos de pago en este chat (estás esperando el pago).
+      esperandoPago: state.status === "ESPERANDO_PAGO" || Boolean(state.lastPaymentPromptAt),
       selectedProductId: state.selectedProductId ?? null,
       pendingAction: state.pendingAction ?? null,
       presented: Array.isArray(state.presentedProductIds) ? state.presentedProductIds : [],
@@ -244,6 +246,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
           }
         : null,
     })}`,
+    "- Si en el estado 'esperandoPago' es true, YA enviaste el monto y los métodos de pago en este chat y estás esperando que el cliente pague. NO ofrezcas 'enviarte los métodos de pago' ni reinicies la venta como si recién empezara: eso confunde al cliente. Si el cliente vuelve a preguntar el monto o a qué cuenta deposita, los datos ya están más arriba: recuérdaselos brevemente (o reenvíalos con enviar_metodos_pago SIN preguntar si los quiere) y avanza al cierre pidiéndole la captura del comprobante o el nombre del titular de su Yape/Plin para validar.",
     "- Si en el estado hay 'comprobanteLeido', el cliente ya mandó la captura del pago y se leyó automáticamente. Usa esos datos para validar: llama a validar_pago (con el código si lo hay, o con el nombre del titular de SU Yape si el cliente lo dio). Recuerda que la captura muestra NUESTRO nombre (el destino), no el del cliente: NUNCA tomes ese nombre como el del pagador.",
     "- Si en el estado hay 'offeredCrossSell', significa que YA ofreciste ese producto relacionado tras la entrega. Si el cliente acepta o pregunta por él (ej. 'sí', 'cuéntame', '¿qué incluye?'), preséntalo con enviar_ficha y sigue el flujo normal (resuelve dudas, cobra con enviar_metodos_pago, etc.). Habla con secuencia respecto a esa oferta y mantente abierto.",
     "",
