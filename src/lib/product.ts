@@ -202,6 +202,9 @@ export function mapBotProduct(
             crossSellPitch: product.digitalDelivery?.crossSellPitch ?? null,
             crossSellPitchMediaUrl: product.digitalDelivery?.crossSellPitchMediaUrl ?? null,
             crossSellPitchMediaType: product.digitalDelivery?.crossSellPitchMediaType ?? null,
+            onSaleCrmId: product.digitalDelivery?.onSaleCrmId ?? null,
+            onSaleCrmColumnId: product.digitalDelivery?.onSaleCrmColumnId ?? null,
+            onSaleTagIds: product.digitalDelivery?.onSaleTagIds ?? [],
           }
         : null,
     physicalDelivery:

@@ -54,6 +54,7 @@ export async function sendQuickReplyController(req: Request, res: Response) {
     req.user!.companyId,
     String(req.params.id),
     req.body.conversationId,
+    req.body.takeControl === true,
   );
   return res.json({ success: true, ...result });
 }

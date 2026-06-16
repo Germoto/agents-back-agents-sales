@@ -91,6 +91,10 @@ export const productBodySchema = z.object({
     crossSellPitch: z.string().optional().default(""),
     crossSellPitchMediaUrl: z.string().optional().default(""),
     crossSellPitchMediaType: z.string().optional().default(""),
+    // Acciones al cerrar la venta: mover al cliente a una pestaña del CRM y/o etiquetar.
+    onSaleCrmId: z.string().uuid().nullable().optional(),
+    onSaleCrmColumnId: z.string().uuid().nullable().optional(),
+    onSaleTagIds: z.array(z.string().uuid()).optional().default([]),
   }).nullable().optional(),
   physicalDelivery: z.object({
     requiresAddress: z.boolean().default(true),

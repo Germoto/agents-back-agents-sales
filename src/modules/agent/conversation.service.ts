@@ -181,6 +181,12 @@ export async function recordMessage(opts: {
     },
     select: { id: true, role: true, message: true, mediaUrl: true, mediaType: true, createdAt: true },
   });
+  // Subir el chat al tope de la lista: TODO mensaje (entrante, del bot, del humano,
+  // respuesta rápida o recordatorio) actualiza lastMessageAt. listConversations ordena
+  // por este campo desc, así el panel se reordena en vivo.
+  await prisma.conversation
+    .update({ where: { id: opts.conversationId }, data: { lastMessageAt: created.createdAt } })
+    .catch(() => undefined);
   socketService.emitToCompany(opts.companyId, SOCKET_EVENTS.MESSAGE_NEW, {
     conversationId: opts.conversationId,
     customerId: opts.customerId,

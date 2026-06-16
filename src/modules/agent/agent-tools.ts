@@ -11,6 +11,7 @@ import type { ToolDefinition } from "../../lib/openai";
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { setBotPaused } from "./conversation.service";
+import { applyCrmAndTagActions } from "../crm/crm.service";
 import { mediaKindFor } from "./outbound";
 import {
   addToCart,
@@ -1075,6 +1076,21 @@ export async function executeTool(
         return JSON.stringify({ ok: false, error: "No se encontró entrega digital configurada para el producto pagado." });
       }
       ctx.state.status = "ENTREGADO";
+
+      // Acciones de venta configuradas por producto: mover al cliente a una pestaña
+      // del CRM y/o asignarle etiquetas (best-effort, no rompe la entrega).
+      if (!ctx.simulate) {
+        for (const pid of ids) {
+          const dd = findProductById(ctx, pid)?.digitalDelivery;
+          if (dd && (dd.onSaleCrmId || (dd.onSaleTagIds && dd.onSaleTagIds.length))) {
+            await applyCrmAndTagActions(ctx.companyId, ctx.customerId, {
+              tagIds: dd.onSaleTagIds,
+              crmId: dd.onSaleCrmId,
+              crmColumnId: dd.onSaleCrmColumnId,
+            });
+          }
+        }
+      }
 
       // Cierre total: si el catálogo tiene UN solo producto y no se ofreció
       // enganche, no queda nada más que vender — pasar al cliente a la lista de

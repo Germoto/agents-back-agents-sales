@@ -9,11 +9,10 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
-import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { loadWhatsappSender, sendText, sendMedia } from "../agent/outbound";
 import { applyFirma } from "../agent/firma";
 import { recordMessage, setBotPaused } from "../agent/conversation.service";
-import { moveCard } from "../crm/crm.service";
+import { applyCrmAndTagActions } from "../crm/crm.service";
 import type { QuickReplyMessageInput, QuickReplyActionsInput } from "./quick-replies.schemas";
 
 const quickReplySelect = {
@@ -183,13 +182,14 @@ const SEND_GAP_MS = 500; // pausa entre mensajes para preservar el orden en el g
 
 /**
  * Envía la secuencia completa de una respuesta rápida al cliente de la
- * conversación. Si el bot está activo, lo pausa primero (toma de control
- * implícita) para que no pise la conversación humana.
+ * conversación. Solo pausa el bot (toma de control) si `takeControl` es true;
+ * así enviar una respuesta rápida NO implica pausar al bot por defecto.
  */
 export async function sendQuickReply(
   companyId: string,
   quickReplyId: string,
   conversationId: string,
+  takeControl = false,
 ): Promise<SendQuickReplyResult> {
   const quickReply = await prisma.quickReply.findFirst({
     where: { id: quickReplyId, companyId },
@@ -209,8 +209,8 @@ export async function sendQuickReply(
   const messages = (quickReply.messages as unknown as QuickReplyMessageInput[]) ?? [];
   if (!messages.length) throw new AppError("La respuesta rápida no tiene mensajes", 422);
 
-  // Auto-pausa: tomar control antes de enviar (emite CONVERSATION_UPDATED).
-  if (!convo.botPaused) {
+  // Tomar control solo si se pidió explícitamente (emite CONVERSATION_UPDATED).
+  if (takeControl && !convo.botPaused) {
     await setBotPaused(companyId, conversationId, true);
   }
 
@@ -273,29 +273,9 @@ async function applyQuickReplyActions(
   actions: QuickReplyActionsInput | null,
 ): Promise<void> {
   if (!actions) return;
-  try {
-    if (actions.tagIds?.length) {
-      // Solo etiquetas de la empresa (por si la respuesta quedó apuntando a tags borradas)
-      const owned = await prisma.customerTag.findMany({
-        where: { companyId, id: { in: actions.tagIds } },
-        select: { id: true },
-      });
-      if (owned.length) {
-        await prisma.customerTagLink.createMany({
-          data: owned.map((tag) => ({ customerId, tagId: tag.id })),
-          skipDuplicates: true,
-        });
-        socketService.emitToCompany(companyId, SOCKET_EVENTS.CRM_UPDATED, { crmId: null });
-      }
-    }
-    if (actions.crmId && actions.crmColumnId) {
-      await moveCard(companyId, actions.crmId, {
-        customerId,
-        toColumnId: actions.crmColumnId,
-      });
-    }
-  } catch (err) {
-    // No romper el envío por una acción (CRM/columna borrada, etc.)
-    console.error("[quick-replies] acciones post-envío fallaron:", err instanceof Error ? err.message : err);
-  }
+  await applyCrmAndTagActions(companyId, customerId, {
+    tagIds: actions.tagIds,
+    crmId: actions.crmId,
+    crmColumnId: actions.crmColumnId,
+  });
 }

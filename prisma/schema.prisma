@@ -402,6 +402,11 @@ model DigitalDelivery {
   // Multimedia opcional del mensaje de enganche (se envía con el pitch como caption).
   crossSellPitchMediaUrl  String @default("")
   crossSellPitchMediaType String @default("")
+  // Acciones al cerrar la venta (entrega del producto): mover al cliente a una pestaña
+  // del CRM y/o asignarle etiquetas. Sin FK formal: si el CRM/columna/tag se borra, se ignora.
+  onSaleCrmId        String?  @db.Uuid
+  onSaleCrmColumnId  String?  @db.Uuid
+  onSaleTagIds       String[] @default([]) @db.Uuid
   product      Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 

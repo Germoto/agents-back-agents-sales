@@ -55,6 +55,9 @@ type ProductPayload = {
     crossSellPitch?: string;
     crossSellPitchMediaUrl?: string;
     crossSellPitchMediaType?: string;
+    onSaleCrmId?: string | null;
+    onSaleCrmColumnId?: string | null;
+    onSaleTagIds?: string[];
   } | null;
   physicalDelivery?: {
     requiresAddress: boolean;
@@ -243,6 +246,9 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
       crossSellPitch: payload.digitalDelivery.crossSellPitch ?? "",
       crossSellPitchMediaUrl: payload.digitalDelivery.crossSellPitchMediaUrl ?? "",
       crossSellPitchMediaType: payload.digitalDelivery.crossSellPitchMediaType ?? "",
+      onSaleCrmId: payload.digitalDelivery.onSaleCrmId ?? null,
+      onSaleCrmColumnId: payload.digitalDelivery.onSaleCrmColumnId ?? null,
+      onSaleTagIds: payload.digitalDelivery.onSaleTagIds ?? [],
     };
     await tx.digitalDelivery.upsert({
       where: { productId },
