@@ -520,3 +520,146 @@ export async function deleteDeal(companyId: string, dealId: string) {
   await prisma.customerDeal.delete({ where: { id: dealId } });
   emitCrmUpdated(companyId);
 }
+
+// ---------------------------------------------------------------------------
+// Embudo de ventas
+// ---------------------------------------------------------------------------
+
+/**
+ * Suma de valor (comprobantes APROBADO + valores de negocio manuales) por
+ * cliente para un conjunto dado. Reusa la lógica de la tarjeta del board.
+ */
+async function valueByCustomers(
+  companyId: string,
+  customerIds: string[],
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (!customerIds.length) return result;
+
+  const receipts = await prisma.paymentReceipt.findMany({
+    where: { companyId, status: "APROBADO", customerId: { in: customerIds } },
+    select: { customerId: true, amountPaid: true, amountExpected: true },
+  });
+  for (const r of receipts) {
+    if (!r.customerId) continue;
+    const amount = Number(r.amountPaid ?? r.amountExpected);
+    if (!Number.isFinite(amount)) continue;
+    result.set(r.customerId, (result.get(r.customerId) ?? 0) + amount);
+  }
+
+  const dealSums = await prisma.customerDeal.groupBy({
+    by: ["customerId"],
+    where: { companyId, customerId: { in: customerIds } },
+    _sum: { amount: true },
+  });
+  for (const d of dealSums) {
+    result.set(d.customerId, (result.get(d.customerId) ?? 0) + Number(d._sum.amount ?? 0));
+  }
+
+  return result;
+}
+
+export type FunnelMode = "crm" | "columns" | "tags";
+
+export interface FunnelLevel {
+  key: string;
+  label: string;
+  color: string | null;
+  count: number;
+  value: number;
+}
+
+export interface FunnelResult {
+  mode: FunnelMode;
+  crmId: string | null;
+  totalContacts: number;
+  totalValue: number;
+  levels: FunnelLevel[];
+}
+
+/**
+ * Métricas del embudo de ventas. Tres modos de agrupación:
+ *  - crm: un nivel por tablero CRM (clientes con tarjeta + valor).
+ *  - columns: un nivel por columna de un CRM (requiere crmId).
+ *  - tags: un nivel por etiqueta (clientes con esa etiqueta + valor).
+ */
+export async function getFunnelMetrics(
+  companyId: string,
+  mode: FunnelMode,
+  crmId?: string | null,
+): Promise<FunnelResult> {
+  const totalContacts = await prisma.customer.count({ where: { companyId } });
+
+  let levels: FunnelLevel[] = [];
+
+  if (mode === "tags") {
+    const tags = await prisma.customerTag.findMany({
+      where: { companyId },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, color: true },
+    });
+    const links = await prisma.customerTagLink.findMany({
+      where: { tag: { companyId } },
+      select: { customerId: true, tagId: true },
+    });
+    const customersByTag = new Map<string, string[]>();
+    for (const l of links) {
+      const arr = customersByTag.get(l.tagId) ?? [];
+      arr.push(l.customerId);
+      customersByTag.set(l.tagId, arr);
+    }
+    const valueMap = await valueByCustomers(companyId, [...new Set(links.map((l) => l.customerId))]);
+    levels = tags.map((t) => {
+      const ids = customersByTag.get(t.id) ?? [];
+      return {
+        key: t.id,
+        label: t.name,
+        color: t.color,
+        count: ids.length,
+        value: ids.reduce((s, id) => s + (valueMap.get(id) ?? 0), 0),
+      };
+    });
+  } else if (mode === "columns") {
+    if (!crmId) throw new AppError("crmId requerido para el modo columns", 400);
+    await assertCrmOwned(companyId, crmId);
+    const columns = await prisma.crmColumn.findMany({
+      where: { crmId, companyId },
+      orderBy: { sortOrder: "asc" },
+      select: { id: true, name: true, color: true, cards: { select: { customerId: true } } },
+    });
+    const allIds = [...new Set(columns.flatMap((c) => c.cards.map((card) => card.customerId)))];
+    const valueMap = await valueByCustomers(companyId, allIds);
+    levels = columns.map((col) => {
+      const ids = col.cards.map((c) => c.customerId);
+      return {
+        key: col.id,
+        label: col.name,
+        color: col.color,
+        count: ids.length,
+        value: ids.reduce((s, id) => s + (valueMap.get(id) ?? 0), 0),
+      };
+    });
+  } else {
+    // mode === "crm": un nivel por tablero
+    const crms = await prisma.crm.findMany({
+      where: { companyId },
+      orderBy: { sortOrder: "asc" },
+      select: { id: true, name: true, color: true, cards: { select: { customerId: true } } },
+    });
+    const allIds = [...new Set(crms.flatMap((c) => c.cards.map((card) => card.customerId)))];
+    const valueMap = await valueByCustomers(companyId, allIds);
+    levels = crms.map((crm) => {
+      const ids = [...new Set(crm.cards.map((c) => c.customerId))];
+      return {
+        key: crm.id,
+        label: crm.name,
+        color: crm.color,
+        count: ids.length,
+        value: ids.reduce((s, id) => s + (valueMap.get(id) ?? 0), 0),
+      };
+    });
+  }
+
+  const totalValue = levels.reduce((s, l) => s + l.value, 0);
+  return { mode, crmId: crmId ?? null, totalContacts, totalValue, levels };
+}

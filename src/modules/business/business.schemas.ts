@@ -30,4 +30,7 @@ export const updateBusinessSchema = z.object({
   botMode: z.enum(["AI", "FLOW"]).default("AI"),
   isActive: z.boolean().default(true),
   deliveryConfig: deliveryConfigSchema,
+  // Firma anexada a los mensajes automáticos (agente IA + flujos).
+  firmaEnabled: z.boolean().default(false),
+  firmaText: z.string().trim().max(60).nullable().optional(),
 });

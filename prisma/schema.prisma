@@ -128,6 +128,10 @@ model Company {
   // flujos guiados). Excluyentes: en modo FLOW el agente IA no responde.
   botMode           String                @default("AI")
   isActive          Boolean               @default(true)
+  // Firma anexada a los mensajes automáticos (agente IA + flujos). Cuando
+  // firmaEnabled, se agrega `*_<firmaText>:_*` al final de cada texto saliente.
+  firmaEnabled      Boolean               @default(false)
+  firmaText         String?
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
   users             User[]
@@ -153,6 +157,7 @@ model Company {
   customerTags         CustomerTag[]
   customerDeals        CustomerDeal[]
   chatFlows            ChatFlow[]
+  contactNotes         ContactNote[]
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -428,6 +433,11 @@ model Customer {
   email             String?
   status            String
   selectedProductId String?               @db.Uuid
+  // Ficha de contacto editable desde el panel de Conversaciones.
+  sexo              String?
+  fechaNacimiento   DateTime?
+  idioma            String?
+  origenDeLead      String?
   lastInteractionAt DateTime
   metadata          Json
   createdAt         DateTime              @default(now())
@@ -445,6 +455,7 @@ model Customer {
   crmCards          CrmCard[]
   tagLinks          CustomerTagLink[]
   deals             CustomerDeal[]
+  contactNotes      ContactNote[]
 
   @@unique([companyId, phone])
   @@index([companyId, lastInteractionAt])
@@ -499,6 +510,7 @@ model Conversation {
   company       Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
   customer      Customer              @relation(fields: [customerId], references: [id], onDelete: Cascade)
   messages      ConversationMessage[]
+  contactNotes  ContactNote[]
 
   @@unique([companyId, customerId, channel])
   @@index([companyId, lastMessageAt])
@@ -527,6 +539,9 @@ model QuickReply {
   companyId  String              @db.Uuid
   categoryId String?             @db.Uuid
   title      String
+  // Disparador opcional tipo "/saludo": al escribir el comando en el input del
+  // panel se autocompleta y envía esta respuesta rápida (estilo WA Business).
+  command    String?
   messages   Json
   // Acciones al enviar: { tagIds: string[], crmId?: string, crmColumnId?: string }
   actions    Json?
@@ -536,7 +551,27 @@ model QuickReply {
   company    Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
   category   QuickReplyCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
 
+  @@unique([companyId, command])
   @@index([companyId, updatedAt])
+}
+
+// Nota interna por contacto (estilo "Notas" de la extensión de WA): texto
+// opcional + multimedia opcional. No se envía al cliente; solo el equipo la ve.
+model ContactNote {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String        @db.Uuid
+  customerId     String        @db.Uuid
+  conversationId String?       @db.Uuid
+  text           String?
+  mediaUrl       String?
+  mediaType      String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  company        Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer       Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, customerId, createdAt])
 }
 
 // ---------------------------------------------------------------------------

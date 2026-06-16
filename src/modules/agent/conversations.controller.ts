@@ -7,9 +7,11 @@ import {
   listConversationMessages,
   setBotPaused,
   sendHumanReply,
+  sendHumanMedia,
   getConversationCustomerPhone,
   getConversationCustomerId,
   resetConversation,
+  deleteConversation,
   notifyOwner,
 } from "./conversation.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
@@ -51,8 +53,30 @@ export const pauseConversationController = asyncHandler(async (req: Request, res
 export const replyConversationController = asyncHandler(async (req: Request, res: Response) => {
   const companyId = req.user!.companyId;
   const message = String(req.body?.message ?? "").trim();
-  if (!message) throw new AppError("El mensaje no puede estar vacío", 400);
-  await sendHumanReply(companyId, String(req.params.id), message);
+  const mediaUrl = req.body?.mediaUrl ? String(req.body.mediaUrl) : null;
+  if (!message && !mediaUrl) throw new AppError("El mensaje no puede estar vacío", 400);
+  if (mediaUrl) {
+    const kindRaw = String(req.body?.mediaKind ?? "image");
+    const mediaKind = (["image", "video", "audio", "document"].includes(kindRaw) ? kindRaw : "image") as
+      | "image"
+      | "video"
+      | "audio"
+      | "document";
+    await sendHumanMedia(companyId, String(req.params.id), {
+      mediaUrl,
+      mediaKind,
+      caption: message || undefined,
+      fileName: req.body?.fileName ? String(req.body.fileName) : undefined,
+    });
+  } else {
+    await sendHumanReply(companyId, String(req.params.id), message);
+  }
+  res.json({ success: true });
+});
+
+export const deleteConversationController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  await deleteConversation(companyId, String(req.params.id));
   res.json({ success: true });
 });
 

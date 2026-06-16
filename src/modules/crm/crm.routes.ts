@@ -22,6 +22,7 @@ import {
   createDealController,
   updateDealController,
   deleteDealController,
+  funnelController,
 } from "./crm.controller";
 import {
   upsertCrmSchema,
@@ -38,6 +39,9 @@ const router = Router();
 router.use(requireAuth);
 
 // Rutas estáticas primero (antes de /:id) — Express 5.
+
+// --- Embudo de ventas ---
+router.get("/funnel", asyncHandler(funnelController));
 
 // --- Etiquetas internas ---
 router.get("/tags", asyncHandler(listTagsController));

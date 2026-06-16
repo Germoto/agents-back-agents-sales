@@ -47,6 +47,53 @@ export async function getDashboardStats(companyId: string) {
     `.then((rows) => Number(rows[0]?.count ?? 0)),
   ]);
 
+  // ---- Indicadores adicionales (rubro infoproducto) ----
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+
+  const [
+    customersTotal,
+    customersNewThisMonth,
+    conversationsTotal,
+    approvedWithProduct,
+    paymentMethodGroups,
+    validationModeGroups,
+    digitalSalesTotal,
+    digitalSalesDelivered,
+  ] = await Promise.all([
+    prisma.customer.count({ where: { companyId } }),
+    prisma.customer.count({ where: { companyId, createdAt: { gte: monthStart } } }),
+    prisma.conversation.count({ where: { companyId, channel: "whatsapp" } }),
+    prisma.paymentReceipt.count({
+      where: {
+        companyId,
+        status: "APROBADO",
+        OR: [{ productId: { not: null } }, { productIds: { isEmpty: false } }],
+      },
+    }),
+    prisma.paymentReceipt.groupBy({
+      by: ["paymentSource"],
+      where: { companyId, status: "APROBADO" },
+      _count: { _all: true },
+    }),
+    prisma.paymentReceipt.groupBy({
+      by: ["validationMode"],
+      where: { companyId, status: "APROBADO" },
+      _count: { _all: true },
+    }),
+    prisma.digitalSale.count({ where: { companyId } }),
+    prisma.digitalSale.count({ where: { companyId, status: "ENTREGADO" } }),
+  ]);
+
+  const paymentMethods = paymentMethodGroups
+    .map((g) => ({ method: g.paymentSource ?? "otro", count: g._count._all }))
+    .sort((a, b) => b.count - a.count);
+  const autoApprovals = validationModeGroups.find((g) => g.validationMode === "AUTO")?._count._all ?? 0;
+  const manualApprovals = validationModeGroups.find((g) => g.validationMode === "MANUAL")?._count._all ?? 0;
+  const conversionRate = conversationsTotal > 0 ? approvedWithProduct / conversationsTotal : 0;
+  const deliveryRate = digitalSalesTotal > 0 ? digitalSalesDelivered / digitalSalesTotal : 0;
+
   // ---- Pagos: APROBADOS y asociados a un producto ----
   const since = new Date();
   since.setMonth(since.getMonth() - 12);
@@ -133,6 +180,8 @@ export async function getDashboardStats(companyId: string) {
 
   const currentMonth = monthly[monthly.length - 1] ?? { total: 0, count: 0 };
 
+  const avgTicket = currentMonth.count > 0 ? Math.round((currentMonth.total / currentMonth.count) * 100) / 100 : 0;
+
   return {
     flows: { total: flowsTotal, active: flowsActive, activeSessions: activeFlowSessions },
     payments: {
@@ -141,6 +190,20 @@ export async function getDashboardStats(companyId: string) {
       monthly,
       monthTotal: currentMonth.total,
       monthCount: currentMonth.count,
+    },
+    metrics: {
+      currency,
+      customersTotal,
+      customersNewThisMonth,
+      conversationsTotal,
+      conversionRate: Math.round(conversionRate * 10000) / 100, // %
+      avgTicket,
+      autoApprovals,
+      manualApprovals,
+      deliveryRate: Math.round(deliveryRate * 10000) / 100, // %
+      digitalSalesTotal,
+      digitalSalesDelivered,
+      paymentMethods,
     },
   };
 }

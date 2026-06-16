@@ -27,6 +27,8 @@ export type QuickReplyActionsInput = z.infer<typeof quickReplyActionsSchema>;
 
 export const upsertQuickReplySchema = z.object({
   title: z.string().trim().min(1, "Título requerido").max(120),
+  // Comando para invocarla desde el input con "/": opcional, se normaliza en el service.
+  command: z.string().trim().max(40).nullable().optional(),
   categoryId: z.string().uuid().nullable().optional(),
   messages: z.array(quickReplyMessageSchema).min(1, "Agrega al menos un mensaje").max(10),
   actions: quickReplyActionsSchema.nullable().optional(),

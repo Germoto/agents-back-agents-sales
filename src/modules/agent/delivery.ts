@@ -6,6 +6,7 @@
 
 import { recordMessage } from "./conversation.service";
 import { sendText, sendMedia, type WhatsappSender } from "./outbound";
+import { applyFirma } from "./firma";
 import type { OutboxMessage } from "./agent-tools";
 
 /**
@@ -32,26 +33,29 @@ export async function deliver(
 ): Promise<void> {
   try {
     if (msg.kind === "media" && msg.mediaUrl) {
-      const r = await sendMedia(sender, to, msg.mediaKind ?? "image", msg.mediaUrl, msg.caption, msg.fileName);
+      // La firma se aplica solo cuando el media trae caption con texto.
+      const caption = await applyFirma(ids.companyId, msg.caption);
+      const r = await sendMedia(sender, to, msg.mediaKind ?? "image", msg.mediaUrl, caption ?? undefined, msg.fileName);
       await recordMessage({
         companyId: ids.companyId,
         customerId: ids.customerId,
         conversationId: ids.conversationId,
         role: "ASSISTANT",
-        message: msg.caption ?? null,
+        message: caption ?? null,
         mediaUrl: msg.mediaUrl,
         mediaType: msg.mediaKind ?? "image",
         gatewayId: r.gatewayId,
         deliveryStatus: r.gatewayId ? "pending" : null,
       });
     } else if (msg.text) {
-      const r = await sendText(sender, to, msg.text);
+      const text = (await applyFirma(ids.companyId, msg.text)) ?? msg.text;
+      const r = await sendText(sender, to, text);
       await recordMessage({
         companyId: ids.companyId,
         customerId: ids.customerId,
         conversationId: ids.conversationId,
         role: "ASSISTANT",
-        message: msg.text,
+        message: text,
         gatewayId: r.gatewayId,
         deliveryStatus: r.gatewayId ? "pending" : null,
       });

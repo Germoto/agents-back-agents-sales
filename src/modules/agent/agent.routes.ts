@@ -8,6 +8,7 @@ import {
   pauseConversationController,
   replyConversationController,
   resetConversationController,
+  deleteConversationController,
 } from "./conversations.controller";
 import { listBookingsController, updateBookingStatusController } from "./bookings.controller";
 import {
@@ -33,6 +34,7 @@ router.get("/conversations/:id/messages", requireAuth, listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);
 router.post("/conversations/:id/reset", requireAuth, resetConversationController);
+router.delete("/conversations/:id", requireAuth, deleteConversationController);
 
 // Simulador del agente (panel > Pruebas): corre el agente real sin enviar por WhatsApp.
 router.get("/simulate", requireAuth, simulateMessagesController);

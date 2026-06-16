@@ -19,6 +19,8 @@ import {
   createDeal,
   updateDeal,
   deleteDeal,
+  getFunnelMetrics,
+  type FunnelMode,
 } from "./crm.service";
 
 // --- CRMs ---
@@ -121,4 +123,13 @@ export async function updateDealController(req: Request, res: Response) {
 export async function deleteDealController(req: Request, res: Response) {
   await deleteDeal(req.user!.companyId, String(req.params.dealId));
   return res.json({ success: true });
+}
+
+// --- Embudo de ventas ---
+
+export async function funnelController(req: Request, res: Response) {
+  const rawMode = String(req.query.mode ?? "crm");
+  const mode: FunnelMode = rawMode === "columns" || rawMode === "tags" ? rawMode : "crm";
+  const crmId = req.query.crmId ? String(req.query.crmId) : null;
+  return res.json(await getFunnelMetrics(req.user!.companyId, mode, crmId));
 }

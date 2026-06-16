@@ -18,6 +18,7 @@ import type { QuickReplyMessageInput, QuickReplyActionsInput } from "./quick-rep
 const quickReplySelect = {
   id: true,
   title: true,
+  command: true,
   categoryId: true,
   category: { select: { id: true, name: true } },
   messages: true,
@@ -25,6 +26,13 @@ const quickReplySelect = {
   usageCount: true,
   updatedAt: true,
 } satisfies Prisma.QuickReplySelect;
+
+/** Normaliza un comando "/saludo": minúsculas, sin barra inicial, vacío => null. */
+function normalizeCommand(command: string | null | undefined): string | null {
+  if (!command) return null;
+  const clean = command.trim().replace(/^\/+/, "").toLowerCase().replace(/\s+/g, "");
+  return clean || null;
+}
 
 // ---------------------------------------------------------------------------
 // Categorías
@@ -96,6 +104,7 @@ export async function listQuickReplies(companyId: string) {
 
 type UpsertQuickReplyData = {
   title: string;
+  command?: string | null;
   categoryId?: string | null;
   messages: QuickReplyMessageInput[];
   actions?: QuickReplyActionsInput | null;
@@ -109,32 +118,48 @@ function actionsValue(actions: QuickReplyActionsInput | null | undefined) {
 
 export async function createQuickReply(companyId: string, data: UpsertQuickReplyData) {
   await assertCategoryOwned(companyId, data.categoryId);
-  return prisma.quickReply.create({
-    data: {
-      companyId,
-      title: data.title,
-      categoryId: data.categoryId ?? null,
-      messages: data.messages as unknown as Prisma.InputJsonValue,
-      actions: actionsValue(data.actions),
-    },
-    select: quickReplySelect,
-  });
+  try {
+    return await prisma.quickReply.create({
+      data: {
+        companyId,
+        title: data.title,
+        command: normalizeCommand(data.command),
+        categoryId: data.categoryId ?? null,
+        messages: data.messages as unknown as Prisma.InputJsonValue,
+        actions: actionsValue(data.actions),
+      },
+      select: quickReplySelect,
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      throw new AppError("Ese comando ya está en uso por otra respuesta rápida", 409);
+    }
+    throw err;
+  }
 }
 
 export async function updateQuickReply(companyId: string, id: string, data: UpsertQuickReplyData) {
   const existing = await prisma.quickReply.findFirst({ where: { id, companyId } });
   if (!existing) throw new AppError("Respuesta rápida no encontrada", 404);
   await assertCategoryOwned(companyId, data.categoryId);
-  return prisma.quickReply.update({
-    where: { id },
-    data: {
-      title: data.title,
-      categoryId: data.categoryId ?? null,
-      messages: data.messages as unknown as Prisma.InputJsonValue,
-      actions: actionsValue(data.actions),
-    },
-    select: quickReplySelect,
-  });
+  try {
+    return await prisma.quickReply.update({
+      where: { id },
+      data: {
+        title: data.title,
+        command: normalizeCommand(data.command),
+        categoryId: data.categoryId ?? null,
+        messages: data.messages as unknown as Prisma.InputJsonValue,
+        actions: actionsValue(data.actions),
+      },
+      select: quickReplySelect,
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      throw new AppError("Ese comando ya está en uso por otra respuesta rápida", 409);
+    }
+    throw err;
+  }
 }
 
 export async function deleteQuickReply(companyId: string, id: string) {

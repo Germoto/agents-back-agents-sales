@@ -12,7 +12,7 @@ import { cancelPendingReminders } from "../scheduler/scheduler.service";
 import { env } from "../../config/env";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
-import { loadWhatsappSender, sendText } from "./outbound";
+import { loadWhatsappSender, sendText, sendMedia } from "./outbound";
 import type { ChatMessage } from "../../lib/openai";
 
 /** Estado conversacional persistido en Conversation.state (equivalente al customer.* de n8n). */
@@ -272,6 +272,78 @@ export async function sendHumanReply(companyId: string, conversationId: string, 
     conversationId,
     role: "ADMIN",
     message,
+  });
+}
+
+/**
+ * Envío manual de multimedia por el operador humano (botón adjuntar del panel).
+ * No pasa por la firma (es un mensaje manual, no automático).
+ */
+export async function sendHumanMedia(
+  companyId: string,
+  conversationId: string,
+  media: { mediaUrl: string; mediaKind: "image" | "video" | "audio" | "document"; caption?: string; fileName?: string },
+) {
+  const convo = await prisma.conversation.findFirst({
+    where: { id: conversationId, companyId },
+    select: { id: true, customerId: true, customer: { select: { phone: true } } },
+  });
+  if (!convo) throw new AppError("Conversación no encontrada", 404);
+
+  const sender = await loadWhatsappSender(companyId);
+  if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
+
+  const to = convo.customer.phone.replace(/\D/g, "");
+  await sendMedia(sender, to, media.mediaKind, media.mediaUrl, media.caption, media.fileName);
+  await recordMessage({
+    companyId,
+    customerId: convo.customerId,
+    conversationId,
+    role: "ADMIN",
+    message: media.caption ?? null,
+    mediaUrl: media.mediaUrl,
+    mediaType: media.mediaKind,
+  });
+}
+
+/**
+ * Elimina una conversación completa (historial + estado). Solo permitido cuando
+ * el cliente no tiene un pago asociado activo ni está esperando pago.
+ */
+export async function deleteConversation(companyId: string, conversationId: string): Promise<void> {
+  const convo = await prisma.conversation.findFirst({
+    where: { id: conversationId, companyId },
+    select: { id: true, customerId: true, state: true },
+  });
+  if (!convo) throw new AppError("Conversación no encontrada", 404);
+
+  // Guard 1: no eliminar si hay comprobantes en proceso/aprobados del cliente.
+  const receiptCount = await prisma.paymentReceipt.count({
+    where: {
+      companyId,
+      customerId: convo.customerId,
+      status: { in: ["PENDIENTE", "EN_REVISION", "APROBADO"] },
+    },
+  });
+  if (receiptCount > 0) {
+    throw new AppError("No puedes eliminar este chat: tiene un pago asociado.", 409);
+  }
+
+  // Guard 2: no eliminar si está esperando pago/validación.
+  const status = ((convo.state as ConversationState) ?? {}).status ?? null;
+  if (status === "ESPERANDO_PAGO" || status === "ESPERANDO_VALIDACION") {
+    throw new AppError("No puedes eliminar este chat: está esperando un pago.", 409);
+  }
+
+  // ConversationMessage.conversationId es SetNull: borrar mensajes explícitamente
+  // para no dejar huérfanos.
+  await prisma.$transaction([
+    prisma.conversationMessage.deleteMany({ where: { companyId, conversationId } }),
+    prisma.conversation.delete({ where: { id: conversationId } }),
+  ]);
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
+    conversationId,
+    deleted: true,
   });
 }
 

@@ -11,4 +11,6 @@ export const rejectReceiptSchema = z.object({
 export const approveReceiptSchema = z.object({
   // Asociar el comprobante a un producto al aprobarlo manualmente (opcional)
   productId: z.string().uuid().nullable().optional(),
+  // Teléfono que hizo el pago (puede no existir en Conversaciones)
+  payerPhone: z.string().trim().max(30).nullable().optional(),
 });

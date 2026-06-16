@@ -2,6 +2,7 @@ import { BusinessVertical, Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { getEnabledVerticals } from "../platform-config/platform-config.service";
+import { invalidateFirmaCache } from "../agent/firma";
 
 export async function getBusinessProfile(companyId: string) {
   const company = await prisma.company.findUnique({
@@ -41,6 +42,8 @@ export async function updateBusinessProfile(companyId: string, data: {
   botMode?: "AI" | "FLOW";
   isActive: boolean;
   deliveryConfig?: DeliveryConfigInput | null;
+  firmaEnabled?: boolean;
+  firmaText?: string | null;
 }) {
   const existing = await prisma.company.findUnique({
     where: { id: companyId },
@@ -82,6 +85,8 @@ export async function updateBusinessProfile(companyId: string, data: {
     data: { ...rest, deliveryConfig: deliveryValue },
     include: { _count: { select: { products: true } } },
   });
+  // La firma se cachea en el módulo de entrega: invalidar tras guardar.
+  invalidateFirmaCache(companyId);
   const { _count, ...company } = updated;
   return { ...company, productCount: _count.products };
 }

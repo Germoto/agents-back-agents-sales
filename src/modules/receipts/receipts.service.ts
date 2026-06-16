@@ -4,9 +4,29 @@ import { AppError } from "../../lib/app-error";
 import { validatePaymentInValidPay } from "../../lib/validpay-client";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 
-export async function listReceipts(companyId: string) {
+export interface ReceiptFilters {
+  status?: string | null;
+  from?: string | null;
+  to?: string | null;
+}
+
+export async function listReceipts(companyId: string, filters?: ReceiptFilters) {
+  const where: Prisma.PaymentReceiptWhereInput = { companyId };
+  if (filters?.status && filters.status !== "ALL") {
+    where.status = filters.status as Prisma.PaymentReceiptWhereInput["status"];
+  }
+  if (filters?.from || filters?.to) {
+    where.createdAt = {};
+    if (filters.from) (where.createdAt as Prisma.DateTimeFilter).gte = new Date(filters.from);
+    if (filters.to) {
+      // 'to' inclusivo: hasta el final del día indicado.
+      const end = new Date(filters.to);
+      end.setHours(23, 59, 59, 999);
+      (where.createdAt as Prisma.DateTimeFilter).lte = end;
+    }
+  }
   return prisma.paymentReceipt.findMany({
-    where: { companyId },
+    where,
     include: {
       customer: true,
       product: {
@@ -66,6 +86,7 @@ export async function approveReceipt(
   companyId: string,
   receiptId: string,
   productId?: string | null,
+  payerPhone?: string | null,
 ) {
   const receipt = await findReceipt(companyId, receiptId);
 
@@ -78,12 +99,20 @@ export async function approveReceipt(
     if (!product) throw new AppError("Producto no encontrado", 404);
   }
 
+  // Teléfono que hizo el pago: puede no estar en Conversaciones (venta iniciada
+  // por chat humano). Se normaliza a solo dígitos.
+  const normalizedPhone =
+    payerPhone != null ? payerPhone.replace(/\D/g, "") || null : undefined;
+
   const updated = await prisma.$transaction(async (tx) => {
     const approved = await applyReceiptApproval(tx, receipt.id, receipt.digitalSaleId);
-    if (productId) {
+    if (productId || normalizedPhone !== undefined) {
       return tx.paymentReceipt.update({
         where: { id: receipt.id },
-        data: { productId },
+        data: {
+          ...(productId ? { productId } : {}),
+          ...(normalizedPhone !== undefined ? { payerPhone: normalizedPhone } : {}),
+        },
       });
     }
     return approved;
