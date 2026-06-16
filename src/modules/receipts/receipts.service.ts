@@ -2,6 +2,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { validatePaymentInValidPay } from "../../lib/validpay-client";
+import { persistInboundMedia } from "../../lib/inbound-media";
+import { env } from "../../config/env";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 
 export interface ReceiptFilters {
@@ -62,6 +64,29 @@ export type ReceiptProof = {
  * confirmados por API), busca la captura que el cliente envió por WhatsApp más
  * cercana al momento del comprobante.
  */
+/** ¿La URL ya está en nuestro almacenamiento estático (carga en el navegador)? */
+function isLocalUrl(url: string): boolean {
+  const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
+  return url.startsWith(`${base}/uploads/`) || url.startsWith("/uploads/");
+}
+
+/**
+ * Si la URL es externa (SMS Tools, que expira y no carga en <img>), la descarga a
+ * /uploads y persiste la URL local en el mensaje para que el chat también la vea.
+ * Best-effort: si falla devuelve la URL original.
+ */
+async function ensureLocalProof(
+  companyId: string,
+  messageId: string,
+  url: string,
+): Promise<string> {
+  if (isLocalUrl(url)) return url;
+  const local = await persistInboundMedia(companyId, url, "image");
+  if (!local) return url;
+  await prisma.conversationMessage.update({ where: { id: messageId }, data: { mediaUrl: local } }).catch(() => undefined);
+  return local;
+}
+
 export async function getReceiptProof(companyId: string, receiptId: string): Promise<ReceiptProof> {
   const receipt = await findReceipt(companyId, receiptId);
   if (receipt.mediaUrl) {
@@ -69,10 +94,10 @@ export async function getReceiptProof(companyId: string, receiptId: string): Pro
   }
   if (!receipt.customerId) return { mediaUrl: null, mediaType: null, source: null };
 
-  const pickImage = (rows: { mediaUrl: string | null; mediaType: string | null }[]): ReceiptProof | null => {
-    const hit = rows.find((m) => isImageMedia(m.mediaUrl, m.mediaType));
-    return hit ? { mediaUrl: hit.mediaUrl, mediaType: hit.mediaType ?? "image", source: "chat" } : null;
-  };
+  // Solo mensajes-imagen SIN texto: la captura del pago llega sin caption. Los
+  // mensajes con texto que traen una "imagen" son la foto de perfil fantasma.
+  const pick = (rows: { id: string; message: string | null; mediaUrl: string | null; mediaType: string | null }[]) =>
+    rows.find((m) => (!m.message || !m.message.trim()) && isImageMedia(m.mediaUrl, m.mediaType)) ?? null;
 
   // 1) Ventana alrededor del momento del comprobante (la captura suele llegar justo antes).
   const windowStart = new Date(receipt.createdAt.getTime() - 6 * 60 * 60 * 1000);
@@ -87,19 +112,24 @@ export async function getReceiptProof(companyId: string, receiptId: string): Pro
     },
     orderBy: { createdAt: "desc" },
     take: 20,
-    select: { mediaUrl: true, mediaType: true },
+    select: { id: true, message: true, mediaUrl: true, mediaType: true },
   });
-  const nearHit = pickImage(near);
-  if (nearHit) return nearHit;
 
   // 2) Fallback: la última imagen que envió el cliente (sin ventana de tiempo).
-  const any = await prisma.conversationMessage.findMany({
-    where: { companyId, customerId: receipt.customerId, role: "USER", mediaUrl: { not: null } },
-    orderBy: { createdAt: "desc" },
-    take: 20,
-    select: { mediaUrl: true, mediaType: true },
-  });
-  return pickImage(any) ?? { mediaUrl: null, mediaType: null, source: null };
+  const hit =
+    pick(near) ??
+    pick(
+      await prisma.conversationMessage.findMany({
+        where: { companyId, customerId: receipt.customerId, role: "USER", mediaUrl: { not: null } },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+        select: { id: true, message: true, mediaUrl: true, mediaType: true },
+      }),
+    );
+
+  if (!hit?.mediaUrl) return { mediaUrl: null, mediaType: null, source: null };
+  const mediaUrl = await ensureLocalProof(companyId, hit.id, hit.mediaUrl);
+  return { mediaUrl, mediaType: hit.mediaType ?? "image", source: "chat" };
 }
 
 async function findReceipt(companyId: string, receiptId: string) {

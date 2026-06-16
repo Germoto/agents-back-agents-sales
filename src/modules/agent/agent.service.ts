@@ -11,6 +11,7 @@ import { prisma } from "../../lib/prisma";
 import { env } from "../../config/env";
 import { buildBotConfig } from "../bot/bot.service";
 import type { InboundMessage } from "../../lib/smstools-client";
+import { persistInboundMedia } from "../../lib/inbound-media";
 import {
   loadOrCreateConversation,
   markInboundProcessed,
@@ -123,6 +124,14 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   } catch (err) {
     console.error("[agent] buildBotConfig falló:", err instanceof Error ? err.message : err);
     return; // sin config (p.ej. falta openaiApiKey) no podemos responder
+  }
+
+  // Copiar la media entrante a /uploads (las URLs de SMS Tools expiran y no
+  // renderizan en el navegador). Así se ve en el chat y en la lupa de comprobantes,
+  // y queda persistida. Best-effort: si falla, se conserva la URL original.
+  if (inbound.mediaUrl && inbound.type !== "text") {
+    const local = await persistInboundMedia(companyId, inbound.mediaUrl, inbound.type);
+    if (local) inbound.mediaUrl = local;
   }
 
   // Comandos del dueño (canal de control = número de notificación de pago). Si el

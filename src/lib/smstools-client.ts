@@ -78,7 +78,8 @@ export function extractTokenFromUrl(url: string | undefined | null): string | nu
 type RequestOptions = {
   query?: Record<string, string | number | boolean | undefined | null>;
   method?: "GET" | "POST" | "DELETE";
-  body?: FormData | URLSearchParams;
+  body?: FormData | URLSearchParams | string;
+  headers?: Record<string, string>;
   responseType?: "json" | "binary";
 };
 
@@ -100,6 +101,7 @@ async function smsToolsRequest<T = unknown>(
     response = await fetch(url.toString(), {
       method: options.method ?? "GET",
       body: options.body,
+      headers: options.headers,
     });
   } catch (error) {
     throw new AppError(
@@ -309,30 +311,57 @@ export const smsTools = {
     fileName?: string,
   ): Promise<SmsToolsMessage> {
     const base = deriveApiBase(creds.apiUrl);
-    const form = new FormData();
-    form.set("secret", creds.secret);
-    form.set("account", account);
-    form.set("recipient", to);
-    if (caption) form.set("message", caption);
+
+    // La API exige multipart/form-data construido "a mano": con el FormData estándar
+    // (undici) responde { status: 400, message: "Invalid Parameters!" }. Replicamos el
+    // multipart manual probado del workflow n8n. `message` es obligatorio para TODOS
+    // los tipos, así que si no hay caption mandamos un espacio.
+    const fields: Record<string, string> = {
+      secret: creds.secret,
+      account,
+      recipient: to.replace(/\D/g, ""),
+      type: kind === "document" ? "document" : "media",
+      message: (caption && caption.trim()) || " ",
+      priority: "2",
+    };
 
     if (kind === "document") {
       const name = (fileName && fileName.trim()) || guessFileNameFromUrl(mediaUrl, "documento.pdf");
-      form.set("type", "document");
-      form.set("document_url", mediaUrl);
-      form.set("document_name", name);
-      form.set("document_type", name.toLowerCase().endsWith(".pdf") ? "pdf" : "file");
+      fields.document_url = mediaUrl;
+      fields.document_name = name;
+      fields.document_type = name.toLowerCase().endsWith(".pdf") ? "pdf" : "file";
     } else {
-      form.set("type", "media");
-      form.set("media_type", kind); // image | video | audio
-      form.set("media_url", mediaUrl);
+      fields.media_type = kind; // image | video | audio
+      fields.media_url = mediaUrl;
     }
 
+    const { body, contentType } = buildMultipart(fields);
     return smsToolsRequest<SmsToolsMessage>(base, "/send/whatsapp", {
       method: "POST",
-      body: form,
+      body,
+      headers: { "Content-Type": contentType },
     });
   },
 };
+
+/**
+ * Arma un cuerpo multipart/form-data manualmente con boundary explícito. Necesario
+ * porque /send/whatsapp rechaza el multipart del FormData estándar ("Invalid
+ * Parameters!"). Campos vacíos se omiten.
+ */
+function buildMultipart(fields: Record<string, string | undefined | null>): { body: string; contentType: string } {
+  const boundary = `----salesAgentBoundary${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+  let body = "";
+  for (const [key, raw] of Object.entries(fields)) {
+    if (raw === undefined || raw === null || raw === "") continue;
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="${key}"\r\n\r\n`;
+    body += String(raw);
+    body += "\r\n";
+  }
+  body += `--${boundary}--\r\n`;
+  return { body, contentType: `multipart/form-data; boundary=${boundary}` };
+}
 
 /** Deriva un nombre de archivo legible desde una URL (para document_name). */
 function guessFileNameFromUrl(url: string, fallback: string): string {
@@ -434,14 +463,15 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
   let type: InboundMessage["type"] = "text";
   let mediaUrl: string | null = null;
   if (explicitMediaType) {
+    // Tipo de media explícito de SMS Tools → es un adjunto real (con o sin caption).
     type = explicitMediaType;
     mediaUrl = attachmentUrl ?? ambiguousUrl;
-  } else if (attachmentUrl) {
+  } else if (!hasText && (attachmentUrl ?? ambiguousUrl)) {
+    // SIN texto: un URL suelto es el adjunto real (imagen/comprobante). CON texto NO
+    // inferimos media: SMS Tools adjunta la foto de perfil del remitente en campos de
+    // URL (media/attachment/image/url) en TODOS los inbound, incluidos los de texto.
     type = "image";
-    mediaUrl = attachmentUrl;
-  } else if (ambiguousUrl && !hasText) {
-    type = "image"; // imagen sola (sin texto): el url/image es el adjunto, no la foto de perfil
-    mediaUrl = ambiguousUrl;
+    mediaUrl = attachmentUrl ?? ambiguousUrl;
   }
 
   const fromMeRaw = (field(body, data, ["fromMe", "from_me", "self", "outgoing", "direction"]) ?? "").toLowerCase();
