@@ -8,6 +8,7 @@ import {
   setBotPaused,
   sendHumanReply,
   sendHumanMedia,
+  startConversation,
   getConversationCustomerPhone,
   getConversationCustomerId,
   resetConversation,
@@ -72,6 +73,16 @@ export const replyConversationController = asyncHandler(async (req: Request, res
     await sendHumanReply(companyId, String(req.params.id), message);
   }
   res.json({ success: true });
+});
+
+export const startConversationController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const phone = String(req.body?.phone ?? "").trim();
+  const message = String(req.body?.message ?? "").trim();
+  if (!phone) throw new AppError("Ingresa el número del cliente", 400);
+  if (!message) throw new AppError("El mensaje no puede estar vacío", 400);
+  const result = await startConversation(companyId, phone, message);
+  res.json({ success: true, data: result });
 });
 
 export const deleteConversationController = asyncHandler(async (req: Request, res: Response) => {

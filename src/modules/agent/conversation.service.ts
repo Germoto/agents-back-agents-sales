@@ -310,6 +310,50 @@ export async function sendHumanMedia(
 }
 
 /**
+ * Inicia una conversación saliente desde el panel (botón "Nueva conversación"):
+ * crea o reutiliza el chat del número indicado, envía el primer mensaje como asesor
+ * humano y lo deja visible en Conversaciones. Útil cuando el mensaje del cliente no
+ * llegó al sistema (p. ej. durante un despliegue). NO pausa el bot: si el cliente
+ * responde, el agente puede continuar.
+ */
+export async function startConversation(
+  companyId: string,
+  phone: string,
+  message: string,
+): Promise<{ conversationId: string }> {
+  const normalized = normalizePhone(phone);
+  if (normalized.replace(/\D/g, "").length < 8) {
+    throw new AppError("Número de teléfono inválido", 400);
+  }
+  const text = message.trim();
+  if (!text) throw new AppError("El mensaje no puede estar vacío", 400);
+
+  const sender = await loadWhatsappSender(companyId);
+  if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
+
+  const convo = await loadOrCreateConversation(companyId, normalized, null);
+
+  const finalText = (await applyFirma(companyId, text)) ?? text;
+  await sendText(sender, normalized.replace(/\D/g, ""), finalText);
+  await recordMessage({
+    companyId,
+    customerId: convo.customerId,
+    conversationId: convo.conversationId,
+    role: "ADMIN",
+    message: finalText,
+  });
+  // Subir al tope de la lista + refrescar el panel en tiempo real.
+  await prisma.conversation.update({
+    where: { id: convo.conversationId },
+    data: { lastMessageAt: new Date() },
+  });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
+    conversationId: convo.conversationId,
+  });
+  return { conversationId: convo.conversationId };
+}
+
+/**
  * Elimina una conversación completa (historial + estado). Solo permitido cuando
  * el cliente no tiene un pago asociado activo ni está esperando pago.
  */

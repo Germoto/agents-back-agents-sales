@@ -9,6 +9,7 @@ import {
   replyConversationController,
   resetConversationController,
   deleteConversationController,
+  startConversationController,
 } from "./conversations.controller";
 import { listBookingsController, updateBookingStatusController } from "./bookings.controller";
 import {
@@ -30,6 +31,7 @@ router.post("/inbound", optionalAgentApiKey, inboundController);
 
 // Visor de conversaciones para el panel admin (requiere auth de tenant)
 router.get("/conversations", requireAuth, listConversationsController);
+router.post("/conversations/start", requireAuth, startConversationController);
 router.get("/conversations/:id/messages", requireAuth, listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);
