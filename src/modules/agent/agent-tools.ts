@@ -922,7 +922,7 @@ export async function executeTool(
       const text =
         `El monto a pagar es: *${amountText}*\n\n` +
         `Puedes pagar con:\n${methods}\n\n` +
-        `Cuando pagues, respóndeme con el *nombre del titular* que aparece en tu Yape/Plin para validar tu pago automáticamente.`;
+        `Cuando pagues, mándame la *captura del comprobante* o el *nombre del titular* de tu Yape/Plin (la cuenta DESDE donde pagaste) y validamos tu pago al instante ✅`;
       ctx.outbox.push({ kind: "text", text });
       ctx.state.status = "ESPERANDO_PAGO";
       ctx.state.lastPaymentPromptAt = new Date().toISOString();
