@@ -709,13 +709,15 @@ async function scheduleAutoReminders(
   // cubren los mensajes adicionales tras la entrega del Paso 5).
   if (["ENTREGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status)) return;
 
-  // Abandono de carrito: esperando pago con carrito/producto.
+  // Abandono de carrito y dejado en visto son EXCLUYENTES: un mismo silencio no debe
+  // disparar dos secuencias que se encimarían (parece spam). Si hay carrito/compra
+  // pendiente → solo abandono de carrito (más específico y accionable); si no → solo
+  // dejado en visto.
   if (status === "ESPERANDO_PAGO" && (cart.items.length || state.selectedProductId)) {
     await scheduleSeq("abandonedCart", ScheduledMessageType.ABANDONED_CART);
+  } else {
+    await scheduleSeq("leftOnRead", ScheduledMessageType.LEFT_ON_READ);
   }
-
-  // Dejado en visto: el cliente escribió y el bot respondió; si no contesta, seguimos.
-  await scheduleSeq("leftOnRead", ScheduledMessageType.LEFT_ON_READ);
 }
 
 async function notifyAdmin(

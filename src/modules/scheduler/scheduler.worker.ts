@@ -16,6 +16,9 @@ import { clampToBusinessHours, normalizeQuietHours, type QuietHours } from "./qu
 import type { WhatsappSender } from "../agent/outbound";
 
 const BATCH = 50;
+// Separación mínima entre recordatorios VISIBLES al mismo cliente en una misma pasada
+// del worker: evita que dos seguimientos lleguen pegados (parece spam). Configurable.
+const MIN_GAP_MS = Number(process.env.REMINDER_MIN_GAP_MS) || 120_000;
 
 type QuietConfig = { tz: string | null; quiet: QuietHours };
 
@@ -57,10 +60,14 @@ async function processDue(): Promise<void> {
 
   const senderCache = new Map<string, WhatsappSender | null>();
   const quietCache = new Map<string, QuietConfig>();
+  // Clientes que ya recibieron un recordatorio VISIBLE en esta pasada: el resto de
+  // sus recordatorios se reprograma para no encimarse.
+  const sentToCustomer = new Set<string>();
 
   for (const msg of due) {
     const isInternal =
       msg.type === ScheduledMessageType.FLOW_TIMEOUT || msg.type === ScheduledMessageType.PAYMENT_RECHECK;
+    const custKey = `${msg.companyId}:${msg.customerId}`;
 
     // Guard de negocio (red de seguridad): un recordatorio de SEGUIMIENTO no debe
     // enviarse si el cliente ya pagó/cerró o si la conversación está en atención
@@ -109,6 +116,18 @@ async function processDue(): Promise<void> {
           continue;
         }
       }
+    }
+
+    // Anti-spam: si este cliente ya recibió un recordatorio visible en esta misma
+    // pasada, no encimar el siguiente; reprogramarlo MIN_GAP_MS más tarde (sin
+    // reclamarlo). En un tick posterior se reevalúa y vuelve a espaciarse si hace
+    // falta, serializando la ráfaga con separación. Los internos no cuentan.
+    if (!isInternal && sentToCustomer.has(custKey)) {
+      await prisma.scheduledMessage.updateMany({
+        where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
+        data: { sendAt: new Date(now.getTime() + MIN_GAP_MS) },
+      });
+      continue;
     }
 
     // Claim optimista: solo procede quien logra pasarlo de PENDING a SENT
@@ -165,6 +184,10 @@ async function processDue(): Promise<void> {
           mediaUrl: msg.mediaUrl,
         });
       }
+
+      // Marcar que este cliente ya recibió un recordatorio visible en esta pasada
+      // (los siguientes se reprograman para no encimarse).
+      sentToCustomer.add(custKey);
     } catch (err) {
       await prisma.scheduledMessage.update({
         where: { id: msg.id },
