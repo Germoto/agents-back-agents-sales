@@ -207,11 +207,12 @@ function findProductById(ctx: TurnContext, productId: string): BotProduct | unde
 export function buildDeliveryOutbox(
   config: BotConfig,
   productIds: string[],
-): { outbox: OutboxMessage[]; delivered: string[]; offeredCrossSellId: string | null } {
+): { outbox: OutboxMessage[]; delivered: string[]; offeredCrossSellId: string | null; offeredCatalog: boolean } {
   const find = (id: string) => config.products.find((p) => p.id === id || p.slug === id);
   const outbox: OutboxMessage[] = [];
   const delivered: string[] = [];
   let offeredCrossSellId: string | null = null;
+  let offeredCatalog = false;
 
   for (const id of productIds) {
     const p = find(id);
@@ -254,7 +255,24 @@ export function buildDeliveryOutbox(
     delivered.push(p.name);
   }
 
-  return { outbox, delivered, offeredCrossSellId };
+  // Si NO se ofreció un producto relacionado (cross-sell) y quedan otros productos
+  // en el catálogo, invitar (corto) a ver el resto. El cross-sell tiene prioridad:
+  // no apilamos dos ofertas.
+  if (delivered.length && !offeredCrossSellId) {
+    const deliveredIds = new Set(productIds);
+    const remaining = catalogProducts(config.products).filter(
+      (p) => !deliveredIds.has(p.id) && !deliveredIds.has(p.slug),
+    );
+    if (remaining.length) {
+      outbox.push({
+        kind: "text",
+        text: "😊 Por cierto, tenemos más en el catálogo. ¿Quieres que te muestre las demás opciones? 👀",
+      });
+      offeredCatalog = true;
+    }
+  }
+
+  return { outbox, delivered, offeredCrossSellId, offeredCatalog };
 }
 
 // --------------------------------------------------------------------------
@@ -829,7 +847,7 @@ export async function executeTool(
       const body = renderCustomerCatalog(products);
       ctx.outbox.push({
         kind: "text",
-        text: `📋 *${ctx.config.business.name}* — esto es lo que tenemos:\n\n${body}\n\n¿Cuál te interesa? Te cuento más. 😊`,
+        text: `¡Hola! 👋 Gracias por escribirnos a *${ctx.config.business.name}* ✨ Esto es lo que tenemos para ti:\n\n${body}\n\n¿Cuál te llama la atención? Con gusto te cuento más 😊`,
       });
       return JSON.stringify({ ok: true, count: products.length, sent: true, nota: "Ya envié el catálogo al cliente. NO repitas la lista en tu texto final; deja el texto vacío o cierra con una sola frase breve." });
     }
@@ -1065,7 +1083,7 @@ export async function executeTool(
           : [];
       }
 
-      const { outbox: deliveryMsgs, delivered, offeredCrossSellId } = buildDeliveryOutbox(ctx.config, ids);
+      const { outbox: deliveryMsgs, delivered, offeredCrossSellId, offeredCatalog } = buildDeliveryOutbox(ctx.config, ids);
       ctx.outbox.push(...deliveryMsgs);
       const offeredCrossSell = Boolean(offeredCrossSellId);
       if (offeredCrossSellId) {
@@ -1101,13 +1119,17 @@ export async function executeTool(
       }
 
       // El recordatorio post-venta se programa automáticamente (plantilla configurada).
+      const notaEntrega = offeredCrossSell
+        ? "Ya entregué el acceso, los mensajes adicionales y al final ofrecí otro producto con una pregunta abierta ('¿Te cuento más?'). NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO para que la conversación quede ABIERTA en esa oferta y el cliente pueda responder."
+        : offeredCatalog
+        ? "Ya entregué el acceso y los mensajes adicionales, y al final invité al cliente a ver el resto del catálogo. NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO. Si el cliente acepta ('sí', 'muéstrame'), usa enviar_catalogo en el siguiente turno."
+        : "Ya entregué el acceso y los mensajes adicionales configurados (suelen incluir el saludo/agradecimiento). NO repitas el link ni vuelvas a agradecer; deja tu texto final VACÍO. Mantente disponible, no cierres la conversación.";
       return JSON.stringify({
         ok: true,
         delivered,
         offeredCrossSell,
-        nota: offeredCrossSell
-          ? "Ya entregué el acceso, los mensajes adicionales y al final ofrecí otro producto con una pregunta abierta ('¿Te cuento más?'). NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO para que la conversación quede ABIERTA en esa oferta y el cliente pueda responder."
-          : "Ya entregué el acceso y los mensajes adicionales configurados (suelen incluir el saludo/agradecimiento). NO repitas el link ni vuelvas a agradecer; deja tu texto final VACÍO. Mantente disponible, no cierres la conversación.",
+        offeredCatalog,
+        nota: notaEntrega,
       });
     }
 

@@ -214,6 +214,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "- NUNCA mandes el genérico de 'tuve un problema' en el flujo de pago.",
     "- OJO con el nombre del titular: la CAPTURA muestra el nombre de NUESTRA cuenta (el destino), NO el del cliente. Si el cliente te escribe nuestro propio nombre de titular, NO es su dato (pásalo igual a validar_pago: el sistema lo detecta).",
     "- Productos DIGITALES: informa, cobra, valida el pago y entrega el acceso. Nunca pidas dirección ni datos de envío. La herramienta entregar_producto ya envía el mensaje de entrega configurado (con el link de acceso dentro) y, si el dueño los configuró, uno o varios mensajes adicionales (multimedia + texto) y la oferta de otro producto relacionado. NO escribas tú el link ni inventes una oferta. Tras entregar, NO agregues un cierre de 'gracias por tu compra' (los mensajes configurados ya saludan/agradecen): por defecto deja tu texto final VACÍO. Si entregar_producto ofreció otro producto, NO cierres: deja la conversación abierta en esa oferta. Y SIEMPRE mantente abierto y disponible para seguir conversando (no des por terminada la conversación).",
+    "- 'yaCompro' (en el estado) son los productos que el cliente YA compró y recibió en esta conversación (memoria durable, no depende del historial reciente). Tenlo presente: no le re-vendas lo mismo, dale soporte post-venta de esos productos y reconócelo como cliente que ya compró.",
+    "- Tras una entrega (status ENTREGADO), si el cliente se interesa en OTRO producto, trátalo como una VENTA NUEVA: preséntalo con enviar_ficha y sigue el flujo normal (resuelve dudas → agregar_carrito si aplica → enviar_metodos_pago → validar_pago → entregar_producto). El 'selectedProductId' y el status ENTREGADO se refieren a la compra ANTERIOR; NO dejes que bloqueen una compra nueva.",
     "- Productos FÍSICOS: informa, ayuda a cerrar y pide los datos de entrega (nombre de quien recibe, dirección completa, referencia, cantidad y variante si el producto tiene variantes). Valida la dirección contra las zonas de envío configuradas; si está fuera de zona, dilo y ofrece alternativas (recojo si está disponible). Luego registra el pedido con registrar_pedido. Nunca envíes enlaces digitales para un físico.",
     `- Modo de pago del negocio: *${paymentMode}*. before_delivery = cobra y valida el pago (enviar_metodos_pago + validar_pago) ANTES de registrar el pedido. cash_on_delivery = toma los datos y registra el pedido (paga contra entrega), sin cobrar antes. manual = registra el pedido y coordina el pago con un asesor.`,
     "- Si el cliente se enfría, deja en visto o tiene un carrito sin pagar, puedes programar un recordatorio con agendar_recordatorio.",
@@ -238,6 +240,11 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
         const cp = config.products.find((p) => p.id === id || p.slug === id);
         return cp ? { id: cp.id, name: cp.name } : { id };
       })(),
+      // Memoria durable: productos que el cliente YA compró y recibió (no depende
+      // del historial reciente).
+      yaCompro: (Array.isArray(state.purchasedProductIds) ? state.purchasedProductIds : [])
+        .map((id) => config.products.find((p) => p.id === id || p.slug === id)?.name)
+        .filter(Boolean),
       // Datos leídos automáticamente del último comprobante que envió el cliente.
       comprobanteLeido: state.lastReceipt
         ? {

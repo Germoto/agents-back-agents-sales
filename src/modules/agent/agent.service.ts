@@ -385,6 +385,12 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     adminNotices: [],
   };
 
+  // Memoria durable de compras: productos ya comprados/entregados (comprobantes
+  // APROBADOS). Independiente de los últimos 16 mensajes de historial; se recalcula
+  // cada turno y se inyecta al prompt para que el agente recuerde compras previas y
+  // no se confunda con un catálogo de varios productos.
+  ctx.state.purchasedProductIds = await getPurchasedProductIds(companyId, customerId);
+
   // Modo FLOW: corre el motor de flujos guiados en lugar del agente IA. El motor
   // envía todo por su propio IO (deliver) y deja el estado en ctx.state.
   if (config.business.botMode === "FLOW") {
@@ -657,6 +663,24 @@ async function handleReceiptImage(
   console.log(
     `[agent] comprobante de ${fromPhone} leído (monto=${receipt?.amountText ?? "-"} cód=${receipt?.securityCode ?? "-"}); lo validará el agente en su turno`,
   );
+}
+
+/**
+ * Memoria durable de compras: ids de productos que el cliente YA compró y se le
+ * entregaron (comprobantes APROBADOS), juntando productIds (carrito) y productId
+ * (compra de un solo producto). No depende del historial reciente.
+ */
+async function getPurchasedProductIds(companyId: string, customerId: string): Promise<string[]> {
+  const receipts = await prisma.paymentReceipt.findMany({
+    where: { companyId, customerId, status: "APROBADO" },
+    select: { productIds: true, productId: true },
+  });
+  const ids = new Set<string>();
+  for (const r of receipts) {
+    for (const id of r.productIds ?? []) ids.add(id);
+    if (r.productId) ids.add(r.productId);
+  }
+  return [...ids];
 }
 
 /**
