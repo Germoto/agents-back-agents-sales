@@ -517,11 +517,15 @@ function catalogProducts(products: BotProduct[]): BotProduct[] {
 function renderCustomerCatalog(products: BotProduct[]): string {
   const line = (p: BotProduct) => {
     const price = p.priceText ?? p.price;
-    const desc = p.shortDescription ? ` — ${p.shortDescription}` : "";
-    return `• *${p.name}* (${price})${desc}`;
+    // Trim del nombre: los espacios dentro de *...* rompen el negrita de WhatsApp
+    // y se ven feos ("* *"). La descripción va en una línea aparte para que respire.
+    const name = (p.name ?? "").trim();
+    const desc = p.shortDescription?.trim() ? `\n${p.shortDescription.trim()}` : "";
+    return `• *${name}* — ${price}${desc}`;
   };
+  // Línea en blanco entre productos: se ve más limpio.
   const hasCat = products.some((p) => p.category && p.category.trim());
-  if (!hasCat) return products.map(line).join("\n");
+  if (!hasCat) return products.map(line).join("\n\n");
   const groups = new Map<string, BotProduct[]>();
   for (const p of products) {
     const c = p.category?.trim() || "Otros";
@@ -529,7 +533,7 @@ function renderCustomerCatalog(products: BotProduct[]): string {
     groups.get(c)!.push(p);
   }
   const sections: string[] = [];
-  for (const [cat, items] of groups) sections.push(`*${cat}*\n${items.map(line).join("\n")}`);
+  for (const [cat, items] of groups) sections.push(`*${cat}*\n\n${items.map(line).join("\n\n")}`);
   return sections.join("\n\n");
 }
 
