@@ -411,6 +411,19 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     finalText = "Disculpa, estoy teniendo un inconveniente. En un momento te atiendo.";
   }
 
+  // Dedup de multimedia repetida en el mismo turno: si el modelo reenvía con
+  // enviar_multimedia (fileIds, sin guard) un archivo que enviar_ficha ya mandó en
+  // la presentación, llegaría dos veces. Nunca mandamos la misma URL dos veces en un
+  // turno (los reenvíos legítimos que pide el cliente ocurren en turnos posteriores,
+  // con un outbox nuevo, así que no se ven afectados).
+  const seenMedia = new Set<string>();
+  ctx.outbox = ctx.outbox.filter((m) => {
+    if (m.kind !== "media" || !m.mediaUrl) return true;
+    if (seenMedia.has(m.mediaUrl)) return false;
+    seenMedia.add(m.mediaUrl);
+    return true;
+  });
+
   // Enviar adjuntos/mensajes acumulados por las herramientas, en orden
   await flushOutbox(sender, customerPhone, ctx.outbox, ctx);
 
