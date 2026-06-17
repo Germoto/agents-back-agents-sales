@@ -120,6 +120,22 @@ async function maybeMuteAfterSale(ctx: TurnContext): Promise<void> {
   }
 }
 
+const CLOSED_STATUSES = ["ENTREGADO", "PAGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA"];
+
+/**
+ * Reabre el embudo (status → INTERESADO) si la conversación venía de una venta
+ * CERRADA y el cliente se interesa en un producto que AÚN NO compró. Sin esto, el
+ * status terminal (ENTREGADO/…) bloquearía los recordatorios de seguimiento del
+ * nuevo producto. No reabre si el producto ya está comprado (no molestar con algo
+ * que el cliente ya tiene).
+ */
+function reopenFunnelIfClosed(ctx: TurnContext, productId: string): void {
+  const purchased = Array.isArray(ctx.state.purchasedProductIds) ? ctx.state.purchasedProductIds : [];
+  if (CLOSED_STATUSES.includes(ctx.state.status ?? "") && !purchased.includes(productId)) {
+    ctx.state.status = "INTERESADO";
+  }
+}
+
 // --------------------------------------------------------------------------
 // Matching de producto (porta el matcher del workflow n8n: exacto/alias/fuzzy)
 // --------------------------------------------------------------------------
@@ -819,6 +835,8 @@ export async function executeTool(
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
       ctx.state.selectedProductId = product.id;
+      // Re-enganche tras una venta cerrada: presentar un producto nuevo reabre el embudo.
+      reopenFunnelIfClosed(ctx, product.id);
       const presented = Array.isArray(ctx.state.presentedProductIds) ? ctx.state.presentedProductIds : [];
       if (presented.includes(product.id)) {
         return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la ficha de este producto en esta conversación. NO la reenvíes; responde la consulta del cliente directamente con la base de conocimiento (faq, objeciones, descripción)." });
@@ -907,6 +925,8 @@ export async function executeTool(
         : undefined;
       const summary = await addToCart(ctx.companyId, ctx.customerId, product.id, qty, modifiers);
       ctx.state.selectedProductId = product.id;
+      // Re-enganche tras una venta cerrada: agregar un producto nuevo reabre el embudo.
+      reopenFunnelIfClosed(ctx, product.id);
       return JSON.stringify({
         ok: true,
         cart: summary.items.map((it) => ({
