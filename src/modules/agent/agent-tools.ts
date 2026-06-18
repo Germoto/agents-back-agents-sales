@@ -917,6 +917,11 @@ export async function executeTool(
     case "agregar_carrito": {
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
+      // Guard anti-reventa: no agregar al carrito un producto DIGITAL ya comprado.
+      const purchasedCart = Array.isArray(ctx.state.purchasedProductIds) ? ctx.state.purchasedProductIds : [];
+      if (purchasedCart.includes(product.id) && product.productType !== "physical") {
+        return JSON.stringify({ ok: false, error: "El cliente YA compró este producto digital; no lo agregues al carrito ni lo cobres de nuevo. Es soporte post-venta; si hay un problema con su compra usa derivar_humano." });
+      }
       const qty = Math.max(1, Number(args.quantity ?? 1));
       const modifiers = Array.isArray(args.modifiers)
         ? args.modifiers
@@ -954,6 +959,21 @@ export async function executeTool(
         return JSON.stringify({ ok: false, error: "pagos no configurados" });
       }
       const cart = await summarizeCart(ctx.companyId, ctx.customerId);
+      // Guard anti-reventa: no re-cobrar un producto DIGITAL que el cliente YA compró.
+      // (Un físico sí podría re-pedirse; un infoproducto ya entregado no.)
+      const purchased = Array.isArray(ctx.state.purchasedProductIds) ? ctx.state.purchasedProductIds : [];
+      const chargeIds = cart.productIds.length
+        ? cart.productIds
+        : ctx.state.selectedProductId
+        ? [ctx.state.selectedProductId]
+        : [];
+      const newIds = chargeIds.filter((id) => !purchased.includes(id));
+      if (chargeIds.length && newIds.length === 0) {
+        const allDigital = chargeIds.every((id) => findProductById(ctx, id)?.productType !== "physical");
+        if (allDigital) {
+          return JSON.stringify({ ok: false, error: "El cliente YA compró este producto (es suyo); NO le cobres de nuevo ni le ofrezcas 'activarlo/comprarlo'. Es SOPORTE post-venta: responde su duda. Si dice que no le llegó el acceso o hay un problema con su compra, usa derivar_humano." });
+        }
+      }
       let amountText = cart.totalText;
       if (!cart.items.length && ctx.state.selectedProductId) {
         const p = findProductById(ctx, ctx.state.selectedProductId);
