@@ -1,8 +1,11 @@
 /**
- * Métricas del dashboard del tenant: indicadores de flujos de chatbot y serie
- * de pagos (solo comprobantes APROBADOS asociados a un producto), agrupada por
- * día (últimos 30 días) y por mes (últimos 12 meses) en la zona horaria del
- * negocio. Los montos de PaymentReceipt son String legacy → se suman en JS.
+ * Métricas del dashboard del tenant (rubro INFOPRODUCT). Todo se calcula sobre un
+ * RANGO de fechas [from, to] y, opcionalmente, filtrado por producto, comparando
+ * contra el periodo anterior equivalente para mostrar la variación (delta).
+ *
+ * Los montos de PaymentReceipt son String legacy → se suman en JS con Number().
+ * Una venta = comprobante APROBADO asociado a un producto (productId o productIds).
+ * Fecha de referencia de la venta: occurredAt ?? validatedAt ?? createdAt.
  */
 
 import { prisma } from "../../lib/prisma";
@@ -14,6 +17,15 @@ interface SeriesPoint {
   count: number;
 }
 
+interface Delta {
+  value: number;
+  prev: number;
+}
+
+const MONTH_LABELS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const FOLLOWUP_TYPES = ["ABANDONED_CART", "LEFT_ON_READ", "OFFER_COUNTDOWN", "POST_SALE", "CUSTOM"];
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 function dayKeyFormatter(timezone: string) {
   const fmt = new Intl.DateTimeFormat("en-CA", {
     timeZone: timezone,
@@ -24,195 +36,234 @@ function dayKeyFormatter(timezone: string) {
   return (d: Date) => fmt.format(d); // YYYY-MM-DD
 }
 
-const MONTH_LABELS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const r2 = (n: number) => Math.round(n * 100) / 100;
+const pct = (n: number) => Math.round(n * 10000) / 100; // fracción → %
 
-export async function getDashboardStats(companyId: string) {
+export interface DashboardParams {
+  companyId: string;
+  from?: string; // YYYY-MM-DD
+  to?: string; // YYYY-MM-DD
+  productId?: string;
+}
+
+export async function getDashboardStats(params: DashboardParams) {
+  const { companyId, productId } = params;
   const company = await prisma.company.findUnique({
     where: { id: companyId },
     select: { timezone: true },
   });
   const timezone = company?.timezone ?? "America/Lima";
 
-  // ---- Indicadores de flujos ----
-  const [flowsTotal, flowsActive, activeFlowSessions] = await Promise.all([
-    prisma.chatFlow.count({ where: { companyId } }),
-    prisma.chatFlow.count({ where: { companyId, isActive: true } }),
-    // Conversaciones con una sesión de flujo esperando respuesta del cliente
-    prisma.$queryRaw<Array<{ count: bigint }>>`
-      SELECT COUNT(*)::bigint AS count
-      FROM "Conversation"
-      WHERE "companyId" = ${companyId}::uuid
-        AND "channel" = 'whatsapp'
-        AND state -> 'flow' ->> 'awaitingNodeId' IS NOT NULL
-    `.then((rows) => Number(rows[0]?.count ?? 0)),
-  ]);
+  // ---- Rango actual y periodo anterior equivalente ----
+  const now = new Date();
+  const toDate = params.to ? new Date(`${params.to}T23:59:59.999Z`) : endOfDay(now);
+  const fromDate = params.from ? new Date(`${params.from}T00:00:00.000Z`) : new Date(endOfDay(now).getTime() - 30 * DAY_MS + 1);
+  const lengthMs = Math.max(DAY_MS, toDate.getTime() - fromDate.getTime());
+  const prevTo = new Date(fromDate.getTime() - 1);
+  const prevFrom = new Date(prevTo.getTime() - lengthMs);
+  const days = Math.round(lengthMs / DAY_MS);
+  const granularity: "daily" | "monthly" = days <= 92 ? "daily" : "monthly";
 
-  // ---- Indicadores adicionales (rubro infoproducto) ----
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+  const inRange = (d: Date, a: Date, b: Date) => d.getTime() >= a.getTime() && d.getTime() <= b.getTime();
+  const refDate = (r: { occurredAt: Date | null; validatedAt: Date | null; createdAt: Date }) =>
+    r.occurredAt ?? r.validatedAt ?? r.createdAt;
+  const receiptProductIds = (r: { productId: string | null; productIds: string[] }) => {
+    const set = new Set<string>(r.productIds ?? []);
+    if (r.productId) set.add(r.productId);
+    return [...set];
+  };
 
-  const [
-    customersTotal,
-    customersNewThisMonth,
-    conversationsTotal,
-    approvedWithProduct,
-    paymentMethodGroups,
-    validationModeGroups,
-    digitalSalesTotal,
-    digitalSalesDelivered,
-    crmsTotal,
-    crmColumnsTotal,
-    crmCardsTotal,
-  ] = await Promise.all([
-    prisma.customer.count({ where: { companyId } }),
-    prisma.customer.count({ where: { companyId, createdAt: { gte: monthStart } } }),
-    prisma.conversation.count({ where: { companyId, channel: "whatsapp" } }),
-    prisma.paymentReceipt.count({
-      where: {
-        companyId,
-        status: "APROBADO",
-        OR: [{ productId: { not: null } }, { productIds: { isEmpty: false } }],
-      },
-    }),
-    prisma.paymentReceipt.groupBy({
-      by: ["paymentSource"],
-      where: { companyId, status: "APROBADO" },
-      _count: { _all: true },
-    }),
-    prisma.paymentReceipt.groupBy({
-      by: ["validationMode"],
-      where: { companyId, status: "APROBADO" },
-      _count: { _all: true },
-    }),
-    prisma.digitalSale.count({ where: { companyId } }),
-    prisma.digitalSale.count({ where: { companyId, status: "ENTREGADO" } }),
-    prisma.crm.count({ where: { companyId } }),
-    prisma.crmColumn.count({ where: { crm: { companyId } } }),
-    prisma.crmCard.count({ where: { crm: { companyId } } }),
-  ]);
-
-  const paymentMethods = paymentMethodGroups
-    .map((g) => ({ method: g.paymentSource ?? "otro", count: g._count._all }))
-    .sort((a, b) => b.count - a.count);
-  const autoApprovals = validationModeGroups.find((g) => g.validationMode === "AUTO")?._count._all ?? 0;
-  const manualApprovals = validationModeGroups.find((g) => g.validationMode === "MANUAL")?._count._all ?? 0;
-  const conversionRate = conversationsTotal > 0 ? approvedWithProduct / conversationsTotal : 0;
-  const deliveryRate = digitalSalesTotal > 0 ? digitalSalesDelivered / digitalSalesTotal : 0;
-
-  // ---- Pagos: APROBADOS y asociados a un producto ----
-  const since = new Date();
-  since.setMonth(since.getMonth() - 12);
+  // ---- Comprobantes APROBADOS con producto, en [prevFrom, toDate] (un solo fetch) ----
   const receipts = await prisma.paymentReceipt.findMany({
     where: {
       companyId,
       status: "APROBADO",
-      createdAt: { gte: since },
       OR: [{ productId: { not: null } }, { productIds: { isEmpty: false } }],
+      AND: [
+        {
+          OR: [
+            { occurredAt: { gte: prevFrom, lte: toDate } },
+            { validatedAt: { gte: prevFrom, lte: toDate } },
+            { createdAt: { gte: prevFrom, lte: toDate } },
+          ],
+        },
+      ],
     },
     select: {
       amountPaid: true,
       amountExpected: true,
       currency: true,
+      paymentSource: true,
+      validationMode: true,
+      productId: true,
+      productIds: true,
       occurredAt: true,
       validatedAt: true,
       createdAt: true,
     },
   });
 
-  const toDayKey = dayKeyFormatter(timezone);
-  const dayTotals = new Map<string, { total: number; count: number }>();
-  const monthTotals = new Map<string, { total: number; count: number }>();
   let currency = "PEN";
-
+  const curAll: typeof receipts = [];
+  const prevAll: typeof receipts = [];
   for (const r of receipts) {
-    const amount = Number(r.amountPaid ?? r.amountExpected);
-    if (!Number.isFinite(amount) || amount <= 0) continue;
     if (r.currency) currency = r.currency;
-    const when = r.occurredAt ?? r.validatedAt ?? r.createdAt;
-    const dayKey = toDayKey(when); // YYYY-MM-DD en la TZ del negocio
-    const monthKey = dayKey.slice(0, 7);
-
-    const day = dayTotals.get(dayKey) ?? { total: 0, count: 0 };
-    day.total += amount;
-    day.count += 1;
-    dayTotals.set(dayKey, day);
-
-    const month = monthTotals.get(monthKey) ?? { total: 0, count: 0 };
-    month.total += amount;
-    month.count += 1;
-    monthTotals.set(monthKey, month);
+    const when = refDate(r);
+    if (inRange(when, fromDate, toDate)) curAll.push(r);
+    else if (inRange(when, prevFrom, prevTo)) prevAll.push(r);
   }
 
-  // Serie diaria: últimos 30 días, incluyendo días sin pagos (en 0)
-  const daily: SeriesPoint[] = [];
-  const now = new Date();
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-    const key = toDayKey(d);
-    const bucket = dayTotals.get(key) ?? { total: 0, count: 0 };
-    const [, m, day] = key.split("-").map(Number);
-    daily.push({
-      date: key,
-      label: `${day} ${MONTH_LABELS[(m ?? 1) - 1]}`,
-      total: Math.round(bucket.total * 100) / 100,
-      count: bucket.count,
-    });
-  }
+  const matchesProduct = (r: { productId: string | null; productIds: string[] }) =>
+    !productId || receiptProductIds(r).includes(productId);
+  const cur = curAll.filter(matchesProduct);
+  const prev = prevAll.filter(matchesProduct);
 
-  // Serie mensual: últimos 12 meses
-  const monthly: SeriesPoint[] = [];
-  const nowKey = toDayKey(now); // YYYY-MM-DD
-  let [y, m] = nowKey.split("-").map(Number);
-  const monthKeys: string[] = [];
-  for (let i = 0; i < 12; i++) {
-    monthKeys.unshift(`${y}-${String(m).padStart(2, "0")}`);
-    m -= 1;
-    if (m === 0) {
-      m = 12;
-      y -= 1;
+  // ---- KPIs de ventas (respetan el filtro de producto) ----
+  const sumRevenue = (rs: typeof receipts) =>
+    rs.reduce((acc, r) => {
+      const a = Number(r.amountPaid ?? r.amountExpected);
+      return acc + (Number.isFinite(a) && a > 0 ? a : 0);
+    }, 0);
+  const sumUnits = (rs: typeof receipts) =>
+    rs.reduce((acc, r) => {
+      const ids = receiptProductIds(r);
+      return acc + (productId ? (ids.includes(productId) ? 1 : 0) : ids.length);
+    }, 0);
+
+  const revenue: Delta = { value: r2(sumRevenue(cur)), prev: r2(sumRevenue(prev)) };
+  const sales: Delta = { value: cur.length, prev: prev.length };
+  const units: Delta = { value: sumUnits(cur), prev: sumUnits(prev) };
+  const avgTicket: Delta = {
+    value: sales.value > 0 ? r2(revenue.value / sales.value) : 0,
+    prev: sales.prev > 0 ? r2(revenue.prev / sales.prev) : 0,
+  };
+
+  // Métodos de pago y modo de validación (del periodo actual, producto-filtrado)
+  const methodMap = new Map<string, number>();
+  let autoApprovals = 0;
+  let manualApprovals = 0;
+  for (const r of cur) {
+    const m = (r.paymentSource ?? "otro").toLowerCase();
+    methodMap.set(m, (methodMap.get(m) ?? 0) + 1);
+    if (r.validationMode === "AUTO") autoApprovals += 1;
+    else if (r.validationMode === "MANUAL") manualApprovals += 1;
+  }
+  const paymentMethods = [...methodMap.entries()]
+    .map(([method, count]) => ({ method, count }))
+    .sort((a, b) => b.count - a.count);
+
+  // Ranking de productos más vendidos (global del periodo, ignora el filtro)
+  const prodAgg = new Map<string, { revenue: number; units: number }>();
+  for (const r of curAll) {
+    const a = Number(r.amountPaid ?? r.amountExpected);
+    const amount = Number.isFinite(a) && a > 0 ? a : 0;
+    for (const id of receiptProductIds(r)) {
+      const agg = prodAgg.get(id) ?? { revenue: 0, units: 0 };
+      agg.revenue += amount;
+      agg.units += 1;
+      prodAgg.set(id, agg);
     }
   }
-  for (const key of monthKeys) {
-    const bucket = monthTotals.get(key) ?? { total: 0, count: 0 };
-    const [yy, mm] = key.split("-").map(Number);
-    monthly.push({
-      date: key,
-      label: `${MONTH_LABELS[(mm ?? 1) - 1]} ${String(yy).slice(2)}`,
-      total: Math.round(bucket.total * 100) / 100,
-      count: bucket.count,
-    });
+  const prodNames = await prisma.product.findMany({
+    where: { companyId, id: { in: [...prodAgg.keys()] } },
+    select: { id: true, name: true },
+  });
+  const nameById = new Map(prodNames.map((p) => [p.id, p.name.trim()]));
+  const topProducts = [...prodAgg.entries()]
+    .map(([id, agg]) => ({ productId: id, name: nameById.get(id) ?? "Producto", revenue: r2(agg.revenue), units: agg.units }))
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 8);
+
+  // ---- Serie de ingresos en el tiempo (producto-filtrado) ----
+  const toDayKey = dayKeyFormatter(timezone);
+  const bucket = new Map<string, { total: number; count: number }>();
+  for (const r of cur) {
+    const a = Number(r.amountPaid ?? r.amountExpected);
+    if (!Number.isFinite(a) || a <= 0) continue;
+    const dayKey = toDayKey(refDate(r));
+    const key = granularity === "daily" ? dayKey : dayKey.slice(0, 7);
+    const b = bucket.get(key) ?? { total: 0, count: 0 };
+    b.total += a;
+    b.count += 1;
+    bucket.set(key, b);
+  }
+  const series: SeriesPoint[] = [];
+  if (granularity === "daily") {
+    for (let i = 0; i < days; i++) {
+      const d = new Date(fromDate.getTime() + i * DAY_MS);
+      const key = toDayKey(d);
+      const b = bucket.get(key) ?? { total: 0, count: 0 };
+      const [, m, day] = key.split("-").map(Number);
+      series.push({ date: key, label: `${day} ${MONTH_LABELS[(m ?? 1) - 1]}`, total: r2(b.total), count: b.count });
+    }
+  } else {
+    const startKey = toDayKey(fromDate).slice(0, 7);
+    const endKey = toDayKey(toDate).slice(0, 7);
+    let [yy, mm] = startKey.split("-").map(Number);
+    while (true) {
+      const key = `${yy}-${String(mm).padStart(2, "0")}`;
+      const b = bucket.get(key) ?? { total: 0, count: 0 };
+      series.push({ date: key, label: `${MONTH_LABELS[(mm ?? 1) - 1]} ${String(yy).slice(2)}`, total: r2(b.total), count: b.count });
+      if (key === endKey) break;
+      mm += 1;
+      if (mm === 13) { mm = 1; yy += 1; }
+      if (series.length > 240) break; // guard
+    }
   }
 
-  const currentMonth = monthly[monthly.length - 1] ?? { total: 0, count: 0 };
+  // ---- Embudo / global (NO filtra por producto) ----
+  const [newContactsCur, newContactsPrev, conversationsCur, conversationsPrev, pendingReceipts, remindersCur, remindersPrev, crmCardsTotal, flowsTotal, flowsActive] =
+    await Promise.all([
+      prisma.customer.count({ where: { companyId, createdAt: { gte: fromDate, lte: toDate } } }),
+      prisma.customer.count({ where: { companyId, createdAt: { gte: prevFrom, lte: prevTo } } }),
+      prisma.conversation.count({ where: { companyId, channel: "whatsapp", createdAt: { gte: fromDate, lte: toDate } } }),
+      prisma.conversation.count({ where: { companyId, channel: "whatsapp", createdAt: { gte: prevFrom, lte: prevTo } } }),
+      prisma.paymentReceipt.count({ where: { companyId, status: { in: ["PENDIENTE", "EN_REVISION"] } } }),
+      prisma.scheduledMessage.count({ where: { companyId, status: "SENT", type: { in: FOLLOWUP_TYPES as any }, sentAt: { gte: fromDate, lte: toDate } } }),
+      prisma.scheduledMessage.count({ where: { companyId, status: "SENT", type: { in: FOLLOWUP_TYPES as any }, sentAt: { gte: prevFrom, lte: prevTo } } }),
+      prisma.crmCard.count({ where: { crm: { companyId } } }),
+      prisma.chatFlow.count({ where: { companyId } }),
+      prisma.chatFlow.count({ where: { companyId, isActive: true } }),
+    ]);
 
-  const avgTicket = currentMonth.count > 0 ? Math.round((currentMonth.total / currentMonth.count) * 100) / 100 : 0;
+  const newContacts: Delta = { value: newContactsCur, prev: newContactsPrev };
+  const conversations: Delta = { value: conversationsCur, prev: conversationsPrev };
+  // Conversión global del periodo: ventas (con producto, sin filtro) / conversaciones.
+  const globalSalesCur = curAll.length;
+  const globalSalesPrev = prevAll.length;
+  const conversionRate: Delta = {
+    value: conversationsCur > 0 ? pct(globalSalesCur / conversationsCur) : 0,
+    prev: conversationsPrev > 0 ? pct(globalSalesPrev / conversationsPrev) : 0,
+  };
 
   return {
-    flows: { total: flowsTotal, active: flowsActive, activeSessions: activeFlowSessions },
-    payments: {
-      currency,
-      daily,
-      monthly,
-      monthTotal: currentMonth.total,
-      monthCount: currentMonth.count,
-    },
-    metrics: {
-      currency,
-      customersTotal,
-      customersNewThisMonth,
-      conversationsTotal,
-      conversionRate: Math.round(conversionRate * 10000) / 100, // %
+    range: { from: toDayKey(fromDate), to: toDayKey(toDate), granularity },
+    currency,
+    productId: productId ?? null,
+    kpis: {
+      revenue,
+      sales,
       avgTicket,
+      units,
+      newContacts,
+      conversations,
+      conversionRate,
       autoApprovals,
       manualApprovals,
-      deliveryRate: Math.round(deliveryRate * 10000) / 100, // %
-      digitalSalesTotal,
-      digitalSalesDelivered,
-      paymentMethods,
-      crmsTotal,
-      crmColumnsTotal,
+      pendingReceipts,
+      remindersSent: { value: remindersCur, prev: remindersPrev },
       crmCardsTotal,
     },
+    series,
+    topProducts,
+    paymentMethods,
+    funnel: { contacts: newContactsCur, conversations: conversationsCur, sales: globalSalesCur },
+    flows: { total: flowsTotal, active: flowsActive },
   };
+}
+
+function endOfDay(d: Date): Date {
+  const x = new Date(d);
+  x.setUTCHours(23, 59, 59, 999);
+  return x;
 }

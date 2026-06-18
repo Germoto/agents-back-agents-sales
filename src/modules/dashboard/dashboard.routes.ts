@@ -11,7 +11,15 @@ router.use(requireAuth);
 router.get(
   "/stats",
   asyncHandler(async (req: Request, res: Response) => {
-    res.json(await getDashboardStats(req.user!.companyId));
+    const { from, to, productId } = req.query;
+    res.json(
+      await getDashboardStats({
+        companyId: req.user!.companyId,
+        from: typeof from === "string" && from ? from : undefined,
+        to: typeof to === "string" && to ? to : undefined,
+        productId: typeof productId === "string" && productId ? productId : undefined,
+      }),
+    );
   }),
 );
 
