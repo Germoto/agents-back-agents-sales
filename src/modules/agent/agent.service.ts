@@ -436,6 +436,18 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
 
   await saveState(conversationId, ctx.state);
 
+  // Reconciliación: los follow-ups de abandono y dejado-en-visto son EXCLUYENTES y
+  // scheduleAutoReminders es su único dueño. Cancelamos los PENDING de turnos previos
+  // antes de regenerarlos, así no se acumulan ambos tipos para el mismo cliente (el
+  // re-disparo `dirty` corre un 2º turno que no pasa por handleInbound, donde está la
+  // otra cancelación). Va ANTES del loop de ctx.reminders para no pisar un recordatorio
+  // que el modelo acabe de pedir en este turno; los manuales quedan protegidos por
+  // cancelPendingReminders (NOT metadata.manual).
+  await cancelPendingReminders(companyId, customerId, [
+    ScheduledMessageType.ABANDONED_CART,
+    ScheduledMessageType.LEFT_ON_READ,
+  ]);
+
   // Recordatorios solicitados por el modelo (clampeados a horario hábil)
   for (const r of ctx.reminders) {
     await scheduleReminder({
