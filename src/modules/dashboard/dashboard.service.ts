@@ -53,11 +53,16 @@ export async function getDashboardStats(params: DashboardParams) {
     select: { timezone: true },
   });
   const timezone = company?.timezone ?? "America/Lima";
+  const toDayKey = dayKeyFormatter(timezone);
 
-  // ---- Rango actual y periodo anterior equivalente ----
+  // ---- Rango actual y periodo anterior equivalente (en la TZ del negocio) ----
+  // Los límites se anclan a la medianoche/fin-de-día LOCAL del tenant (no UTC), si
+  // no, en zonas UTC- se perdería el día de hoy y las ventas de la tarde/noche.
   const now = new Date();
-  const toDate = params.to ? new Date(`${params.to}T23:59:59.999Z`) : endOfDay(now);
-  const fromDate = params.from ? new Date(`${params.from}T00:00:00.000Z`) : new Date(endOfDay(now).getTime() - 30 * DAY_MS + 1);
+  const toYmd = params.to ?? toDayKey(now);
+  const fromYmd = params.from ?? toDayKey(new Date(now.getTime() - 29 * DAY_MS));
+  const toDate = zonedDayBoundary(toYmd, timezone, true);
+  const fromDate = zonedDayBoundary(fromYmd, timezone, false);
   const lengthMs = Math.max(DAY_MS, toDate.getTime() - fromDate.getTime());
   const prevTo = new Date(fromDate.getTime() - 1);
   const prevFrom = new Date(prevTo.getTime() - lengthMs);
@@ -175,7 +180,6 @@ export async function getDashboardStats(params: DashboardParams) {
     .slice(0, 8);
 
   // ---- Serie de ingresos en el tiempo (producto-filtrado) ----
-  const toDayKey = dayKeyFormatter(timezone);
   const bucket = new Map<string, { total: number; count: number }>();
   for (const r of cur) {
     const a = Number(r.amountPaid ?? r.amountExpected);
@@ -262,8 +266,26 @@ export async function getDashboardStats(params: DashboardParams) {
   };
 }
 
-function endOfDay(d: Date): Date {
-  const x = new Date(d);
-  x.setUTCHours(23, 59, 59, 999);
-  return x;
+/** Offset (ms) entre la hora local del tenant y UTC para esa fecha (sin lib de fechas). */
+function tzOffsetMs(date: Date, timeZone: string): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const p = Object.fromEntries(dtf.formatToParts(date).map((x) => [x.type, x.value])) as Record<string, string>;
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return asUTC - date.getTime();
+}
+
+/** Instante UTC del inicio (00:00) o fin (23:59:59.999) del día local `ymd` en la TZ del tenant. */
+function zonedDayBoundary(ymd: string, timeZone: string, end: boolean): Date {
+  const base = new Date(`${ymd}T${end ? "23:59:59.999" : "00:00:00.000"}Z`);
+  const offset = tzOffsetMs(base, timeZone);
+  return new Date(base.getTime() - offset);
 }
