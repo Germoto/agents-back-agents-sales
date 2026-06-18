@@ -100,6 +100,7 @@ export async function getDashboardStats(params: DashboardParams) {
       currency: true,
       paymentSource: true,
       validationMode: true,
+      customerId: true,
       productId: true,
       productIds: true,
       occurredAt: true,
@@ -215,29 +216,45 @@ export async function getDashboardStats(params: DashboardParams) {
     }
   }
 
-  // ---- Embudo / global (NO filtra por producto) ----
-  const [newContactsCur, newContactsPrev, conversationsCur, conversationsPrev, pendingReceipts, remindersCur, remindersPrev, crmCardsTotal, flowsTotal, flowsActive] =
+  // ---- Embudo / global (todo sensible al rango). Pending y leads convertidos
+  // respetan el filtro de producto; contactos y conversaciones quedan globales. ----
+  const productClause = productId
+    ? { OR: [{ productId }, { productIds: { has: productId } }] }
+    : {};
+  const [customersWindow, conversationsCur, conversationsPrev, pendingReceipts, remindersCur, remindersPrev, flowsTotal, flowsActive] =
     await Promise.all([
-      prisma.customer.count({ where: { companyId, createdAt: { gte: fromDate, lte: toDate } } }),
-      prisma.customer.count({ where: { companyId, createdAt: { gte: prevFrom, lte: prevTo } } }),
+      // Clientes creados en [prevFrom, toDate] (ids para separar actual/anterior y
+      // cruzar con quienes cerraron venta).
+      prisma.customer.findMany({ where: { companyId, createdAt: { gte: prevFrom, lte: toDate } }, select: { id: true, createdAt: true } }),
       prisma.conversation.count({ where: { companyId, channel: "whatsapp", createdAt: { gte: fromDate, lte: toDate } } }),
       prisma.conversation.count({ where: { companyId, channel: "whatsapp", createdAt: { gte: prevFrom, lte: prevTo } } }),
-      prisma.paymentReceipt.count({ where: { companyId, status: { in: ["PENDIENTE", "EN_REVISION"] } } }),
+      prisma.paymentReceipt.count({ where: { companyId, status: { in: ["PENDIENTE", "EN_REVISION"] }, createdAt: { gte: fromDate, lte: toDate }, ...productClause } }),
       prisma.scheduledMessage.count({ where: { companyId, status: "SENT", type: { in: FOLLOWUP_TYPES as any }, sentAt: { gte: fromDate, lte: toDate } } }),
       prisma.scheduledMessage.count({ where: { companyId, status: "SENT", type: { in: FOLLOWUP_TYPES as any }, sentAt: { gte: prevFrom, lte: prevTo } } }),
-      prisma.crmCard.count({ where: { crm: { companyId } } }),
       prisma.chatFlow.count({ where: { companyId } }),
       prisma.chatFlow.count({ where: { companyId, isActive: true } }),
     ]);
 
-  const newContacts: Delta = { value: newContactsCur, prev: newContactsPrev };
+  const newIdsCur = customersWindow.filter((c) => inRange(c.createdAt, fromDate, toDate)).map((c) => c.id);
+  const newIdsPrev = customersWindow.filter((c) => inRange(c.createdAt, prevFrom, prevTo)).map((c) => c.id);
+  const newContacts: Delta = { value: newIdsCur.length, prev: newIdsPrev.length };
   const conversations: Delta = { value: conversationsCur, prev: conversationsPrev };
+
   // Conversión global del periodo: ventas (con producto, sin filtro) / conversaciones.
   const globalSalesCur = curAll.length;
   const globalSalesPrev = prevAll.length;
   const conversionRate: Delta = {
     value: conversationsCur > 0 ? pct(globalSalesCur / conversationsCur) : 0,
     prev: conversationsPrev > 0 ? pct(globalSalesPrev / conversationsPrev) : 0,
+  };
+
+  // Leads convertidos: contactos NUEVOS del periodo que cerraron una venta (de los
+  // comprobantes producto-filtrados del periodo). Respeta rango y producto.
+  const salesCustCur = new Set(cur.map((r) => r.customerId).filter(Boolean) as string[]);
+  const salesCustPrev = new Set(prev.map((r) => r.customerId).filter(Boolean) as string[]);
+  const convertedLeads: Delta = {
+    value: newIdsCur.filter((id) => salesCustCur.has(id)).length,
+    prev: newIdsPrev.filter((id) => salesCustPrev.has(id)).length,
   };
 
   return {
@@ -256,12 +273,12 @@ export async function getDashboardStats(params: DashboardParams) {
       manualApprovals,
       pendingReceipts,
       remindersSent: { value: remindersCur, prev: remindersPrev },
-      crmCardsTotal,
+      convertedLeads,
     },
     series,
     topProducts,
     paymentMethods,
-    funnel: { contacts: newContactsCur, conversations: conversationsCur, sales: globalSalesCur },
+    funnel: { contacts: newContacts.value, conversations: conversationsCur, sales: globalSalesCur },
     flows: { total: flowsTotal, active: flowsActive },
   };
 }
