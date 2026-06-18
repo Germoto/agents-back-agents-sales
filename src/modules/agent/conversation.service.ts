@@ -448,6 +448,30 @@ export async function deleteConversation(companyId: string, conversationId: stri
 }
 
 /**
+ * Elimina en lote varias conversaciones (selección masiva del panel). Aplica los
+ * mismos guards por chat que deleteConversation: las que tienen pago asociado o
+ * están esperando pago se omiten (no se borran) y se reportan con su motivo.
+ */
+export async function deleteConversations(
+  companyId: string,
+  ids: string[],
+): Promise<{ deleted: string[]; skipped: Array<{ id: string; reason: string }> }> {
+  const clean = [...new Set(ids.map((s) => String(s).trim()).filter(Boolean))];
+  const deleted: string[] = [];
+  const skipped: Array<{ id: string; reason: string }> = [];
+  for (const id of clean) {
+    try {
+      await deleteConversation(companyId, id);
+      deleted.push(id);
+    } catch (err) {
+      const reason = err instanceof AppError ? err.message : "No se pudo eliminar";
+      skipped.push({ id, reason });
+    }
+  }
+  return { deleted, skipped };
+}
+
+/**
  * Reinicia el contexto de una conversación (para pruebas / comando "reset" del
  * cliente): borra historial, carrito y estado; reactiva el bot.
  */

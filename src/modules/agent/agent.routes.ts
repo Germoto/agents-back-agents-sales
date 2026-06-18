@@ -9,6 +9,7 @@ import {
   replyConversationController,
   resetConversationController,
   deleteConversationController,
+  deleteConversationsBulkController,
   startConversationController,
   scheduleReminderController,
 } from "./conversations.controller";
@@ -34,6 +35,7 @@ router.post("/inbound", optionalAgentApiKey, inboundController);
 // Visor de conversaciones para el panel admin (requiere auth de tenant)
 router.get("/conversations", requireAuth, listConversationsController);
 router.post("/conversations/start", requireAuth, startConversationController);
+router.post("/conversations/delete-bulk", requireAuth, deleteConversationsBulkController);
 router.get("/conversations/:id/messages", requireAuth, listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);

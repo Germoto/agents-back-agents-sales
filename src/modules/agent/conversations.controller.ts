@@ -13,6 +13,7 @@ import {
   getConversationCustomerId,
   resetConversation,
   deleteConversation,
+  deleteConversations,
   notifyOwner,
   scheduleManualReminder,
 } from "./conversation.service";
@@ -113,6 +114,16 @@ export const deleteConversationController = asyncHandler(async (req: Request, re
   const companyId = req.user!.companyId;
   await deleteConversation(companyId, String(req.params.id));
   res.json({ success: true });
+});
+
+// Eliminación masiva: borra las conversaciones que pasen los guards (pago) y
+// reporta las omitidas con su motivo.
+export const deleteConversationsBulkController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const ids = Array.isArray(req.body?.ids) ? (req.body.ids as unknown[]).map(String) : [];
+  if (!ids.length) throw new AppError("No se enviaron conversaciones a eliminar", 400);
+  const result = await deleteConversations(companyId, ids);
+  res.json({ success: true, ...result });
 });
 
 // Reset desde el panel: igual que el comando "reset" del cliente (borra historial,
