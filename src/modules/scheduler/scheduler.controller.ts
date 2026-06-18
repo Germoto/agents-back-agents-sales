@@ -11,10 +11,11 @@ import {
   listPendingReminders,
   cancelReminderById,
   cancelPendingReminders,
+  cancelRemindersByIds,
   FOLLOWUP_TYPES,
 } from "./scheduler.service";
 
-/** GET /agent/reminders?type=&q= → lista de recordatorios de seguimiento pendientes. */
+/** GET /agent/reminders?type=&q=&productId= → lista de recordatorios de seguimiento pendientes. */
 export const listRemindersController = asyncHandler(async (req: Request, res: Response) => {
   const companyId = req.user!.companyId;
   const typeRaw = String(req.query.type ?? "").toUpperCase();
@@ -22,8 +23,18 @@ export const listRemindersController = asyncHandler(async (req: Request, res: Re
     ? (typeRaw as ScheduledMessageType)
     : undefined;
   const q = String(req.query.q ?? "");
-  const reminders = await listPendingReminders(companyId, { type, q });
+  const productId = String(req.query.productId ?? "");
+  const reminders = await listPendingReminders(companyId, { type, q, productId });
   res.json({ success: true, data: reminders });
+});
+
+/** POST /agent/reminders/cancel-bulk { ids: string[] } → cancela en lote los seleccionados. */
+export const cancelRemindersBulkController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const ids = Array.isArray(req.body?.ids) ? (req.body.ids as unknown[]).map(String) : [];
+  if (!ids.length) throw new AppError("No se enviaron recordatorios a cancelar", 400);
+  const count = await cancelRemindersByIds(companyId, ids);
+  res.json({ success: true, count });
 });
 
 /** POST /agent/reminders/:id/cancel → cancela un recordatorio puntual. */

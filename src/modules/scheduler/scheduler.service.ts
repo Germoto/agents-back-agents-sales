@@ -120,13 +120,27 @@ export async function cancelReminderById(companyId: string, id: string): Promise
 }
 
 /**
+ * Cancela en lote varios recordatorios PENDING por id (selección masiva desde el panel).
+ * Filtra por empresa y solo PENDING; devuelve cuántos canceló.
+ */
+export async function cancelRemindersByIds(companyId: string, ids: string[]): Promise<number> {
+  const clean = [...new Set(ids.map((s) => String(s).trim()).filter(Boolean))];
+  if (!clean.length) return 0;
+  const res = await prisma.scheduledMessage.updateMany({
+    where: { id: { in: clean }, companyId, status: ScheduledMessageStatus.PENDING },
+    data: { status: ScheduledMessageStatus.CANCELLED },
+  });
+  return res.count;
+}
+
+/**
  * Lista los recordatorios de seguimiento PENDING de una empresa (panel "Programados").
  * Excluye los internos (FLOW_TIMEOUT, PAYMENT_RECHECK). Filtro opcional por tipo y por
  * texto (nombre/teléfono del cliente).
  */
 export async function listPendingReminders(
   companyId: string,
-  opts?: { type?: ScheduledMessageType; q?: string },
+  opts?: { type?: ScheduledMessageType; q?: string; productId?: string },
 ): Promise<
   Array<{
     id: string;
@@ -136,15 +150,19 @@ export async function listPendingReminders(
     mediaUrl: string | null;
     customerId: string;
     conversationId: string | null;
+    productId: string | null;
     customer: { name: string | null; phone: string };
   }>
 > {
   const q = (opts?.q ?? "").trim();
+  const productId = (opts?.productId ?? "").trim();
   const rows = await prisma.scheduledMessage.findMany({
     where: {
       companyId,
       status: ScheduledMessageStatus.PENDING,
       type: opts?.type ? opts.type : { in: FOLLOWUP_TYPES },
+      // El productId se guarda en metadata al agendar el recordatorio (scheduleAutoReminders).
+      ...(productId ? { metadata: { path: ["productId"], equals: productId } } : {}),
       ...(q
         ? {
             customer: {
@@ -166,10 +184,16 @@ export async function listPendingReminders(
       mediaUrl: true,
       customerId: true,
       conversationId: true,
+      metadata: true,
       customer: { select: { name: true, phone: true } },
     },
   });
-  return rows;
+  return rows.map(({ metadata, ...r }) => {
+    const pid = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>).productId
+      : null;
+    return { ...r, productId: typeof pid === "string" ? pid : null };
+  });
 }
 
 export function minutesFromNow(minutes: number): Date {

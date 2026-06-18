@@ -22,6 +22,7 @@ import {
   listRemindersController,
   cancelReminderController,
   cancelClientRemindersController,
+  cancelRemindersBulkController,
 } from "../scheduler/scheduler.controller";
 
 const router = Router();
@@ -52,6 +53,7 @@ router.post("/bookings/:id/status", requireAuth, updateBookingStatusController);
 // Recordatorios programados (panel > Recordatorios > Programados): ver y cancelar.
 router.get("/reminders", requireAuth, listRemindersController);
 router.post("/reminders/cancel", requireAuth, cancelClientRemindersController);
+router.post("/reminders/cancel-bulk", requireAuth, cancelRemindersBulkController);
 router.post("/reminders/:id/cancel", requireAuth, cancelReminderController);
 
 export default router;

@@ -6,7 +6,7 @@
  * Reemplaza por completo el workflow de n8n.
  */
 
-import { ScheduledMessageType } from "@prisma/client";
+import { Prisma, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { env } from "../../config/env";
 import { buildBotConfig } from "../bot/bot.service";
@@ -710,6 +710,8 @@ async function scheduleAutoReminders(
   const cart = await summarizeCart(companyId, customerId);
   const pid = cart.items[0]?.productId ?? state.selectedProductId ?? null;
   const product = pid ? config.products.find((p) => p.id === pid || p.slug === pid) : undefined;
+  // Id real del producto (no el slug) para poder filtrar/cancelar recordatorios por producto en el panel.
+  const productId = product?.id ?? null;
   const vars = {
     nombre: await getCustomerName(customerId),
     producto: product?.name,
@@ -725,6 +727,9 @@ async function scheduleAutoReminders(
     const seq = resolveReminderSequence(followup, type, productReminder, vars);
     if (!seq.enabled) return;
     for (const step of seq.steps) {
+      const meta: Record<string, unknown> = {};
+      if (step.mediaType) meta.mediaType = step.mediaType;
+      if (productId) meta.productId = productId;
       await scheduleReminder({
         companyId,
         customerId,
@@ -733,7 +738,7 @@ async function scheduleAutoReminders(
         sendAt: secondsFromNow(step.delaySeconds),
         body: step.message,
         mediaUrl: step.mediaUrl,
-        metadata: step.mediaType ? { mediaType: step.mediaType } : undefined,
+        metadata: Object.keys(meta).length ? (meta as Prisma.InputJsonValue) : undefined,
         timezone: config.business.timezone,
         quietHours: (followup as { quietHours?: unknown } | null)?.quietHours,
       });
