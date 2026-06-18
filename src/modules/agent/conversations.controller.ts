@@ -14,6 +14,7 @@ import {
   resetConversation,
   deleteConversation,
   notifyOwner,
+  scheduleManualReminder,
 } from "./conversation.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
 
@@ -49,6 +50,29 @@ export const pauseConversationController = asyncHandler(async (req: Request, res
   }
 
   res.json({ success: true, data: { paused } });
+});
+
+export const scheduleReminderController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const conversationId = String(req.params.id);
+  const message = String(req.body?.message ?? "").trim();
+  const mediaUrl = req.body?.mediaUrl ? String(req.body.mediaUrl) : null;
+  // Acepta sendAt (ISO) o delayMinutes (relativo a ahora).
+  let sendAt: Date;
+  if (req.body?.sendAt) {
+    sendAt = new Date(String(req.body.sendAt));
+  } else if (req.body?.delayMinutes != null) {
+    sendAt = new Date(Date.now() + Number(req.body.delayMinutes) * 60 * 1000);
+  } else {
+    throw new AppError("Falta la fecha del recordatorio (sendAt o delayMinutes)", 400);
+  }
+  await scheduleManualReminder(companyId, conversationId, {
+    message,
+    sendAt,
+    mediaUrl,
+    mediaType: req.body?.mediaType ? String(req.body.mediaType) : null,
+  });
+  res.json({ success: true });
 });
 
 export const replyConversationController = asyncHandler(async (req: Request, res: Response) => {

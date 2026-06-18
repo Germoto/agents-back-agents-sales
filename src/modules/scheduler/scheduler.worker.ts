@@ -87,15 +87,20 @@ async function processDue(): Promise<void> {
           });
       const status = ((convo?.state as { status?: string } | null)?.status ?? "").toUpperCase();
       const closed = ["PAGADO", "ENTREGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status);
-      if (convo?.botPaused || closed) {
+      // Recordatorio MANUAL (programado por un humano desde el panel): se envía
+      // aunque la conversación esté en atención humana (botPaused) — para eso lo
+      // creó el asesor. Igual se cancela si el cliente ya cerró/compró.
+      const isManual = (msg.metadata as { manual?: boolean } | null)?.manual === true;
+      const cancelForPause = convo?.botPaused && !isManual;
+      if (cancelForPause || closed) {
         await prisma.scheduledMessage.updateMany({
           where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
           data: {
             status: ScheduledMessageStatus.CANCELLED,
-            failureReason: convo?.botPaused ? "conversación en atención humana" : `cliente en estado ${status}`,
+            failureReason: closed ? `cliente en estado ${status}` : "conversación en atención humana",
           },
         });
-        console.log(`[scheduler] recordatorio ${msg.type} cancelado (${convo?.botPaused ? "pausado" : status}) cliente=${msg.customerId}`);
+        console.log(`[scheduler] recordatorio ${msg.type} cancelado (${closed ? status : "pausado"}) cliente=${msg.customerId}`);
         continue;
       }
     }

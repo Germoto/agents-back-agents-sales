@@ -56,6 +56,10 @@ export async function cancelPendingReminders(
       customerId,
       status: ScheduledMessageStatus.PENDING,
       ...(types && types.length ? { type: { in: types } } : {}),
+      // Los recordatorios MANUALES (programados por un humano desde el panel) NO se
+      // cancelan automáticamente al pausar/reiniciar: solo se cancelan a mano desde
+      // "Programados" o por estado cerrado (worker).
+      NOT: { metadata: { path: ["manual"], equals: true } },
     },
     data: { status: ScheduledMessageStatus.CANCELLED },
   });

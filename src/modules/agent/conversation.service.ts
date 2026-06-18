@@ -8,7 +8,7 @@
 
 import { Prisma, ConversationRole, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
-import { cancelPendingReminders } from "../scheduler/scheduler.service";
+import { cancelPendingReminders, scheduleReminder } from "../scheduler/scheduler.service";
 import { env } from "../../config/env";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
@@ -283,6 +283,50 @@ export async function sendHumanReply(companyId: string, conversationId: string, 
     conversationId,
     role: "ADMIN",
     message: text,
+  });
+}
+
+/**
+ * Programa un recordatorio MANUAL desde el panel de Conversaciones (atención
+ * humana). Se marca metadata.manual=true para que el worker lo envíe aunque la
+ * conversación esté en atención humana (botPaused) — a diferencia de los
+ * recordatorios del agente, que se cancelan al pausar. Respeta el horario hábil.
+ */
+export async function scheduleManualReminder(
+  companyId: string,
+  conversationId: string,
+  opts: { message: string; sendAt: Date; mediaUrl?: string | null; mediaType?: string | null },
+) {
+  const convo = await prisma.conversation.findFirst({
+    where: { id: conversationId, companyId },
+    select: { customerId: true, company: { select: { timezone: true } } },
+  });
+  if (!convo) throw new AppError("Conversación no encontrada", 404);
+  const body = (opts.message ?? "").trim();
+  if (!body && !opts.mediaUrl) throw new AppError("El recordatorio necesita un mensaje", 400);
+  if (!(opts.sendAt instanceof Date) || isNaN(opts.sendAt.getTime()) || opts.sendAt.getTime() <= Date.now()) {
+    throw new AppError("La fecha del recordatorio debe ser futura", 400);
+  }
+
+  const followup = await prisma.agentConfig.findUnique({
+    where: { companyId },
+    select: { followupConfig: true },
+  });
+
+  await scheduleReminder({
+    companyId,
+    customerId: convo.customerId,
+    conversationId,
+    type: ScheduledMessageType.CUSTOM,
+    sendAt: opts.sendAt,
+    body,
+    mediaUrl: opts.mediaUrl ?? null,
+    metadata: {
+      manual: true,
+      ...(opts.mediaType ? { mediaType: opts.mediaType } : {}),
+    },
+    timezone: convo.company?.timezone ?? "America/Lima",
+    quietHours: (followup?.followupConfig as { quietHours?: unknown } | null)?.quietHours,
   });
 }
 

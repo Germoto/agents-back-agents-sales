@@ -10,6 +10,7 @@ import {
   resetConversationController,
   deleteConversationController,
   startConversationController,
+  scheduleReminderController,
 } from "./conversations.controller";
 import { listBookingsController, updateBookingStatusController } from "./bookings.controller";
 import {
@@ -35,6 +36,7 @@ router.post("/conversations/start", requireAuth, startConversationController);
 router.get("/conversations/:id/messages", requireAuth, listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);
+router.post("/conversations/:id/reminder", requireAuth, scheduleReminderController);
 router.post("/conversations/:id/reset", requireAuth, resetConversationController);
 router.delete("/conversations/:id", requireAuth, deleteConversationController);
 
