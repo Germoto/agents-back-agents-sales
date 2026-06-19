@@ -119,7 +119,7 @@ export async function simulateTurn(
   companyId: string,
   message: string,
   modeParam?: SimMode,
-): Promise<{ replies: SimMessage[]; reminders: SimReminderPreview[]; trace?: FlowTraceEntry[] }> {
+): Promise<{ replies: SimMessage[]; reminders: SimReminderPreview[]; trace?: FlowTraceEntry[]; notices?: string[] }> {
   const config = await buildBotConfig(companyId);
   const mode: SimMode = modeParam ?? (config.business.botMode === "FLOW" ? "FLOW" : "AI");
   const sim = await loadSimConversation(companyId, mode);
@@ -229,7 +229,9 @@ export async function simulateTurn(
 
   await saveState(sim.conversationId, ctx.state);
   const reminders = await previewReminders(companyId, sim.customerId, ctx.state, config);
-  return { replies, reminders };
+  // Notas de sistema (p. ej. "pasaría a atención humana"): el simulador no ejecuta
+  // los efectos reales pero deja constancia de lo que ocurriría en producción.
+  return { replies, reminders, notices: ctx.adminNotices };
 }
 
 /** Mensajes actuales de la conversación de simulación (para cargar el chat al abrir). */

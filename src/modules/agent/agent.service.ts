@@ -30,7 +30,7 @@ import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, sleep, OUTBOX_GAP_MS } from "./delivery";
 import { runFlowTurn, buildRealFlowIO, trailingUserText } from "../flows/flow-engine";
-import { tryApprovePayment, type TurnContext } from "./agent-tools";
+import { tryApprovePayment, muteCustomerToHuman, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
 import {
@@ -572,6 +572,23 @@ export async function recheckPayment(msg: {
         conversationId,
       });
       await saveState(conversationId, state as ConversationState);
+      // Si el producto está marcado para pasar a humano tras vender, hacerlo también
+      // en este camino de auto-entrega (el modelo no llamó a entregar_producto).
+      if (result.shouldPauseHuman) {
+        await muteCustomerToHuman(msg.companyId, conversationId, md.customerPhone ?? to);
+        const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+        if (adminPhone) {
+          try {
+            await sendText(
+              sender,
+              adminPhone,
+              `✅ Venta entregada a ${md.customerPhone ?? to}. Pasé el chat a atención humana automáticamente (configurado en el producto). Lo ves en Agente IA → Atención humana.`,
+            );
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
       console.log(`[agent] recheckPayment: aprobado y entregado (conv=${conversationId})`);
       return;
     }

@@ -90,19 +90,22 @@ export interface TurnContext {
  *    que se mutea SIEMPRE, saltándose la heurística y el global muteAfterSale (override).
  * Best-effort: nunca rompe la entrega.
  */
-async function maybeMuteAfterSale(ctx: TurnContext, opts: { forced?: boolean } = {}): Promise<void> {
+/**
+ * Núcleo del pase a atención humana: agrega el número del cliente a
+ * AgentConfig.mutedNumbers y pausa el bot. Reutilizable por el agente (tras la
+ * entrega) y por el worker de recheck (auto-entrega). Devuelve true si muteó.
+ * Best-effort: nunca lanza.
+ */
+export async function muteCustomerToHuman(
+  companyId: string,
+  conversationId: string,
+  customerPhone: string,
+): Promise<boolean> {
   try {
-    if (!opts.forced) {
-      const agentCfg = (ctx.config as any).agent ?? {};
-      if (agentCfg.muteAfterSale === false) return;
-      const products = ctx.config.products ?? [];
-      if (products.length !== 1) return;
-    }
-    const digits = ctx.customerPhone.replace(/\D/g, "");
-    if (!digits) return;
-
+    const digits = customerPhone.replace(/\D/g, "");
+    if (!digits) return false;
     const cfg = await prisma.agentConfig.findUnique({
-      where: { companyId: ctx.companyId },
+      where: { companyId },
       select: { mutedNumbers: true },
     });
     const list = Array.isArray(cfg?.mutedNumbers)
@@ -110,22 +113,35 @@ async function maybeMuteAfterSale(ctx: TurnContext, opts: { forced?: boolean } =
       : [];
     if (!list.includes(digits)) {
       await prisma.agentConfig.update({
-        where: { companyId: ctx.companyId },
+        where: { companyId },
         data: { mutedNumbers: [...list, digits] },
       });
     }
-    await setBotPaused(ctx.companyId, ctx.conversationId, true);
-    ctx.adminNotices.push(
-      `✅ Venta entregada a ${ctx.customerPhone}. Pasé el chat a atención humana automáticamente ` +
-        (opts.forced
-          ? `(configurado en el producto).`
-          : `(catálogo de 1 producto, sin producto de enganche).`) +
-        ` Lo ves en Agente IA → Atención humana.`,
-    );
-    console.log(`[agent] muteAfterSale${opts.forced ? "(forzado)" : ""}: ${digits} agregado a atención humana (company=${ctx.companyId})`);
+    await setBotPaused(companyId, conversationId, true);
+    console.log(`[agent] muteCustomerToHuman: ${digits} agregado a atención humana (company=${companyId})`);
+    return true;
   } catch (err) {
-    console.warn("[agent] muteAfterSale falló (se ignora):", err instanceof Error ? err.message : err);
+    console.warn("[agent] muteCustomerToHuman falló (se ignora):", err instanceof Error ? err.message : err);
+    return false;
   }
+}
+
+async function maybeMuteAfterSale(ctx: TurnContext, opts: { forced?: boolean } = {}): Promise<void> {
+  if (!opts.forced) {
+    const agentCfg = (ctx.config as any).agent ?? {};
+    if (agentCfg.muteAfterSale === false) return;
+    const products = ctx.config.products ?? [];
+    if (products.length !== 1) return;
+  }
+  const muted = await muteCustomerToHuman(ctx.companyId, ctx.conversationId, ctx.customerPhone);
+  if (!muted) return;
+  ctx.adminNotices.push(
+    `✅ Venta entregada a ${ctx.customerPhone}. Pasé el chat a atención humana automáticamente ` +
+      (opts.forced
+        ? `(configurado en el producto).`
+        : `(catálogo de 1 producto, sin producto de enganche).`) +
+      ` Lo ves en Agente IA → Atención humana.`,
+  );
 }
 
 const CLOSED_STATUSES = ["ENTREGADO", "PAGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA"];
@@ -231,12 +247,15 @@ function findProductById(ctx: TurnContext, productId: string): BotProduct | unde
 export function buildDeliveryOutbox(
   config: BotConfig,
   productIds: string[],
-): { outbox: OutboxMessage[]; delivered: string[]; offeredCrossSellId: string | null; offeredCatalog: boolean } {
+): { outbox: OutboxMessage[]; delivered: string[]; offeredCrossSellId: string | null; offeredCatalog: boolean; shouldPauseHuman: boolean } {
   const find = (id: string) => config.products.find((p) => p.id === id || p.slug === id);
   const outbox: OutboxMessage[] = [];
   const delivered: string[] = [];
   let offeredCrossSellId: string | null = null;
   let offeredCatalog = false;
+  // Si algún producto entregado está marcado para pasar a atención humana tras la
+  // venta, NO seguimos vendiendo: no ofrecemos cross-sell ni el resto del catálogo.
+  const shouldPauseHuman = productIds.some((id) => (find(id) as { pauseHumanAfterSale?: boolean } | undefined)?.pauseHumanAfterSale === true);
 
   for (const id of productIds) {
     const p = find(id);
@@ -254,7 +273,7 @@ export function buildDeliveryOutbox(
       }
     }
 
-    const crossId = dd.crossSellProductId ?? null;
+    const crossId = shouldPauseHuman ? null : dd.crossSellProductId ?? null;
     if (crossId) {
       const cross = find(crossId);
       if (cross && cross.id !== p.id) {
@@ -281,8 +300,8 @@ export function buildDeliveryOutbox(
 
   // Si NO se ofreció un producto relacionado (cross-sell) y quedan otros productos
   // en el catálogo, invitar (corto) a ver el resto. El cross-sell tiene prioridad:
-  // no apilamos dos ofertas.
-  if (delivered.length && !offeredCrossSellId) {
+  // no apilamos dos ofertas. Si el producto pasa a atención humana, no ofrecemos nada.
+  if (delivered.length && !offeredCrossSellId && !shouldPauseHuman) {
     const deliveredIds = new Set(productIds);
     const remaining = catalogProducts(config.products).filter(
       (p) => !deliveredIds.has(p.id) && !deliveredIds.has(p.slug),
@@ -296,7 +315,7 @@ export function buildDeliveryOutbox(
     }
   }
 
-  return { outbox, delivered, offeredCrossSellId, offeredCatalog };
+  return { outbox, delivered, offeredCrossSellId, offeredCatalog, shouldPauseHuman };
 }
 
 // --------------------------------------------------------------------------
@@ -314,6 +333,8 @@ export interface ApprovePaymentResult {
   deliveryOutbox?: OutboxMessage[];
   delivered?: string[];
   offeredCrossSellId?: string | null;
+  /** El producto entregado tiene pauseHumanAfterSale=ON → el caller debe pasar a humano. */
+  shouldPauseHuman?: boolean;
   /** Si quedó pendiente por timing (el caller decide si agenda el recheck). */
   shouldRecheck?: boolean;
 }
@@ -416,7 +437,7 @@ export async function tryApprovePayment(opts: {
     }
 
     if (opts.deliver) {
-      const { outbox, delivered, offeredCrossSellId } = buildDeliveryOutbox(config, productIds);
+      const { outbox, delivered, offeredCrossSellId, shouldPauseHuman } = buildDeliveryOutbox(config, productIds);
       if (delivered.length) {
         state.status = "ENTREGADO";
         if (offeredCrossSellId) state.offeredCrossSellProductId = offeredCrossSellId;
@@ -425,6 +446,7 @@ export async function tryApprovePayment(opts: {
           deliveryOutbox: outbox,
           delivered,
           offeredCrossSellId,
+          shouldPauseHuman,
           customerMessage: "¡Pago confirmado! ✅ Te entrego tu acceso ahora mismo 👇",
         };
       }
@@ -1135,7 +1157,7 @@ export async function executeTool(
           : [];
       }
 
-      const { outbox: deliveryMsgs, delivered, offeredCrossSellId, offeredCatalog } = buildDeliveryOutbox(ctx.config, ids);
+      const { outbox: deliveryMsgs, delivered, offeredCrossSellId, offeredCatalog, shouldPauseHuman } = buildDeliveryOutbox(ctx.config, ids);
       ctx.outbox.push(...deliveryMsgs);
       const offeredCrossSell = Boolean(offeredCrossSellId);
       if (offeredCrossSellId) {
@@ -1163,20 +1185,25 @@ export async function executeTool(
       }
 
       // Pase a atención humana tras la venta. Dos casos:
-      //  - FORZADO: si alguno de los productos entregados tiene pauseHumanAfterSale=ON,
-      //    se mutea SIEMPRE (aunque haya enganche o varios productos en el catálogo).
+      //  - FORZADO (shouldPauseHuman): el producto tiene pauseHumanAfterSale=ON → se
+      //    mutea SIEMPRE (aunque haya enganche o varios productos en el catálogo).
       //  - DEFAULT: si no se ofreció enganche, aplica la heurística (catálogo de 1, flag
       //    muteAfterSale). El mensaje de entrega de ESTE turno sale normal; el mute
       //    aplica desde el siguiente inbound.
-      if (!ctx.simulate) {
-        const forced = ids.some((pid) => findProductById(ctx, pid)?.pauseHumanAfterSale === true);
-        if (forced || !offeredCrossSell) {
-          await maybeMuteAfterSale(ctx, { forced });
+      if (ctx.simulate) {
+        // En el simulador NO se mutea de verdad (no tocamos mutedNumbers ni pausamos).
+        // Dejamos una nota visible para que el tester sepa qué pasaría en real.
+        if (shouldPauseHuman) {
+          ctx.adminNotices.push("🔇 (Simulación) Aquí el chat pasaría a atención humana porque el producto tiene activado “pasar a humano tras vender”. En real el bot dejaría de responder a este cliente.");
         }
+      } else if (shouldPauseHuman || !offeredCrossSell) {
+        await maybeMuteAfterSale(ctx, { forced: shouldPauseHuman });
       }
 
       // El recordatorio post-venta se programa automáticamente (plantilla configurada).
-      const notaEntrega = offeredCrossSell
+      const notaEntrega = shouldPauseHuman
+        ? "Ya entregué el acceso y los mensajes configurados. Este producto pasa a atención humana tras la venta: NO ofrezcas más productos ni el catálogo, NO agregues cierre ni 'gracias por tu compra'. Deja tu texto final VACÍO; un asesor humano continúa desde aquí."
+        : offeredCrossSell
         ? "Ya entregué el acceso, los mensajes adicionales y al final ofrecí otro producto con una pregunta abierta ('¿Te cuento más?'). NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO para que la conversación quede ABIERTA en esa oferta y el cliente pueda responder."
         : offeredCatalog
         ? "Ya entregué el acceso y los mensajes adicionales, y al final invité al cliente a ver el resto del catálogo. NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO. Si el cliente acepta ('sí', 'muéstrame'), usa enviar_catalogo en el siguiente turno."
