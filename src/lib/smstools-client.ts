@@ -456,22 +456,44 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     return null;
   };
 
+  // Mimetype del adjunto (si SMS Tools lo manda): señal FUERTE de adjunto real, incluso
+  // con caption (un mensaje de texto con foto de perfil no trae mimetype).
+  const mime = (field(body, data, ["mimetype", "mime", "mime_type", "content_type", "contentType"]) ?? "").toLowerCase();
+  const typeFromMime = (): InboundMessage["type"] | null => {
+    if (mime.startsWith("image/")) return "image";
+    if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+    if (mime.includes("pdf") || mime.startsWith("application/")) return "document";
+    return null;
+  };
+
+  // Tipo inferido de la extensión de la URL (cuando no hay type ni mimetype).
+  const typeFromUrl = (url: string): InboundMessage["type"] => {
+    const u = url.toLowerCase().split(/[?#]/)[0];
+    if (/\.(pdf|docx?|xlsx?|pptx?|txt)$/.test(u)) return "document";
+    if (/\.(mp4|mov|webm|mkv|avi|3gp)$/.test(u)) return "video";
+    if (/\.(ogg|opus|mp3|m4a|aac|wav)$/.test(u)) return "audio";
+    return "image";
+  };
+
   // Detección robusta (no depende del valor exacto de data[type] de SMS Tools):
-  // 1) tipo media explícito → ese tipo; 2) campo adjunto-específico → media aunque
-  // haya caption; 3) campo ambiguo SIN texto → es una imagen sola (comprobante).
-  const explicitMediaType = typeFromRaw();
+  // 1) tipo media explícito o mimetype → ese tipo (con o sin caption);
+  // 2) campo adjunto-específico (attachment/media/...) → adjunto real AUNQUE haya
+  //    caption (esos campos nunca traen la foto de perfil);
+  // 3) campo ambiguo (image/url) SIN texto → imagen sola (comprobante). Con texto se
+  //    ignora: ahí SMS Tools manda la foto de perfil del remitente.
+  const mediaType = typeFromRaw() ?? typeFromMime();
   let type: InboundMessage["type"] = "text";
   let mediaUrl: string | null = null;
-  if (explicitMediaType) {
-    // Tipo de media explícito de SMS Tools → es un adjunto real (con o sin caption).
-    type = explicitMediaType;
+  if (mediaType) {
+    type = mediaType;
     mediaUrl = attachmentUrl ?? ambiguousUrl;
-  } else if (!hasText && (attachmentUrl ?? ambiguousUrl)) {
-    // SIN texto: un URL suelto es el adjunto real (imagen/comprobante). CON texto NO
-    // inferimos media: SMS Tools adjunta la foto de perfil del remitente en campos de
-    // URL (media/attachment/image/url) en TODOS los inbound, incluidos los de texto.
-    type = "image";
-    mediaUrl = attachmentUrl ?? ambiguousUrl;
+  } else if (attachmentUrl) {
+    type = typeFromUrl(attachmentUrl);
+    mediaUrl = attachmentUrl;
+  } else if (!hasText && ambiguousUrl) {
+    type = typeFromUrl(ambiguousUrl);
+    mediaUrl = ambiguousUrl;
   }
 
   const fromMeRaw = (field(body, data, ["fromMe", "from_me", "self", "outgoing", "direction"]) ?? "").toLowerCase();
@@ -480,7 +502,7 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
 
   // Diagnóstico: qué tipo trae SMS Tools y qué detectamos (sin volcar datos).
   console.log(
-    `[inbound] rawType="${rawType}" detected=${type} media=${mediaUrl ? "yes" : "no"} hasText=${hasText} keys=${Object.keys(data).join(",") || Object.keys(body).join(",")}`,
+    `[inbound] rawType="${rawType}" mime="${mime}" detected=${type} media=${mediaUrl ? "yes" : "no"} hasText=${hasText} keys=${Object.keys(data).join(",") || Object.keys(body).join(",")}`,
   );
 
   return {
