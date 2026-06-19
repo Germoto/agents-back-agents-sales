@@ -37,6 +37,7 @@ export async function getCustomer(companyId: string, customerId: string) {
 }
 
 export interface UpdateCustomerInput {
+  phone?: string;
   name?: string | null;
   email?: string | null;
   sexo?: string | null;
@@ -59,9 +60,26 @@ export async function updateCustomer(companyId: string, customerId: string, data
     if (!product) throw new AppError("Producto no encontrado", 404);
   }
 
+  // Corregir el número del chat (a veces el gateway entrega un número mal). Se
+  // normaliza a "+<dígitos>" (mismo formato que usa el upsert del inbound, para que
+  // futuros mensajes entrantes/salientes calcen) y se evita chocar con otro contacto.
+  let phoneUpdate: string | undefined;
+  if (data.phone !== undefined) {
+    const digits = data.phone.replace(/\D/g, "");
+    if (digits.length < 8) throw new AppError("El número debe tener al menos 8 dígitos (con código de país)", 400);
+    const normalized = `+${digits}`;
+    const clash = await prisma.customer.findFirst({
+      where: { companyId, phone: normalized, NOT: { id: customerId } },
+      select: { id: true },
+    });
+    if (clash) throw new AppError("Ya existe otro contacto con ese número en tu cuenta", 409);
+    phoneUpdate = normalized;
+  }
+
   await prisma.customer.update({
     where: { id: customerId },
     data: {
+      phone: phoneUpdate ?? undefined,
       name: data.name ?? undefined,
       email: data.email ?? undefined,
       sexo: data.sexo ?? undefined,

@@ -1,6 +1,9 @@
 import { z } from "zod";
 
 export const updateCustomerSchema = z.object({
+  // El número del chat se puede corregir (a veces el gateway entrega un número mal).
+  // Se normaliza y valida en el servicio. No nullable: un contacto siempre tiene número.
+  phone: z.string().trim().max(24).optional(),
   name: z.string().trim().max(120).nullable().optional(),
   email: z.string().trim().max(160).nullable().optional(),
   sexo: z.string().trim().max(20).nullable().optional(),
