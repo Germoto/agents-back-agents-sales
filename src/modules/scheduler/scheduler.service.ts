@@ -44,23 +44,35 @@ export async function scheduleReminder(opts: {
 /**
  * Cancela recordatorios PENDING de un cliente (evita follow-ups obsoletos
  * cuando el cliente vuelve a responder). Si se pasan tipos, solo esos.
+ *
+ * Los recordatorios MANUALES (programados por un humano desde el panel, con
+ * metadata.manual=true) NO se cancelan automáticamente. OJO: el filtro de Prisma
+ * `NOT: { metadata: { path: ["manual"], equals: true } }` NO sirve aquí — para las
+ * filas cuyo metadata NO tiene la clave "manual" (todos los recordatorios
+ * automáticos), el path es NULL y `NOT NULL` es NULL, así que la fila NO matchea y
+ * NO se cancela (la cancelación quedaba sin efecto → recordatorios duplicados/spam).
+ * Por eso filtramos los manuales en JS y cancelamos por lista de ids.
  */
 export async function cancelPendingReminders(
   companyId: string,
   customerId: string,
   types?: ScheduledMessageType[],
 ): Promise<void> {
-  await prisma.scheduledMessage.updateMany({
+  const rows = await prisma.scheduledMessage.findMany({
     where: {
       companyId,
       customerId,
       status: ScheduledMessageStatus.PENDING,
       ...(types && types.length ? { type: { in: types } } : {}),
-      // Los recordatorios MANUALES (programados por un humano desde el panel) NO se
-      // cancelan automáticamente al pausar/reiniciar: solo se cancelan a mano desde
-      // "Programados" o por estado cerrado (worker).
-      NOT: { metadata: { path: ["manual"], equals: true } },
     },
+    select: { id: true, metadata: true },
+  });
+  const isManual = (m: unknown) =>
+    !!m && typeof m === "object" && !Array.isArray(m) && (m as Record<string, unknown>).manual === true;
+  const ids = rows.filter((r) => !isManual(r.metadata)).map((r) => r.id);
+  if (!ids.length) return;
+  await prisma.scheduledMessage.updateMany({
+    where: { id: { in: ids } },
     data: { status: ScheduledMessageStatus.CANCELLED },
   });
 }
