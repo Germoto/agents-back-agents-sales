@@ -70,6 +70,7 @@ export function mapAdminProduct(product: ProductWithRelations) {
     slug: product.slug,
     active: product.active,
     showInCatalog: product.showInCatalog,
+    pauseHumanAfterSale: product.pauseHumanAfterSale,
     productType: product.productType,
     name: product.name,
     price: product.price,
@@ -148,6 +149,7 @@ export function mapBotProduct(
     code: product.slug,           // alias de slug, para uso en n8n
     active: product.active,
     showInCatalog: product.showInCatalog,
+    pauseHumanAfterSale: product.pauseHumanAfterSale,
     productType: product.productType.toLowerCase(),
     name: product.name,
     aliases: product.aliases.map((item) => item.value),

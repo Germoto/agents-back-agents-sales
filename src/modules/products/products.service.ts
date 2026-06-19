@@ -10,6 +10,7 @@ type ProductPayload = {
   slug: string;
   active: boolean;
   showInCatalog?: boolean;
+  pauseHumanAfterSale?: boolean;
   productType?: "DIGITAL" | "PHYSICAL";
   name: string;
   price: string;
@@ -313,6 +314,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         slug: payload.slug,
         active: payload.active,
         showInCatalog: payload.showInCatalog ?? true,
+        pauseHumanAfterSale: payload.pauseHumanAfterSale ?? false,
         productType,
         name: payload.name,
         price: payload.price,
@@ -353,6 +355,7 @@ export async function updateProduct(companyId: string, productId: string, payloa
         slug: payload.slug,
         active: payload.active,
         showInCatalog: payload.showInCatalog ?? true,
+        pauseHumanAfterSale: payload.pauseHumanAfterSale ?? false,
         productType,
         name: payload.name,
         price: payload.price,

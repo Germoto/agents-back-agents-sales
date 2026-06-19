@@ -82,17 +82,22 @@ export interface TurnContext {
 }
 
 /**
- * Tras una entrega exitosa, si la empresa tiene UN solo producto en el catálogo
- * del bot y no se ofreció enganche, agrega al cliente a la lista de atención
- * humana (AgentConfig.mutedNumbers) y pausa el bot. Controlado por el flag
- * `muteAfterSale` (default ON). Best-effort: nunca rompe la entrega.
+ * Tras una entrega exitosa, agrega al cliente a la lista de atención humana
+ * (AgentConfig.mutedNumbers) y pausa el bot. Dos caminos:
+ *  - DEFAULT (heurística): solo si la empresa tiene UN producto en el catálogo del
+ *    bot y no se ofreció enganche, y el flag `muteAfterSale` (default ON) no está OFF.
+ *  - FORZADO (`opts.forced`): el producto vendido tiene `pauseHumanAfterSale=ON`, así
+ *    que se mutea SIEMPRE, saltándose la heurística y el global muteAfterSale (override).
+ * Best-effort: nunca rompe la entrega.
  */
-async function maybeMuteAfterSale(ctx: TurnContext): Promise<void> {
+async function maybeMuteAfterSale(ctx: TurnContext, opts: { forced?: boolean } = {}): Promise<void> {
   try {
-    const agentCfg = (ctx.config as any).agent ?? {};
-    if (agentCfg.muteAfterSale === false) return;
-    const products = ctx.config.products ?? [];
-    if (products.length !== 1) return;
+    if (!opts.forced) {
+      const agentCfg = (ctx.config as any).agent ?? {};
+      if (agentCfg.muteAfterSale === false) return;
+      const products = ctx.config.products ?? [];
+      if (products.length !== 1) return;
+    }
     const digits = ctx.customerPhone.replace(/\D/g, "");
     if (!digits) return;
 
@@ -112,9 +117,12 @@ async function maybeMuteAfterSale(ctx: TurnContext): Promise<void> {
     await setBotPaused(ctx.companyId, ctx.conversationId, true);
     ctx.adminNotices.push(
       `✅ Venta entregada a ${ctx.customerPhone}. Pasé el chat a atención humana automáticamente ` +
-        `(catálogo de 1 producto, sin producto de enganche). Lo ves en Agente IA → Atención humana.`,
+        (opts.forced
+          ? `(configurado en el producto).`
+          : `(catálogo de 1 producto, sin producto de enganche).`) +
+        ` Lo ves en Agente IA → Atención humana.`,
     );
-    console.log(`[agent] muteAfterSale: ${digits} agregado a atención humana (company=${ctx.companyId})`);
+    console.log(`[agent] muteAfterSale${opts.forced ? "(forzado)" : ""}: ${digits} agregado a atención humana (company=${ctx.companyId})`);
   } catch (err) {
     console.warn("[agent] muteAfterSale falló (se ignora):", err instanceof Error ? err.message : err);
   }
@@ -1154,12 +1162,17 @@ export async function executeTool(
         }
       }
 
-      // Cierre total: si el catálogo tiene UN solo producto y no se ofreció
-      // enganche, no queda nada más que vender — pasar al cliente a la lista de
-      // atención humana (flag muteAfterSale, default ON). El mensaje de entrega
-      // de ESTE turno sale normal; el mute aplica desde el siguiente inbound.
-      if (!ctx.simulate && !offeredCrossSell) {
-        await maybeMuteAfterSale(ctx);
+      // Pase a atención humana tras la venta. Dos casos:
+      //  - FORZADO: si alguno de los productos entregados tiene pauseHumanAfterSale=ON,
+      //    se mutea SIEMPRE (aunque haya enganche o varios productos en el catálogo).
+      //  - DEFAULT: si no se ofreció enganche, aplica la heurística (catálogo de 1, flag
+      //    muteAfterSale). El mensaje de entrega de ESTE turno sale normal; el mute
+      //    aplica desde el siguiente inbound.
+      if (!ctx.simulate) {
+        const forced = ids.some((pid) => findProductById(ctx, pid)?.pauseHumanAfterSale === true);
+        if (forced || !offeredCrossSell) {
+          await maybeMuteAfterSale(ctx, { forced });
+        }
       }
 
       // El recordatorio post-venta se programa automáticamente (plantilla configurada).

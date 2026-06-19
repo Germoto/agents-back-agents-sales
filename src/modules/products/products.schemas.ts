@@ -36,6 +36,8 @@ export const productBodySchema = z.object({
   slug: z.string().min(1),
   active: z.boolean().default(true),
   showInCatalog: z.boolean().default(true),
+  // Si ON, tras vender este producto el bot pasa el chat a atención humana (override).
+  pauseHumanAfterSale: z.boolean().default(false),
   // Opcional: el backend lo deriva de Company.vertical. Para OTHER se respeta el enviado.
   productType: z.enum(["DIGITAL", "PHYSICAL"]).optional(),
   name: z.string().min(1),

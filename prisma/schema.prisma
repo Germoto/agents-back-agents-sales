@@ -262,6 +262,10 @@ model Product {
   // Visibilidad en el catálogo. Un producto puede estar activo (vendible) pero
   // oculto del catálogo: solo se ofrece como relacionado (cross-sell) o si lo nombran.
   showInCatalog    Boolean               @default(true)
+  // Si está ON, tras entregar este producto el bot pasa el chat a atención humana
+  // automáticamente, FORZANDO el mute aunque haya producto de enganche o varios
+  // productos en el catálogo (override de la heurística por defecto AgentConfig.muteAfterSale).
+  pauseHumanAfterSale Boolean             @default(false)
   productType      ProductType
   name             String
   price            String
