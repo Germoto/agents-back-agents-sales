@@ -78,6 +78,53 @@ async function resolveCompanyByAccount(account: string | null): Promise<string |
 }
 
 /**
+ * Igualdad de teléfono SEGURA para verificar la sesión (anti-colisión).
+ * A diferencia de `isPhoneAllowed`/`phoneMatches` (sufijo laxo), solo acepta:
+ *  - igualdad exacta normalizada, o
+ *  - un hueco de código de país (1..3 dígitos) sobre un núcleo largo (>=9),
+ *    ej. `51928818265` vs `928818265`. Así evitamos que un wid ajeno con sufijo
+ *    parecido se cuele.
+ */
+function sessionPhoneEquals(a: string, b: string): boolean {
+  const da = a.replace(/\D/g, "");
+  const db = b.replace(/\D/g, "");
+  if (!da || !db) return false;
+  if (da === db) return true;
+  const [short, long] = da.length <= db.length ? [da, db] : [db, da];
+  const gap = long.length - short.length;
+  if (gap >= 1 && gap <= 3 && short.length >= 9 && long.endsWith(short)) return true;
+  return false;
+}
+
+/**
+ * Verifica que el inbound pertenezca REALMENTE a la sesión (número de WhatsApp)
+ * de la empresa ya resuelta. No busca la empresa: confirma que el `companyId`
+ * resuelto es el dueño del número que recibió el mensaje. Una sola consulta a BD,
+ * sin llamar a SMS Tools.
+ *  (a) si vino `account` → debe coincidir EXACTO con WhatsappConfig.account;
+ *  (b) si no, el wid (data[wid]) debe coincidir con el User.phone del admin;
+ *  (c) sin account ni wid → no verificable → descartar (fail-closed).
+ */
+async function verifyInboundSession(companyId: string, inbound: InboundMessage): Promise<boolean> {
+  if (inbound.account) {
+    const cfg = await prisma.whatsappConfig.findFirst({
+      where: { companyId, isActive: true },
+      select: { account: true },
+    });
+    return !!cfg?.account && cfg.account === inbound.account;
+  }
+  if (inbound.businessPhone) {
+    const businessPhone = inbound.businessPhone;
+    const users = await prisma.user.findMany({
+      where: { companyId, isActive: true },
+      select: { phone: true },
+    });
+    return users.some((u) => sessionPhoneEquals(u.phone, businessPhone));
+  }
+  return false;
+}
+
+/**
  * Resuelve el tenant del mensaje entrante. Prioridad:
  *  1) account SMS Tools si vino en el payload (raro en inbound),
  *  2) businessPhone (numero propio del negocio = data[wid]) contra el phone del
@@ -114,6 +161,20 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   if (!companyId) {
     console.warn(
       `[agent] no se resolvió empresa (account=${inbound.account ?? "-"}, business=${inbound.businessPhone ?? "-"})`,
+    );
+    return;
+  }
+
+  // GATE de sesión: solo procesamos mensajes que llegaron al PROPIO número de la
+  // empresa (su sesión de WhatsApp). Mensajes de otro número se descartan ANTES de
+  // persistir: no se guardan, no crean conversación y no se ven en Conversaciones.
+  const belongs = await verifyInboundSession(companyId, inbound);
+  if (!belongs) {
+    console.warn(
+      `[agent] DROP inbound: no pertenece a la sesión de la empresa ` +
+        `(company=${companyId} account=${inbound.account ?? "-"} ` +
+        `business=${inbound.businessPhone ?? "-"} from=${inbound.fromPhone ?? "-"} ` +
+        `msgId=${inbound.messageId ?? "-"})`,
     );
     return;
   }
