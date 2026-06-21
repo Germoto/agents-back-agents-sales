@@ -33,6 +33,7 @@ import { runFlowTurn, buildRealFlowIO, trailingUserText } from "../flows/flow-en
 import { tryApprovePayment, muteCustomerToHuman, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
+import { getLinkedPhone } from "../whatsapp-config/whatsapp-config.service";
 import {
   scheduleReminder,
   cancelPendingReminders,
@@ -96,14 +97,43 @@ function sessionPhoneEquals(a: string, b: string): boolean {
   return false;
 }
 
+// Cache del teléfono de la cuenta vinculada (getLinkedPhone llama a SMS Tools).
+// Evita una llamada de red por cada inbound; se refresca cada SESSION_PHONE_TTL_MS
+// y conserva el último valor conocido si SMS Tools falla (no descartar todo en outage).
+const SESSION_PHONE_TTL_MS = 10 * 60 * 1000;
+const sessionPhoneCache = new Map<string, { digits: string; ts: number }>();
+
+/** Dígitos del teléfono de la sesión (cuenta vinculada), igual que filtra WA API. */
+async function getSessionPhoneDigits(companyId: string): Promise<string | null> {
+  const cached = sessionPhoneCache.get(companyId);
+  if (cached && Date.now() - cached.ts < SESSION_PHONE_TTL_MS) return cached.digits;
+  let phone: string | null = null;
+  try {
+    phone = await getLinkedPhone(companyId);
+  } catch {
+    phone = null;
+  }
+  if (phone) {
+    const digits = phone.replace(/\D/g, "");
+    if (digits) {
+      sessionPhoneCache.set(companyId, { digits, ts: Date.now() });
+      return digits;
+    }
+  }
+  // Sin valor nuevo (outage o sin cuenta vinculada): usar el último conocido.
+  return cached?.digits ?? null;
+}
+
 /**
- * Verifica que el inbound pertenezca REALMENTE a la sesión (número de WhatsApp)
- * de la empresa ya resuelta. No busca la empresa: confirma que el `companyId`
- * resuelto es el dueño del número que recibió el mensaje. Una sola consulta a BD,
- * sin llamar a SMS Tools.
+ * Verifica que el inbound pertenezca a la SESIÓN (cuenta de WhatsApp vinculada)
+ * de la empresa ya resuelta. Filtra TAL CUAL las pestañas de WhatsApp API: la
+ * fuente de verdad es la cuenta vinculada (WhatsappConfig.account → getLinkedPhone),
+ * NO el User.phone del admin. Así, si la empresa tiene varios números vinculados,
+ * solo entra el de la sesión configurada; los demás se descartan.
  *  (a) si vino `account` → debe coincidir EXACTO con WhatsappConfig.account;
- *  (b) si no, el wid (data[wid]) debe coincidir con el User.phone del admin;
- *  (c) sin account ni wid → no verificable → descartar (fail-closed).
+ *  (b) si no, el número receptor (wid) debe ser el de la cuenta vinculada;
+ *  (c) sin cuenta vinculada conocida → fallback a User.phone (no descartar todo);
+ *  (d) sin account ni wid → no verificable → descartar (fail-closed).
  */
 async function verifyInboundSession(companyId: string, inbound: InboundMessage): Promise<boolean> {
   if (inbound.account) {
@@ -115,6 +145,9 @@ async function verifyInboundSession(companyId: string, inbound: InboundMessage):
   }
   if (inbound.businessPhone) {
     const businessPhone = inbound.businessPhone;
+    const sessionDigits = await getSessionPhoneDigits(companyId);
+    if (sessionDigits) return sessionPhoneEquals(sessionDigits, businessPhone);
+    // Fallback: sin cuenta vinculada conocida (o SMS Tools caído) → User.phone.
     const users = await prisma.user.findMany({
       where: { companyId, isActive: true },
       select: { phone: true },
@@ -170,9 +203,10 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   // persistir: no se guardan, no crean conversación y no se ven en Conversaciones.
   const belongs = await verifyInboundSession(companyId, inbound);
   if (!belongs) {
+    const sessionDigits = await getSessionPhoneDigits(companyId).catch(() => null);
     console.warn(
       `[agent] DROP inbound: no pertenece a la sesión de la empresa ` +
-        `(company=${companyId} account=${inbound.account ?? "-"} ` +
+        `(company=${companyId} session=${sessionDigits ?? "-"} account=${inbound.account ?? "-"} ` +
         `business=${inbound.businessPhone ?? "-"} from=${inbound.fromPhone ?? "-"} ` +
         `msgId=${inbound.messageId ?? "-"})`,
     );

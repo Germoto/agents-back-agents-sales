@@ -313,7 +313,7 @@ async function fetchAndPaginate<T extends { account?: string | null }>(
 }
 
 /** Resuelve el teléfono real (+51...) de la cuenta `unique` almacenada en config. */
-async function getLinkedPhone(companyId: string): Promise<string | null> {
+export async function getLinkedPhone(companyId: string): Promise<string | null> {
   const config = await prisma.whatsappConfig.findUnique({
     where: { companyId },
     select: { account: true },
