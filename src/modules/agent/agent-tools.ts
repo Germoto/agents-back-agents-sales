@@ -1040,12 +1040,16 @@ export async function executeTool(
         return JSON.stringify({ ok: true, approved: true, note: "(simulación) Pago aprobado. Ahora entrega el producto con entregar_producto." });
       }
 
-      const payerName = String(args.payerName ?? "").trim();
       // La llave es el CÓDIGO DE SEGURIDAD (solo Yape→Yape); ValidPay lo manda como
       // "Nombre (cód: xxx)". En otros casos no hay código → se valida por nombre.
       const codes = [ctx.state.lastReceipt?.securityCode]
         .map((c) => (c ?? "").trim())
         .filter(Boolean) as string[];
+      // Si la captura trae código, validamos SOLO por el código e IGNORAMOS el texto
+      // que el cliente haya mandado (ej. "Mio personal"): ese texto no es un nombre de
+      // titular útil y solo ensucia las ramas de confusión/intentos. Sin código (Plin)
+      // sí usamos el nombre que el cliente dé.
+      const payerName = codes.length ? "" : String(args.payerName ?? "").trim();
 
       // Monto esperado (para el match y el recheck).
       const cartVp = await summarizeCart(ctx.companyId, ctx.customerId);

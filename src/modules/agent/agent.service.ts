@@ -327,7 +327,20 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     `[agent] inbound de ${inbound.fromPhone}: type=${inbound.type} media=${inbound.mediaUrl ? "yes" : "no"} textLen=${(inbound.text ?? "").trim().length} pay=${paymentsEnabled} payCtx=${isPaymentContext(convo.state)}`,
   );
   if (inbound.mediaUrl && inbound.type !== "text" && paymentsEnabled) {
-    await handleReceiptImage(companyId, config, convo, inbound);
+    // Marca que hay un comprobante leyéndose para esta conversación: el turno del
+    // agente debe ESPERAR a que termine (y se guarde el código en lastReceipt) antes
+    // de validar. Si no, un texto que llega aparte (ej. "Listo") dispara su turno con
+    // el debounce ANTES de que la visión guarde el código → valida con code=[] →
+    // pide el nombre del titular en vano → bucle. (race del debounce vs. visión)
+    const rk = convo.conversationId;
+    receiptReadsInFlight.set(rk, (receiptReadsInFlight.get(rk) ?? 0) + 1);
+    try {
+      await handleReceiptImage(companyId, config, convo, inbound);
+    } finally {
+      const n = (receiptReadsInFlight.get(rk) ?? 1) - 1;
+      if (n > 0) receiptReadsInFlight.set(rk, n);
+      else receiptReadsInFlight.delete(rk);
+    }
   }
 
   // El cliente respondió => cancelar follow-ups de silencio/abandono pendientes.
@@ -391,6 +404,16 @@ interface PendingTurn {
 
 const pendingTurns = new Map<string, PendingTurn>();
 
+// Comprobantes (imágenes) que se están leyendo con visión, por conversación. Mientras
+// haya uno en vuelo, el turno del agente se DIFIERE: debe ver el código leído
+// (state.lastReceipt) antes de validar. Clave = conversationId. In-memory ⇒
+// single-instance, igual que pendingTurns.
+const receiptReadsInFlight = new Map<string, number>();
+// Veces que un turno se difirió esperando una lectura de comprobante; tope de
+// seguridad para que una visión colgada nunca bloquee el turno indefinidamente.
+const turnDeferrals = new Map<string, number>();
+const MAX_TURN_DEFERRALS = 10; // ~15s (10 × 1500ms)
+
 function scheduleTurn(job: TurnJob): void {
   const key = job.conversationId;
   let p = pendingTurns.get(key);
@@ -417,6 +440,21 @@ function scheduleTurn(job: TurnJob): void {
 async function fireTurn(key: string): Promise<void> {
   const p = pendingTurns.get(key);
   if (!p) return;
+
+  // Si hay un comprobante leyéndose para esta conversación, espera: el turno debe
+  // ver el código (state.lastReceipt) antes de validar. Re-arma el timer corto y
+  // sale sin correr. Tope de seguridad por si la visión se cuelga.
+  const deferrals = turnDeferrals.get(key) ?? 0;
+  if ((receiptReadsInFlight.get(key) ?? 0) > 0 && deferrals < MAX_TURN_DEFERRALS) {
+    turnDeferrals.set(key, deferrals + 1);
+    console.log(`[agent] turno diferido (comprobante en lectura) convo=${key} intento=${deferrals + 1}`);
+    p.timer = setTimeout(() => {
+      void fireTurn(key);
+    }, 1500);
+    return;
+  }
+  turnDeferrals.delete(key);
+
   p.timer = null;
   p.running = true;
   p.dirty = false;
