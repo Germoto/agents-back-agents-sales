@@ -1062,13 +1062,20 @@ export async function executeTool(
       // (showInPresentation) en lugar de depender de que el modelo encadene
       // enviar_multimedia después (a veces lo omitía → la ficha llegaba sin media).
       const fichaMedia = pushPresentationMedia(ctx, product);
+      // Solo STREAMER: la ficha ya incluye la lista "Planes y precios"; refuerzo para
+      // que el modelo NO la reescriba en su texto (causaba duplicado). No afecta otros rubros.
+      const streamerNota =
+        (ctx.config.business as { vertical?: string }).vertical === "STREAMER"
+          ? " La lista de planes y precios YA fue enviada en la ficha: NO la reescribas en tu texto; responde solo con UNA frase breve para que elija (ej. '¿Cuál te interesa?')."
+          : "";
       return JSON.stringify({
         ok: true,
         sent: true,
         mediaSent: fichaMedia,
-        nota: fichaMedia
-          ? "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) Y la multimedia de presentación al cliente. NO los repitas ni describas su contenido en tu texto final; cierra con UNA frase breve preguntando si lo quiere."
-          : "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) al cliente. NO la repitas en tu texto final.",
+        nota:
+          (fichaMedia
+            ? "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) Y la multimedia de presentación al cliente. NO los repitas ni describas su contenido en tu texto final; cierra con UNA frase breve preguntando si lo quiere."
+            : "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) al cliente. NO la repitas en tu texto final.") + streamerNota,
       });
     }
 
