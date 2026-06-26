@@ -108,8 +108,15 @@ export async function buildBotConfig(companyId: string, account?: string) {
   // requiere entrega (reserva del agente).
   const vertical = whatsappConfig.company.vertical;
   for (const product of botMode === "FLOW" ? [] : products) {
-    if ((vertical === "INFOPRODUCT" || vertical === "STREAMER") && product.productType === "DIGITAL" && !product.digitalDelivery?.instructions?.trim()) {
-      throw new AppError(`El producto digital ${product.slug} no tiene mensaje de entrega configurado`, 422);
+    if ((vertical === "INFOPRODUCT" || vertical === "STREAMER") && product.productType === "DIGITAL") {
+      // El mensaje de entrega (instructions) solo es obligatorio en modo STATIC (mensaje
+      // fijo). En POOL_AUTO la entrega usa la credencial del inventario (plantilla opcional)
+      // y en MANUAL la entrega la hace un asesor → no requieren instructions. Exigirlo a
+      // todos rompía el agente de la empresa cuando había un producto MANUAL/POOL_AUTO.
+      const mode = (product.digitalDelivery as { assignmentMode?: string } | null)?.assignmentMode ?? "STATIC";
+      if (mode === "STATIC" && !product.digitalDelivery?.instructions?.trim()) {
+        throw new AppError(`El producto digital ${product.slug} no tiene mensaje de entrega configurado`, 422);
+      }
     }
     if (vertical === "PHYSICAL_GOODS" && product.productType === "PHYSICAL" && !product.physicalDelivery) {
       throw new AppError(`El producto fisico ${product.slug} no tiene physicalDelivery`, 422);
