@@ -310,6 +310,7 @@ model Product {
   digitalSales     DigitalSale[]
   paymentReceipts  PaymentReceipt[]
   serviceBookings  ServiceBooking[]
+  streamingCredentials StreamingCredential[]
 
   @@unique([companyId, slug])
   @@index([companyId, active, sortOrder])
@@ -392,6 +393,10 @@ model DigitalDelivery {
   productId    String  @unique @db.Uuid
   link         String
   instructions String
+  // Modo de entrega del acceso (streaming): STATIC = mensaje fijo igual para todos
+  // (comportamiento por defecto, infoproducto); POOL_AUTO = toma una credencial del
+  // inventario y la asigna; MANUAL = avisa al vendedor para entrega manual.
+  assignmentMode DeliveryAssignmentMode @default(STATIC)
   // Mensajes adicionales opcionales tras la entrega: array de {message,mediaUrl,mediaType}.
   followupMessages  Json    @default("[]")
   // Legacy (single) — conservados por compat; el array de arriba es la fuente de verdad.
@@ -432,6 +437,49 @@ model ProductVariant {
   options   Json
   sortOrder Int
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+// Modo de entrega del acceso digital (por producto, en DigitalDelivery).
+enum DeliveryAssignmentMode {
+  STATIC    // mensaje fijo igual para todos (default; infoproducto)
+  POOL_AUTO // toma una credencial del inventario y la asigna al aprobar el pago
+  MANUAL    // el bot no entrega; avisa al vendedor para entrega manual
+}
+
+enum StreamingCredentialStatus {
+  AVAILABLE // libre, lista para asignar
+  ASSIGNED  // ya entregada a un cliente
+  DOWN      // cuenta caída/reportada (no asignar)
+  DISABLED  // dada de baja
+}
+
+// Inventario de credenciales/cuentas/perfiles (streaming). Cada fila es una unidad
+// vendible (un perfil o una cuenta completa) que abastece a un producto/plan.
+model StreamingCredential {
+  id                     String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId              String                    @db.Uuid
+  productId              String                    @db.Uuid
+  // Modalidad/plan que cubre (ej. "Mensual por perfil"). null = sirve para cualquier plan del producto.
+  optionLabel            String?
+  // Payload de entrega (lo que se envía al cliente).
+  email                  String?
+  username               String?
+  password               String?
+  profileName            String?
+  pin                    String?
+  extra                  String?
+  // Estado / asignación.
+  status                 StreamingCredentialStatus @default(AVAILABLE)
+  assignedCustomerId     String?                   @db.Uuid
+  assignedConversationId String?                   @db.Uuid
+  assignedAt             DateTime?
+  expiresAt              DateTime?                 // vencimiento de ESTA asignación
+  note                   String?
+  createdAt              DateTime                  @default(now())
+  updatedAt              DateTime                  @updatedAt
+  product                Product                   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, productId, status])
 }
 
 model Customer {

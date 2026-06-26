@@ -705,18 +705,20 @@ export async function recheckPayment(msg: {
         conversationId,
       });
       await saveState(conversationId, state as ConversationState);
-      // Si el producto está marcado para pasar a humano tras vender, hacerlo también
-      // en este camino de auto-entrega (el modelo no llamó a entregar_producto).
+      // Pasar a atención humana en este camino de auto-entrega (el modelo no llamó a
+      // entregar_producto): por pauseHumanAfterSale, o por entrega manual / sin stock.
       if (result.shouldPauseHuman) {
         await muteCustomerToHuman(msg.companyId, conversationId, md.customerPhone ?? to);
         const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
         if (adminPhone) {
+          const manual = result.manualNeeded ?? [];
+          const adminMsg = manual.length
+            ? `🔔 Pago confirmado de ${md.customerPhone ?? to}. Falta ENTREGAR MANUALMENTE: ${manual.join(", ")}.` +
+              (result.outOfStock?.length ? ` ⚠️ SIN STOCK en inventario: ${result.outOfStock.join(", ")}.` : "") +
+              ` El chat quedó en atención humana (Agente IA → Atención humana).`
+            : `✅ Venta entregada a ${md.customerPhone ?? to}. Pasé el chat a atención humana automáticamente (configurado en el producto). Lo ves en Agente IA → Atención humana.`;
           try {
-            await sendText(
-              sender,
-              adminPhone,
-              `✅ Venta entregada a ${md.customerPhone ?? to}. Pasé el chat a atención humana automáticamente (configurado en el producto). Lo ves en Agente IA → Atención humana.`,
-            );
+            await sendText(sender, adminPhone, adminMsg);
           } catch {
             /* best-effort */
           }

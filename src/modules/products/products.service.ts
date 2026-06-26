@@ -48,6 +48,7 @@ type ProductPayload = {
   digitalDelivery?: {
     link?: string;
     instructions?: string;
+    assignmentMode?: "STATIC" | "POOL_AUTO" | "MANUAL";
     followupMessages?: { message?: string; mediaUrl?: string; mediaType?: string }[];
     followupMessage?: string;
     followupMediaUrl?: string;
@@ -232,6 +233,7 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
     const dd = {
       link: payload.digitalDelivery.link ?? "",
       instructions: payload.digitalDelivery.instructions ?? "",
+      assignmentMode: payload.digitalDelivery.assignmentMode ?? "STATIC",
       followupMessages: (payload.digitalDelivery.followupMessages ?? [])
         .map((m) => ({
           message: (m.message ?? "").trim(),

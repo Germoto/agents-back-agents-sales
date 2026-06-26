@@ -74,6 +74,7 @@ export const productBodySchema = z.object({
   digitalDelivery: z.object({
     link: z.string().optional().default(""),
     instructions: z.string().optional().default(""),
+    assignmentMode: z.enum(["STATIC", "POOL_AUTO", "MANUAL"]).optional().default("STATIC"),
     // Mensajes adicionales opcionales tras la entrega (cada uno media + texto) y cross-sell.
     followupMessages: z
       .array(

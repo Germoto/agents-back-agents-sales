@@ -199,6 +199,7 @@ export function mapBotProduct(
         ? {
             link: product.digitalDelivery?.link ?? null,
             instructions: product.digitalDelivery?.instructions ?? null,
+            assignmentMode: product.digitalDelivery?.assignmentMode ?? "STATIC",
             followupMessages: normalizeFollowups(product.digitalDelivery),
             crossSellProductId: product.digitalDelivery?.crossSellProductId ?? null,
             crossSellPitch: product.digitalDelivery?.crossSellPitch ?? null,

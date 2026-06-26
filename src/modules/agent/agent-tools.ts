@@ -28,6 +28,7 @@ import {
 import { createAgentOrder, createOrderFromCart } from "./order.service";
 import { createBooking } from "./booking.service";
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
+import { claimAvailableCredential, countAvailable } from "../streaming-inventory/streaming-inventory.service";
 
 /** Comparación laxa de nombres (acentos/orden) para detectar confusión de titular. */
 function looseNameNorm(s: string): string {
@@ -244,64 +245,171 @@ function findProductById(ctx: TurnContext, productId: string): BotProduct | unde
  * sender desde el worker). Devuelve el outbox, los nombres entregados y el id del
  * producto de cross-sell ofrecido (si hubo).
  */
-export function buildDeliveryOutbox(
+// Empuja los mensajes adicionales (followups) de una entrega digital.
+function pushFollowups(outbox: OutboxMessage[], dd: NonNullable<BotProduct["digitalDelivery"]>): void {
+  for (const f of dd.followupMessages ?? []) {
+    const text = (f.message ?? "").trim();
+    const media = (f.mediaUrl ?? "").trim();
+    if (media) {
+      outbox.push({ kind: "media", mediaUrl: media, mediaKind: mediaKindFor(f.mediaType || ""), caption: text || undefined });
+    } else if (text) {
+      outbox.push({ kind: "text", text });
+    }
+  }
+}
+
+// Ofrece el producto relacionado (cross-sell) tras una entrega. Devuelve el id ofrecido o null.
+function pushCrossSell(
+  outbox: OutboxMessage[],
+  p: BotProduct,
+  dd: NonNullable<BotProduct["digitalDelivery"]>,
+  find: (id: string) => BotProduct | undefined,
+  shouldPauseHuman: boolean,
+): string | null {
+  const crossId = shouldPauseHuman ? null : dd.crossSellProductId ?? null;
+  if (!crossId) return null;
+  const cross = find(crossId);
+  if (!cross || cross.id === p.id) return null;
+  const pitch = (dd.crossSellPitch ?? "").trim();
+  const pitchMedia = (dd.crossSellPitchMediaUrl ?? "").trim();
+  if (pitchMedia) {
+    outbox.push({ kind: "media", mediaUrl: pitchMedia, mediaKind: mediaKindFor(dd.crossSellPitchMediaType || ""), caption: pitch || undefined });
+  } else if (pitch) {
+    outbox.push({ kind: "text", text: pitch });
+  } else {
+    const price = cross.priceText ?? cross.price;
+    const desc = (cross.shortDescription ?? "").trim();
+    outbox.push({
+      kind: "text",
+      text: `🎁 Además, podría interesarte *${cross.name}*` + (desc ? ` — ${desc}` : "") + (price ? ` (${price})` : "") + `. ¿Te cuento más?`,
+    });
+  }
+  return cross.id;
+}
+
+// Sustituye variables de la plantilla de entrega con los datos de la credencial.
+// Si la plantilla no tiene placeholders, anexa un bloque con los datos.
+type CredentialLike = { email?: string | null; username?: string | null; password?: string | null; profileName?: string | null; pin?: string | null; extra?: string | null };
+function renderCredentialDelivery(template: string, cred: CredentialLike): string {
+  const map: Record<string, string> = {
+    email: cred.email ?? "",
+    correo: cred.email ?? "",
+    usuario: cred.username ?? "",
+    user: cred.username ?? "",
+    username: cred.username ?? "",
+    clave: cred.password ?? "",
+    "contraseña": cred.password ?? "",
+    contrasena: cred.password ?? "",
+    password: cred.password ?? "",
+    perfil: cred.profileName ?? "",
+    profile: cred.profileName ?? "",
+    pin: cred.pin ?? "",
+    extra: cred.extra ?? "",
+  };
+  const base = (template ?? "").trim();
+  if (/\{[^}]+\}/.test(base)) {
+    return base.replace(/\{(\w+)\}/g, (_, k: string) => map[k.toLowerCase()] ?? "");
+  }
+  const lines: string[] = [];
+  if (cred.email) lines.push(`Correo: ${cred.email}`);
+  if (cred.username) lines.push(`Usuario: ${cred.username}`);
+  if (cred.password) lines.push(`Contraseña: ${cred.password}`);
+  if (cred.profileName) lines.push(`Perfil: ${cred.profileName}`);
+  if (cred.pin) lines.push(`PIN: ${cred.pin}`);
+  if (cred.extra) lines.push(cred.extra);
+  const block = lines.join("\n");
+  return base ? `${base}\n\n${block}` : block;
+}
+
+export interface AssignedDeliveryResult {
+  outbox: OutboxMessage[];
+  delivered: string[];        // entregados automáticamente (STATIC, o POOL_AUTO con stock)
+  manualNeeded: string[];     // requieren entrega manual (MANUAL, o POOL_AUTO sin stock)
+  outOfStock: string[];       // POOL_AUTO sin stock (subconjunto de manualNeeded; para aviso admin)
+  offeredCrossSellId: string | null;
+  offeredCatalog: boolean;
+  shouldPauseHuman: boolean;
+}
+
+/**
+ * Arma la entrega de los productos pagados según el modo por producto:
+ *  - STATIC: mensaje fijo (instructions) + followups (comportamiento histórico).
+ *  - POOL_AUTO: reclama una credencial del inventario (claim atómico) y entrega sus
+ *    datos con la plantilla de instructions; si no hay stock → entrega manual.
+ *  - MANUAL: no entrega; queda para que un asesor lo envíe.
+ * Es async (toca la BD en POOL_AUTO). En `simulate` no consume stock real.
+ */
+export async function assignAndBuildDelivery(
   config: BotConfig,
   productIds: string[],
-): { outbox: OutboxMessage[]; delivered: string[]; offeredCrossSellId: string | null; offeredCatalog: boolean; shouldPauseHuman: boolean } {
+  opts: {
+    companyId: string;
+    customerId: string;
+    conversationId?: string | null;
+    planByProduct?: Record<string, string | undefined>;
+    simulate?: boolean;
+  },
+): Promise<AssignedDeliveryResult> {
   const find = (id: string) => config.products.find((p) => p.id === id || p.slug === id);
   const outbox: OutboxMessage[] = [];
   const delivered: string[] = [];
+  const manualNeeded: string[] = [];
+  const outOfStock: string[] = [];
   let offeredCrossSellId: string | null = null;
   let offeredCatalog = false;
-  // Si algún producto entregado está marcado para pasar a atención humana tras la
-  // venta, NO seguimos vendiendo: no ofrecemos cross-sell ni el resto del catálogo.
   const shouldPauseHuman = productIds.some((id) => (find(id) as { pauseHumanAfterSale?: boolean } | undefined)?.pauseHumanAfterSale === true);
 
   for (const id of productIds) {
     const p = find(id);
     const dd = p?.digitalDelivery;
-    if (!p || p.productType !== "digital" || !dd?.instructions?.trim()) continue;
+    if (!p || p.productType !== "digital" || !dd) continue;
+    const mode = (dd as { assignmentMode?: string }).assignmentMode ?? "STATIC";
+
+    if (mode === "MANUAL") {
+      manualNeeded.push(p.name);
+      continue;
+    }
+
+    if (mode === "POOL_AUTO") {
+      const days = Number((p.verticalData as Record<string, unknown> | null)?.durationDays);
+      const expiresAt = Number.isFinite(days) && days > 0 ? new Date(Date.now() + days * 86400000) : null;
+      const optionLabel = opts.planByProduct?.[p.id] ?? opts.planByProduct?.[p.slug] ?? null;
+      let cred: CredentialLike | null = null;
+      if (opts.simulate) {
+        // No consumir stock real en el simulador: datos de ejemplo.
+        cred = { email: "correo@ejemplo.com", username: "usuario_demo", password: "clave_demo", profileName: optionLabel || "Perfil 1", pin: "1234" };
+      } else {
+        cred = await claimAvailableCredential(opts.companyId, p.id, optionLabel, {
+          customerId: opts.customerId,
+          conversationId: opts.conversationId,
+          expiresAt,
+        });
+      }
+      if (!cred) {
+        manualNeeded.push(p.name);
+        outOfStock.push(p.name);
+        continue;
+      }
+      outbox.push({ kind: "text", text: renderCredentialDelivery(dd.instructions ?? "", cred) });
+      pushFollowups(outbox, dd);
+      const crossId = pushCrossSell(outbox, p, dd, find, shouldPauseHuman);
+      if (crossId) offeredCrossSellId = crossId;
+      delivered.push(p.name);
+      continue;
+    }
+
+    // STATIC (default) — comportamiento histórico (infoproducto).
+    if (!dd.instructions?.trim()) continue;
     outbox.push({ kind: "text", text: dd.instructions.trim() });
-
-    for (const f of dd.followupMessages ?? []) {
-      const text = (f.message ?? "").trim();
-      const media = (f.mediaUrl ?? "").trim();
-      if (media) {
-        outbox.push({ kind: "media", mediaUrl: media, mediaKind: mediaKindFor(f.mediaType || ""), caption: text || undefined });
-      } else if (text) {
-        outbox.push({ kind: "text", text });
-      }
-    }
-
-    const crossId = shouldPauseHuman ? null : dd.crossSellProductId ?? null;
-    if (crossId) {
-      const cross = find(crossId);
-      if (cross && cross.id !== p.id) {
-        const pitch = (dd.crossSellPitch ?? "").trim();
-        const pitchMedia = (dd.crossSellPitchMediaUrl ?? "").trim();
-        if (pitchMedia) {
-          outbox.push({ kind: "media", mediaUrl: pitchMedia, mediaKind: mediaKindFor(dd.crossSellPitchMediaType || ""), caption: pitch || undefined });
-        } else if (pitch) {
-          outbox.push({ kind: "text", text: pitch });
-        } else {
-          const price = cross.priceText ?? cross.price;
-          const desc = (cross.shortDescription ?? "").trim();
-          outbox.push({
-            kind: "text",
-            text: `🎁 Además, podría interesarte *${cross.name}*` + (desc ? ` — ${desc}` : "") + (price ? ` (${price})` : "") + `. ¿Te cuento más?`,
-          });
-        }
-        offeredCrossSellId = cross.id;
-      }
-    }
-
+    pushFollowups(outbox, dd);
+    const crossId = pushCrossSell(outbox, p, dd, find, shouldPauseHuman);
+    if (crossId) offeredCrossSellId = crossId;
     delivered.push(p.name);
   }
 
-  // Si NO se ofreció un producto relacionado (cross-sell) y quedan otros productos
-  // en el catálogo, invitar (corto) a ver el resto. El cross-sell tiene prioridad:
-  // no apilamos dos ofertas. Si el producto pasa a atención humana, no ofrecemos nada.
-  if (delivered.length && !offeredCrossSellId && !shouldPauseHuman) {
+  // Invitación al resto del catálogo (solo si hubo entrega automática, sin cross-sell,
+  // sin handoff pendiente y sin pasar a humano).
+  if (delivered.length && !offeredCrossSellId && !shouldPauseHuman && !manualNeeded.length) {
     const deliveredIds = new Set(productIds);
     const remaining = catalogProducts(config.products).filter(
       (p) => !deliveredIds.has(p.id) && !deliveredIds.has(p.slug),
@@ -315,7 +423,15 @@ export function buildDeliveryOutbox(
     }
   }
 
-  return { outbox, delivered, offeredCrossSellId, offeredCatalog, shouldPauseHuman };
+  // Productos con entrega manual / sin stock: avisar al cliente que un asesor envía el acceso.
+  if (manualNeeded.length) {
+    outbox.push({
+      kind: "text",
+      text: `Para *${manualNeeded.join(", ")}* un asesor te enviará el acceso en breve 🙏`,
+    });
+  }
+
+  return { outbox, delivered, manualNeeded, outOfStock, offeredCrossSellId, offeredCatalog, shouldPauseHuman };
 }
 
 // --------------------------------------------------------------------------
@@ -335,6 +451,10 @@ export interface ApprovePaymentResult {
   offeredCrossSellId?: string | null;
   /** El producto entregado tiene pauseHumanAfterSale=ON → el caller debe pasar a humano. */
   shouldPauseHuman?: boolean;
+  /** Productos que requieren entrega manual (modo MANUAL o POOL_AUTO sin stock). */
+  manualNeeded?: string[];
+  /** Productos POOL_AUTO sin stock (subconjunto de manualNeeded; para aviso al admin). */
+  outOfStock?: string[];
   /** Si quedó pendiente por timing (el caller decide si agenda el recheck). */
   shouldRecheck?: boolean;
 }
@@ -343,6 +463,16 @@ function parseAmountNumber(text: string | null | undefined): number | undefined 
   if (!text) return undefined;
   const n = Number(String(text).replace(/[^0-9.]/g, ""));
   return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/** Mapa productId -> plan elegido (opción del grupo "Plan") leído del carrito. */
+function planByProductFromCart(cart: Awaited<ReturnType<typeof summarizeCart>>): Record<string, string | undefined> {
+  const m: Record<string, string | undefined> = {};
+  for (const it of cart.items) {
+    const plan = it.modifiers?.find((x) => (x.group ?? "").toLowerCase().trim() === "plan")?.option;
+    if (plan) m[it.productId] = plan;
+  }
+  return m;
 }
 
 /**
@@ -437,17 +567,27 @@ export async function tryApprovePayment(opts: {
     }
 
     if (opts.deliver) {
-      const { outbox, delivered, offeredCrossSellId, shouldPauseHuman } = buildDeliveryOutbox(config, productIds);
-      if (delivered.length) {
-        state.status = "ENTREGADO";
-        if (offeredCrossSellId) state.offeredCrossSellProductId = offeredCrossSellId;
+      const del = await assignAndBuildDelivery(config, productIds, {
+        companyId,
+        customerId,
+        conversationId: opts.conversationId,
+        planByProduct: planByProductFromCart(cart),
+      });
+      if (del.delivered.length || del.manualNeeded.length) {
+        const needsHandoff = del.manualNeeded.length > 0;
+        state.status = del.delivered.length ? "ENTREGADO" : "PAGADO";
+        if (del.offeredCrossSellId) state.offeredCrossSellProductId = del.offeredCrossSellId;
         return {
           approved: true,
-          deliveryOutbox: outbox,
-          delivered,
-          offeredCrossSellId,
-          shouldPauseHuman,
-          customerMessage: "¡Pago confirmado! ✅ Te entrego tu acceso ahora mismo 👇",
+          deliveryOutbox: del.outbox,
+          delivered: del.delivered,
+          offeredCrossSellId: del.offeredCrossSellId,
+          shouldPauseHuman: del.shouldPauseHuman || needsHandoff,
+          manualNeeded: del.manualNeeded,
+          outOfStock: del.outOfStock,
+          customerMessage: del.delivered.length
+            ? "¡Pago confirmado! ✅ Te entrego tu acceso ahora mismo 👇"
+            : "¡Pago confirmado! ✅",
         };
       }
     }
@@ -998,6 +1138,22 @@ export async function executeTool(
             .map((m: any) => ({ group: String(m?.group ?? ""), option: String(m?.option ?? "") }))
             .filter((m: { option: string }) => m.option)
         : undefined;
+      // Stock real solo para entrega por inventario (POOL_AUTO): no agregar lo que no
+      // podremos entregar. Para STATIC/MANUAL y otros rubros no aplica.
+      if (!ctx.simulate && (product.digitalDelivery as { assignmentMode?: string } | null)?.assignmentMode === "POOL_AUTO") {
+        const plan = modifiers?.find((m) => m.group.toLowerCase().trim() === "plan")?.option ?? null;
+        const available = await countAvailable(ctx.companyId, product.id, plan);
+        if (available < qty) {
+          return JSON.stringify({
+            ok: false,
+            outOfStock: true,
+            available,
+            error: available === 0
+              ? `Sin stock de "${product.name}"${plan ? ` (${plan})` : ""} por ahora. Ofrece otra modalidad/plataforma disponible o avisa que un asesor lo consigue; NO lo agregues al carrito.`
+              : `Solo quedan ${available} de "${product.name}"${plan ? ` (${plan})` : ""}. Ajusta la cantidad u ofrece otra opción.`,
+          });
+        }
+      }
       const summary = await addToCart(ctx.companyId, ctx.customerId, product.id, qty, modifiers);
       ctx.state.selectedProductId = product.id;
       // Re-enganche tras una venta cerrada: agregar un producto nuevo reabre el embudo.
@@ -1201,17 +1357,27 @@ export async function executeTool(
           : [];
       }
 
-      const { outbox: deliveryMsgs, delivered, offeredCrossSellId, offeredCatalog, shouldPauseHuman } = buildDeliveryOutbox(ctx.config, ids);
-      ctx.outbox.push(...deliveryMsgs);
-      const offeredCrossSell = Boolean(offeredCrossSellId);
-      if (offeredCrossSellId) {
+      const cartForPlan = await summarizeCart(ctx.companyId, ctx.customerId);
+      const del = await assignAndBuildDelivery(ctx.config, ids, {
+        companyId: ctx.companyId,
+        customerId: ctx.customerId,
+        conversationId: ctx.conversationId,
+        planByProduct: planByProductFromCart(cartForPlan),
+        simulate: ctx.simulate,
+      });
+      const { delivered, offeredCatalog, shouldPauseHuman, manualNeeded, outOfStock } = del;
+      ctx.outbox.push(...del.outbox);
+      const offeredCrossSell = Boolean(del.offeredCrossSellId);
+      if (del.offeredCrossSellId) {
         // Contexto para el siguiente turno: el agente sabe qué producto ofreció.
-        ctx.state.offeredCrossSellProductId = offeredCrossSellId;
+        ctx.state.offeredCrossSellProductId = del.offeredCrossSellId;
       }
-      if (!delivered.length) {
+      if (!delivered.length && !manualNeeded.length) {
         return JSON.stringify({ ok: false, error: "No se encontró entrega digital configurada para el producto pagado." });
       }
-      ctx.state.status = "ENTREGADO";
+      const needsHandoff = manualNeeded.length > 0;
+      // Si todo quedó manual (nada entregado automático), el estado no es ENTREGADO.
+      ctx.state.status = delivered.length ? "ENTREGADO" : "PAGADO";
 
       // Acciones de venta configuradas por producto: mover al cliente a una pestaña
       // del CRM y/o asignarle etiquetas (best-effort, no rompe la entrega).
@@ -1228,15 +1394,20 @@ export async function executeTool(
         }
       }
 
-      // Pase a atención humana tras la venta. Dos casos:
-      //  - FORZADO (shouldPauseHuman): el producto tiene pauseHumanAfterSale=ON → se
-      //    mutea SIEMPRE (aunque haya enganche o varios productos en el catálogo).
-      //  - DEFAULT: si no se ofreció enganche, aplica la heurística (catálogo de 1, flag
-      //    muteAfterSale). El mensaje de entrega de ESTE turno sale normal; el mute
-      //    aplica desde el siguiente inbound.
-      if (ctx.simulate) {
+      // Entrega MANUAL / sin stock: pasar el chat a atención humana y avisar al asesor.
+      if (needsHandoff) {
+        if (ctx.simulate) {
+          ctx.adminNotices.push(
+            `🔇 (Simulación) ${manualNeeded.join(", ")} requiere entrega manual${outOfStock.length ? " (SIN STOCK en inventario)" : ""}; el chat pasaría a atención humana.`,
+          );
+        } else {
+          ctx.state.status = "ASESOR_HUMANO";
+          ctx.state.pendingAction =
+            `Entrega manual pendiente: ${manualNeeded.join(", ")}` +
+            (outOfStock.length ? ` · SIN STOCK: ${outOfStock.join(", ")}` : "");
+        }
+      } else if (ctx.simulate) {
         // En el simulador NO se mutea de verdad (no tocamos mutedNumbers ni pausamos).
-        // Dejamos una nota visible para que el tester sepa qué pasaría en real.
         if (shouldPauseHuman) {
           ctx.adminNotices.push("🔇 (Simulación) Aquí el chat pasaría a atención humana porque el producto tiene activado “pasar a humano tras vender”. En real el bot dejaría de responder a este cliente.");
         }
@@ -1245,7 +1416,9 @@ export async function executeTool(
       }
 
       // El recordatorio post-venta se programa automáticamente (plantilla configurada).
-      const notaEntrega = shouldPauseHuman
+      const notaEntrega = needsHandoff
+        ? "Le confirmé el pago y avisé que un asesor le enviará el acceso pendiente en breve. El chat pasa a atención humana: NO ofrezcas nada más ni agregues cierre. Deja tu texto final VACÍO."
+        : shouldPauseHuman
         ? "Ya entregué el acceso y los mensajes configurados. Este producto pasa a atención humana tras la venta: NO ofrezcas más productos ni el catálogo, NO agregues cierre ni 'gracias por tu compra'. Deja tu texto final VACÍO; un asesor humano continúa desde aquí."
         : offeredCrossSell
         ? "Ya entregué el acceso, los mensajes adicionales y al final ofrecí otro producto con una pregunta abierta ('¿Te cuento más?'). NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO para que la conversación quede ABIERTA en esa oferta y el cliente pueda responder."
@@ -1255,6 +1428,7 @@ export async function executeTool(
       return JSON.stringify({
         ok: true,
         delivered,
+        manualNeeded,
         offeredCrossSell,
         offeredCatalog,
         nota: notaEntrega,
