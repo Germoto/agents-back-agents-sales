@@ -363,14 +363,19 @@ export async function moveCard(
       select: { id: true },
     });
 
-    // Re-escribir el orden 0..n de la columna destino con el movido insertado
+    // Re-escribir el orden 0..n de la columna destino con el movido insertado.
+    // Un solo UPDATE masivo en vez de N (evitaba el timeout de la transacción en
+    // columnas con muchos leads). unnest WITH ORDINALITY da el índice 1-based →
+    // sortOrder = ord - 1 (denso, 0-based).
     const ordered = [...siblings.slice(0, position), moved, ...siblings.slice(position)];
-    await Promise.all(
-      ordered.map((card, index) =>
-        tx.crmCard.update({ where: { id: card.id }, data: { sortOrder: index } }),
-      ),
-    );
-  });
+    const orderedIds = ordered.map((c) => c.id);
+    await tx.$executeRaw`
+      UPDATE "CrmCard" AS c
+      SET "sortOrder" = (v.ord - 1)::int, "updatedAt" = now()
+      FROM unnest(${orderedIds}::uuid[]) WITH ORDINALITY AS v(id, ord)
+      WHERE c.id = v.id
+    `;
+  }, { timeout: 15000 });
 
   emitCrmUpdated(companyId, crmId);
 }
