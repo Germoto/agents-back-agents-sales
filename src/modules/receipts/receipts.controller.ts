@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { approveReceipt, deleteReceipt, getReceiptProof, ignoreReceipt, listReceipts, rejectReceipt } from "./receipts.service";
+import { approveReceipt, associateReceiptProduct, deleteReceipt, getReceiptProof, ignoreReceipt, listReceipts, rejectReceipt } from "./receipts.service";
 
 export async function listReceiptsController(req: Request, res: Response) {
   const receipts = await listReceipts(req.user!.companyId, {
@@ -17,6 +17,16 @@ export async function getReceiptProofController(req: Request, res: Response) {
 
 export async function approveReceiptController(req: Request, res: Response) {
   const receipt = await approveReceipt(
+    req.user!.companyId,
+    String(req.params.id),
+    req.body?.productId ?? null,
+    req.body?.payerPhone ?? undefined,
+  );
+  return res.json(receipt);
+}
+
+export async function associateReceiptController(req: Request, res: Response) {
+  const receipt = await associateReceiptProduct(
     req.user!.companyId,
     String(req.params.id),
     req.body?.productId ?? null,

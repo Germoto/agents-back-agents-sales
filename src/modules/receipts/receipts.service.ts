@@ -228,6 +228,51 @@ export async function approveReceipt(
 }
 
 /**
+ * Asocia (o cambia) el producto de un comprobante ya APROBADO, sin tocar el estado.
+ * Opcionalmente corrige el teléfono que hizo el pago. No notifica a ValidPay
+ * porque el estado no cambia. Reutilizado por el panel para comprobantes "Sin asociar".
+ */
+export async function associateReceiptProduct(
+  companyId: string,
+  receiptId: string,
+  productId?: string | null,
+  payerPhone?: string | null,
+) {
+  await findReceipt(companyId, receiptId);
+
+  // Solo productos de la empresa (si se asocia uno)
+  if (productId) {
+    const product = await prisma.product.findFirst({
+      where: { id: productId, companyId },
+      select: { id: true },
+    });
+    if (!product) throw new AppError("Producto no encontrado", 404);
+  }
+
+  // Teléfono que hizo el pago: se normaliza a solo dígitos. undefined = no tocar.
+  const normalizedPhone =
+    payerPhone != null ? payerPhone.replace(/\D/g, "") || null : undefined;
+
+  const updated = await prisma.paymentReceipt.update({
+    where: { id: receiptId },
+    data: {
+      productId: productId ?? null,
+      ...(normalizedPhone !== undefined ? { payerPhone: normalizedPhone } : {}),
+    },
+  });
+
+  // Refresco en vivo del panel
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
+    id: updated.id,
+    status: updated.status,
+    source: updated.source,
+    externalId: updated.externalId,
+  });
+
+  return updated;
+}
+
+/**
  * Busca la API Key de ValidPay del endpoint activo de la empresa
  * y llama a ValidPay para marcar el pago como validado.
  */

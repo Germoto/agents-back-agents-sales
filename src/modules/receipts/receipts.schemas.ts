@@ -14,3 +14,10 @@ export const approveReceiptSchema = z.object({
   // Teléfono que hizo el pago (puede no existir en Conversaciones)
   payerPhone: z.string().trim().max(30).nullable().optional(),
 });
+
+export const associateReceiptSchema = z.object({
+  // Asociar/cambiar el producto de un comprobante ya APROBADO (sin tocar el estado)
+  productId: z.string().uuid().nullable().optional(),
+  // Teléfono que hizo el pago (puede no existir en Conversaciones)
+  payerPhone: z.string().trim().max(30).nullable().optional(),
+});
