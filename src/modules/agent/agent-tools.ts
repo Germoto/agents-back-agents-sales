@@ -322,11 +322,19 @@ function renderCredentialDelivery(template: string, cred: CredentialLike): strin
   return base ? `${base}\n\n${block}` : block;
 }
 
+export interface AutoSaleInfo {
+  name: string;
+  plan: string | null;
+  account: string | null; // identificador de la cuenta entregada (email/usuario)
+  remaining: number; // stock disponible restante de ese plan
+}
+
 export interface AssignedDeliveryResult {
   outbox: OutboxMessage[];
   delivered: string[];        // entregados automáticamente (STATIC, o POOL_AUTO con stock)
   manualNeeded: string[];     // requieren entrega manual (MANUAL, o POOL_AUTO sin stock)
   outOfStock: string[];       // POOL_AUTO sin stock (subconjunto de manualNeeded; para aviso admin)
+  autoSales: AutoSaleInfo[];  // ventas entregadas por inventario (POOL_AUTO real) → aviso al dueño
   offeredCrossSellId: string | null;
   offeredCatalog: boolean;
   shouldPauseHuman: boolean;
@@ -356,6 +364,7 @@ export async function assignAndBuildDelivery(
   const delivered: string[] = [];
   const manualNeeded: string[] = [];
   const outOfStock: string[] = [];
+  const autoSales: AutoSaleInfo[] = [];
   let offeredCrossSellId: string | null = null;
   let offeredCatalog = false;
   const shouldPauseHuman = productIds.some((id) => (find(id) as { pauseHumanAfterSale?: boolean } | undefined)?.pauseHumanAfterSale === true);
@@ -397,6 +406,16 @@ export async function assignAndBuildDelivery(
       const crossId = pushCrossSell(outbox, p, dd, find, shouldPauseHuman);
       if (crossId) offeredCrossSellId = crossId;
       delivered.push(p.name);
+      // Aviso al dueño (solo venta real por inventario): cuenta entregada + stock restante.
+      if (!opts.simulate) {
+        const remaining = await countAvailable(opts.companyId, p.id, optionLabel);
+        autoSales.push({
+          name: p.name,
+          plan: optionLabel ?? null,
+          account: cred.email || cred.username || cred.profileName || null,
+          remaining,
+        });
+      }
       continue;
     }
 
@@ -441,7 +460,16 @@ export async function assignAndBuildDelivery(
     outbox.push({ kind: "text", text: manualText });
   }
 
-  return { outbox, delivered, manualNeeded, outOfStock, offeredCrossSellId, offeredCatalog, shouldPauseHuman };
+  return { outbox, delivered, manualNeeded, outOfStock, autoSales, offeredCrossSellId, offeredCatalog, shouldPauseHuman };
+}
+
+/** Formatea el aviso al dueño de una venta automática (entrega por inventario). */
+export function autoSaleNotice(s: AutoSaleInfo, customerPhone: string): string {
+  return (
+    `💰 Venta automática: *${s.name}*${s.plan ? ` (${s.plan})` : ""} a ${customerPhone}.` +
+    (s.account ? ` Cuenta entregada: ${s.account}.` : "") +
+    ` Stock restante: ${s.remaining}.`
+  );
 }
 
 // --------------------------------------------------------------------------
@@ -465,6 +493,8 @@ export interface ApprovePaymentResult {
   manualNeeded?: string[];
   /** Productos POOL_AUTO sin stock (subconjunto de manualNeeded; para aviso al admin). */
   outOfStock?: string[];
+  /** Ventas entregadas por inventario (POOL_AUTO) → aviso al dueño con cuenta + stock. */
+  autoSales?: AutoSaleInfo[];
   /** Si quedó pendiente por timing (el caller decide si agenda el recheck). */
   shouldRecheck?: boolean;
 }
@@ -637,6 +667,7 @@ export async function tryApprovePayment(opts: {
           shouldPauseHuman: del.shouldPauseHuman || needsHandoff,
           manualNeeded: del.manualNeeded,
           outOfStock: del.outOfStock,
+          autoSales: del.autoSales,
           customerMessage: del.delivered.length
             ? "¡Pago confirmado! ✅ Te entrego tu acceso ahora mismo 👇"
             : "¡Pago confirmado! ✅",
@@ -1473,6 +1504,11 @@ export async function executeTool(
       const needsHandoff = manualNeeded.length > 0;
       // Si todo quedó manual (nada entregado automático), el estado no es ENTREGADO.
       ctx.state.status = delivered.length ? "ENTREGADO" : "PAGADO";
+
+      // Aviso al dueño por cada venta automática (entrega por inventario).
+      for (const s of del.autoSales) {
+        ctx.adminNotices.push(autoSaleNotice(s, ctx.customerPhone));
+      }
 
       // Suscripciones de vencimiento (solo productos STREAMER con duración; no en simulación).
       if (!ctx.simulate) {

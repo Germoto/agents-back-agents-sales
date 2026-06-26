@@ -30,7 +30,7 @@ import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, sleep, OUTBOX_GAP_MS } from "./delivery";
 import { runFlowTurn, buildRealFlowIO, trailingUserText } from "../flows/flow-engine";
-import { tryApprovePayment, muteCustomerToHuman, type TurnContext } from "./agent-tools";
+import { tryApprovePayment, muteCustomerToHuman, autoSaleNotice, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
 import { getLinkedPhone } from "../whatsapp-config/whatsapp-config.service";
@@ -705,6 +705,19 @@ export async function recheckPayment(msg: {
         conversationId,
       });
       await saveState(conversationId, state as ConversationState);
+      // Aviso al dueño por cada venta automática (entrega por inventario).
+      if (result.autoSales?.length) {
+        const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+        if (adminPhone) {
+          for (const s of result.autoSales) {
+            try {
+              await sendText(sender, adminPhone, autoSaleNotice(s, md.customerPhone ?? to));
+            } catch {
+              /* best-effort */
+            }
+          }
+        }
+      }
       // Pasar a atención humana en este camino de auto-entrega (el modelo no llamó a
       // entregar_producto): por pauseHumanAfterSale, o por entrega manual / sin stock.
       if (result.shouldPauseHuman) {
