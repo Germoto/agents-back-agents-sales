@@ -107,6 +107,27 @@ export async function countAvailable(companyId: string, productId: string, optio
 }
 
 /**
+ * Vista previa READ-ONLY: devuelve la primera credencial AVAILABLE que matchee, SIN
+ * marcarla ASSIGNED ni tocar stock. La usa el SIMULADOR para mostrar una credencial
+ * real del inventario sin consumirla.
+ */
+export async function peekAvailableCredential(
+  companyId: string,
+  productId: string,
+  optionLabel: string | null | undefined,
+) {
+  const pick = (where: Prisma.StreamingCredentialWhereInput) =>
+    prisma.streamingCredential.findFirst({ where, orderBy: { createdAt: "asc" } });
+  if (optionLabel) {
+    return (
+      (await pick({ companyId, productId, status: "AVAILABLE", optionLabel })) ??
+      (await pick({ companyId, productId, status: "AVAILABLE", optionLabel: null }))
+    );
+  }
+  return pick({ companyId, productId, status: "AVAILABLE" });
+}
+
+/**
  * Reclama (atómico) una credencial AVAILABLE para entregar. Prefiere una con el
  * optionLabel del plan comprado; si no hay, usa una genérica (optionLabel null).
  * Devuelve la credencial asignada o null si no hay stock. No lanza.

@@ -28,7 +28,7 @@ import {
 import { createAgentOrder, createOrderFromCart } from "./order.service";
 import { createBooking } from "./booking.service";
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
-import { claimAvailableCredential, countAvailable } from "../streaming-inventory/streaming-inventory.service";
+import { claimAvailableCredential, countAvailable, peekAvailableCredential } from "../streaming-inventory/streaming-inventory.service";
 
 /** Comparación laxa de nombres (acentos/orden) para detectar confusión de titular. */
 function looseNameNorm(s: string): string {
@@ -376,8 +376,9 @@ export async function assignAndBuildDelivery(
       const optionLabel = opts.planByProduct?.[p.id] ?? opts.planByProduct?.[p.slug] ?? null;
       let cred: CredentialLike | null = null;
       if (opts.simulate) {
-        // No consumir stock real en el simulador: datos de ejemplo.
-        cred = { email: "correo@ejemplo.com", username: "usuario_demo", password: "clave_demo", profileName: optionLabel || "Perfil 1", pin: "1234" };
+        // Simulador: muestra una credencial REAL del inventario como vista previa,
+        // SIN consumir stock (read-only). Si no hay, cred=null → flujo "sin stock".
+        cred = await peekAvailableCredential(opts.companyId, p.id, optionLabel);
       } else {
         cred = await claimAvailableCredential(opts.companyId, p.id, optionLabel, {
           customerId: opts.customerId,
@@ -1394,6 +1395,17 @@ export async function executeTool(
       });
       const { delivered, offeredCatalog, shouldPauseHuman, manualNeeded, outOfStock } = del;
       ctx.outbox.push(...del.outbox);
+      // Aclaración en el simulador: la credencial mostrada es una vista previa real del
+      // inventario, pero NO se consumió stock (en real sí se asigna y baja el stock).
+      if (
+        ctx.simulate &&
+        delivered.length &&
+        ids.some((id) => (findProductById(ctx, id)?.digitalDelivery as { assignmentMode?: string } | null)?.assignmentMode === "POOL_AUTO")
+      ) {
+        ctx.adminNotices.push(
+          "🔎 (Simulación) Mostré una credencial REAL de tu inventario como vista previa; NO se consumió stock. En real, esa cuenta se asigna al cliente y el stock baja.",
+        );
+      }
       const offeredCrossSell = Boolean(del.offeredCrossSellId);
       if (del.offeredCrossSellId) {
         // Contexto para el siguiente turno: el agente sabe qué producto ofreció.
