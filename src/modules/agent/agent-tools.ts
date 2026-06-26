@@ -539,18 +539,45 @@ function pushPresentationMedia(ctx: TurnContext, product: BotProduct, kind: stri
 }
 
 /** Ficha customer-facing de un producto con los campos configurados (paso 3). */
-function renderProductFicha(p: BotProduct): string {
-  const price = p.priceText ?? p.price;
-  const priceLine = p.regularPriceText
-    ? `💰 *${price}*  ~antes ${p.regularPriceText}~`
-    : `💰 *${price}*`;
+function parseFichaPrice(value: unknown): number {
+  if (value == null) return 0;
+  const n = Number(String(value).replace(/[^0-9.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Planes/modalidades (verticalData.modifierGroups) con precio ABSOLUTO = base + delta. Solo STREAMER. */
+function streamerPlanLines(p: BotProduct): string[] {
+  const v = (p.verticalData ?? null) as Record<string, unknown> | null;
+  const groups = v && Array.isArray(v.modifierGroups) ? (v.modifierGroups as any[]) : [];
+  if (!groups.length) return [];
+  const base = parseFichaPrice(p.priceText ?? p.price);
+  const lines: string[] = [];
+  for (const grp of groups) {
+    for (const o of grp.options ?? []) {
+      if (!o?.label) continue;
+      lines.push(`• ${o.label} — S/ ${(base + (Number(o.priceDelta) || 0)).toFixed(2)}`);
+    }
+  }
+  return lines;
+}
+
+function renderProductFicha(p: BotProduct, vertical?: string): string {
   const parts: string[] = [`*${p.name}*`];
   const desc = (p.fullDescription || p.shortDescription || "").trim();
   if (desc) parts.push(desc);
   if (p.benefits?.length) parts.push(`*Lo que logras:*\n${p.benefits.join("\n")}`);
   if (p.includes?.length) parts.push(`*Incluye:*\n${p.includes.join("\n")}`);
   if (p.bonuses?.length) parts.push(`*Bonos:*\n${p.bonuses.join("\n")}`);
-  parts.push(priceLine);
+  // STREAMER con varios planes: listar cada plan con su precio (en vez de un precio fijo).
+  const planLines = vertical === "STREAMER" ? streamerPlanLines(p) : [];
+  if (planLines.length) {
+    parts.push(`📋 *Planes y precios:*\n${planLines.join("\n")}`);
+  } else {
+    const price = p.priceText ?? p.price;
+    parts.push(
+      p.regularPriceText ? `💰 *${price}*  ~antes ${p.regularPriceText}~` : `💰 *${price}*`,
+    );
+  }
   return parts.join("\n\n");
 }
 
@@ -560,9 +587,22 @@ function catalogProducts(products: BotProduct[]): BotProduct[] {
 }
 
 /** Catálogo customer-facing (sin ids/alias), agrupado por categoría si existe. */
-function renderCustomerCatalog(products: BotProduct[]): string {
+function renderCustomerCatalog(products: BotProduct[], vertical?: string): string {
   const line = (p: BotProduct) => {
-    const price = p.priceText ?? p.price;
+    let price = p.priceText ?? p.price;
+    // STREAMER con varios planes: mostrar "desde S/{mínimo}" en vez de un precio fijo.
+    if (vertical === "STREAMER") {
+      const lines = streamerPlanLines(p);
+      if (lines.length) {
+        const base = parseFichaPrice(p.priceText ?? p.price);
+        const v = (p.verticalData ?? null) as Record<string, unknown> | null;
+        const groups = v && Array.isArray(v.modifierGroups) ? (v.modifierGroups as any[]) : [];
+        const prices = groups.flatMap((g) =>
+          (g.options ?? []).map((o: any) => base + (Number(o.priceDelta) || 0)),
+        );
+        if (prices.length) price = `desde S/ ${Math.min(...prices).toFixed(2)}`;
+      }
+    }
     // Trim del nombre: los espacios dentro de *...* rompen el negrita de WhatsApp
     // y se ven feos ("* *"). La descripción va en una línea aparte para que respire.
     const name = (p.name ?? "").trim();
@@ -876,7 +916,7 @@ export async function executeTool(
       // saltos de línea); si no, el bot arma la ficha con los campos estructurados.
       const fichaText = (product as { presentationMessage?: string | null }).presentationMessage?.trim()
         ? (product as { presentationMessage?: string | null }).presentationMessage!.trim()
-        : renderProductFicha(product);
+        : renderProductFicha(product, (ctx.config.business as { vertical?: string }).vertical);
       ctx.outbox.push({ kind: "text", text: fichaText });
       // Acople determinista: adjuntamos AQUÍ mismo la multimedia de presentación
       // (showInPresentation) en lugar de depender de que el modelo encadene
@@ -896,7 +936,7 @@ export async function executeTool(
       // Solo productos visibles en catálogo (excluye los secundarios/oculto).
       const products = catalogProducts(ctx.config.products);
       if (!products.length) return JSON.stringify({ ok: false, error: "no hay productos en el catálogo" });
-      const body = renderCustomerCatalog(products);
+      const body = renderCustomerCatalog(products, (ctx.config.business as { vertical?: string }).vertical);
       ctx.outbox.push({
         kind: "text",
         text: `¡Hola! 👋 Gracias por escribirnos a *${ctx.config.business.name}* ✨ Esto es lo que tenemos para ti:\n\n${body}\n\n¿Cuál te llama la atención? Con gusto te cuento más 😊`,
