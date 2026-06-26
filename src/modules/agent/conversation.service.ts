@@ -47,6 +47,8 @@ export interface ConversationState {
   receiptAutoHandledAt?: string | null;
   /** Intentos fallidos de validación por falta de dato (Plin sin nombre): tras 3 se deriva a un asesor. */
   paymentAttempts?: number;
+  /** SIMULACIÓN: productIds del combo capturados al validar pago (el carrito se cierra antes de entregar). */
+  pendingDeliveryProductIds?: string[];
   [key: string]: unknown;
 }
 

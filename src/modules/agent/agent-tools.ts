@@ -425,10 +425,18 @@ export async function assignAndBuildDelivery(
 
   // Productos con entrega manual / sin stock: avisar al cliente que un asesor envía el acceso.
   if (manualNeeded.length) {
-    outbox.push({
-      kind: "text",
-      text: `Para *${manualNeeded.join(", ")}* un asesor te enviará el acceso en breve 🙏`,
-    });
+    let manualText: string;
+    if (delivered.length === 0) {
+      // Todo el pedido es manual: mensaje genérico (no listamos producto por producto).
+      manualText =
+        manualNeeded.length > 1
+          ? "¡Listo! ✅ Un asesor te enviará tus accesos en breve 🙏"
+          : `¡Listo! ✅ Un asesor te enviará tu acceso de *${manualNeeded[0]}* en breve 🙏`;
+    } else {
+      // Mixto: ya entregamos lo automático; avisamos solo de lo que falta (manual/sin stock).
+      manualText = `Y para *${manualNeeded.join(", ")}* un asesor te enviará el acceso en breve 🙏`;
+    }
+    outbox.push({ kind: "text", text: manualText });
   }
 
   return { outbox, delivered, manualNeeded, outOfStock, offeredCrossSellId, offeredCatalog, shouldPauseHuman };
@@ -1238,6 +1246,13 @@ export async function executeTool(
       // SIMULACIÓN: no tocar PaymentReceipt reales; aprobar de frente.
       if (ctx.simulate) {
         const cartSim = await summarizeCart(ctx.companyId, ctx.customerId);
+        // Capturar el combo ANTES de cerrar el carrito: entregar_producto (sim) lee de aquí
+        // (si no, summarizeCart devolvería vacío y se perdería todo menos el último producto).
+        ctx.state.pendingDeliveryProductIds = cartSim.productIds.length
+          ? cartSim.productIds
+          : ctx.state.selectedProductId
+          ? [ctx.state.selectedProductId]
+          : [];
         if (cartSim.items.length) await checkoutCart(ctx.companyId, ctx.customerId, cartSim.totalText);
         ctx.state.status = "PAGADO";
         return JSON.stringify({ ok: true, approved: true, note: "(simulación) Pago aprobado. Ahora entrega el producto con entregar_producto." });
@@ -1336,12 +1351,17 @@ export async function executeTool(
       // En SIMULACIÓN no hay PaymentReceipt real: entregar según carrito/seleccionado.
       let ids: string[];
       if (ctx.simulate) {
+        // Preferir el combo capturado al validar el pago (el carrito ya se cerró en sim).
+        const pending = ctx.state.pendingDeliveryProductIds ?? [];
         const cartSim = await summarizeCart(ctx.companyId, ctx.customerId);
-        ids = cartSim.productIds.length
+        ids = pending.length
+          ? pending
+          : cartSim.productIds.length
           ? cartSim.productIds
           : ctx.state.selectedProductId
           ? [ctx.state.selectedProductId]
           : [];
+        ctx.state.pendingDeliveryProductIds = [];
         if (!ids.length) {
           return JSON.stringify({ ok: false, error: "(simulación) No hay un producto seleccionado para entregar." });
         }
