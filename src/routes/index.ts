@@ -10,6 +10,7 @@ import customersRoutes from "../modules/customers/customers.routes";
 import ordersRoutes from "../modules/orders/orders.routes";
 import digitalSalesRoutes from "../modules/digital-sales/digital-sales.routes";
 import streamingInventoryRoutes from "../modules/streaming-inventory/streaming-inventory.routes";
+import subscriptionsRoutes from "../modules/subscriptions/subscriptions.routes";
 import receiptsRoutes from "../modules/receipts/receipts.routes";
 import botRoutes from "../modules/bot/bot.routes";
 import agentRoutes from "../modules/agent/agent.routes";
@@ -38,6 +39,8 @@ router.use("/orders", ordersRoutes);
 router.use("/digital-sales", digitalSalesRoutes);
 // Inventario de credenciales/cuentas de streaming (rubro STREAMER)
 router.use("/streaming-inventory", streamingInventoryRoutes);
+// Suscripciones/ventas con vencimiento (rubro STREAMER): seguimiento + recordatorio
+router.use("/subscriptions", subscriptionsRoutes);
 router.use("/receipts", receiptsRoutes);
 router.use("/bot", botRoutes);
 // Webhook inbound del agente autónomo (reemplaza n8n)

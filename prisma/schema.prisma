@@ -97,6 +97,7 @@ enum ScheduledMessageType {
   CUSTOM
   FLOW_TIMEOUT
   PAYMENT_RECHECK
+  RENEWAL
 }
 
 enum ScheduledMessageStatus {
@@ -158,6 +159,7 @@ model Company {
   customerDeals        CustomerDeal[]
   chatFlows            ChatFlow[]
   contactNotes         ContactNote[]
+  subscriptions        Subscription[]
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -311,6 +313,7 @@ model Product {
   paymentReceipts  PaymentReceipt[]
   serviceBookings  ServiceBooking[]
   streamingCredentials StreamingCredential[]
+  subscriptions    Subscription[]
 
   @@unique([companyId, slug])
   @@index([companyId, active, sortOrder])
@@ -482,6 +485,41 @@ model StreamingCredential {
   @@index([companyId, productId, status])
 }
 
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  RENEWED
+  CANCELLED
+}
+
+// Suscripción/venta con vencimiento (rubro STREAMER). Sirve para gestionar las ventas
+// del negocio (las del agente y las MANUALES/externas) y programar el recordatorio de
+// vencimiento. NO entrega accesos (las cuentas cambian/caen): solo seguimiento + aviso.
+model Subscription {
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId         String             @db.Uuid
+  customerId        String             @db.Uuid
+  // Producto del catálogo (opcional: las ventas externas pueden no estar en el catálogo).
+  productId         String?            @db.Uuid
+  productName       String?            // nombre libre si no hay productId
+  planLabel         String?            // modalidad/plan (ej. "Mensual por perfil")
+  startAt           DateTime           @default(now())
+  expiresAt         DateTime
+  durationDays      Int?               // para reprogramar al renovar
+  amount            String?
+  status            SubscriptionStatus @default(ACTIVE)
+  source            String             @default("MANUAL") // AGENT | MANUAL
+  note              String?
+  reminderMessageId String?            @db.Uuid // ScheduledMessage del aviso (para cancelar/reprogramar)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  company           Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer          Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product           Product?           @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, status, expiresAt])
+}
+
 model Customer {
   id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId         String                @db.Uuid
@@ -513,6 +551,7 @@ model Customer {
   tagLinks          CustomerTagLink[]
   deals             CustomerDeal[]
   contactNotes      ContactNote[]
+  subscriptions     Subscription[]
 
   @@unique([companyId, phone])
   @@index([companyId, lastInteractionAt])

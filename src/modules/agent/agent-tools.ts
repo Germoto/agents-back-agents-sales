@@ -29,6 +29,7 @@ import { createAgentOrder, createOrderFromCart } from "./order.service";
 import { createBooking } from "./booking.service";
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
 import { claimAvailableCredential, countAvailable, peekAvailableCredential } from "../streaming-inventory/streaming-inventory.service";
+import { createSubscriptionForSale, type RenewalReminderConfig } from "../subscriptions/subscriptions.service";
 
 /** Comparación laxa de nombres (acentos/orden) para detectar confusión de titular. */
 function looseNameNorm(s: string): string {
@@ -485,6 +486,39 @@ function planByProductFromCart(cart: Awaited<ReturnType<typeof summarizeCart>>):
 }
 
 /**
+ * Registra suscripciones (vencimiento) para los productos STREAMER con `durationDays`
+ * recién vendidos. Best-effort y con dedupe (no duplica si ya hay una vigente). Solo
+ * aplica a productos con duración → no afecta INFOPRODUCT (no tiene durationDays).
+ */
+async function registerStreamingSubscriptions(opts: {
+  config: BotConfig;
+  companyId: string;
+  customerId: string;
+  conversationId?: string | null;
+  productIds: string[];
+  planByProduct: Record<string, string | undefined>;
+}): Promise<void> {
+  for (const pid of opts.productIds) {
+    const p = opts.config.products.find((x) => x.id === pid || x.slug === pid);
+    if (!p) continue;
+    const dur = Number((p.verticalData as Record<string, unknown> | null)?.durationDays);
+    if (!Number.isFinite(dur) || dur <= 0) continue;
+    const renewal = (p.reminderConfig as { renewal?: RenewalReminderConfig } | null)?.renewal;
+    await createSubscriptionForSale({
+      companyId: opts.companyId,
+      customerId: opts.customerId,
+      conversationId: opts.conversationId ?? null,
+      productId: p.id,
+      productName: p.name,
+      planLabel: opts.planByProduct[p.id] ?? opts.planByProduct[p.slug] ?? null,
+      durationDays: dur,
+      amount: p.priceText ?? p.price ?? null,
+      reminder: renewal,
+    });
+  }
+}
+
+/**
  * Intenta aprobar el pago con las señales disponibles. Si matchea (código u
  * nombre), reclama y aprueba el comprobante; con `deliver=true` arma además la
  * entrega del producto digital. Devuelve el resultado para que cada caller emita
@@ -586,6 +620,15 @@ export async function tryApprovePayment(opts: {
         const needsHandoff = del.manualNeeded.length > 0;
         state.status = del.delivered.length ? "ENTREGADO" : "PAGADO";
         if (del.offeredCrossSellId) state.offeredCrossSellProductId = del.offeredCrossSellId;
+        // Suscripciones de vencimiento (solo productos STREAMER con duración).
+        await registerStreamingSubscriptions({
+          config,
+          companyId,
+          customerId,
+          conversationId: opts.conversationId,
+          productIds,
+          planByProduct: planByProductFromCart(cart),
+        });
         return {
           approved: true,
           deliveryOutbox: del.outbox,
@@ -1417,6 +1460,18 @@ export async function executeTool(
       const needsHandoff = manualNeeded.length > 0;
       // Si todo quedó manual (nada entregado automático), el estado no es ENTREGADO.
       ctx.state.status = delivered.length ? "ENTREGADO" : "PAGADO";
+
+      // Suscripciones de vencimiento (solo productos STREAMER con duración; no en simulación).
+      if (!ctx.simulate) {
+        await registerStreamingSubscriptions({
+          config: ctx.config,
+          companyId: ctx.companyId,
+          customerId: ctx.customerId,
+          conversationId: ctx.conversationId,
+          productIds: ids,
+          planByProduct: planByProductFromCart(cartForPlan),
+        });
+      }
 
       // Acciones de venta configuradas por producto: mover al cliente a una pestaña
       // del CRM y/o asignarle etiquetas (best-effort, no rompe la entrega).

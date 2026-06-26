@@ -86,12 +86,17 @@ async function processDue(): Promise<void> {
             select: { botPaused: true, state: true },
           });
       const status = ((convo?.state as { status?: string } | null)?.status ?? "").toUpperCase();
-      const closed = ["PAGADO", "ENTREGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status);
+      // RENEWAL (vencimiento de suscripción) ocurre JUSTO después de una venta cerrada
+      // (ENTREGADO) y a veces con el chat en atención humana: debe dispararse igual.
+      // Por eso se exime del cancel por "cerrado" y por "pausa". El resto de tipos
+      // (ABANDONED_CART, LEFT_ON_READ, etc. — infoproductos) se comportan IGUAL que antes.
+      const isRenewal = msg.type === ScheduledMessageType.RENEWAL;
+      const closed = !isRenewal && ["PAGADO", "ENTREGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status);
       // Recordatorio MANUAL (programado por un humano desde el panel): se envía
       // aunque la conversación esté en atención humana (botPaused) — para eso lo
       // creó el asesor. Igual se cancela si el cliente ya cerró/compró.
       const isManual = (msg.metadata as { manual?: boolean } | null)?.manual === true;
-      const cancelForPause = convo?.botPaused && !isManual;
+      const cancelForPause = convo?.botPaused && !isManual && !isRenewal;
       if (cancelForPause || closed) {
         await prisma.scheduledMessage.updateMany({
           where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
