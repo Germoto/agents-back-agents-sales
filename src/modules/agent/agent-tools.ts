@@ -1104,30 +1104,43 @@ export async function executeTool(
         return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la ficha de este producto en esta conversación. NO la reenvíes; responde la consulta del cliente directamente con la base de conocimiento (faq, objeciones, descripción)." });
       }
       ctx.state.presentedProductIds = [...presented, product.id];
+      const fichaVertical = (ctx.config.business as { vertical?: string }).vertical;
+      const presentationMessage = (product as { presentationMessage?: string | null }).presentationMessage?.trim();
+
+      // STREAMER (sin mensaje de presentación fijo): el AGENTE redacta la presentación
+      // (más natural, con emojis y espaciada). Solo adjuntamos la multimedia y le pasamos
+      // los planes con precios EXACTOS para que no invente. Otros rubros: ficha determinista.
+      if (fichaVertical === "STREAMER" && !presentationMessage) {
+        const mediaSent = pushPresentationMedia(ctx, product);
+        const planes = streamerPlanLines(product); // ["Mensual por perfil — S/ 16.00", ...] o []
+        return JSON.stringify({
+          ok: true,
+          present: true,
+          mediaSent,
+          producto: { nombre: product.name, descripcion: product.shortDescription ?? "", planes },
+          nota:
+            "PRESENTA TÚ este producto al cliente, con tus palabras: claro y atractivo, con algún emoji y líneas separadas (NO lo pongas todo pegado). " +
+            (planes.length ? "Incluye los planes con sus precios EXACTOS de 'planes' (no inventes ni cambies precios; no digas que es 'fijo'). " : "") +
+            "Cierra con una pregunta para que elija." +
+            (mediaSent ? " (Ya adjunté la multimedia; no la describas.)" : ""),
+        });
+      }
+
       // Si el dueño configuró un mensaje de presentación, se envía TAL CUAL (respeta
       // saltos de línea); si no, el bot arma la ficha con los campos estructurados.
-      const fichaText = (product as { presentationMessage?: string | null }).presentationMessage?.trim()
-        ? (product as { presentationMessage?: string | null }).presentationMessage!.trim()
-        : renderProductFicha(product, (ctx.config.business as { vertical?: string }).vertical);
+      const fichaText = presentationMessage || renderProductFicha(product, fichaVertical);
       ctx.outbox.push({ kind: "text", text: fichaText });
       // Acople determinista: adjuntamos AQUÍ mismo la multimedia de presentación
       // (showInPresentation) en lugar de depender de que el modelo encadene
       // enviar_multimedia después (a veces lo omitía → la ficha llegaba sin media).
       const fichaMedia = pushPresentationMedia(ctx, product);
-      // Solo STREAMER: la ficha ya incluye la lista "Planes y precios"; refuerzo para
-      // que el modelo NO la reescriba en su texto (causaba duplicado). No afecta otros rubros.
-      const streamerNota =
-        (ctx.config.business as { vertical?: string }).vertical === "STREAMER"
-          ? " La lista de planes y precios YA fue enviada en la ficha: NO la reescribas en tu texto; responde solo con UNA frase breve para que elija (ej. '¿Cuál te interesa?')."
-          : "";
       return JSON.stringify({
         ok: true,
         sent: true,
         mediaSent: fichaMedia,
-        nota:
-          (fichaMedia
-            ? "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) Y la multimedia de presentación al cliente. NO los repitas ni describas su contenido en tu texto final; cierra con UNA frase breve preguntando si lo quiere."
-            : "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) al cliente. NO la repitas en tu texto final.") + streamerNota,
+        nota: fichaMedia
+          ? "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) Y la multimedia de presentación al cliente. NO los repitas ni describas su contenido en tu texto final; cierra con UNA frase breve preguntando si lo quiere."
+          : "Ya envié la ficha (descripción, beneficios, incluye, bonos, precio) al cliente. NO la repitas en tu texto final.",
       });
     }
 
