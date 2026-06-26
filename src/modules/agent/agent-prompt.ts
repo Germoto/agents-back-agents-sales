@@ -14,13 +14,36 @@ import { HUMAN_AGENT_TAG } from "./conversation.service";
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
 
+function parsePriceNum(value: unknown): number {
+  if (value == null) return 0;
+  const n = Number(String(value).replace(/[^0-9.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Renderiza las modalidades (grupo de modificadores) con su PRECIO ABSOLUTO
+// (precio base del producto + delta), para que el agente las ofrezca con claridad.
+function renderModalities(v: Record<string, unknown>, basePrice: string | undefined): string {
+  const groups = Array.isArray(v.modifierGroups) ? (v.modifierGroups as any[]) : [];
+  if (!groups.length) return "";
+  const base = parsePriceNum(basePrice);
+  return groups
+    .map((grp) => {
+      const opts = (grp.options ?? [])
+        .map((o: any) => `${o.label}: S/ ${(base + (Number(o.priceDelta) || 0)).toFixed(2)}`)
+        .join(" / ");
+      return `${grp.name}${grp.required ? "*" : ""}: ${opts}`;
+    })
+    .join(" | ");
+}
+
 // Renderiza los datos estructurados del rubro (vertical pack) de un producto.
-function renderVerticalData(vertical: string | undefined, vData: unknown): string {
+function renderVerticalData(vertical: string | undefined, vData: unknown, basePrice?: string): string {
   if (!vData || typeof vData !== "object") return "";
   const v = vData as Record<string, unknown>;
   const show = (label: string, key: string) =>
     v[key] != null && String(v[key]).trim() ? `${label}: ${v[key]}` : "";
   if (vertical === "STREAMER") {
+    const modalities = renderModalities(v, basePrice);
     return [
       show("periodo", "billingPeriod"),
       show("duración (días)", "durationDays"),
@@ -28,6 +51,7 @@ function renderVerticalData(vertical: string | undefined, vData: unknown): strin
       show("pantallas", "screens"),
       show("calidad", "quality"),
       show("renovación", "renewal"),
+      modalities ? `modalidades — ${modalities}` : "",
     ].filter(Boolean).join(" · ");
   }
   if (vertical === "SERVICE") {
@@ -76,7 +100,7 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
     parts.push(`   detalle: ${fullDesc.slice(0, 600)}`);
   }
   if (p.aliases?.length) parts.push(`   alias: ${p.aliases.join(", ")}`);
-  const vd = renderVerticalData(vertical, p.verticalData);
+  const vd = renderVerticalData(vertical, p.verticalData, p.priceText ?? p.price);
   if (vd) parts.push(`   ${vertical === "STREAMER" ? "plan" : "detalle"}: ${vd}`);
   if (p.benefits?.length) parts.push(`   beneficios: ${p.benefits.slice(0, 5).join("; ")}`);
   if (p.includes?.length) parts.push(`   incluye: ${p.includes.slice(0, 5).join("; ")}`);
@@ -154,7 +178,10 @@ function verticalGuidance(vertical: string | undefined): string {
     case "RESTAURANT":
       return "Rubro RESTAURANTE: el catálogo son platos/combos agrupados por sección del menú (categoría). Arma el pedido con varios ítems en el carrito (agregar_carrito); cuando un plato tenga opciones/extras, pregúntalas y pásalas como `modifiers` en agregar_carrito (el precio de la línea se ajusta solo con sus deltas). Sugiere acompañamientos/bebidas (upsell). Ten en cuenta el tiempo de preparación y la zona de entrega. Cuando el cliente confirme, toma nombre y dirección (o indica recojo en local) y usa registrar_pedido_carrito para registrar TODO el carrito como un pedido. Sé rápido y apetitoso.";
     case "STREAMER":
-      return "Rubro STREAMER/SUSCRIPCIONES: el catálogo son PLANES (agrupados por plataforma/servicio en la categoría). Compara planes por periodo (mensual/anual), tier, nº de pantallas y calidad; recomienda el más conveniente. Cobra y, tras validar el pago, entrega el acceso (flujo digital). Haz upsell del plan superior y ofrece renovación cuando esté por vencer.";
+      return "Rubro STREAMER/SUSCRIPCIONES: el catálogo son PLANES (agrupados por plataforma/servicio en la categoría). Compara planes por periodo (mensual/anual), tier, nº de pantallas y calidad; recomienda el más conveniente. " +
+        "MODALIDADES: si un plan tiene 'modalidades' (ej. 1 perfil, 2 perfiles, cuenta completa) con distinto precio, pregunta cuál quiere y al agregar al carrito pásala en `modifiers` como {group:'Modalidad', option:'<la que eligió>'}; el precio de la línea se ajusta solo. Si el plan no tiene modalidades, se vende al precio base. " +
+        "COMBOS: el cliente puede llevar varias plataformas a la vez (ej. Netflix + Disney + IPTV) o varias unidades; agrégalas todas al carrito (agregar_carrito) y cobra el total combinado con ver_carrito/enviar_metodos_pago. " +
+        "Cobra y, tras validar el pago, entrega el acceso (flujo digital). Haz upsell del plan superior y ofrece renovación cuando esté por vencer.";
     case "SERVICE":
       return "Rubro SERVICIOS: vendes servicios (citas, asesorías, reservas). Explica alcance, duración y modalidad (presencial/online) y requisitos. Cuando el cliente acepte, pregunta su horario preferido y usa agendar_servicio para registrar la reserva (queda SOLICITADA; un asesor confirma el horario exacto). Si hay seña/depósito configurado, cóbralo con enviar_metodos_pago + validar_pago antes de confirmar. No inventes disponibilidad horaria que no esté configurada.";
     case "PHYSICAL_GOODS":
