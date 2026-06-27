@@ -21,6 +21,9 @@ export const quickReplyActionsSchema = z.object({
   // Mover al cliente a una pestaña de un CRM (ambos o ninguno)
   crmId: z.string().uuid().nullable().optional(),
   crmColumnId: z.string().uuid().nullable().optional(),
+  // Si ON, al enviar esta respuesta en un chat con comprobante PENDIENTE, el panel
+  // ofrece marcar la venta como ENTREGADA (aprueba el comprobante + lo vincula).
+  markDelivered: z.boolean().optional().default(false),
 });
 
 export type QuickReplyActionsInput = z.infer<typeof quickReplyActionsSchema>;

@@ -278,6 +278,10 @@ model Product {
   // Mensaje de presentación que el bot envía TAL CUAL al presentar el producto
   // (si está vacío, el bot arma la ficha con los campos estructurados).
   presentationMessage String?
+  // Mensajes adicionales opcionales que acompañan la info completa de presentación:
+  // array de {message,mediaUrl,mediaType}. Se envían después del mensaje principal y
+  // de la multimedia de presentación. Mismo formato que DigitalDelivery.followupMessages.
+  presentationFollowups Json    @default("[]")
   deliveryMethod   String?
   support          String?
   // Atributos flexibles libres por rubro (clave→valor). Complemento opcional.
@@ -419,6 +423,11 @@ model DigitalDelivery {
   onSaleCrmId        String?  @db.Uuid
   onSaleCrmColumnId  String?  @db.Uuid
   onSaleTagIds       String[] @default([]) @db.Uuid
+  // Acciones al ENVIAR la info completa (presentación): mismo patrón que onSale*.
+  // Mueve al cliente a una pestaña del CRM y/o le asigna etiquetas cuando el bot presenta.
+  onPresentationCrmId       String?  @db.Uuid
+  onPresentationCrmColumnId String?  @db.Uuid
+  onPresentationTagIds      String[] @default([]) @db.Uuid
   product      Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 

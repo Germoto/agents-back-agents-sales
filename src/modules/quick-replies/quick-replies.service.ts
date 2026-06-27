@@ -112,7 +112,8 @@ type UpsertQuickReplyData = {
 
 function actionsValue(actions: QuickReplyActionsInput | null | undefined) {
   if (!actions) return Prisma.JsonNull;
-  const empty = !actions.tagIds?.length && !actions.crmId && !actions.crmColumnId;
+  const empty =
+    !actions.tagIds?.length && !actions.crmId && !actions.crmColumnId && !actions.markDelivered;
   return empty ? Prisma.JsonNull : (actions as unknown as Prisma.InputJsonValue);
 }
 

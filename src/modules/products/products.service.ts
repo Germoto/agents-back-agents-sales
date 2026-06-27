@@ -19,6 +19,7 @@ type ProductPayload = {
   shortDescription: string;
   fullDescription?: string;
   presentationMessage?: string | null;
+  presentationFollowups?: { message?: string; mediaUrl?: string; mediaType?: string }[];
   deliveryMethod?: string | null;
   support?: string | null;
   attributes?: Record<string, string> | null;
@@ -60,6 +61,9 @@ type ProductPayload = {
     onSaleCrmId?: string | null;
     onSaleCrmColumnId?: string | null;
     onSaleTagIds?: string[];
+    onPresentationCrmId?: string | null;
+    onPresentationCrmColumnId?: string | null;
+    onPresentationTagIds?: string[];
   } | null;
   physicalDelivery?: {
     requiresAddress: boolean;
@@ -97,6 +101,20 @@ async function ensureProductBelongsToCompany(companyId: string, productId: strin
   }
 
   return product;
+}
+
+// Limpia un array de mensajes adicionales (texto/media): trim y descarta vacíos.
+// Compartido por la entrega (followupMessages) y la presentación (presentationFollowups).
+function cleanFollowupList(
+  items?: { message?: string; mediaUrl?: string; mediaType?: string }[],
+) {
+  return (items ?? [])
+    .map((m) => ({
+      message: (m.message ?? "").trim(),
+      mediaUrl: (m.mediaUrl ?? "").trim(),
+      mediaType: (m.mediaType ?? "").trim(),
+    }))
+    .filter((m) => m.message || m.mediaUrl);
 }
 
 async function safeUnlinkStorage(storagePath: string | null | undefined) {
@@ -234,13 +252,7 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
       link: payload.digitalDelivery.link ?? "",
       instructions: payload.digitalDelivery.instructions ?? "",
       assignmentMode: payload.digitalDelivery.assignmentMode ?? "STATIC",
-      followupMessages: (payload.digitalDelivery.followupMessages ?? [])
-        .map((m) => ({
-          message: (m.message ?? "").trim(),
-          mediaUrl: (m.mediaUrl ?? "").trim(),
-          mediaType: (m.mediaType ?? "").trim(),
-        }))
-        .filter((m) => m.message || m.mediaUrl),
+      followupMessages: cleanFollowupList(payload.digitalDelivery.followupMessages),
       // Legacy single: el front ya no los envía → quedan en "".
       followupMessage: payload.digitalDelivery.followupMessage ?? "",
       followupMediaUrl: payload.digitalDelivery.followupMediaUrl ?? "",
@@ -252,6 +264,9 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
       onSaleCrmId: payload.digitalDelivery.onSaleCrmId ?? null,
       onSaleCrmColumnId: payload.digitalDelivery.onSaleCrmColumnId ?? null,
       onSaleTagIds: payload.digitalDelivery.onSaleTagIds ?? [],
+      onPresentationCrmId: payload.digitalDelivery.onPresentationCrmId ?? null,
+      onPresentationCrmColumnId: payload.digitalDelivery.onPresentationCrmColumnId ?? null,
+      onPresentationTagIds: payload.digitalDelivery.onPresentationTagIds ?? [],
     };
     await tx.digitalDelivery.upsert({
       where: { productId },
@@ -325,6 +340,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         shortDescription: payload.shortDescription,
         fullDescription: payload.fullDescription ?? "",
         presentationMessage: payload.presentationMessage ?? null,
+        presentationFollowups: cleanFollowupList(payload.presentationFollowups) as Prisma.InputJsonValue,
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
@@ -366,6 +382,7 @@ export async function updateProduct(companyId: string, productId: string, payloa
         shortDescription: payload.shortDescription,
         fullDescription: payload.fullDescription ?? "",
         presentationMessage: payload.presentationMessage ?? null,
+        presentationFollowups: cleanFollowupList(payload.presentationFollowups) as Prisma.InputJsonValue,
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),

@@ -15,6 +15,16 @@ export const approveReceiptSchema = z.object({
   payerPhone: z.string().trim().max(30).nullable().optional(),
 });
 
+export const deliverReceiptSchema = z.object({
+  // Producto entregado (obligatorio): se vincula al comprobante.
+  productId: z.string().uuid(),
+  // Teléfono del pagador (el del chat). Opcional.
+  payerPhone: z.string().trim().max(30).nullable().optional(),
+  // Conversación a marcar como ENTREGADO en el embudo. Opcional (si no, se resuelve
+  // por el cliente del comprobante).
+  conversationId: z.string().uuid().nullable().optional(),
+});
+
 export const associateReceiptSchema = z.object({
   // Asociar/cambiar el producto de un comprobante ya APROBADO (sin tocar el estado)
   productId: z.string().uuid().nullable().optional(),

@@ -1,11 +1,12 @@
 import { Request, Response } from "express";
-import { approveReceipt, associateReceiptProduct, deleteReceipt, getReceiptProof, ignoreReceipt, listReceipts, rejectReceipt } from "./receipts.service";
+import { approveReceipt, associateReceiptProduct, deleteReceipt, deliverReceiptManually, getReceiptProof, ignoreReceipt, listReceipts, rejectReceipt } from "./receipts.service";
 
 export async function listReceiptsController(req: Request, res: Response) {
   const receipts = await listReceipts(req.user!.companyId, {
     status: req.query.status ? String(req.query.status) : null,
     from: req.query.from ? String(req.query.from) : null,
     to: req.query.to ? String(req.query.to) : null,
+    customerId: req.query.customerId ? String(req.query.customerId) : null,
   });
   return res.json(receipts);
 }
@@ -32,6 +33,15 @@ export async function associateReceiptController(req: Request, res: Response) {
     req.body?.productId ?? null,
     req.body?.payerPhone ?? undefined,
   );
+  return res.json(receipt);
+}
+
+export async function deliverReceiptController(req: Request, res: Response) {
+  const receipt = await deliverReceiptManually(req.user!.companyId, String(req.params.id), {
+    productId: req.body.productId,
+    payerPhone: req.body?.payerPhone ?? undefined,
+    conversationId: req.body?.conversationId ?? undefined,
+  });
   return res.json(receipt);
 }
 

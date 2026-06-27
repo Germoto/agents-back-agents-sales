@@ -17,6 +17,19 @@ const productVariantSchema = z.object({
   sortOrder: z.coerce.number().int().min(0).default(0),
 });
 
+// Mensajes adicionales con multimedia (texto y/o media). Reutilizado por la entrega
+// (digitalDelivery.followupMessages) y la presentación (presentationFollowups).
+const followupListSchema = z
+  .array(
+    z.object({
+      message: z.string().optional().default(""),
+      mediaUrl: z.string().optional().default(""),
+      mediaType: z.string().optional().default(""),
+    }),
+  )
+  .optional()
+  .default([]);
+
 const productFileSchema = z.object({
   id: z.string().uuid().optional(),
   type: z.enum(["IMAGE", "PDF", "VIDEO", "AUDIO", "OTHER"]),
@@ -48,6 +61,8 @@ export const productBodySchema = z.object({
   // Opcional: varios rubros (restaurante/streaming) no usan descripción completa.
   fullDescription: z.string().optional().default(""),
   presentationMessage: z.string().nullable().optional(),
+  // Mensajes adicionales (texto/media) que acompañan la info completa de presentación.
+  presentationFollowups: followupListSchema,
   deliveryMethod: z.string().nullable().optional(),
   support: z.string().nullable().optional(),
   // Atributos flexibles por rubro (clave→valor). Ej. restaurante: {ingredientes, tiempo_preparacion};
@@ -76,16 +91,7 @@ export const productBodySchema = z.object({
     instructions: z.string().optional().default(""),
     assignmentMode: z.enum(["STATIC", "POOL_AUTO", "MANUAL"]).optional().default("STATIC"),
     // Mensajes adicionales opcionales tras la entrega (cada uno media + texto) y cross-sell.
-    followupMessages: z
-      .array(
-        z.object({
-          message: z.string().optional().default(""),
-          mediaUrl: z.string().optional().default(""),
-          mediaType: z.string().optional().default(""),
-        }),
-      )
-      .optional()
-      .default([]),
+    followupMessages: followupListSchema,
     // Legacy single (compat; el front ya no los envía).
     followupMessage: z.string().optional().default(""),
     followupMediaUrl: z.string().optional().default(""),
@@ -98,6 +104,10 @@ export const productBodySchema = z.object({
     onSaleCrmId: z.string().uuid().nullable().optional(),
     onSaleCrmColumnId: z.string().uuid().nullable().optional(),
     onSaleTagIds: z.array(z.string().uuid()).optional().default([]),
+    // Acciones al ENVIAR la info completa (presentación): mismo patrón que onSale*.
+    onPresentationCrmId: z.string().uuid().nullable().optional(),
+    onPresentationCrmColumnId: z.string().uuid().nullable().optional(),
+    onPresentationTagIds: z.array(z.string().uuid()).optional().default([]),
   }).nullable().optional(),
   physicalDelivery: z.object({
     requiresAddress: z.boolean().default(true),

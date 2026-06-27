@@ -5,17 +5,22 @@ import { validatePaymentInValidPay } from "../../lib/validpay-client";
 import { persistInboundMedia } from "../../lib/inbound-media";
 import { env } from "../../config/env";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { ConversationState, saveState } from "../agent/conversation.service";
 
 export interface ReceiptFilters {
   status?: string | null;
   from?: string | null;
   to?: string | null;
+  customerId?: string | null;
 }
 
 export async function listReceipts(companyId: string, filters?: ReceiptFilters) {
   const where: Prisma.PaymentReceiptWhereInput = { companyId };
   if (filters?.status && filters.status !== "ALL") {
     where.status = filters.status as Prisma.PaymentReceiptWhereInput["status"];
+  }
+  if (filters?.customerId) {
+    where.customerId = filters.customerId;
   }
   if (filters?.from || filters?.to) {
     where.createdAt = {};
@@ -217,6 +222,91 @@ export async function approveReceipt(
   }
 
   // Emitir evento Socket.IO para que el frontend actualice en tiempo real
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
+    id: updated.id,
+    status: updated.status,
+    source: updated.source,
+    externalId: updated.externalId,
+  });
+
+  return updated;
+}
+
+/**
+ * Entrega manual desde el panel de Conversaciones: replica una venta auto-validada.
+ * Aprueba un comprobante PENDIENTE, lo vincula a un producto y al teléfono del chat,
+ * marca la venta digital (si la hay) como ENTREGADO, y deja el embudo del chat en
+ * ENTREGADO. La parte de la conversación es best-effort: nunca aborta la aprobación.
+ */
+export async function deliverReceiptManually(
+  companyId: string,
+  receiptId: string,
+  params: { productId: string; payerPhone?: string | null; conversationId?: string | null },
+) {
+  const receipt = await findReceipt(companyId, receiptId);
+
+  // El producto es obligatorio y debe pertenecer a la empresa.
+  const product = await prisma.product.findFirst({
+    where: { id: params.productId, companyId },
+    select: { id: true },
+  });
+  if (!product) throw new AppError("Producto no encontrado", 404);
+
+  // Teléfono del pagador (el del chat): normalizado a solo dígitos. undefined = no tocar.
+  const normalizedPhone =
+    params.payerPhone != null ? params.payerPhone.replace(/\D/g, "") || null : undefined;
+
+  const updated = await prisma.$transaction(async (tx) => {
+    await applyReceiptApproval(tx, receipt.id, receipt.digitalSaleId);
+    const result = await tx.paymentReceipt.update({
+      where: { id: receipt.id },
+      data: {
+        productId: params.productId,
+        ...(normalizedPhone !== undefined ? { payerPhone: normalizedPhone } : {}),
+      },
+    });
+    // Si había venta digital asociada, la marcamos ENTREGADO (sobreescribe el
+    // COMPROBANTE_RECIBIDO que dejó applyReceiptApproval).
+    if (receipt.digitalSaleId) {
+      await tx.digitalSale.update({
+        where: { id: receipt.digitalSaleId },
+        data: { status: "ENTREGADO", deliveredAt: new Date() },
+      });
+    }
+    return result;
+  });
+
+  // Embudo del chat → ENTREGADO (best-effort, no rompe la aprobación).
+  try {
+    const conversation = params.conversationId
+      ? await prisma.conversation.findFirst({
+          where: { id: params.conversationId, companyId },
+          select: { id: true, state: true },
+        })
+      : receipt.customerId
+        ? await prisma.conversation.findFirst({
+            where: { companyId, customerId: receipt.customerId, channel: "whatsapp" },
+            select: { id: true, state: true },
+          })
+        : null;
+    if (conversation) {
+      const state = ((conversation.state as ConversationState) ?? {}) as ConversationState;
+      state.status = "ENTREGADO";
+      const purchased = Array.isArray(state.purchasedProductIds) ? state.purchasedProductIds : [];
+      state.purchasedProductIds = Array.from(new Set([...purchased, params.productId]));
+      await saveState(conversation.id, state);
+    }
+  } catch (err) {
+    console.error("[receipts] entrega manual: no se pudo actualizar el embudo:", err instanceof Error ? err.message : err);
+  }
+
+  // Notificar a ValidPay si aplica (igual que la aprobación normal).
+  if (receipt.source === "validpay" && receipt.externalId) {
+    notifyValidPayApproval(companyId, receipt.externalId).catch((err) => {
+      console.error("[ValidPay] No se pudo notificar aprobación:", err.message);
+    });
+  }
+
   socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
     id: updated.id,
     status: updated.status,

@@ -36,13 +36,12 @@ export interface FollowupMessage {
 }
 
 /**
- * Normaliza los mensajes adicionales de entrega a un array de {message,mediaUrl,mediaType}.
- * Lee el JSON `followupMessages`; si está vacío pero hay un single legacy (fila no
- * migrada), sintetiza un elemento. Descarta entradas sin texto ni media.
+ * Normaliza un JSON arbitrario a un array de {message,mediaUrl,mediaType}.
+ * Descarta entradas sin texto ni media. Reutilizable para los followups de entrega
+ * (DigitalDelivery.followupMessages) y los de presentación (Product.presentationFollowups).
  */
-function normalizeFollowups(dd: ProductWithRelations["digitalDelivery"]): FollowupMessage[] {
+export function normalizeFollowupList(raw: Prisma.JsonValue | null | undefined): FollowupMessage[] {
   const out: FollowupMessage[] = [];
-  const raw = dd?.followupMessages;
   if (Array.isArray(raw)) {
     for (const item of raw) {
       if (!item || typeof item !== "object" || Array.isArray(item)) continue;
@@ -53,6 +52,16 @@ function normalizeFollowups(dd: ProductWithRelations["digitalDelivery"]): Follow
       if (message.trim() || mediaUrl.trim()) out.push({ message, mediaUrl, mediaType });
     }
   }
+  return out;
+}
+
+/**
+ * Normaliza los mensajes adicionales de entrega a un array de {message,mediaUrl,mediaType}.
+ * Lee el JSON `followupMessages`; si está vacío pero hay un single legacy (fila no
+ * migrada), sintetiza un elemento.
+ */
+function normalizeFollowups(dd: ProductWithRelations["digitalDelivery"]): FollowupMessage[] {
+  const out = normalizeFollowupList(dd?.followupMessages);
   if (!out.length && dd && (dd.followupMessage?.trim() || dd.followupMediaUrl?.trim())) {
     out.push({
       message: dd.followupMessage ?? "",
@@ -79,6 +88,7 @@ export function mapAdminProduct(product: ProductWithRelations) {
     shortDescription: product.shortDescription,
     fullDescription: product.fullDescription,
     presentationMessage: product.presentationMessage,
+    presentationFollowups: normalizeFollowupList(product.presentationFollowups),
     deliveryMethod: product.deliveryMethod,
     support: product.support,
     attributes: (product.attributes ?? null) as Record<string, unknown> | null,
@@ -161,6 +171,7 @@ export function mapBotProduct(
     shortDescription: product.shortDescription,
     fullDescription: product.fullDescription,
     presentationMessage: product.presentationMessage,
+    presentationFollowups: normalizeFollowupList(product.presentationFollowups),
     deliveryMethod: product.deliveryMethod,
     support: product.support,
     attributes: (product.attributes ?? null) as Record<string, unknown> | null,
@@ -208,6 +219,9 @@ export function mapBotProduct(
             onSaleCrmId: product.digitalDelivery?.onSaleCrmId ?? null,
             onSaleCrmColumnId: product.digitalDelivery?.onSaleCrmColumnId ?? null,
             onSaleTagIds: product.digitalDelivery?.onSaleTagIds ?? [],
+            onPresentationCrmId: product.digitalDelivery?.onPresentationCrmId ?? null,
+            onPresentationCrmColumnId: product.digitalDelivery?.onPresentationCrmColumnId ?? null,
+            onPresentationTagIds: product.digitalDelivery?.onPresentationTagIds ?? [],
           }
         : null,
     physicalDelivery:

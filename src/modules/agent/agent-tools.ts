@@ -246,9 +246,13 @@ function findProductById(ctx: TurnContext, productId: string): BotProduct | unde
  * sender desde el worker). Devuelve el outbox, los nombres entregados y el id del
  * producto de cross-sell ofrecido (si hubo).
  */
-// Empuja los mensajes adicionales (followups) de una entrega digital.
-function pushFollowups(outbox: OutboxMessage[], dd: NonNullable<BotProduct["digitalDelivery"]>): void {
-  for (const f of dd.followupMessages ?? []) {
+// Empuja una lista de mensajes adicionales (texto y/o media) al outbox, en orden.
+// Reutilizado por la entrega digital (followupMessages) y la presentación (presentationFollowups).
+function pushFollowupList(
+  outbox: OutboxMessage[],
+  items: { message?: string; mediaUrl?: string; mediaType?: string }[] | undefined,
+): void {
+  for (const f of items ?? []) {
     const text = (f.message ?? "").trim();
     const media = (f.mediaUrl ?? "").trim();
     if (media) {
@@ -257,6 +261,11 @@ function pushFollowups(outbox: OutboxMessage[], dd: NonNullable<BotProduct["digi
       outbox.push({ kind: "text", text });
     }
   }
+}
+
+// Empuja los mensajes adicionales (followups) de una entrega digital.
+function pushFollowups(outbox: OutboxMessage[], dd: NonNullable<BotProduct["digitalDelivery"]>): void {
+  pushFollowupList(outbox, dd.followupMessages);
 }
 
 // Ofrece el producto relacionado (cross-sell) tras una entrega. Devuelve el id ofrecido o null.
@@ -1135,14 +1144,35 @@ export async function executeTool(
         return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la ficha de este producto en esta conversación. NO la reenvíes; responde la consulta del cliente directamente con la base de conocimiento (faq, objeciones, descripción)." });
       }
       ctx.state.presentedProductIds = [...presented, product.id];
+
+      // Acciones al ENVIAR la info completa: mover al cliente a una pestaña del CRM
+      // y/o etiquetarlo (best-effort, no rompe la presentación). Corre una sola vez
+      // por producto presentado (la guarda `presented.includes` arriba ya hizo return).
+      if (!ctx.simulate) {
+        const ddPres = product.digitalDelivery;
+        if (ddPres && (ddPres.onPresentationCrmId || (ddPres.onPresentationTagIds?.length ?? 0) > 0)) {
+          try {
+            await applyCrmAndTagActions(ctx.companyId, ctx.customerId, {
+              tagIds: ddPres.onPresentationTagIds,
+              crmId: ddPres.onPresentationCrmId,
+              crmColumnId: ddPres.onPresentationCrmColumnId,
+            });
+          } catch (err) {
+            console.error("[agent] acciones CRM al presentar fallaron:", err instanceof Error ? err.message : err);
+          }
+        }
+      }
+
       const fichaVertical = (ctx.config.business as { vertical?: string }).vertical;
       const presentationMessage = (product as { presentationMessage?: string | null }).presentationMessage?.trim();
+      const presentationFollowups = (product as { presentationFollowups?: { message?: string; mediaUrl?: string; mediaType?: string }[] }).presentationFollowups ?? [];
 
       // STREAMER (sin mensaje de presentación fijo): el AGENTE redacta la presentación
       // (más natural, con emojis y espaciada). Solo adjuntamos la multimedia y le pasamos
       // los planes con precios EXACTOS para que no invente. Otros rubros: ficha determinista.
       if (fichaVertical === "STREAMER" && !presentationMessage) {
         const mediaSent = pushPresentationMedia(ctx, product);
+        pushFollowupList(ctx.outbox, presentationFollowups);
         const planes = streamerPlanLines(product); // ["Mensual por perfil — S/ 16.00", ...] o []
         return JSON.stringify({
           ok: true,
@@ -1165,6 +1195,8 @@ export async function executeTool(
       // (showInPresentation) en lugar de depender de que el modelo encadene
       // enviar_multimedia después (a veces lo omitía → la ficha llegaba sin media).
       const fichaMedia = pushPresentationMedia(ctx, product);
+      // Mensajes adicionales de la info completa (texto/media), tras el principal y la media.
+      pushFollowupList(ctx.outbox, presentationFollowups);
       return JSON.stringify({
         ok: true,
         sent: true,
