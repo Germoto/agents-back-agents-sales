@@ -6,6 +6,8 @@ import {
   listCustomersController,
   getCustomerController,
   updateCustomerController,
+  deleteCustomerController,
+  deleteCustomersBulkController,
   listNotesController,
   createNoteController,
   deleteNoteController,
@@ -18,6 +20,9 @@ router.use(requireAuth);
 
 router.get("/", asyncHandler(listCustomersController));
 
+// Borrado masivo de leads (ruta estática antes de /:id — Express 5)
+router.post("/delete-bulk", asyncHandler(deleteCustomersBulkController));
+
 // Notas internas por contacto (rutas estáticas antes de /:id — Express 5)
 router.delete("/notes/:noteId", asyncHandler(deleteNoteController));
 router.get("/:id/notes", asyncHandler(listNotesController));
@@ -26,5 +31,6 @@ router.post("/:id/notes", validate({ body: createNoteSchema }), asyncHandler(cre
 // Ficha de contacto
 router.get("/:id", asyncHandler(getCustomerController));
 router.put("/:id", validate({ body: updateCustomerSchema }), asyncHandler(updateCustomerController));
+router.delete("/:id", asyncHandler(deleteCustomerController));
 
 export default router;

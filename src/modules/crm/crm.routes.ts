@@ -13,6 +13,9 @@ import {
   deleteColumnController,
   reorderColumnsController,
   moveCardController,
+  bulkMoveController,
+  bulkTagsController,
+  bulkDealsController,
   listTagsController,
   createTagController,
   updateTagController,
@@ -32,6 +35,9 @@ import {
   upsertTagSchema,
   setCustomerTagsSchema,
   upsertDealSchema,
+  bulkMoveSchema,
+  bulkTagsSchema,
+  bulkDealsSchema,
 } from "./crm.schemas";
 
 const router = Router();
@@ -53,6 +59,10 @@ router.put(
   validate({ body: setCustomerTagsSchema }),
   asyncHandler(setCustomerTagsController),
 );
+
+// --- Acciones masivas (rutas estáticas) ---
+router.post("/cards/bulk-tags", validate({ body: bulkTagsSchema }), asyncHandler(bulkTagsController));
+router.post("/cards/bulk-deals", validate({ body: bulkDealsSchema }), asyncHandler(bulkDealsController));
 
 // --- Valores de negocio ---
 router.get("/customers/:customerId/deals", asyncHandler(listDealsController));
@@ -89,5 +99,6 @@ router.put(
 );
 router.delete("/:id/columns/:columnId", asyncHandler(deleteColumnController));
 router.patch("/:id/move", validate({ body: moveCardSchema }), asyncHandler(moveCardController));
+router.post("/:id/cards/bulk-move", validate({ body: bulkMoveSchema }), asyncHandler(bulkMoveController));
 
 export default router;

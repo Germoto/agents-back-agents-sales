@@ -15,6 +15,9 @@ import {
   updateTag,
   deleteTag,
   setCustomerTags,
+  bulkMoveCards,
+  bulkTagCards,
+  bulkAddDeals,
   listDeals,
   createDeal,
   updateDeal,
@@ -102,6 +105,20 @@ export async function deleteTagController(req: Request, res: Response) {
 export async function setCustomerTagsController(req: Request, res: Response) {
   await setCustomerTags(req.user!.companyId, String(req.params.customerId), req.body.tagIds);
   return res.json({ success: true });
+}
+
+// --- Acciones masivas ---
+
+export async function bulkMoveController(req: Request, res: Response) {
+  return res.json(await bulkMoveCards(req.user!.companyId, String(req.params.id), req.body));
+}
+
+export async function bulkTagsController(req: Request, res: Response) {
+  return res.json(await bulkTagCards(req.user!.companyId, req.body));
+}
+
+export async function bulkDealsController(req: Request, res: Response) {
+  return res.json(await bulkAddDeals(req.user!.companyId, req.body));
 }
 
 // --- Valores de negocio ---

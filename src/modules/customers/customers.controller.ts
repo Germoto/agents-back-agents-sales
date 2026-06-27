@@ -3,6 +3,8 @@ import {
   listCustomers,
   getCustomer,
   updateCustomer,
+  deleteCustomer,
+  deleteCustomersBulk,
   listNotes,
   createNote,
   deleteNote,
@@ -19,6 +21,17 @@ export async function getCustomerController(req: Request, res: Response) {
 
 export async function updateCustomerController(req: Request, res: Response) {
   return res.json(await updateCustomer(req.user!.companyId, String(req.params.id), req.body));
+}
+
+export async function deleteCustomerController(req: Request, res: Response) {
+  await deleteCustomer(req.user!.companyId, String(req.params.id));
+  return res.json({ success: true });
+}
+
+export async function deleteCustomersBulkController(req: Request, res: Response) {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((x: unknown) => String(x)) : [];
+  const result = await deleteCustomersBulk(req.user!.companyId, ids);
+  return res.json({ success: true, ...result });
 }
 
 export async function listNotesController(req: Request, res: Response) {

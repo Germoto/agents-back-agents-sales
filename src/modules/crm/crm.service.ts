@@ -489,6 +489,96 @@ export async function setCustomerTags(companyId: string, customerId: string, tag
 }
 
 // ---------------------------------------------------------------------------
+// Acciones masivas (selección por pestaña en el kanban)
+// ---------------------------------------------------------------------------
+
+/** Filtra una lista de customerIds dejando solo los que pertenecen a la empresa. */
+async function ownedCustomerIds(companyId: string, customerIds: string[]): Promise<string[]> {
+  const ids = [...new Set(customerIds)];
+  const owned = await prisma.customer.findMany({
+    where: { companyId, id: { in: ids } },
+    select: { id: true },
+  });
+  return owned.map((c) => c.id);
+}
+
+/** Mueve varios leads a una columna del CRM (o al Inbox si toColumnId=null). */
+export async function bulkMoveCards(
+  companyId: string,
+  crmId: string,
+  data: { customerIds: string[]; toColumnId: string | null },
+): Promise<{ moved: number }> {
+  await assertCrmOwned(companyId, crmId);
+  if (data.toColumnId !== null) {
+    const column = await prisma.crmColumn.findFirst({
+      where: { id: data.toColumnId, crmId, companyId },
+      select: { id: true },
+    });
+    if (!column) throw new AppError("Columna no encontrada", 404);
+  }
+  const ids = await ownedCustomerIds(companyId, data.customerIds);
+  for (const customerId of ids) {
+    // Reusa moveCard (maneja upsert + renumber + inbox). Append al final de la columna.
+    await moveCard(companyId, crmId, { customerId, toColumnId: data.toColumnId });
+  }
+  emitCrmUpdated(companyId, crmId);
+  return { moved: ids.length };
+}
+
+/** Asigna y/o quita etiquetas a varios leads (sin reemplazar el set completo). */
+export async function bulkTagCards(
+  companyId: string,
+  data: { customerIds: string[]; addTagIds?: string[]; removeTagIds?: string[] },
+): Promise<{ updated: number }> {
+  const ids = await ownedCustomerIds(companyId, data.customerIds);
+  if (!ids.length) return { updated: 0 };
+
+  const addTagIds = data.addTagIds?.length
+    ? (await prisma.customerTag.findMany({
+        where: { companyId, id: { in: data.addTagIds } },
+        select: { id: true },
+      })).map((t) => t.id)
+    : [];
+  const removeTagIds = data.removeTagIds?.length
+    ? (await prisma.customerTag.findMany({
+        where: { companyId, id: { in: data.removeTagIds } },
+        select: { id: true },
+      })).map((t) => t.id)
+    : [];
+
+  await prisma.$transaction(async (tx) => {
+    if (removeTagIds.length) {
+      await tx.customerTagLink.deleteMany({
+        where: { customerId: { in: ids }, tagId: { in: removeTagIds } },
+      });
+    }
+    if (addTagIds.length) {
+      await tx.customerTagLink.createMany({
+        data: ids.flatMap((customerId) => addTagIds.map((tagId) => ({ customerId, tagId }))),
+        skipDuplicates: true,
+      });
+    }
+  });
+  emitCrmUpdated(companyId);
+  return { updated: ids.length };
+}
+
+/** Agrega un Valor del negocio (deal) a cada lead seleccionado. */
+export async function bulkAddDeals(
+  companyId: string,
+  data: { customerIds: string[]; amount: number; description?: string },
+): Promise<{ created: number }> {
+  const ids = await ownedCustomerIds(companyId, data.customerIds);
+  if (!ids.length) return { created: 0 };
+  const description = data.description?.trim() || "Valor agregado (masivo)";
+  await prisma.customerDeal.createMany({
+    data: ids.map((customerId) => ({ companyId, customerId, description, amount: data.amount })),
+  });
+  emitCrmUpdated(companyId);
+  return { created: ids.length };
+}
+
+// ---------------------------------------------------------------------------
 // Valores de negocio (deals manuales)
 // ---------------------------------------------------------------------------
 

@@ -40,3 +40,32 @@ export const upsertDealSchema = z.object({
   description: z.string().trim().min(1, "Descripción requerida").max(100),
   amount: z.coerce.number().positive("El valor debe ser mayor a 0").max(999999999),
 });
+
+// --- Acciones masivas ---
+const customerIds = z.array(z.string().uuid()).min(1, "Selecciona al menos un lead").max(500);
+
+export const bulkMoveSchema = z.object({
+  customerIds,
+  // null => volver al Inbox (quitar placement en este CRM)
+  toColumnId: z.string().uuid().nullable(),
+});
+
+export const bulkTagsSchema = z
+  .object({
+    customerIds,
+    addTagIds: z.array(z.string().uuid()).max(50).optional().default([]),
+    removeTagIds: z.array(z.string().uuid()).max(50).optional().default([]),
+  })
+  .refine((d) => d.addTagIds.length > 0 || d.removeTagIds.length > 0, {
+    message: "Indica al menos una etiqueta a asignar o quitar",
+  });
+
+export const bulkDealsSchema = z.object({
+  customerIds,
+  description: z.string().trim().max(100).optional().default(""),
+  amount: z.coerce.number().positive("El valor debe ser mayor a 0").max(999999999),
+});
+
+export const bulkDeleteSchema = z.object({
+  ids: z.array(z.string().uuid()).min(1).max(500),
+});

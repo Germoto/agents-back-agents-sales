@@ -12,6 +12,7 @@ import { cancelPendingReminders, scheduleReminder } from "../scheduler/scheduler
 import { env } from "../../config/env";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { deleteCustomer } from "../customers/customers.service";
 import { loadWhatsappSender, sendText, sendMedia } from "./outbound";
 import { applyFirma } from "./firma";
 import type { ChatMessage } from "../../lib/openai";
@@ -409,44 +410,18 @@ export async function startConversation(
 }
 
 /**
- * Elimina una conversación completa (historial + estado). Solo permitido cuando
- * el cliente no tiene un pago asociado activo ni está esperando pago.
+ * Elimina un chat = elimina el LEAD/cliente por completo (historial, estado, y su
+ * presencia en TODOS los CRM). Unifica el borrado: lo que se borra en Conversaciones
+ * también desaparece del CRM y viceversa. Bloquea solo si el cliente tiene una venta
+ * aprobada (comprobante APROBADO). Delega en deleteCustomer (cascade + eventos).
  */
 export async function deleteConversation(companyId: string, conversationId: string): Promise<void> {
   const convo = await prisma.conversation.findFirst({
     where: { id: conversationId, companyId },
-    select: { id: true, customerId: true, state: true },
+    select: { id: true, customerId: true },
   });
   if (!convo) throw new AppError("Conversación no encontrada", 404);
-
-  // Guard 1: no eliminar si hay comprobantes en proceso/aprobados del cliente.
-  const receiptCount = await prisma.paymentReceipt.count({
-    where: {
-      companyId,
-      customerId: convo.customerId,
-      status: { in: ["PENDIENTE", "EN_REVISION", "APROBADO"] },
-    },
-  });
-  if (receiptCount > 0) {
-    throw new AppError("No puedes eliminar este chat: tiene un pago asociado.", 409);
-  }
-
-  // Guard 2: no eliminar si está esperando pago/validación.
-  const status = ((convo.state as ConversationState) ?? {}).status ?? null;
-  if (status === "ESPERANDO_PAGO" || status === "ESPERANDO_VALIDACION") {
-    throw new AppError("No puedes eliminar este chat: está esperando un pago.", 409);
-  }
-
-  // ConversationMessage.conversationId es SetNull: borrar mensajes explícitamente
-  // para no dejar huérfanos.
-  await prisma.$transaction([
-    prisma.conversationMessage.deleteMany({ where: { companyId, conversationId } }),
-    prisma.conversation.delete({ where: { id: conversationId } }),
-  ]);
-  socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
-    conversationId,
-    deleted: true,
-  });
+  await deleteCustomer(companyId, convo.customerId);
 }
 
 /**

@@ -1,5 +1,67 @@
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+
+/**
+ * Elimina un lead/cliente POR COMPLETO. El cascade de Prisma borra sus CrmCards
+ * (todos los CRM), conversaciones, mensajes, etiquetas, valores de negocio,
+ * carritos, recordatorios, notas y suscripciones. Los PaymentReceipt quedan
+ * huérfanos (customerId=null, onDelete SetNull) — siguen visibles en Comprobantes.
+ * Bloquea SOLO si el cliente tiene una venta aprobada (comprobante APROBADO).
+ */
+export async function deleteCustomer(companyId: string, customerId: string): Promise<void> {
+  const customer = await prisma.customer.findFirst({
+    where: { id: customerId, companyId },
+    select: { id: true },
+  });
+  if (!customer) throw new AppError("Cliente no encontrado", 404);
+
+  const approved = await prisma.paymentReceipt.count({
+    where: { companyId, customerId, status: "APROBADO" },
+  });
+  if (approved > 0) {
+    throw new AppError("No puedes eliminar este lead: tiene una venta aprobada (comprobante APROBADO).", 409);
+  }
+
+  // Conversaciones del cliente: para avisar a las vistas abiertas tras el borrado.
+  const convos = await prisma.conversation.findMany({
+    where: { companyId, customerId },
+    select: { id: true },
+  });
+
+  await prisma.customer.delete({ where: { id: customerId } });
+
+  // Refrescar CRM y Conversaciones en tiempo real.
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.CRM_UPDATED, { crmId: null });
+  for (const c of convos) {
+    socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
+      conversationId: c.id,
+      deleted: true,
+    });
+  }
+}
+
+/**
+ * Elimina en lote varios leads (selección masiva del CRM). Best-effort por item:
+ * los que tienen venta aprobada se omiten y se reportan con su motivo.
+ */
+export async function deleteCustomersBulk(
+  companyId: string,
+  ids: string[],
+): Promise<{ deleted: string[]; skipped: Array<{ id: string; reason: string }> }> {
+  const clean = [...new Set(ids.map((s) => String(s).trim()).filter(Boolean))];
+  const deleted: string[] = [];
+  const skipped: Array<{ id: string; reason: string }> = [];
+  for (const id of clean) {
+    try {
+      await deleteCustomer(companyId, id);
+      deleted.push(id);
+    } catch (err) {
+      skipped.push({ id, reason: err instanceof AppError ? err.message : "No se pudo eliminar" });
+    }
+  }
+  return { deleted, skipped };
+}
 
 export async function listCustomers(companyId: string) {
   return prisma.customer.findMany({
