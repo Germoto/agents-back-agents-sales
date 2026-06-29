@@ -24,6 +24,9 @@ export const quickReplyActionsSchema = z.object({
   // Si ON, al enviar esta respuesta en un chat con comprobante PENDIENTE, el panel
   // ofrece marcar la venta como ENTREGADA (aprueba el comprobante + lo vincula).
   markDelivered: z.boolean().optional().default(false),
+  // Producto que esta respuesta presenta/atiende. Al enviarla, el bot lo marca
+  // como presentado y en foco (no lo re-presenta al reactivarse tras modo humano).
+  presentProductId: z.string().uuid().nullable().optional(),
 });
 
 export type QuickReplyActionsInput = z.infer<typeof quickReplyActionsSchema>;

@@ -11,7 +11,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { loadWhatsappSender, sendText, sendMedia } from "../agent/outbound";
 import { applyFirma } from "../agent/firma";
-import { recordMessage, setBotPaused } from "../agent/conversation.service";
+import { recordMessage, setBotPaused, saveState, type ConversationState } from "../agent/conversation.service";
 import { applyCrmAndTagActions } from "../crm/crm.service";
 import type { QuickReplyMessageInput, QuickReplyActionsInput } from "./quick-replies.schemas";
 
@@ -113,7 +113,7 @@ type UpsertQuickReplyData = {
 function actionsValue(actions: QuickReplyActionsInput | null | undefined) {
   if (!actions) return Prisma.JsonNull;
   const empty =
-    !actions.tagIds?.length && !actions.crmId && !actions.crmColumnId && !actions.markDelivered;
+    !actions.tagIds?.length && !actions.crmId && !actions.crmColumnId && !actions.markDelivered && !actions.presentProductId;
   return empty ? Prisma.JsonNull : (actions as unknown as Prisma.InputJsonValue);
 }
 
@@ -200,7 +200,7 @@ export async function sendQuickReply(
 
   const convo = await prisma.conversation.findFirst({
     where: { id: conversationId, companyId },
-    select: { id: true, customerId: true, botPaused: true, customer: { select: { phone: true } } },
+    select: { id: true, customerId: true, botPaused: true, state: true, customer: { select: { phone: true } } },
   });
   if (!convo) throw new AppError("Conversación no encontrada", 404);
 
@@ -258,11 +258,30 @@ export async function sendQuickReply(
   });
 
   // Acciones post-envío (best-effort): etiquetar al cliente y/o moverlo a un CRM
-  await applyQuickReplyActions(
-    companyId,
-    convo.customerId,
-    quickReply.actions as QuickReplyActionsInput | null,
-  );
+  const actions = quickReply.actions as QuickReplyActionsInput | null;
+  await applyQuickReplyActions(companyId, convo.customerId, actions);
+
+  // Si la respuesta presenta un producto, lo marcamos como presentado y en foco
+  // en el state. Así, al reactivarse tras modo humano, el bot sabe qué producto
+  // se atendió y NO vuelve a presentar la info que ya envió el humano.
+  if (actions?.presentProductId) {
+    try {
+      const state = (convo.state as ConversationState) ?? {};
+      const productId = actions.presentProductId;
+      state.selectedProductId = productId;
+      state.presentedProductIds = Array.from(new Set([...(state.presentedProductIds ?? []), productId]));
+      // Si la respuesta incluye multimedia, también evitamos reenviar media de presentación.
+      if (messages.some((m) => m.type !== "text")) {
+        state.mediaSentProductIds = Array.from(new Set([...(state.mediaSentProductIds ?? []), productId]));
+      }
+      await saveState(conversationId, state);
+    } catch (err) {
+      console.warn(
+        "[quick-replies] marcar producto presentado falló:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 
   return { sentCount, total: messages.length, ...(failedAtIndex !== undefined ? { failedAtIndex } : {}) };
 }
