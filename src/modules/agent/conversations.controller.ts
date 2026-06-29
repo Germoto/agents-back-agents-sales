@@ -4,6 +4,7 @@ import { asyncHandler } from "../../lib/async-handler";
 import { AppError } from "../../lib/app-error";
 import {
   listConversations,
+  getConversationSummary,
   listConversationMessages,
   setBotPaused,
   sendHumanReply,
@@ -23,6 +24,13 @@ export const listConversationsController = asyncHandler(async (req: Request, res
   const companyId = req.user!.companyId;
   const conversations = await listConversations(companyId);
   res.json({ success: true, data: conversations });
+});
+
+export const getConversationController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const conversation = await getConversationSummary(companyId, String(req.params.id));
+  if (!conversation) throw new AppError("Conversación no encontrada", 404);
+  res.json({ success: true, data: conversation });
 });
 
 export const listMessagesController = asyncHandler(async (req: Request, res: Response) => {

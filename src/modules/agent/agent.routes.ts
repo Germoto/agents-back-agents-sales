@@ -4,6 +4,7 @@ import { requireAuth } from "../../middlewares/auth.middleware";
 import { inboundController } from "./agent.controller";
 import {
   listConversationsController,
+  getConversationController,
   listMessagesController,
   pauseConversationController,
   replyConversationController,
@@ -41,6 +42,9 @@ router.post("/conversations/:id/pause", requireAuth, pauseConversationController
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);
 router.post("/conversations/:id/reminder", requireAuth, scheduleReminderController);
 router.post("/conversations/:id/reset", requireAuth, resetConversationController);
+// Resumen de una conversación por id (para abrir un chat fuera de los últimos 50).
+// Va después de las subrutas /:id/* para no capturarlas.
+router.get("/conversations/:id", requireAuth, getConversationController);
 router.delete("/conversations/:id", requireAuth, deleteConversationController);
 
 // Simulador del agente (panel > Pruebas): corre el agente real sin enviar por WhatsApp.

@@ -240,6 +240,40 @@ export async function listConversations(companyId: string, limit = 50) {
 }
 
 /**
+ * Resumen de UNA conversación, con el mismo shape que un item de listConversations.
+ * Para el panel: al abrir un chat enlazado (p.ej. desde el CRM) que no está entre
+ * los últimos 50 de la lista, el front lo resuelve por id sin paginar.
+ */
+export async function getConversationSummary(companyId: string, conversationId: string) {
+  const c = await prisma.conversation.findFirst({
+    where: { id: conversationId, companyId, channel: "whatsapp" },
+    select: {
+      id: true,
+      status: true,
+      botPaused: true,
+      state: true,
+      lastMessageAt: true,
+      customer: { select: { id: true, phone: true, name: true } },
+      messages: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { message: true, role: true, createdAt: true },
+      },
+    },
+  });
+  if (!c) return null;
+  return {
+    id: c.id,
+    status: c.status,
+    botPaused: c.botPaused,
+    funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
+    lastMessageAt: c.lastMessageAt,
+    customer: c.customer,
+    lastMessage: c.messages[0] ?? null,
+  };
+}
+
+/**
  * Estado runtime fresco de una conversación (para el turno debounced del agente,
  * que corre desfasado del inbound y debe leer el estado más reciente).
  */
