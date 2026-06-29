@@ -1190,7 +1190,15 @@ export async function executeTool(
       // Si el dueño configuró un mensaje de presentación, se envía TAL CUAL (respeta
       // saltos de línea); si no, el bot arma la ficha con los campos estructurados.
       const fichaText = presentationMessage || renderProductFicha(product, fichaVertical);
-      ctx.outbox.push({ kind: "text", text: fichaText });
+      // Si la info completa tiene multimedia adjunta, se envía como UN solo mensaje
+      // (media con el texto como caption); si no, como texto plano (como antes).
+      const presMediaUrl = (product as { presentationMessageMediaUrl?: string | null }).presentationMessageMediaUrl?.trim();
+      const presMediaType = (product as { presentationMessageMediaType?: string | null }).presentationMessageMediaType?.trim();
+      if (presMediaUrl) {
+        ctx.outbox.push({ kind: "media", mediaUrl: presMediaUrl, mediaKind: mediaKindFor(presMediaType || ""), caption: fichaText || undefined });
+      } else {
+        ctx.outbox.push({ kind: "text", text: fichaText });
+      }
       // Acople determinista: adjuntamos AQUÍ mismo la multimedia de presentación
       // (showInPresentation) en lugar de depender de que el modelo encadene
       // enviar_multimedia después (a veces lo omitía → la ficha llegaba sin media).

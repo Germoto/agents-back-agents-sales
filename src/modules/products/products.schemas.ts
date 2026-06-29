@@ -61,6 +61,9 @@ export const productBodySchema = z.object({
   // Opcional: varios rubros (restaurante/streaming) no usan descripción completa.
   fullDescription: z.string().optional().default(""),
   presentationMessage: z.string().nullable().optional(),
+  // Multimedia opcional adjunta a la info completa (se envía con el texto como caption).
+  presentationMessageMediaUrl: z.string().optional().default(""),
+  presentationMessageMediaType: z.string().optional().default(""),
   // Mensajes adicionales (texto/media) que acompañan la info completa de presentación.
   presentationFollowups: followupListSchema,
   deliveryMethod: z.string().nullable().optional(),

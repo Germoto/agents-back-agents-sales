@@ -19,6 +19,8 @@ type ProductPayload = {
   shortDescription: string;
   fullDescription?: string;
   presentationMessage?: string | null;
+  presentationMessageMediaUrl?: string;
+  presentationMessageMediaType?: string;
   presentationFollowups?: { message?: string; mediaUrl?: string; mediaType?: string }[];
   deliveryMethod?: string | null;
   support?: string | null;
@@ -340,6 +342,8 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         shortDescription: payload.shortDescription,
         fullDescription: payload.fullDescription ?? "",
         presentationMessage: payload.presentationMessage ?? null,
+        presentationMessageMediaUrl: (payload.presentationMessageMediaUrl ?? "").trim(),
+        presentationMessageMediaType: (payload.presentationMessageMediaType ?? "").trim(),
         presentationFollowups: cleanFollowupList(payload.presentationFollowups) as Prisma.InputJsonValue,
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
@@ -382,6 +386,8 @@ export async function updateProduct(companyId: string, productId: string, payloa
         shortDescription: payload.shortDescription,
         fullDescription: payload.fullDescription ?? "",
         presentationMessage: payload.presentationMessage ?? null,
+        presentationMessageMediaUrl: (payload.presentationMessageMediaUrl ?? "").trim(),
+        presentationMessageMediaType: (payload.presentationMessageMediaType ?? "").trim(),
         presentationFollowups: cleanFollowupList(payload.presentationFollowups) as Prisma.InputJsonValue,
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,

@@ -282,6 +282,10 @@ model Product {
   // array de {message,mediaUrl,mediaType}. Se envían después del mensaje principal y
   // de la multimedia de presentación. Mismo formato que DigitalDelivery.followupMessages.
   presentationFollowups Json    @default("[]")
+  // Multimedia opcional de la info completa de presentación (se envía con
+  // presentationMessage como caption, en un solo mensaje). Vacío => solo texto.
+  presentationMessageMediaUrl  String @default("")
+  presentationMessageMediaType String @default("")
   deliveryMethod   String?
   support          String?
   // Atributos flexibles libres por rubro (clave→valor). Complemento opcional.
