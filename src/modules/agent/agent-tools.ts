@@ -1397,6 +1397,27 @@ export async function executeTool(
       // sí usamos el nombre que el cliente dé.
       const payerName = codes.length ? "" : String(args.payerName ?? "").trim();
 
+      // GUARDA: no hay con qué validar. Si NO hay un comprobante con datos leídos
+      // (monto/op/código) NI el cliente dio nombre/código, el modelo está intentando
+      // validar sin que haya pago real (típico: el cliente mandó una imagen que NO es
+      // comprobante estando en contexto de pago). NO le pidas el titular en automático
+      // (eso confunde y mete en bucle); deja que el agente decida por contexto.
+      const hasReceiptData = !!(
+        ctx.state.lastReceipt &&
+        (ctx.state.lastReceipt.operationNumber ||
+          ctx.state.lastReceipt.amountText ||
+          ctx.state.lastReceipt.securityCode)
+      );
+      if (!hasReceiptData && !payerName && !codes.length) {
+        return JSON.stringify({
+          ok: false,
+          error:
+            "El cliente todavía no envió un comprobante de pago ni datos del titular. NO valides ni le pidas automáticamente el nombre del titular. " +
+            "Si envió una imagen que NO es un comprobante, conversa normal sobre ella según el contexto de la conversación. " +
+            "Si dice que ya pagó, pídele con naturalidad que te mande la CAPTURA del comprobante (o, si paga por Plin, el nombre del titular de su Yape/Plin).",
+        });
+      }
+
       // Monto esperado (para el match y el recheck).
       const cartVp = await summarizeCart(ctx.companyId, ctx.customerId);
       let expectedVp: number | undefined = cartVp.total > 0 ? cartVp.total : undefined;
