@@ -16,6 +16,7 @@ import {
   loadOrCreateConversation,
   markInboundProcessed,
   recordMessage,
+  annotateMessageText,
   buildHistory,
   saveState,
   setBotPaused,
@@ -306,7 +307,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   }
 
   // Persistir el mensaje del cliente
-  await recordMessage({
+  const userMessageId = await recordMessage({
     companyId,
     customerId: convo.customerId,
     conversationId: convo.conversationId,
@@ -335,7 +336,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     const rk = convo.conversationId;
     receiptReadsInFlight.set(rk, (receiptReadsInFlight.get(rk) ?? 0) + 1);
     try {
-      await handleReceiptImage(companyId, config, convo, inbound);
+      await handleInboundImage(companyId, config, convo, inbound, userMessageId);
     } finally {
       const n = (receiptReadsInFlight.get(rk) ?? 1) - 1;
       if (n > 0) receiptReadsInFlight.set(rk, n);
@@ -787,19 +788,24 @@ function isPaymentContext(state: ConversationState): boolean {
 }
 
 /**
- * Comprobante (imagen) recibido. NO responde al cliente ni valida aquí: el AGENTE
- * es la ÚNICA voz. Esto solo le da "ojos" al agente (que es texto-only):
- *  1) lee la imagen con visión y guarda lo leído en `state.lastReceipt` (el system
- *     prompt lo expone como `comprobanteLeido` para que el modelo valide en su turno),
- *  2) reenvía el comprobante al admin como AVISO (sin pausar el bot).
- * El turno del agente (debounced) verá el comprobante leído y llamará a validar_pago
- * y, si aprueba, entregar_producto (que respeta el cierre/atención-humana post-venta).
+ * Imagen recibida del cliente. NO responde al cliente ni valida aquí: el AGENTE es
+ * la ÚNICA voz. Esto le da "ojos" al agente (que es texto-only) y distingue dos casos:
+ *
+ *  A) Es un COMPROBANTE de pago (tiene datos leídos —monto/op/código— o el modelo lo
+ *     clasifica como comprobante): guarda `state.lastReceipt` (el system prompt lo
+ *     expone como `comprobanteLeido`) y reenvía el comprobante al admin como aviso. El
+ *     turno (debounced) lo verá y llamará a validar_pago. — flujo de pago ACTUAL, intacto.
+ *
+ *  B) NO es comprobante (una foto cualquiera: producto, álbum, pantalla): NO se guarda
+ *     como pago ni se avisa al dueño. Se anota en el mensaje del cliente QUÉ muestra la
+ *     imagen (description) para que el agente la interprete y siga la conversación.
  */
-async function handleReceiptImage(
+async function handleInboundImage(
   companyId: string,
   config: Awaited<ReturnType<typeof buildBotConfig>>,
   convo: { conversationId: string; customerId: string; state: ConversationState },
   inbound: InboundMessage,
+  userMessageId: string,
 ): Promise<void> {
   const imageUrl = inbound.mediaUrl;
   const fromPhone = inbound.fromPhone;
@@ -809,17 +815,27 @@ async function handleReceiptImage(
   const apiKey = (config as { openai?: { apiKey?: string | null } }).openai?.apiKey ?? null;
   const model = (config as { openai?: { model?: string } }).openai?.model || "gpt-4o-mini";
   const receipt = apiKey ? await readReceiptImage(apiKey, model, imageUrl).catch(() => null) : null;
-  const looksLikeReceipt = !!(receipt && (receipt.amountText || receipt.securityCode || receipt.operationNumber));
 
-  // Imagen que NO parece comprobante y NO estamos esperando pago: no es de pago,
-  // no la guardamos como tal ni avisamos (puede ser cualquier foto).
-  if (!looksLikeReceipt && !isPaymentContext(convo.state)) {
-    console.log(`[agent] imagen de ${fromPhone}: no parece comprobante y no hay contexto de pago (ignorada para pago)`);
+  // Datos de pago leídos (llaves de validación). Si hay datos, es comprobante seguro.
+  const looksLikeReceipt = !!(receipt && (receipt.amountText || receipt.securityCode || receipt.operationNumber));
+  // Salvaguarda anti-regresión: un comprobante real pero borroso (sin datos) que el
+  // modelo igual reconoce como pago SIGUE entrando al flujo de validación de siempre.
+  const treatAsReceipt = looksLikeReceipt || receipt?.isReceipt === true;
+
+  // CASO B — no es comprobante: anotar la descripción y dejar que el agente converse.
+  if (!treatAsReceipt) {
+    const hadCaption = !!(inbound.text && inbound.text.trim());
+    if (!hadCaption && receipt?.description) {
+      // El cliente mandó la imagen sin texto: anotamos qué muestra para que el agente
+      // (texto-only) responda en contexto en vez de asumir que es un pago.
+      await annotateMessageText(userMessageId, `[El cliente envió una imagen que muestra: ${receipt.description}]`);
+    }
+    console.log(`[agent] imagen de ${fromPhone}: NO es comprobante (desc="${receipt?.description ?? "-"}"); el agente la interpreta en contexto`);
     return;
   }
 
-  // 2) Guardar lo leído (aunque sea parcial / nulo) para que el AGENTE lo use en su
-  // turno y decida: con código valida solo; sin código pedirá el nombre del titular.
+  // CASO A — comprobante: guardar lo leído (aunque sea parcial / nulo) para que el AGENTE
+  // lo use en su turno y decida: con código valida solo; sin código pedirá el titular.
   convo.state.lastReceipt = {
     amountText: receipt?.amountText ?? null,
     time: receipt?.time ?? null,
@@ -830,7 +846,7 @@ async function handleReceiptImage(
   };
   await saveState(convo.conversationId, convo.state);
 
-  // 3) Reenviar el comprobante al admin (solo aviso; NO pausa el bot, NO responde al cliente).
+  // Reenviar el comprobante al admin (solo aviso; NO pausa el bot, NO responde al cliente).
   const sender = await loadWhatsappSender(companyId);
   if (sender) {
     const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");

@@ -170,7 +170,7 @@ export async function recordMessage(opts: {
   rawPayload?: Prisma.InputJsonValue;
   gatewayId?: string | null;
   deliveryStatus?: string | null;
-}): Promise<void> {
+}): Promise<string> {
   const created = await prisma.conversationMessage.create({
     data: {
       companyId: opts.companyId,
@@ -203,6 +203,18 @@ export async function recordMessage(opts: {
     mediaType: created.mediaType,
     createdAt: created.createdAt,
   });
+  return created.id;
+}
+
+/**
+ * Actualiza el texto de un mensaje ya registrado (sin reemitir socket). Lo usa el
+ * análisis de imagen para anotar en el mensaje del cliente QUÉ muestra la imagen,
+ * de modo que buildHistory se lo pase al agente (que es texto-only).
+ */
+export async function annotateMessageText(messageId: string, text: string): Promise<void> {
+  await prisma.conversationMessage
+    .update({ where: { id: messageId }, data: { message: text } })
+    .catch(() => undefined);
 }
 
 // -------------------------------------------------------------------------
@@ -599,7 +611,7 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
     let content = (r.message ?? "").trim();
     if (!content && r.mediaUrl) {
       content = isUser
-        ? "[el cliente envió una imagen/archivo (posible comprobante de pago)]"
+        ? "[el cliente envió una imagen]"
         : "[se envió una imagen/archivo al cliente]";
     }
     if (isHuman) content = `${HUMAN_AGENT_TAG} ${content}`;
