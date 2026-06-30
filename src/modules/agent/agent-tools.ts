@@ -78,6 +78,10 @@ export interface TurnContext {
   reminders: Array<{ type: string; minutes: number; body: string }>;
   /** avisos a enviar al admin al cerrar el turno (pedidos, handoff, etc.) */
   adminNotices: string[];
+  /** Productos PRESENTADOS en ESTE turno (enviar_ficha). Evita que el modelo, en el
+   *  mismo turno de la presentación, "complete" mandando los archivos on-demand
+   *  (showInPresentation=false) vía enviar_multimedia. Transitorio por turno. */
+  presentedThisTurn?: string[];
   /** modo simulación (Pruebas): los tools que escriben datos compartidos/reales
    * (validar_pago, registrar pedidos, reservas) se stubean para no afectar datos. */
   simulate?: boolean;
@@ -1144,6 +1148,9 @@ export async function executeTool(
         return JSON.stringify({ ok: true, alreadySent: true, nota: "Ya enviaste la ficha de este producto en esta conversación. NO la reenvíes; responde la consulta del cliente directamente con la base de conocimiento (faq, objeciones, descripción)." });
       }
       ctx.state.presentedProductIds = [...presented, product.id];
+      // Marca que se presentó en ESTE turno: enviar_multimedia no debe "completar"
+      // con los archivos on-demand junto a la presentación (solo si el cliente los pide después).
+      ctx.presentedThisTurn = [...(ctx.presentedThisTurn ?? []), product.id];
 
       // Acciones al ENVIAR la info completa: mover al cliente a una pestaña del CRM
       // y/o etiquetarlo (best-effort, no rompe la presentación). Corre una sola vez
@@ -1239,9 +1246,22 @@ export async function executeTool(
         ? args.fileIds.map((x: unknown) => String(x)).filter(Boolean)
         : [];
       if (requestedIds.length) {
-        const files = allFiles.filter((f) => requestedIds.includes(f.id));
+        let files = allFiles.filter((f) => requestedIds.includes(f.id));
         if (!files.length) {
           return JSON.stringify({ ok: false, error: "no encontré ese archivo en el producto; revisa los ids de multimedia del catálogo" });
+        }
+        // GUARDA: si el producto se acaba de PRESENTAR en este mismo turno, NO "completar"
+        // mandando los archivos on-demand (showInPresentation=false). La presentación ya envió
+        // los marcados; los on-demand solo salen si el cliente los pide explícitamente en un
+        // mensaje aparte (en ese turno ctx.presentedThisTurn ya no incluye el producto).
+        if ((ctx.presentedThisTurn ?? []).includes(product.id)) {
+          const filtered = files.filter((f) => f.showInPresentation !== false);
+          if (filtered.length !== files.length) {
+            files = filtered;
+            if (!files.length) {
+              return JSON.stringify({ ok: true, sent: 0, nota: "Esos archivos NO están marcados para la presentación inicial (son on-demand). Acabas de presentar el producto, así que NO los envíes ahora: solo mándalos si el cliente pide ESE archivo o contenido en concreto en un mensaje posterior. Cierra preguntando si quiere comprarlo o si tiene alguna duda." });
+            }
+          }
         }
         for (const f of files.slice(0, 6)) {
           ctx.outbox.push({

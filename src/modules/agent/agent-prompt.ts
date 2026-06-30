@@ -120,7 +120,7 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
       const tag = (f as { showInPresentation?: boolean }).showInPresentation === false ? "on-demand" : "presentación";
       return `[${f.id}] ${f.type} (${tag})${desc ? ` — ${desc}` : ""}`;
     });
-    parts.push(`   multimedia — en la presentación inicial, enviar_multimedia (sin fileIds) manda solo los marcados "presentación"; los "on-demand" se envían solo si el cliente los pide o su consulta se relaciona, usando enviar_multimedia fileIds=[id]:\n     ${fileLines.join("\n     ")}`);
+    parts.push(`   multimedia — la presentación (enviar_ficha) ya manda automáticamente los archivos marcados "presentación"; NO los reenvíes. Los "on-demand" se mandan SOLO si el cliente pide ESE archivo o ESE contenido en concreto (ej. "mándame el video", "el PDF de muestra"), con enviar_multimedia fileIds=[id]. Un pedido GENERAL de información ("quiero más info", "cuéntame del curso", aunque mencione el precio) se satisface con la presentación: NO dispares enviar_multimedia para "completar" con los on-demand:\n     ${fileLines.join("\n     ")}`);
   }
   if (p.productType === "physical" && p.physicalDelivery) {
     const d = p.physicalDelivery;
