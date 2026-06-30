@@ -107,6 +107,24 @@ enum ScheduledMessageStatus {
   FAILED
 }
 
+// Estado de una campaña de envío masivo (broadcast).
+enum CampaignStatus {
+  DRAFT
+  RUNNING
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+// Estado de un destinatario dentro de una campaña.
+enum CampaignRecipientStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
 // Estado de una reserva de servicio (rubro SERVICE).
 enum ServiceBookingStatus {
   SOLICITADA
@@ -160,6 +178,7 @@ model Company {
   chatFlows            ChatFlow[]
   contactNotes         ContactNote[]
   subscriptions        Subscription[]
+  campaigns            Campaign[]
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -1002,4 +1021,60 @@ model WebhookEvent {
   @@unique([source, externalId, eventType])
   @@index([companyId, receivedAt])
   @@map("webhook_events")
+}
+
+// ---------------------------------------------------------------------------
+// Campañas de envío masivo (broadcast). El envío corre server-side en un worker
+// con paceo en memoria (campaign-driver) y claim optimista por destinatario.
+//  - `actions`: secuencia de pasos por contacto. Shape (CampaignAction[]):
+//      { type: "send-message", messages: [{type,text?,mediaUrl?,fileName?}] }
+//    | { type: "wait", seconds }
+//    | { type: "tag", addTagIds?, removeTagIds? }
+//    | { type: "crm-move", crmId, columnId }
+//    | { type: "handoff", notifyOwner? }    // modo humano (mutea al contacto)
+//  - `sendConfig`: { intervalSec, pauseEvery, pauseSec, excludeMuted }
+//  - `audience`: { recipients: [{customerId?, phone, name?}] } seleccionados en el wizard
+// ---------------------------------------------------------------------------
+model Campaign {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String              @db.Uuid
+  name        String
+  status      CampaignStatus      @default(DRAFT)
+  actions     Json                @default("[]")
+  sendConfig  Json                @default("{}")
+  audience    Json                @default("{}")
+  totalCount  Int                 @default(0)
+  sentCount   Int                 @default(0)
+  failedCount Int                 @default(0)
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  company     Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  recipients  CampaignRecipient[]
+
+  @@index([companyId, status])
+  @@index([companyId, updatedAt])
+}
+
+model CampaignRecipient {
+  id          String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String                  @db.Uuid
+  campaignId  String                  @db.Uuid
+  // null si el destinatario es un número importado que aún no es Customer.
+  customerId  String?                 @db.Uuid
+  phone       String
+  name        String?
+  status      CampaignRecipientStatus @default(PENDING)
+  // Índice de la próxima acción a ejecutar (punto de reanudación).
+  actionIndex Int                     @default(0)
+  sentAt      DateTime?
+  error       String?
+  sortOrder   Int                     @default(0)
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+  campaign    Campaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status])
+  @@index([campaignId, sortOrder])
 }

@@ -16,6 +16,7 @@ import botRoutes from "../modules/bot/bot.routes";
 import agentRoutes from "../modules/agent/agent.routes";
 import quickRepliesRoutes from "../modules/quick-replies/quick-replies.routes";
 import crmRoutes from "../modules/crm/crm.routes";
+import campaignsRoutes from "../modules/campaigns/campaigns.routes";
 import flowsRoutes from "../modules/flows/flows.routes";
 import dashboardRoutes from "../modules/dashboard/dashboard.routes";
 import setupRoutes from "../modules/setup/setup.routes";
@@ -49,6 +50,8 @@ router.use("/agent", agentRoutes);
 router.use("/quick-replies", quickRepliesRoutes);
 // CRM kanban (tableros, etiquetas internas, valores de negocio)
 router.use("/crm", crmRoutes);
+// Campañas de envío masivo (broadcast) por WhatsApp
+router.use("/campaigns", campaignsRoutes);
 // Flujos guiados de chatbot (alternativa al agente IA)
 router.use("/flows", flowsRoutes);
 // Métricas del dashboard del tenant

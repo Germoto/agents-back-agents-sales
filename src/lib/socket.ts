@@ -24,6 +24,7 @@ export const SOCKET_EVENTS = {
   ORDER_NEW:            "order.new",            // pedido físico registrado por el agente
   BOOKING_NEW:          "booking.new",          // reserva de servicio registrada por el agente
   CRM_UPDATED:          "crm.updated",          // tablero CRM cambió (move/columnas/CRUD)
+  CAMPAIGN_PROGRESS:    "campaign.progress",    // avance de una campaña masiva (enviados/fallos/estado)
 } as const;
 
 class SocketService {

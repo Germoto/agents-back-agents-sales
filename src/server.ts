@@ -4,6 +4,7 @@ import { app } from "./app";
 import { socketService } from "./lib/socket";
 import { startScheduler } from "./modules/scheduler/scheduler.worker";
 import { startDeliveryStatusWorker } from "./modules/agent/delivery-status.worker";
+import { resumeRunningCampaigns } from "./modules/campaigns/campaign-driver";
 
 const httpServer = createServer(app);
 
@@ -16,4 +17,6 @@ httpServer.listen(env.PORT, () => {
   startScheduler();
   // Worker de estado de entrega: reintenta mensajes que el gateway marcó failed
   startDeliveryStatusWorker();
+  // Reanuda las campañas masivas que quedaron en ejecución antes del reinicio
+  void resumeRunningCampaigns();
 });
