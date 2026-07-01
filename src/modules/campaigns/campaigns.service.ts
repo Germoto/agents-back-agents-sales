@@ -73,6 +73,8 @@ export async function getCampaign(companyId: string, id: string) {
     actions: parseActions(c.actions),
     sendConfig: parseSendConfig(c.sendConfig),
     audience: parseAudience(c.audience),
+    contextProductId: c.contextProductId,
+    contextTagIds: c.contextTagIds ?? [],
     totalCount: c.totalCount,
     sentCount: c.sentCount,
     failedCount: c.failedCount,
@@ -146,13 +148,19 @@ export async function updateCampaign(
     actions?: unknown;
     sendConfig?: unknown;
     audience?: unknown;
+    contextProductId?: string | null;
+    contextTagIds?: string[];
   },
 ) {
   const existing = await ensureCampaign(companyId, id);
 
   // Una vez lanzada (no DRAFT), solo se permite renombrar.
   const editingContent =
-    data.actions !== undefined || data.sendConfig !== undefined || data.audience !== undefined;
+    data.actions !== undefined ||
+    data.sendConfig !== undefined ||
+    data.audience !== undefined ||
+    data.contextProductId !== undefined ||
+    data.contextTagIds !== undefined;
   if (editingContent && existing.status !== "DRAFT") {
     throw new AppError("Solo puedes editar el contenido de una campaña en borrador", 409);
   }
@@ -162,6 +170,8 @@ export async function updateCampaign(
   if (data.actions !== undefined) patch.actions = data.actions as Prisma.InputJsonValue;
   if (data.sendConfig !== undefined) patch.sendConfig = data.sendConfig as Prisma.InputJsonValue;
   if (data.audience !== undefined) patch.audience = data.audience as Prisma.InputJsonValue;
+  if (data.contextProductId !== undefined) patch.contextProductId = data.contextProductId;
+  if (data.contextTagIds !== undefined) patch.contextTagIds = data.contextTagIds;
 
   await prisma.campaign.update({ where: { id }, data: patch });
   return getCampaign(companyId, id);
@@ -305,7 +315,13 @@ export async function testCampaign(
   if (!actions.length) throw new AppError("Agrega al menos una acción para probar", 400);
   await runRecipientActions(
     companyId,
-    { id: campaign.id, name: campaign.name, actions: campaign.actions },
+    {
+      id: campaign.id,
+      name: campaign.name,
+      actions: campaign.actions,
+      contextProductId: campaign.contextProductId,
+      contextTagIds: campaign.contextTagIds ?? [],
+    },
     { phone, name: name ?? null },
     { persist: false },
   );

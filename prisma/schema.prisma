@@ -1043,6 +1043,11 @@ model Campaign {
   actions     Json                @default("[]")
   sendConfig  Json                @default("{}")
   audience    Json                @default("{}")
+  // Producto en foco de la campaña: al enviar, se siembra en Conversation.state
+  // (selectedProductId) para que el agente sepa qué producto se ofreció.
+  contextProductId String?        @db.Uuid
+  // Etiquetas que se aplican a cada destinatario alcanzado por la campaña.
+  contextTagIds    String[]       @default([])
   totalCount  Int                 @default(0)
   sentCount   Int                 @default(0)
   failedCount Int                 @default(0)

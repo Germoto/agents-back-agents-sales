@@ -65,7 +65,7 @@ async function tick(companyId: string, campaignId: string): Promise<void> {
   try {
     campaign = await prisma.campaign.findFirst({
       where: { id: campaignId, companyId },
-      select: { id: true, name: true, status: true, actions: true, sendConfig: true, totalCount: true, sentCount: true, failedCount: true },
+      select: { id: true, name: true, status: true, actions: true, sendConfig: true, contextProductId: true, contextTagIds: true, totalCount: true, sentCount: true, failedCount: true },
     });
   } catch (err) {
     console.error("[campaign] tick: error cargando campaña:", err instanceof Error ? err.message : err);
@@ -115,7 +115,13 @@ async function tick(companyId: string, campaignId: string): Promise<void> {
   try {
     await runRecipientActions(
       companyId,
-      { id: campaign.id, name: campaign.name, actions: campaign.actions },
+      {
+        id: campaign.id,
+        name: campaign.name,
+        actions: campaign.actions,
+        contextProductId: campaign.contextProductId,
+        contextTagIds: campaign.contextTagIds ?? [],
+      },
       { id: next.id, customerId: next.customerId, phone: next.phone, name: next.name },
       { persist: true },
     );

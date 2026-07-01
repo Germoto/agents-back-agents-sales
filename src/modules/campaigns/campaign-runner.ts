@@ -17,7 +17,7 @@ import { loadWhatsappSender, mediaKindFor } from "../agent/outbound";
 import { flushOutbox, sleep, type DeliveryIds } from "../agent/delivery";
 import type { OutboxMessage } from "../agent/agent-tools";
 import { muteCustomerToHuman } from "../agent/agent-tools";
-import { loadOrCreateConversation, notifyOwner } from "../agent/conversation.service";
+import { loadOrCreateConversation, notifyOwner, saveState } from "../agent/conversation.service";
 import { applyCrmAndTagActions } from "../crm/crm.service";
 import { parseActions, type CampaignAction, type CampaignMessageItem } from "./campaigns.types";
 
@@ -32,6 +32,10 @@ export interface RunnerCampaign {
   id: string;
   name: string;
   actions: unknown;
+  /** Producto en foco de la campaña; se siembra en Conversation.state. */
+  contextProductId?: string | null;
+  /** Etiquetas a aplicar a cada destinatario alcanzado. */
+  contextTagIds?: string[];
 }
 
 /** Reemplaza placeholders simples del mensaje ({nombre}) con datos del destinatario. */
@@ -60,6 +64,11 @@ function actionsNeedConversation(actions: CampaignAction[]): boolean {
   );
 }
 
+/** Únicos de un array de ids, ignorando vacíos. */
+function uniqueIds(ids: string[]): string[] {
+  return Array.from(new Set(ids.filter(Boolean)));
+}
+
 /**
  * Ejecuta todas las acciones de la campaña contra el destinatario. Lanza si no hay
  * cuenta de WhatsApp activa o si falla un envío crítico (el driver lo marca FAILED).
@@ -80,13 +89,31 @@ export async function runRecipientActions(
   const to = recipient.phone.replace(/\D/g, "");
   if (!to) throw new Error("Teléfono inválido");
 
+  const contextTagIds = uniqueIds(campaign.contextTagIds ?? []);
+  const hasContext = Boolean(campaign.contextProductId) || contextTagIds.length > 0;
+
   let customerId = recipient.customerId ?? null;
   let conversationId: string | null = null;
 
-  if (actionsNeedConversation(actions)) {
+  if (actionsNeedConversation(actions) || hasContext) {
     const convo = await loadOrCreateConversation(companyId, recipient.phone, null);
     customerId = convo.customerId;
     conversationId = convo.conversationId;
+
+    // Sembrar el CONTEXTO de la campaña ANTES de enviar los mensajes:
+    //  - Producto en foco: se guarda en Conversation.state (selectedProductId) para
+    //    que el agente sepa de qué producto hablar cuando el cliente responda. NO se
+    //    marca presentado (presentedProductIds), así el bot puede enviar la ficha si
+    //    el cliente pide más info.
+    //  - Etiquetas: se aplican al Customer alcanzado (segmentación).
+    if (campaign.contextProductId) {
+      await saveState(conversationId, { ...convo.state, selectedProductId: campaign.contextProductId }).catch(
+        () => undefined,
+      );
+    }
+    if (contextTagIds.length && customerId) {
+      await applyCrmAndTagActions(companyId, customerId, { tagIds: contextTagIds }).catch(() => undefined);
+    }
   }
 
   for (let i = 0; i < actions.length; i++) {
