@@ -52,9 +52,15 @@ export async function persistInboundMedia(
   companyId: string,
   url: string,
   type: string,
+  headers?: Record<string, string>,
 ): Promise<string | null> {
   try {
-    const res = await fetch(url);
+    // Ya es una URL nuestra (p.ej. el webhook de Meta la persistió antes de
+    // llamar a handleInbound): no re-descargarse a sí mismo.
+    const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
+    if (url.startsWith(`${base}/uploads/`)) return url;
+
+    const res = await fetch(url, headers ? { headers } : undefined);
     if (!res.ok) return null;
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length === 0) return null;
@@ -70,7 +76,6 @@ export async function persistInboundMedia(
     const name = `${crypto.randomUUID()}.${ext}`;
     await fs.writeFile(path.join(dir, name), buf);
 
-    const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
     return `${base}/uploads/inbound/${companyId}/${name}`;
   } catch (err) {
     console.error("[inbound-media] no se pudo descargar la media entrante:", err instanceof Error ? err.message : err);

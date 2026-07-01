@@ -17,9 +17,16 @@ import { loadWhatsappSender, mediaKindFor } from "../agent/outbound";
 import { flushOutbox, sleep, type DeliveryIds } from "../agent/delivery";
 import type { OutboxMessage } from "../agent/agent-tools";
 import { muteCustomerToHuman } from "../agent/agent-tools";
-import { loadOrCreateConversation, notifyOwner, saveState } from "../agent/conversation.service";
+import { loadOrCreateConversation, notifyOwner, saveState, recordMessage } from "../agent/conversation.service";
 import { applyCrmAndTagActions } from "../crm/crm.service";
-import { parseActions, type CampaignAction, type CampaignMessageItem } from "./campaigns.types";
+import { metaWa, META_WINDOW_REASON } from "../../lib/meta-wa-client";
+import { isWithin24hWindow, substituteTemplateParams } from "../agent/session-window";
+import {
+  parseActions,
+  type CampaignAction,
+  type CampaignMessageItem,
+  type CampaignMetaTemplate,
+} from "./campaigns.types";
 
 export interface RunnerRecipient {
   id?: string;
@@ -36,6 +43,8 @@ export interface RunnerCampaign {
   contextProductId?: string | null;
   /** Etiquetas a aplicar a cada destinatario alcanzado. */
   contextTagIds?: string[];
+  /** Plantilla de Meta para destinatarios fuera de la ventana de 24h (opcional). */
+  metaTemplate?: CampaignMetaTemplate | null;
 }
 
 /** Reemplaza placeholders simples del mensaje ({nombre}) con datos del destinatario. */
@@ -116,17 +125,46 @@ export async function runRecipientActions(
     }
   }
 
+  // Ventana de 24h de Meta: los mensajes libres de la campaña solo pueden ir a
+  // destinatarios que escribieron hace <24h. Fuera de ventana: plantilla de la
+  // campaña (si está configurada, UNA vez por destinatario) o FAILED con razón.
+  let outsideMetaWindow = false;
+  if (sender.provider === "META" && actions.some((a) => a.type === "send-message")) {
+    outsideMetaWindow = customerId ? !(await isWithin24hWindow(companyId, customerId)) : true;
+  }
+  let templateSent = false;
+
   for (let i = 0; i < actions.length; i++) {
     const action = actions[i];
 
     if (action.type === "send-message") {
-      const outbox = action.messages.map((m) => toOutbox(m, recipient));
-      const ids: DeliveryIds = {
-        companyId,
-        customerId: customerId!,
-        conversationId: conversationId!,
-      };
-      await flushOutbox(sender, to, outbox, ids);
+      if (sender.provider === "META" && outsideMetaWindow) {
+        const tpl = campaign.metaTemplate;
+        if (!tpl) throw new Error(META_WINDOW_REASON);
+        if (!templateSent) {
+          const params = substituteTemplateParams(tpl.params, { nombre: recipient.name });
+          await metaWa.sendTemplate(sender, to, tpl.name, tpl.language, params);
+          templateSent = true;
+          if (conversationId) {
+            await recordMessage({
+              companyId,
+              customerId: customerId!,
+              conversationId,
+              role: "ASSISTANT",
+              message: `📋 Plantilla de Meta "${tpl.name}" enviada (destinatario fuera de la ventana de 24h).`,
+            }).catch(() => undefined);
+          }
+        }
+        // Los demás mensajes libres de la campaña se omiten: Meta los rechazaría.
+      } else {
+        const outbox = action.messages.map((m) => toOutbox(m, recipient));
+        const ids: DeliveryIds = {
+          companyId,
+          customerId: customerId!,
+          conversationId: conversationId!,
+        };
+        await flushOutbox(sender, to, outbox, ids);
+      }
     } else if (action.type === "wait") {
       await sleep(Math.max(0, action.seconds) * 1000);
     } else if (action.type === "tag") {

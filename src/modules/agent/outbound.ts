@@ -1,29 +1,39 @@
 /**
  * Envio de mensajes salientes de WhatsApp para el agente y el scheduler.
- * Resuelve las credenciales SMS Tools (WhatsappConfig) de la empresa y expone
- * helpers de texto y multimedia. Centraliza aqui para no repetir la resolucion
- * de credenciales en cada lugar que necesite responder por WhatsApp.
+ * Resuelve el proveedor del canal de la empresa (WhatsappConfig.provider:
+ * SMS Tools o Meta Cloud API) y expone helpers de texto y multimedia con un
+ * sender opaco: los consumidores (delivery, scheduler, campañas, panel) no
+ * saben ni les importa qué proveedor hay detrás.
  */
 
 import { prisma } from "../../lib/prisma";
 import { smsTools } from "../../lib/smstools-client";
+import { metaWa } from "../../lib/meta-wa-client";
+import { decryptCredential } from "../../lib/credentials-crypto";
 
-export interface WhatsappSender {
-  apiUrl: string;
-  secret: string;
-  account: string;
-}
+export type WhatsappSender =
+  | { provider: "SMSTOOLS"; apiUrl: string; secret: string; account: string }
+  | { provider: "META"; accessToken: string; phoneNumberId: string };
 
 /**
- * Devuelve las credenciales de envio de la empresa, o null si no hay una
- * WhatsappConfig activa con account vinculado (no se puede responder sin eso).
+ * Devuelve las credenciales de envio de la empresa segun su proveedor, o null
+ * si no hay una WhatsappConfig activa completa (no se puede responder sin eso).
  */
 export async function loadWhatsappSender(companyId: string): Promise<WhatsappSender | null> {
   const config = await prisma.whatsappConfig.findFirst({
     where: { companyId, isActive: true },
   });
-  if (!config || !config.account) return null;
-  return { apiUrl: config.apiUrl, secret: config.secret, account: config.account };
+  if (!config) return null;
+  if (config.provider === "META") {
+    if (!config.metaAccessToken || !config.metaPhoneNumberId) return null;
+    return {
+      provider: "META",
+      accessToken: decryptCredential(config.metaAccessToken),
+      phoneNumberId: config.metaPhoneNumberId,
+    };
+  }
+  if (!config.account) return null;
+  return { provider: "SMSTOOLS", apiUrl: config.apiUrl, secret: config.secret, account: config.account };
 }
 
 /** Tipo de adjunto WhatsApp segun el tipo de ProductFile / media. */
@@ -36,7 +46,7 @@ export function mediaKindFor(type: string): "image" | "document" | "video" | "au
 }
 
 export interface SendResult {
-  /** id del mensaje en el gateway (data.messageId del envío), para rastrear su estado. */
+  /** id del mensaje en el gateway (SMS Tools messageId o wamid de Meta), para rastrear su estado. */
   gatewayId: string | null;
 }
 
@@ -52,6 +62,10 @@ export async function sendText(
   to: string,
   message: string,
 ): Promise<SendResult> {
+  if (sender.provider === "META") {
+    const res = await metaWa.sendText(sender, to, message);
+    return { gatewayId: res.wamid };
+  }
   const res = await smsTools.sendMessage(
     { apiUrl: sender.apiUrl, secret: sender.secret },
     sender.account,
@@ -69,6 +83,15 @@ export async function sendMedia(
   caption?: string,
   fileName?: string,
 ): Promise<SendResult> {
+  if (sender.provider === "META") {
+    const res = await metaWa.sendMedia(sender, to, kind, mediaUrl, caption, fileName);
+    // La Cloud API no soporta caption en audio: mandarla como texto aparte
+    // para no perder el mensaje que acompañaba al adjunto.
+    if (kind === "audio" && caption) {
+      await metaWa.sendText(sender, to, caption).catch(() => undefined);
+    }
+    return { gatewayId: res.wamid };
+  }
   const res = await smsTools.sendMedia(
     { apiUrl: sender.apiUrl, secret: sender.secret },
     sender.account,

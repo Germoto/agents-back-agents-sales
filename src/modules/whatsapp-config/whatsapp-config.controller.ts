@@ -16,6 +16,9 @@ import {
   syncWhatsappAccount,
   testWhatsappConnection,
   upsertWhatsappConfig,
+  updateMetaConfig,
+  getMetaStatus,
+  listMetaTemplates,
 } from "./whatsapp-config.service";
 
 export async function getWhatsappConfigController(req: Request, res: Response) {
@@ -30,6 +33,21 @@ export async function upsertWhatsappConfigController(req: Request, res: Response
 
 export async function testWhatsappConnectionController(req: Request, res: Response) {
   const result = await testWhatsappConnection(req.body);
+  return res.json(result);
+}
+
+export async function updateMetaConfigController(req: Request, res: Response) {
+  const result = await updateMetaConfig(req.user!.companyId, req.body);
+  return res.json(result);
+}
+
+export async function getMetaStatusController(req: Request, res: Response) {
+  const result = await getMetaStatus(req.user!.companyId);
+  return res.json(result);
+}
+
+export async function listMetaTemplatesController(req: Request, res: Response) {
+  const result = await listMetaTemplates(req.user!.companyId);
   return res.json(result);
 }
 

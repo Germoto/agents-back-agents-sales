@@ -23,6 +23,14 @@ export type CampaignAction =
   | { type: "crm-move"; crmId: string; columnId: string }
   | { type: "handoff"; notifyOwner?: boolean };
 
+/** Plantilla de Meta usada cuando el destinatario está fuera de la ventana de 24h. */
+export interface CampaignMetaTemplate {
+  name: string;
+  language: string;
+  /** Valores de {{1}}, {{2}}, ... del cuerpo; admiten {nombre}. */
+  params: string[];
+}
+
 export interface CampaignSendConfig {
   /** Segundos entre cada contacto. */
   intervalSec: number;
@@ -32,6 +40,12 @@ export interface CampaignSendConfig {
   pauseSec: number;
   /** Excluir de la audiencia a contactos en atención humana (mutedNumbers / botPaused). */
   excludeMuted: boolean;
+  /**
+   * Solo tenants con proveedor META: plantilla a usar si el destinatario está
+   * fuera de la ventana de 24h. Sin plantilla, esos destinatarios se marcan
+   * FAILED con la razón visible (no se intenta el envío libre).
+   */
+  metaTemplate: CampaignMetaTemplate | null;
 }
 
 /** Un destinatario tal como lo seleccionó el usuario en el wizard. */
@@ -50,7 +64,20 @@ export const DEFAULT_SEND_CONFIG: CampaignSendConfig = {
   pauseEvery: 10,
   pauseSec: 60,
   excludeMuted: true,
+  metaTemplate: null,
 };
+
+function parseCampaignMetaTemplate(raw: unknown): CampaignMetaTemplate | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const name = String(o.name ?? "").trim();
+  if (!name) return null;
+  return {
+    name,
+    language: String(o.language ?? "es").trim() || "es",
+    params: Array.isArray(o.params) ? o.params.map((p) => String(p ?? "")) : [],
+  };
+}
 
 export function parseSendConfig(raw: unknown): CampaignSendConfig {
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -63,6 +90,7 @@ export function parseSendConfig(raw: unknown): CampaignSendConfig {
     pauseEvery: num(o.pauseEvery, DEFAULT_SEND_CONFIG.pauseEvery, 0),
     pauseSec: num(o.pauseSec, DEFAULT_SEND_CONFIG.pauseSec, 0),
     excludeMuted: o.excludeMuted === undefined ? DEFAULT_SEND_CONFIG.excludeMuted : Boolean(o.excludeMuted),
+    metaTemplate: parseCampaignMetaTemplate(o.metaTemplate),
   };
 }
 

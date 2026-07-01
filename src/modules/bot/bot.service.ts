@@ -140,6 +140,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
       temperature: Number(agentConfig.temperature),
     },
     whatsapp: {
+      provider: whatsappConfig.provider,
       apiUrl: whatsappConfig.apiUrl,
       secret: whatsappConfig.secret,
       account: whatsappConfig.account,

@@ -321,6 +321,7 @@ export async function testCampaign(
       actions: campaign.actions,
       contextProductId: campaign.contextProductId,
       contextTagIds: campaign.contextTagIds ?? [],
+      metaTemplate: parseSendConfig(campaign.sendConfig).metaTemplate,
     },
     { phone, name: name ?? null },
     { persist: false },

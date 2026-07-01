@@ -74,6 +74,18 @@ export async function reconcile(): Promise<void> {
     const sender = await loadWhatsappSender(companyId);
     if (!sender) continue;
 
+    if (sender.provider !== "SMSTOOLS") {
+      // META: el estado real llega por el webhook de statuses (meta-webhook).
+      // Aquí solo hay fallback: si tras GIVEUP_MIN sigue "pending" (webhook
+      // perdido), dejar de rastrear como "unknown".
+      for (const m of msgs) {
+        if (now - m.createdAt.getTime() > GIVEUP_MIN * 60_000) {
+          await prisma.conversationMessage.update({ where: { id: m.id }, data: { deliveryStatus: "unknown" } });
+        }
+      }
+      continue;
+    }
+
     let statusById = new Map<string, unknown>();
     try {
       const sent = await smsTools.getSent({ apiUrl: sender.apiUrl, secret: sender.secret }, 1, 100);

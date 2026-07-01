@@ -22,6 +22,13 @@ export const createClientSchema = z.object({
   password: z.string().min(6),
   timezone: z.string().min(3).default("America/Lima"),
   isActive: z.boolean().default(true),
+  // Proveedor del canal WhatsApp. SMSTOOLS (default) aprovisiona la cuenta en
+  // SMS Tools como siempre; META omite ese aprovisionamiento y acepta
+  // credenciales opcionales (el tenant puede completarlas luego en /whatsapp).
+  whatsappProvider: z.enum(["SMSTOOLS", "META"]).default("SMSTOOLS"),
+  metaAccessToken: z.string().trim().optional(),
+  metaPhoneNumberId: z.string().trim().regex(/^\d{5,20}$/, "El Phone Number ID son solo dígitos").optional(),
+  metaWabaId: z.string().trim().regex(/^\d{5,20}$/, "El WABA ID son solo dígitos").optional(),
 });
 
 export const clientIdParamsSchema = z.object({

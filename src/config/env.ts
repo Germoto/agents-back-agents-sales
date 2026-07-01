@@ -24,6 +24,16 @@ const envSchema = z.object({
   SMSTOOLS_ADMIN_URL: z.string().default("https://smstools.pro/admin"),
   SMSTOOLS_ADMIN_TOKEN: z.string().optional().default(""),
   SMSTOOLS_API_URL: z.string().default("https://smstools.pro/api/send/whatsapp"),
+  // --- Meta WhatsApp Cloud API (app única de la plataforma) ---
+  META_GRAPH_VERSION: z.string().default("v21.0"),
+  // App secret de la app Meta: firma X-Hub-Signature-256 del webhook entrante.
+  META_APP_SECRET: z.string().optional().default(""),
+  // Verify token que se pega en el dashboard de Meta al suscribir el webhook.
+  META_WEBHOOK_VERIFY_TOKEN: z.string().optional().default(""),
+  // Clave para cifrar credenciales sensibles (metaAccessToken) en reposo con
+  // AES-256-GCM. Si falta, se guardan en texto plano (igual que el secret de
+  // SMS Tools hoy). Cambiarla invalida los tokens ya cifrados.
+  CREDENTIALS_ENC_KEY: z.string().optional().default(""),
 });
 
 export const env = envSchema.parse(process.env);

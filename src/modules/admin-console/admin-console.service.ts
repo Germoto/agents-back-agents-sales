@@ -4,6 +4,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { signAccessToken } from "../../lib/jwt";
 import { smsToolsAdmin, DEFAULT_API_KEY_PERMISSIONS } from "../../lib/smstools-admin-client";
+import { encryptCredential } from "../../lib/credentials-crypto";
 import { env } from "../../config/env";
 
 function defaultRules() {
@@ -152,6 +153,10 @@ export async function createClient(payload: {
   password: string;
   timezone: string;
   isActive: boolean;
+  whatsappProvider?: "SMSTOOLS" | "META";
+  metaAccessToken?: string;
+  metaPhoneNumberId?: string;
+  metaWabaId?: string;
 }) {
   const existingCompany = await prisma.company.findUnique({
     where: { slug: payload.slug },
@@ -173,10 +178,14 @@ export async function createClient(payload: {
 
   const passwordHash = await bcrypt.hash(payload.password, 10);
 
+  const provider = payload.whatsappProvider ?? "SMSTOOLS";
+
   // 1) Provision the SMS TOOLS account + API key BEFORE we touch the DB
   //    so we can fail fast without leaving orphan records.
+  //    Con proveedor META no hay nada que aprovisionar en SMS Tools.
   let smsToolsUserId: number | null = null;
   let smsToolsSecret: string | null = null;
+  if (provider === "SMSTOOLS") {
   try {
     const createdUser = await smsToolsAdmin.createUser({
       name: payload.adminName,
@@ -216,6 +225,7 @@ export async function createClient(payload: {
         : "No se pudo aprovisionar la cuenta de SMS TOOLS.",
       502,
     );
+  }
   }
 
   let company;
@@ -263,15 +273,31 @@ export async function createClient(payload: {
       },
     });
 
-    await tx.whatsappConfig.create({
-      data: {
-        companyId: createdCompany.id,
-        apiUrl: env.SMSTOOLS_API_URL,
-        secret: smsToolsSecret!,
-        smsToolsUserId: smsToolsUserId,
-        isActive: payload.isActive,
-      },
-    });
+    if (provider === "META") {
+      await tx.whatsappConfig.create({
+        data: {
+          companyId: createdCompany.id,
+          provider: "META",
+          // Columnas legacy de SMS Tools (NOT NULL): inertes para META.
+          apiUrl: env.SMSTOOLS_API_URL,
+          secret: "",
+          metaAccessToken: payload.metaAccessToken ? encryptCredential(payload.metaAccessToken) : null,
+          metaPhoneNumberId: payload.metaPhoneNumberId?.trim() || null,
+          metaWabaId: payload.metaWabaId?.trim() || null,
+          isActive: payload.isActive,
+        },
+      });
+    } else {
+      await tx.whatsappConfig.create({
+        data: {
+          companyId: createdCompany.id,
+          apiUrl: env.SMSTOOLS_API_URL,
+          secret: smsToolsSecret!,
+          smsToolsUserId: smsToolsUserId,
+          isActive: payload.isActive,
+        },
+      });
+    }
 
     return tx.company.findUniqueOrThrow({
       where: { id: createdCompany.id },

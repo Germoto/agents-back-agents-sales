@@ -1,16 +1,32 @@
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { smsTools, type SmsToolsCredentials } from "../../lib/smstools-client";
+import { metaWa } from "../../lib/meta-wa-client";
+import { encryptCredential, decryptCredential } from "../../lib/credentials-crypto";
+import { env } from "../../config/env";
 
 async function getCredentials(companyId: string): Promise<SmsToolsCredentials> {
   const config = await prisma.whatsappConfig.findUnique({ where: { companyId } });
   if (!config) {
     throw new AppError("Aun no has configurado la API de WhatsApp.", 400);
   }
+  // Protege de una vez TODOS los endpoints SMS Tools (QR, servers, accounts,
+  // messages): no aplican cuando el canal del tenant es la API oficial de Meta.
+  if (config.provider === "META") {
+    throw new AppError("Esta operación corresponde al proveedor SMS Tools; tu canal usa la API oficial de Meta.", 400);
+  }
   if (!config.secret || !config.apiUrl) {
     throw new AppError("La configuracion de WhatsApp esta incompleta.", 400);
   }
   return { apiUrl: config.apiUrl, secret: config.secret };
+}
+
+/** Enmascara el token para respuestas del API: nunca se devuelve completo. */
+function maskToken(token: string | null): string | null {
+  if (!token) return null;
+  const plain = decryptCredential(token);
+  if (!plain) return null;
+  return `•••${plain.slice(-4)}`;
 }
 
 function getProviderFailureReason(payload: unknown) {
@@ -36,7 +52,10 @@ function getProviderFailureReason(payload: unknown) {
 }
 
 export async function getWhatsappConfig(companyId: string) {
-  return prisma.whatsappConfig.findUnique({ where: { companyId } });
+  const config = await prisma.whatsappConfig.findUnique({ where: { companyId } });
+  if (!config) return null;
+  // El token de Meta jamás sale completo del backend.
+  return { ...config, metaAccessToken: maskToken(config.metaAccessToken) };
 }
 
 export async function upsertWhatsappConfig(companyId: string, data: {
@@ -73,14 +92,120 @@ export async function upsertWhatsappConfig(companyId: string, data: {
     }
   }
 
+  // Guardar el formulario SMS Tools activa ese proveedor (selector implícito:
+  // cada formulario del panel activa el suyo).
   return prisma.whatsappConfig.upsert({
     where: { companyId },
-    update: data,
+    update: { ...data, provider: "SMSTOOLS" },
     create: {
       companyId,
       ...data,
     },
   });
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Meta WhatsApp Cloud API (proveedor oficial)
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Guarda las credenciales de Meta y activa el proveedor META. Valida el token
+ * y el Phone Number ID contra la API de Graph ANTES de guardar (si no, 400 con
+ * el error del proveedor). `accessToken` vacío conserva el token ya guardado
+ * (el frontend lo muestra enmascarado).
+ */
+export async function updateMetaConfig(
+  companyId: string,
+  data: { accessToken?: string | null; phoneNumberId: string; wabaId?: string | null; isActive: boolean },
+) {
+  const current = await prisma.whatsappConfig.findUnique({ where: { companyId } });
+
+  let plainToken = (data.accessToken ?? "").trim();
+  if (!plainToken) {
+    plainToken = decryptCredential(current?.metaAccessToken);
+    if (!plainToken) {
+      throw new AppError("Ingresa el token de acceso de Meta (System User).", 400);
+    }
+  }
+
+  // Validación en vivo: si el token o el phone number id no sirven, no guardamos.
+  const info = await metaWa.getPhoneNumberInfo({ accessToken: plainToken, phoneNumberId: data.phoneNumberId });
+
+  // Otro tenant no puede reclamar el mismo número (índice único + chequeo amable).
+  const clash = await prisma.whatsappConfig.findFirst({
+    where: { metaPhoneNumberId: data.phoneNumberId, companyId: { not: companyId } },
+    select: { id: true },
+  });
+  if (clash) {
+    throw new AppError("Ese Phone Number ID ya está vinculado a otra cuenta de la plataforma.", 409);
+  }
+
+  const metaData = {
+    provider: "META" as const,
+    metaAccessToken: encryptCredential(plainToken),
+    metaPhoneNumberId: data.phoneNumberId,
+    metaWabaId: data.wabaId?.trim() || null,
+    metaDisplayPhone: info.displayPhone,
+    isActive: data.isActive,
+  };
+
+  const saved = await prisma.whatsappConfig.upsert({
+    where: { companyId },
+    update: metaData,
+    create: {
+      companyId,
+      // Columnas legacy de SMS Tools (NOT NULL): inertes para el proveedor META.
+      apiUrl: env.SMSTOOLS_API_URL,
+      secret: "",
+      ...metaData,
+    },
+  });
+
+  const warning = env.PUBLIC_BASE_URL.startsWith("https://")
+    ? null
+    : "PUBLIC_BASE_URL no es HTTPS público: Meta no podrá descargar la multimedia saliente (archivos de productos, imágenes).";
+
+  return { config: { ...saved, metaAccessToken: maskToken(saved.metaAccessToken) }, info, warning };
+}
+
+/** Test de conexión en vivo del canal Meta (semáforo del panel). */
+export async function getMetaStatus(companyId: string) {
+  const config = await prisma.whatsappConfig.findUnique({ where: { companyId } });
+  if (!config || config.provider !== "META" || !config.metaAccessToken || !config.metaPhoneNumberId) {
+    return { connected: false, displayPhone: null, verifiedName: null, qualityRating: null, error: "Sin credenciales de Meta configuradas." };
+  }
+  try {
+    const info = await metaWa.getPhoneNumberInfo({
+      accessToken: decryptCredential(config.metaAccessToken),
+      phoneNumberId: config.metaPhoneNumberId,
+    });
+    // Cache del número visible (lo usa getLinkedPhone/setup sin llamar a Graph).
+    if (info.displayPhone && info.displayPhone !== config.metaDisplayPhone) {
+      await prisma.whatsappConfig.update({ where: { companyId }, data: { metaDisplayPhone: info.displayPhone } });
+    }
+    return { connected: true, ...info, error: null };
+  } catch (err) {
+    return {
+      connected: false,
+      displayPhone: config.metaDisplayPhone,
+      verifiedName: null,
+      qualityRating: null,
+      error: err instanceof Error ? err.message : "No se pudo verificar la conexión con Meta.",
+    };
+  }
+}
+
+/** Plantillas aprobadas del WABA (para recordatorios/campañas fuera de ventana). */
+export async function listMetaTemplates(companyId: string) {
+  const config = await prisma.whatsappConfig.findUnique({ where: { companyId } });
+  if (!config || config.provider !== "META" || !config.metaAccessToken) {
+    throw new AppError("El canal de esta cuenta no usa la API oficial de Meta.", 400);
+  }
+  if (!config.metaWabaId) {
+    throw new AppError("Configura el WABA ID (WhatsApp Business Account) para listar plantillas.", 400);
+  }
+  const templates = await metaWa.listTemplates(decryptCredential(config.metaAccessToken), config.metaWabaId);
+  return templates.filter((t) => t.status === "APPROVED");
 }
 
 /**
@@ -316,8 +441,10 @@ async function fetchAndPaginate<T extends { account?: string | null }>(
 export async function getLinkedPhone(companyId: string): Promise<string | null> {
   const config = await prisma.whatsappConfig.findUnique({
     where: { companyId },
-    select: { account: true },
+    select: { account: true, provider: true, metaDisplayPhone: true },
   });
+  // META: el número visible está cacheado en BD (no hay llamada a Graph aquí).
+  if (config?.provider === "META") return config.metaDisplayPhone ?? null;
   const unique = config?.account ?? null;
   if (!unique) return null;
 

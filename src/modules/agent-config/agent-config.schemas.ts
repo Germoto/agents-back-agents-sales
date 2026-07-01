@@ -29,12 +29,24 @@ const quietHoursSchema = z
   })
   .optional();
 
+// Plantilla de Meta de respaldo para recordatorios fuera de la ventana de 24h
+// (solo tenants con proveedor META; opcional — sin ella el recordatorio se omite).
+const metaTemplateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    language: z.string().trim().min(2).max(10).default("es"),
+    params: z.array(z.string().max(300)).max(10).default([]),
+  })
+  .nullable()
+  .optional();
+
 // Config de recordatorios/seguimientos que consume el agente y el scheduler.
 export const followupConfigSchema = z
   .object({
     abandonedCart: reminderSequenceSchema,
     leftOnRead: reminderSequenceSchema,
     quietHours: quietHoursSchema,
+    metaTemplate: metaTemplateSchema,
   })
   .nullable()
   .optional();

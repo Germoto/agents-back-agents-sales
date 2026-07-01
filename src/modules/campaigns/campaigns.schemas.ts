@@ -38,11 +38,20 @@ const campaignActionSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
+// Plantilla de Meta para destinatarios fuera de la ventana de 24h (opcional;
+// solo aplica cuando el proveedor del tenant es la API oficial de Meta).
+const campaignMetaTemplateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  language: z.string().trim().min(2).max(10).default("es"),
+  params: z.array(z.string().max(300)).max(10).default([]),
+});
+
 const sendConfigSchema = z.object({
   intervalSec: z.coerce.number().int().min(0).max(3600).default(10),
   pauseEvery: z.coerce.number().int().min(0).max(10000).default(10),
   pauseSec: z.coerce.number().int().min(0).max(86400).default(60),
   excludeMuted: z.boolean().default(true),
+  metaTemplate: campaignMetaTemplateSchema.nullable().optional(),
 });
 
 const audienceRecipientSchema = z.object({

@@ -235,14 +235,30 @@ model AgentConfig {
   company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
+// Proveedor del canal WhatsApp del tenant. Solo uno activo por empresa.
+enum WhatsappProviderType {
+  SMSTOOLS
+  META
+}
+
 model WhatsappConfig {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId       String   @unique @db.Uuid
+  id              String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId       String               @unique @db.Uuid
+  provider        WhatsappProviderType @default(SMSTOOLS)
+  // --- SMS Tools ---
   apiUrl          String
   secret          String
   account         String?  @unique
   defaultServerId Int?
   smsToolsUserId  Int?
+  // --- Meta WhatsApp Cloud API (app única de la plataforma; token por tenant) ---
+  // Token de System User; cifrado ("enc:v1:...") si CREDENTIALS_ENC_KEY está definida
+  metaAccessToken   String?
+  // Phone Number ID de Meta; resuelve el tenant en el webhook entrante
+  metaPhoneNumberId String?  @unique
+  metaWabaId        String?
+  // Cache del display_phone_number (UI / setup / getLinkedPhone)
+  metaDisplayPhone  String?
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt

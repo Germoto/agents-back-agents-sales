@@ -121,6 +121,7 @@ async function tick(companyId: string, campaignId: string): Promise<void> {
         actions: campaign.actions,
         contextProductId: campaign.contextProductId,
         contextTagIds: campaign.contextTagIds ?? [],
+        metaTemplate: cfg.metaTemplate,
       },
       { id: next.id, customerId: next.customerId, phone: next.phone, name: next.name },
       { persist: true },

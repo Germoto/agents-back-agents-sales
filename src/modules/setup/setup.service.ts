@@ -46,7 +46,14 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
       }),
       prisma.whatsappConfig.findUnique({
         where: { companyId },
-        select: { account: true, secret: true, isActive: true },
+        select: {
+          account: true,
+          secret: true,
+          isActive: true,
+          provider: true,
+          metaAccessToken: true,
+          metaPhoneNumberId: true,
+        },
       }),
       prisma.paymentConfig.findUnique({
         where: { companyId },
@@ -126,8 +133,11 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
     icon: "card",
   });
 
-  // 5. Conectar WhatsApp — paso clave.
-  const whatsappDone = !!whatsapp?.account && !!whatsapp?.secret && !!whatsapp?.isActive;
+  // 5. Conectar WhatsApp — paso clave. Ramifica por proveedor del canal.
+  const whatsappDone =
+    whatsapp?.provider === "META"
+      ? !!whatsapp.metaAccessToken && !!whatsapp.metaPhoneNumberId && !!whatsapp.isActive
+      : !!whatsapp?.account && !!whatsapp?.secret && !!whatsapp?.isActive;
   steps.push({
     key: "whatsapp",
     title: "Conecta tu WhatsApp",

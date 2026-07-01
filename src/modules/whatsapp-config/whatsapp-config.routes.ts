@@ -19,6 +19,9 @@ import {
   syncWhatsappAccountController,
   testWhatsappConnectionController,
   upsertWhatsappConfigController,
+  updateMetaConfigController,
+  getMetaStatusController,
+  listMetaTemplatesController,
 } from "./whatsapp-config.controller";
 import {
   linkSchema,
@@ -27,6 +30,7 @@ import {
   testWhatsappConnectionSchema,
   tokenQuerySchema,
   upsertWhatsappConfigSchema,
+  updateMetaConfigSchema,
 } from "./whatsapp-config.schemas";
 
 const router = Router();
@@ -36,6 +40,11 @@ router.use(requireAuth);
 router.get("/", asyncHandler(getWhatsappConfigController));
 router.put("/", validate({ body: upsertWhatsappConfigSchema }), asyncHandler(upsertWhatsappConfigController));
 router.post("/test", validate({ body: testWhatsappConnectionSchema }), asyncHandler(testWhatsappConnectionController));
+
+// Proveedor API oficial de Meta (Cloud API): credenciales, semáforo y plantillas
+router.put("/meta", validate({ body: updateMetaConfigSchema }), asyncHandler(updateMetaConfigController));
+router.get("/meta/status", asyncHandler(getMetaStatusController));
+router.get("/meta/templates", asyncHandler(listMetaTemplatesController));
 
 router.get("/servers", asyncHandler(listWhatsappServersController));
 

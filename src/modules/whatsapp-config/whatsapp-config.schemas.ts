@@ -40,3 +40,12 @@ export const tokenQuerySchema = z.object({
   token: z.string().min(8),
 });
 
+// Credenciales de la API oficial de Meta (Cloud API). accessToken vacío/omitido
+// conserva el token ya guardado (el panel lo muestra enmascarado).
+export const updateMetaConfigSchema = z.object({
+  accessToken: z.string().trim().nullable().optional(),
+  phoneNumberId: z.string().trim().regex(/^\d{5,20}$/, "El Phone Number ID de Meta son solo dígitos"),
+  wabaId: z.string().trim().regex(/^\d{5,20}$/, "El WABA ID son solo dígitos").nullable().optional().or(z.literal("").transform(() => null)),
+  isActive: z.boolean().default(true),
+});
+

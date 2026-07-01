@@ -14,6 +14,7 @@ import subscriptionsRoutes from "../modules/subscriptions/subscriptions.routes";
 import receiptsRoutes from "../modules/receipts/receipts.routes";
 import botRoutes from "../modules/bot/bot.routes";
 import agentRoutes from "../modules/agent/agent.routes";
+import metaWebhookRoutes from "../modules/meta-webhook/meta-webhook.routes";
 import quickRepliesRoutes from "../modules/quick-replies/quick-replies.routes";
 import crmRoutes from "../modules/crm/crm.routes";
 import campaignsRoutes from "../modules/campaigns/campaigns.routes";
@@ -46,6 +47,9 @@ router.use("/receipts", receiptsRoutes);
 router.use("/bot", botRoutes);
 // Webhook inbound del agente autónomo (reemplaza n8n)
 router.use("/agent", agentRoutes);
+// Webhook de la API oficial de Meta WhatsApp (verificación GET + inbound/statuses
+// POST firmados con X-Hub-Signature-256; tenant por metadata.phone_number_id)
+router.use("/meta", metaWebhookRoutes);
 // Respuestas rápidas del panel de conversaciones
 router.use("/quick-replies", quickRepliesRoutes);
 // CRM kanban (tableros, etiquetas internas, valores de negocio)

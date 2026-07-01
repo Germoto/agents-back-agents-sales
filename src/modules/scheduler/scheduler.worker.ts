@@ -14,13 +14,20 @@ import { recheckPayment } from "../agent/agent.service";
 import { resumeFlowOnTimeout } from "../flows/flow-engine";
 import { clampToBusinessHours, normalizeQuietHours, type QuietHours } from "./quiet-hours";
 import type { WhatsappSender } from "../agent/outbound";
+import { metaWa, META_WINDOW_REASON } from "../../lib/meta-wa-client";
+import {
+  isWithin24hWindow,
+  parseMetaTemplate,
+  substituteTemplateParams,
+  type MetaTemplateConfig,
+} from "../agent/session-window";
 
 const BATCH = 50;
 // Separación mínima entre recordatorios VISIBLES al mismo cliente en una misma pasada
 // del worker: evita que dos seguimientos lleguen pegados (parece spam). Configurable.
 const MIN_GAP_MS = Number(process.env.REMINDER_MIN_GAP_MS) || 120_000;
 
-type QuietConfig = { tz: string | null; quiet: QuietHours };
+type QuietConfig = { tz: string | null; quiet: QuietHours; metaTemplate: MetaTemplateConfig | null };
 
 /** Carga (y cachea por batch) la zona horaria + ventana de horario del tenant. */
 async function getQuietConfig(companyId: string, cache: Map<string, QuietConfig>): Promise<QuietConfig> {
@@ -30,8 +37,15 @@ async function getQuietConfig(companyId: string, cache: Map<string, QuietConfig>
     prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } }),
     prisma.agentConfig.findUnique({ where: { companyId }, select: { followupConfig: true } }),
   ]);
-  const quiet = normalizeQuietHours((agentCfg?.followupConfig as { quietHours?: unknown } | null)?.quietHours);
-  const cfg: QuietConfig = { tz: company?.timezone ?? null, quiet };
+  const followup = agentCfg?.followupConfig as { quietHours?: unknown; metaTemplate?: unknown } | null;
+  const quiet = normalizeQuietHours(followup?.quietHours);
+  const cfg: QuietConfig = {
+    tz: company?.timezone ?? null,
+    quiet,
+    // Plantilla de respaldo (tenants META) para recordatorios fuera de la
+    // ventana de 24h. Sin plantilla, esos recordatorios se marcan FAILED.
+    metaTemplate: parseMetaTemplate(followup?.metaTemplate),
+  };
   cache.set(companyId, cfg);
   return cfg;
 }
@@ -54,7 +68,7 @@ async function processDue(): Promise<void> {
     where: { status: ScheduledMessageStatus.PENDING, sendAt: { lte: now } },
     orderBy: { sendAt: "asc" },
     take: BATCH,
-    include: { customer: { select: { phone: true } } },
+    include: { customer: { select: { phone: true, name: true } } },
   });
   if (!due.length) return;
 
@@ -174,6 +188,28 @@ async function processDue(): Promise<void> {
       if (!sender) throw new Error("empresa sin WhatsappConfig activa");
 
       const to = msg.customer.phone.replace(/\D/g, "");
+
+      // Ventana de 24h de Meta: un recordatorio libre fuera de ventana sería
+      // rechazado (131047). Con plantilla de respaldo configurada se envía la
+      // plantilla; sin ella, FAILED con la razón visible en el panel.
+      if (sender.provider === "META" && !(await isWithin24hWindow(msg.companyId, msg.customerId))) {
+        const qc = await getQuietConfig(msg.companyId, quietCache);
+        if (!qc.metaTemplate) throw new Error(META_WINDOW_REASON);
+        const params = substituteTemplateParams(qc.metaTemplate.params, { nombre: msg.customer.name });
+        await metaWa.sendTemplate(sender, to, qc.metaTemplate.name, qc.metaTemplate.language, params);
+        if (msg.conversationId) {
+          await recordMessage({
+            companyId: msg.companyId,
+            customerId: msg.customerId,
+            conversationId: msg.conversationId,
+            role: "ASSISTANT",
+            message: `📋 Plantilla de Meta "${qc.metaTemplate.name}" enviada (recordatorio fuera de la ventana de 24h).`,
+          });
+        }
+        sentToCustomer.add(custKey);
+        continue;
+      }
+
       const body = (await applyFirma(msg.companyId, msg.body)) ?? msg.body;
       if (msg.mediaUrl) {
         // El tipo de media va en metadata (image|video|audio|pdf); default image.

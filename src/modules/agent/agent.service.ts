@@ -71,8 +71,10 @@ function isResetCommand(text: string | null | undefined): boolean {
 
 async function resolveCompanyByAccount(account: string | null): Promise<string | null> {
   if (!account) return null;
+  // `account` puede ser el unique de SMS Tools o el phone_number_id de Meta
+  // (el parser de Meta lo pone en ese campo para reutilizar esta resolución).
   const cfg = await prisma.whatsappConfig.findFirst({
-    where: { account, isActive: true },
+    where: { isActive: true, OR: [{ account }, { metaPhoneNumberId: account }] },
     select: { companyId: true, company: { select: { isActive: true } } },
   });
   if (!cfg || !cfg.company.isActive) return null;
@@ -140,9 +142,15 @@ async function verifyInboundSession(companyId: string, inbound: InboundMessage):
   if (inbound.account) {
     const cfg = await prisma.whatsappConfig.findFirst({
       where: { companyId, isActive: true },
-      select: { account: true },
+      select: { account: true, metaPhoneNumberId: true },
     });
-    return !!cfg?.account && cfg.account === inbound.account;
+    if (!cfg) return false;
+    // SMS Tools: unique de la cuenta vinculada. Meta: phone_number_id (el
+    // parser de Meta lo entrega en inbound.account).
+    return (
+      (!!cfg.account && cfg.account === inbound.account) ||
+      (!!cfg.metaPhoneNumberId && cfg.metaPhoneNumberId === inbound.account)
+    );
   }
   if (inbound.businessPhone) {
     const businessPhone = inbound.businessPhone;
