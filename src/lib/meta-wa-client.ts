@@ -207,6 +207,17 @@ export const metaWa = {
     }
   },
 
+  /**
+   * Suscribe la app de la plataforma (la del token) al WABA, para que Meta
+   * entregue los mensajes entrantes de ese número a NUESTRO webhook. Sin esto,
+   * el WABA solo notifica a la app a la que estaba suscrito (con el número de
+   * prueba, la app interna de Meta) y los mensajes reales nunca llegan.
+   * POST /{wabaId}/subscribed_apps → { success: true }.
+   */
+  async subscribeAppToWaba(accessToken: string, wabaId: string): Promise<void> {
+    await graphRequest(`/${wabaId}/subscribed_apps`, accessToken, { method: "POST" });
+  },
+
   /** Valida credenciales y trae los datos del número (test de conexión). */
   async getPhoneNumberInfo(creds: MetaCredentials): Promise<{
     displayPhone: string | null;

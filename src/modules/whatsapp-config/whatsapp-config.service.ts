@@ -161,11 +161,39 @@ export async function updateMetaConfig(
     },
   });
 
-  const warning = env.PUBLIC_BASE_URL.startsWith("https://")
-    ? null
-    : "PUBLIC_BASE_URL no es HTTPS público: Meta no podrá descargar la multimedia saliente (archivos de productos, imágenes).";
+  const warnings: string[] = [];
+  if (!env.PUBLIC_BASE_URL.startsWith("https://")) {
+    warnings.push(
+      "PUBLIC_BASE_URL no es HTTPS público: Meta no podrá descargar la multimedia saliente (archivos de productos, imágenes).",
+    );
+  }
 
-  return { config: { ...saved, metaAccessToken: maskToken(saved.metaAccessToken) }, info, warning };
+  // Suscribir NUESTRA app al WABA para recibir los mensajes entrantes en el
+  // webhook. Es el paso que Meta no hace solo (con el número de prueba el WABA
+  // queda suscrito a la app interna de Meta). Best-effort: si falla, el envío y
+  // la validación ya quedaron guardados; solo avisamos que la recepción no
+  // funcionará hasta resolverlo.
+  if (data.wabaId?.trim()) {
+    try {
+      await metaWa.subscribeAppToWaba(plainToken, data.wabaId.trim());
+    } catch (err) {
+      warnings.push(
+        `No se pudo suscribir la app al WABA automáticamente (los mensajes entrantes podrían no llegar): ${
+          err instanceof Error ? err.message : "error desconocido"
+        }. Verifica que el token tenga el permiso whatsapp_business_management.`,
+      );
+    }
+  } else {
+    warnings.push(
+      "Sin WABA ID no se pudo suscribir la app para recibir mensajes entrantes. Agrega el WABA ID y vuelve a guardar.",
+    );
+  }
+
+  return {
+    config: { ...saved, metaAccessToken: maskToken(saved.metaAccessToken) },
+    info,
+    warning: warnings.length ? warnings.join(" ") : null,
+  };
 }
 
 /** Test de conexión en vivo del canal Meta (semáforo del panel). */
