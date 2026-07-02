@@ -10,8 +10,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "prisma:seed": "ts-node --transpile-only prisma/seed.ts",
-    "test": "vitest run"
+    "prisma:seed": "ts-node --transpile-only prisma/seed.ts"
   },
   "keywords": [
     "express",
@@ -50,8 +49,7 @@
     "prisma": "^6.17.1",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "typescript": "^6.0.3"
   },
   "prisma": {
     "seed": "ts-node --transpile-only prisma/seed.ts"

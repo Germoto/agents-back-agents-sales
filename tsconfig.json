@@ -15,5 +15,5 @@
     "ignoreDeprecations": "6.0"
   },
   "include": ["src/**/*.ts", "prisma/seed.ts"],
-  "exclude": ["dist", "node_modules", "src/**/__tests__/**"]
+  "exclude": ["dist", "node_modules"]
 }
