@@ -16,6 +16,7 @@ import {
   syncWhatsappAccount,
   testWhatsappConnection,
   upsertWhatsappConfig,
+  setActiveProvider,
   updateMetaConfig,
   getMetaStatus,
   listMetaTemplates,
@@ -28,6 +29,11 @@ export async function getWhatsappConfigController(req: Request, res: Response) {
 
 export async function upsertWhatsappConfigController(req: Request, res: Response) {
   const config = await upsertWhatsappConfig(req.user!.companyId, req.body, req.user!.phone);
+  return res.json(config);
+}
+
+export async function setProviderController(req: Request, res: Response) {
+  const config = await setActiveProvider(req.user!.companyId, req.body.provider);
   return res.json(config);
 }
 

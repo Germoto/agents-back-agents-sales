@@ -14,6 +14,12 @@ export const upsertWhatsappConfigSchema = z.object({
   defaultServerId: z.number().int().positive().nullable().optional(),
 });
 
+// Cambio explícito del proveedor activo del canal (SMS Tools ⇄ Meta), sin
+// tocar credenciales. Reemplaza el "selector implícito" de guardar cada form.
+export const setProviderSchema = z.object({
+  provider: z.enum(["SMSTOOLS", "META"]),
+});
+
 export const testWhatsappConnectionSchema = z.object({
   apiUrl: z.string().url(),
   secret: noSpacesText,

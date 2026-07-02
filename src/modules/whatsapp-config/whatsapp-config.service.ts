@@ -92,16 +92,45 @@ export async function upsertWhatsappConfig(companyId: string, data: {
     }
   }
 
-  // Guardar el formulario SMS Tools activa ese proveedor (selector implícito:
-  // cada formulario del panel activa el suyo).
+  // Guardar credenciales NO cambia el proveedor activo: eso ahora es exclusivo
+  // del toggle explícito (setActiveProvider). En creación, `provider` toma el
+  // default del schema (SMSTOOLS).
   return prisma.whatsappConfig.upsert({
     where: { companyId },
-    update: { ...data, provider: "SMSTOOLS" },
+    update: { ...data },
     create: {
       companyId,
       ...data,
     },
   });
+}
+
+/**
+ * Cambia el proveedor activo del canal (SMS Tools ⇄ Meta) sin tocar
+ * credenciales. Es no destructivo: el secret de SMS Tools y las credenciales de
+ * Meta se conservan, así que se puede ir y volver. Valida que existan los
+ * prerequisitos del proveedor destino antes de activarlo.
+ */
+export async function setActiveProvider(companyId: string, provider: "SMSTOOLS" | "META") {
+  const config = await prisma.whatsappConfig.findUnique({ where: { companyId } });
+  if (!config) {
+    throw new AppError("Aún no has configurado la API de WhatsApp.", 400);
+  }
+  if (provider === "SMSTOOLS" && !config.secret) {
+    throw new AppError("No hay credenciales de SMS Tools configuradas para esta cuenta.", 400);
+  }
+  if (provider === "META" && (!config.metaPhoneNumberId || !config.metaAccessToken)) {
+    throw new AppError("Faltan credenciales de la API de Meta. Complétalas antes de activarla.", 400);
+  }
+  if (config.provider === provider) {
+    // Ya está activo: idempotente, devolvemos la config saneada.
+    return { ...config, metaAccessToken: maskToken(config.metaAccessToken) };
+  }
+  const updated = await prisma.whatsappConfig.update({
+    where: { companyId },
+    data: { provider },
+  });
+  return { ...updated, metaAccessToken: maskToken(updated.metaAccessToken) };
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -140,8 +169,11 @@ export async function updateMetaConfig(
     throw new AppError("Ese Phone Number ID ya está vinculado a otra cuenta de la plataforma.", 409);
   }
 
+  // Guardar credenciales de Meta NO cambia el proveedor activo (eso es del
+  // toggle explícito). EXCEPTO al crear la fila por primera vez: si no existía
+  // config, el default del schema sería SMSTOOLS y sin secret quedaría en un
+  // estado inconsistente, así que en creación arrancamos en META.
   const metaData = {
-    provider: "META" as const,
     metaAccessToken: encryptCredential(plainToken),
     metaPhoneNumberId: data.phoneNumberId,
     metaWabaId: data.wabaId?.trim() || null,
@@ -154,6 +186,7 @@ export async function updateMetaConfig(
     update: metaData,
     create: {
       companyId,
+      provider: "META",
       // Columnas legacy de SMS Tools (NOT NULL): inertes para el proveedor META.
       apiUrl: env.SMSTOOLS_API_URL,
       secret: "",

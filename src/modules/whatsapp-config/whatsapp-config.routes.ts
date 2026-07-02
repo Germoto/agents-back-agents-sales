@@ -17,6 +17,7 @@ import {
   listWhatsappServersController,
   relinkWhatsappAccountController,
   syncWhatsappAccountController,
+  setProviderController,
   testWhatsappConnectionController,
   upsertWhatsappConfigController,
   updateMetaConfigController,
@@ -27,6 +28,7 @@ import {
   linkSchema,
   paginationSchema,
   relinkSchema,
+  setProviderSchema,
   testWhatsappConnectionSchema,
   tokenQuerySchema,
   upsertWhatsappConfigSchema,
@@ -39,6 +41,8 @@ router.use(requireAuth);
 
 router.get("/", asyncHandler(getWhatsappConfigController));
 router.put("/", validate({ body: upsertWhatsappConfigSchema }), asyncHandler(upsertWhatsappConfigController));
+// Toggle explícito del proveedor activo del canal (SMS Tools ⇄ Meta).
+router.put("/provider", validate({ body: setProviderSchema }), asyncHandler(setProviderController));
 router.post("/test", validate({ body: testWhatsappConnectionSchema }), asyncHandler(testWhatsappConnectionController));
 
 // Proveedor API oficial de Meta (Cloud API): credenciales, semáforo y plantillas
