@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { env } from "../../config/env";
 import { uploadProductFileMiddleware } from "../../middlewares/upload.middleware";
+import { ensureMetaCompatibleVideo } from "../../lib/video-transcode";
 
 export type UploadedProductFileResponse = {
   type: "IMAGE" | "VIDEO" | "AUDIO" | "PDF" | "OTHER";
@@ -75,9 +76,9 @@ export async function uploadHandler(req: Request, res: Response) {
     throw new AppError("Archivo no recibido", 400);
   }
 
-  const storagePathAbs = file.path;
+  let storagePathAbs = file.path;
   const baseDir = path.resolve(process.cwd(), env.UPLOAD_DIR);
-  const relativePath = toForwardSlashes(path.relative(baseDir, storagePathAbs));
+  let relativePath = toForwardSlashes(path.relative(baseDir, storagePathAbs));
 
   // safety: ensure path is inside expected dir
   if (!relativePath.startsWith(`products/${companyId}/`)) {
@@ -85,16 +86,33 @@ export async function uploadHandler(req: Request, res: Response) {
     throw new AppError("Ruta de almacenamiento invalida", 500);
   }
 
-  const ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase() || path.extname(file.filename).replace(/^\./, "").toLowerCase();
+  const type = detectType(file.mimetype);
+  let ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase() || path.extname(file.filename).replace(/^\./, "").toLowerCase();
+  let mimeType = file.mimetype;
+  let size = file.size;
+
+  // Normalizar video a H.264/AAC mp4 (compatible con la API oficial de Meta).
+  // Cubre TODOS los módulos: todos suben por este único endpoint. Best-effort:
+  // si la conversión falla, se conserva el archivo original.
+  if (type === "VIDEO") {
+    const result = await ensureMetaCompatibleVideo(storagePathAbs);
+    if (result.changed) {
+      storagePathAbs = result.path;
+      relativePath = toForwardSlashes(path.relative(baseDir, storagePathAbs));
+      ext = "mp4";
+      mimeType = "video/mp4";
+      size = (await fs.stat(storagePathAbs)).size;
+    }
+  }
 
   const response: UploadedProductFileResponse = {
-    type: detectType(file.mimetype),
+    type,
     url: buildPublicUrl(relativePath),
     storagePath: relativePath,
     originalName: file.originalname,
     extension: ext,
-    mimeType: file.mimetype,
-    size: file.size,
+    mimeType,
+    size,
   };
 
   return res.status(201).json(response);

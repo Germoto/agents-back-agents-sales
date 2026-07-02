@@ -23,7 +23,9 @@ RUN npm run build
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
+# ffmpeg: normaliza los videos subidos a H.264/AAC (compatibles con Meta).
+# Incluye ffprobe. Solo se usa al subir un video.
+RUN apt-get update && apt-get install -y openssl ffmpeg && rm -rf /var/lib/apt/lists/*
 
 # Mismo blindaje de red para el install de runtime (ENV no se hereda entre etapas).
 ENV NPM_CONFIG_FETCH_RETRIES=5 \

@@ -105,8 +105,10 @@ export async function sendMedia(
     // Subir el archivo a Meta primero (en vez de enviarlo por link): preserva
     // el orden de la secuencia y da errores de tamaño/formato claros.
     const { buffer, mimeType } = await fetchMediaBuffer(mediaUrl);
-    const limit = META_MEDIA_LIMITS[kind];
-    if (buffer.length > limit) {
+    // El video NO se valida por tamaño aquí: la conversión al subir ya lo
+    // normaliza/comprime, y en la práctica Meta acepta videos >16MB (un video
+    // de cámara de 18MB se entregó). Para image/audio/document sí se valida.
+    if (kind !== "video" && buffer.length > META_MEDIA_LIMITS[kind]) {
       throw new AppError(mediaTooLargeReason(kind, buffer.length), 422);
     }
     const filename = fileName ?? mediaUrl.split("/").pop()?.split("?")[0] ?? `archivo.${kind}`;
