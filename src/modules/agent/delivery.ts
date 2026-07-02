@@ -4,7 +4,7 @@
  * (extraído de agent.service.ts para evitar ciclos de imports).
  */
 
-import { recordMessage } from "./conversation.service";
+import { recordMessage, notifyOwner } from "./conversation.service";
 import { sendText, sendMedia, type WhatsappSender } from "./outbound";
 import { applyFirma } from "./firma";
 import type { OutboxMessage } from "./agent-tools";
@@ -61,7 +61,17 @@ export async function deliver(
       });
     }
   } catch (err) {
-    console.error("[agent] error enviando WhatsApp:", err instanceof Error ? err.message : err);
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error("[agent] error enviando WhatsApp:", reason);
+    // Con Meta, el fallo de media es síncrono (subida/tamaño rechazados): avisar
+    // al dueño con el motivo claro (antes esto lo hacía el webhook de status).
+    // Para SMS Tools se mantiene el comportamiento de solo loguear.
+    if (sender.provider === "META" && msg.kind === "media") {
+      await notifyOwner(
+        ids.companyId,
+        `⚠️ No se pudo enviar un archivo al cliente por WhatsApp (Meta).\nMotivo: ${reason}`,
+      ).catch(() => undefined);
+    }
   }
 }
 

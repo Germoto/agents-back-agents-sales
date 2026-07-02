@@ -111,6 +111,27 @@ function normalizeTo(to: string): string {
   return to.replace(/\D/g, "");
 }
 
+/** Límites de tamaño de Meta por tipo de media (bytes). */
+export const META_MEDIA_LIMITS: Record<"image" | "video" | "audio" | "document", number> = {
+  image: 5 * 1024 * 1024,
+  video: 16 * 1024 * 1024,
+  audio: 16 * 1024 * 1024,
+  document: 100 * 1024 * 1024,
+};
+
+const MEDIA_LIMIT_LABEL: Record<string, string> = {
+  image: "5 MB",
+  video: "16 MB",
+  audio: "16 MB",
+  document: "100 MB",
+};
+
+/** Mensaje claro cuando un archivo excede el límite de Meta para su tipo. */
+export function mediaTooLargeReason(kind: "image" | "video" | "audio" | "document", bytes: number): string {
+  const mb = (bytes / (1024 * 1024)).toFixed(1);
+  return `El archivo (${mb} MB) supera el límite de ${MEDIA_LIMIT_LABEL[kind]} de WhatsApp (Meta) para ${kind}. Comprímelo o usa uno más liviano.`;
+}
+
 export const metaWa = {
   /** Mensaje de texto libre (solo dentro de la ventana de 24h). */
   async sendText(creds: MetaCredentials, to: string, body: string): Promise<{ wamid: string | null }> {
@@ -127,18 +148,61 @@ export const metaWa = {
   },
 
   /**
-   * Media por link (imagen/video/audio/documento). Audio no soporta caption en
-   * la Cloud API: si viene caption con audio, el caller debe mandarla aparte.
+   * Sube un archivo a Meta y devuelve su media_id. Subir primero (en vez de
+   * enviar por `link`) preserva el ORDEN de la secuencia —Meta ya tiene el
+   * archivo, así que lo entrega tan rápido como un texto— y da errores de
+   * validación claros y síncronos. POST /{phoneNumberId}/media (multipart).
    */
-  async sendMedia(
+  async uploadMedia(
+    creds: MetaCredentials,
+    file: { buffer: Buffer; mimeType: string; filename: string },
+  ): Promise<string> {
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("type", file.mimeType);
+    // new Uint8Array(...) normaliza el Buffer a un ArrayBuffer estándar (evita el
+    // tipo Buffer<ArrayBufferLike> que TS no acepta como BlobPart).
+    form.append("file", new Blob([new Uint8Array(file.buffer)], { type: file.mimeType }), file.filename);
+
+    let response: Response;
+    try {
+      response = await fetch(`${graphBase()}/${creds.phoneNumberId}/media`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${creds.accessToken}` },
+        body: form,
+      });
+    } catch (error) {
+      throw new AppError(
+        error instanceof Error ? `No se pudo subir la media a Meta: ${error.message}` : "No se pudo subir la media a Meta",
+        502,
+      );
+    }
+    const json = (await response.json().catch(() => null)) as { id?: string; error?: GraphError } | null;
+    if (!response.ok || !json?.id) {
+      const e = json?.error;
+      const detail = e?.error_data?.details ? ` ${e.error_data.details}` : "";
+      throw new AppError(
+        e?.message ? `Meta rechazó la media: ${e.message}${detail}` : `Meta rechazó la media (HTTP ${response.status})`,
+        502,
+        json,
+      );
+    }
+    return json.id;
+  },
+
+  /**
+   * Envía un mensaje de media ya subida (por media_id). Audio no soporta
+   * caption en la Cloud API: si viene caption con audio, el caller la manda aparte.
+   */
+  async sendMediaById(
     creds: MetaCredentials,
     to: string,
     kind: "image" | "document" | "video" | "audio",
-    mediaUrl: string,
+    mediaId: string,
     caption?: string,
     fileName?: string,
   ): Promise<{ wamid: string | null }> {
-    const media: Record<string, string> = { link: mediaUrl };
+    const media: Record<string, string> = { id: mediaId };
     if (caption && kind !== "audio") media.caption = caption;
     if (fileName && kind === "document") media.filename = fileName;
     const res = await graphRequest<SendResponse>(`/${creds.phoneNumberId}/messages`, creds.accessToken, {

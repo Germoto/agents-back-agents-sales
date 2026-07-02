@@ -8,7 +8,8 @@
 
 import { prisma } from "../../lib/prisma";
 import { smsTools } from "../../lib/smstools-client";
-import { metaWa } from "../../lib/meta-wa-client";
+import { metaWa, META_MEDIA_LIMITS, mediaTooLargeReason } from "../../lib/meta-wa-client";
+import { AppError } from "../../lib/app-error";
 import { decryptCredential } from "../../lib/credentials-crypto";
 
 export type WhatsappSender =
@@ -50,6 +51,23 @@ export interface SendResult {
   gatewayId: string | null;
 }
 
+/** Descarga un archivo (de nuestro /uploads u otra URL) a un Buffer + mimeType, para subirlo a Meta. */
+async function fetchMediaBuffer(url: string): Promise<{ buffer: Buffer; mimeType: string }> {
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (error) {
+    throw new AppError(
+      error instanceof Error ? `No se pudo descargar la media a enviar: ${error.message}` : "No se pudo descargar la media a enviar",
+      502,
+    );
+  }
+  if (!res.ok) throw new AppError(`No se pudo descargar la media a enviar (HTTP ${res.status}).`, 502);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const mimeType = (res.headers.get("content-type") ?? "application/octet-stream").split(";")[0].trim();
+  return { buffer, mimeType };
+}
+
 /** Extrae el id del gateway de la respuesta del envío (messageId, con fallback a id). */
 function gatewayIdOf(res: unknown): string | null {
   const r = (res ?? {}) as Record<string, unknown>;
@@ -84,7 +102,16 @@ export async function sendMedia(
   fileName?: string,
 ): Promise<SendResult> {
   if (sender.provider === "META") {
-    const res = await metaWa.sendMedia(sender, to, kind, mediaUrl, caption, fileName);
+    // Subir el archivo a Meta primero (en vez de enviarlo por link): preserva
+    // el orden de la secuencia y da errores de tamaño/formato claros.
+    const { buffer, mimeType } = await fetchMediaBuffer(mediaUrl);
+    const limit = META_MEDIA_LIMITS[kind];
+    if (buffer.length > limit) {
+      throw new AppError(mediaTooLargeReason(kind, buffer.length), 422);
+    }
+    const filename = fileName ?? mediaUrl.split("/").pop()?.split("?")[0] ?? `archivo.${kind}`;
+    const mediaId = await metaWa.uploadMedia(sender, { buffer, mimeType, filename });
+    const res = await metaWa.sendMediaById(sender, to, kind, mediaId, caption, fileName);
     // La Cloud API no soporta caption en audio: mandarla como texto aparte
     // para no perder el mensaje que acompañaba al adjunto.
     if (kind === "audio" && caption) {
