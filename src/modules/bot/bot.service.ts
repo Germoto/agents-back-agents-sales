@@ -53,7 +53,9 @@ export async function buildBotConfig(companyId: string, account?: string) {
     where: {
       companyId,
       isActive: true,
-      ...(account ? { account } : {}),
+      // El "account" puede ser el unique de SMS Tools o el phone_number_id de
+      // Meta (que se guarda en metaPhoneNumberId). Aceptar ambos.
+      ...(account ? { OR: [{ account }, { metaPhoneNumberId: account }] } : {}),
     },
     include: { company: true },
   });
