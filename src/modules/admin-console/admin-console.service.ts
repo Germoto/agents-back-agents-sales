@@ -6,6 +6,8 @@ import { signAccessToken } from "../../lib/jwt";
 import { smsToolsAdmin, DEFAULT_API_KEY_PERMISSIONS } from "../../lib/smstools-admin-client";
 import { encryptCredential } from "../../lib/credentials-crypto";
 import { env } from "../../config/env";
+import { addMonthsUtc } from "../billing/billing.service";
+import { deriveBillingState } from "../billing/entitlements";
 
 function defaultRules() {
   return [
@@ -15,33 +17,29 @@ function defaultRules() {
   ];
 }
 
-function mapClient(company: {
-  id: string;
-  name: string;
-  slug: string;
-  adminPhone: string;
-  timezone: string;
-  isActive: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-  users: Array<{
-    id: string;
-    name: string;
-    phone: string;
-    role: UserRole;
-    isActive: boolean;
-    createdAt: Date;
-  }>;
-} & {
-  _count?: {
-    products: number;
-  };
-}) {
+// Include compartido de los listados/detalle de clientes: usuarios admin,
+// conteo de productos y (nuevo) suscripción SaaS + saldo de créditos.
+const CLIENT_INCLUDE = {
+  users: {
+    where: { role: { in: ["ADMIN", "SUPERADMIN"] as UserRole[] } },
+    orderBy: { createdAt: "asc" as const },
+  },
+  _count: { select: { products: true } },
+  platformSubscription: { include: { plan: true } },
+  wallet: true,
+} satisfies Prisma.CompanyInclude;
+
+type ClientRow = Prisma.CompanyGetPayload<{ include: typeof CLIENT_INCLUDE }>;
+
+function mapClient(company: ClientRow) {
   const adminUser =
     company.users.find((user) => user.role === "ADMIN") ??
     company.users.find((user) => user.role === "SUPERADMIN") ??
     company.users[0] ??
     null;
+
+  const balancePen = company.wallet ? Number(company.wallet.balancePen) : 0;
+  const sub = company.platformSubscription;
 
   return {
     id: company.id,
@@ -63,6 +61,16 @@ function mapClient(company: {
         }
       : null,
     productCount: company._count?.products ?? 0,
+    // null = sin paquete (LEGACY, acceso libre)
+    subscription: sub
+      ? {
+          planId: sub.planId,
+          planName: sub.plan.name,
+          expiresAt: sub.expiresAt,
+          status: deriveBillingState(sub, balancePen).status,
+        }
+      : null,
+    balancePen,
   };
 }
 
@@ -123,21 +131,7 @@ export async function getAuthenticatedSuperadmin(userId: string) {
 
 export async function listClients() {
   const companies = await prisma.company.findMany({
-    include: {
-      users: {
-        where: {
-          role: {
-            in: ["ADMIN", "SUPERADMIN"],
-          },
-        },
-        orderBy: { createdAt: "asc" },
-      },
-      _count: {
-        select: {
-          products: true,
-        },
-      },
-    },
+    include: CLIENT_INCLUDE,
     orderBy: [{ createdAt: "desc" }],
   });
 
@@ -154,6 +148,8 @@ export async function createClient(payload: {
   timezone: string;
   isActive: boolean;
   whatsappProvider?: "SMSTOOLS" | "META";
+  planId?: string;
+  planMonths?: number;
   metaAccessToken?: string;
   metaPhoneNumberId?: string;
   metaWabaId?: string;
@@ -165,6 +161,14 @@ export async function createClient(payload: {
 
   if (existingCompany) {
     throw new AppError("Ya existe un cliente con ese slug", 409);
+  }
+
+  // Validar el paquete ANTES de aprovisionar SMS Tools (fail-fast).
+  const plan = payload.planId
+    ? await prisma.platformPlan.findUnique({ where: { id: payload.planId } })
+    : null;
+  if (payload.planId && (!plan || !plan.isActive)) {
+    throw new AppError("Paquete no encontrado o inactivo", 404);
   }
 
   const existingUser = await prisma.user.findUnique({
@@ -273,6 +277,21 @@ export async function createClient(payload: {
       },
     });
 
+    if (plan) {
+      const now = new Date();
+      const months = payload.planMonths ?? 1;
+      await tx.companySubscription.create({
+        data: {
+          companyId: createdCompany.id,
+          planId: plan.id,
+          startsAt: now,
+          expiresAt: addMonthsUtc(now, months),
+          months,
+          source: "SUPERADMIN",
+        },
+      });
+    }
+
     if (provider === "META") {
       await tx.whatsappConfig.create({
         data: {
@@ -301,21 +320,7 @@ export async function createClient(payload: {
 
     return tx.company.findUniqueOrThrow({
       where: { id: createdCompany.id },
-      include: {
-        users: {
-          where: {
-            role: {
-              in: ["ADMIN", "SUPERADMIN"],
-            },
-          },
-          orderBy: { createdAt: "asc" },
-        },
-        _count: {
-          select: {
-            products: true,
-          },
-        },
-      },
+      include: CLIENT_INCLUDE,
     });
     });
   } catch (error) {
@@ -359,21 +364,7 @@ export async function updateClientStatus(companyId: string, isActive: boolean) {
 
     return tx.company.findUniqueOrThrow({
       where: { id: companyId },
-      include: {
-        users: {
-          where: {
-            role: {
-              in: ["ADMIN", "SUPERADMIN"],
-            },
-          },
-          orderBy: { createdAt: "asc" },
-        },
-        _count: {
-          select: {
-            products: true,
-          },
-        },
-      },
+      include: CLIENT_INCLUDE,
     });
   });
 

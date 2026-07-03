@@ -14,7 +14,9 @@ export async function login(phone: string, password: string) {
     throw new AppError("Credenciales invalidas", 401);
   }
 
-  if (!user.company.isActive) {
+  // El SUPERADMIN entra siempre por el login unificado aunque su empresa
+  // "contenedora" esté inactiva (comparte companyId con una empresa real).
+  if (!user.company.isActive && user.role !== "SUPERADMIN") {
     throw new AppError("La empresa esta inactiva", 403);
   }
 
@@ -37,6 +39,8 @@ export async function login(phone: string, password: string) {
       name: user.name,
       phone: user.phone,
       companyId: user.companyId,
+      // El frontend enruta por rol: SUPERADMIN va a la consola de control.
+      role: user.role,
       uiTheme: user.uiTheme,
     },
   };

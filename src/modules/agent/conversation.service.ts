@@ -61,7 +61,7 @@ export interface LoadedConversation {
   lastInboundId: string | null;
 }
 
-function normalizePhone(value: string) {
+export function normalizePhone(value: string) {
   const digits = value.replace(/\D/g, "");
   return digits.startsWith("+") ? digits : `+${digits}`;
 }

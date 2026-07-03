@@ -34,6 +34,12 @@ const envSchema = z.object({
   // AES-256-GCM. Si falta, se guardan en texto plano (igual que el secret de
   // SMS Tools hoy). Cambiarla invalida los tokens ya cifrados.
   CREDENTIALS_ENC_KEY: z.string().optional().default(""),
+  // --- Monetización SaaS (paquetes / suscripciones / créditos) ---
+  // Días de gracia tras vencer la suscripción antes de bloquear al tenant.
+  BILLING_GRACE_DAYS: z.coerce.number().int().nonnegative().default(7),
+  // Kill-switch del enforcement de billing: "0" => todas las empresas operan
+  // como LEGACY (sin límites ni bloqueos) sin importar su suscripción.
+  BILLING_ENFORCEMENT: z.string().default("1"),
 });
 
 export const env = envSchema.parse(process.env);

@@ -26,6 +26,10 @@ export const createClientSchema = z.object({
   // SMS Tools como siempre; META omite ese aprovisionamiento y acepta
   // credenciales opcionales (el tenant puede completarlas luego en /whatsapp).
   whatsappProvider: z.enum(["SMSTOOLS", "META"]).default("SMSTOOLS"),
+  // Paquete inicial (opcional): crea la suscripción SaaS del tenant al crearlo.
+  // Sin planId la empresa queda LEGACY (acceso libre sin límites).
+  planId: z.string().uuid().optional(),
+  planMonths: z.coerce.number().int().min(1).max(36).default(1),
   metaAccessToken: z.string().trim().optional(),
   metaPhoneNumberId: z.string().trim().regex(/^\d{5,20}$/, "El Phone Number ID son solo dígitos").optional(),
   metaWabaId: z.string().trim().regex(/^\d{5,20}$/, "El WABA ID son solo dígitos").optional(),

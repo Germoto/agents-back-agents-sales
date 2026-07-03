@@ -179,6 +179,10 @@ model Company {
   contactNotes         ContactNote[]
   subscriptions        Subscription[]
   campaigns            Campaign[]
+  platformSubscription CompanySubscription?
+  wallet               CompanyWallet?
+  creditTransactions   CreditTransaction[]
+  redeemedVouchers     Voucher[]            @relation("RedeemedVouchers")
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -1098,4 +1102,127 @@ model CampaignRecipient {
 
   @@index([campaignId, status])
   @@index([campaignId, sortOrder])
+}
+
+// ============================================================
+// Monetización SaaS de la plataforma: paquetes, suscripciones de
+// tenants, vales y créditos. NO confundir con `Subscription`, que
+// es la venta con vencimiento del rubro STREAMER (clientes finales).
+// ============================================================
+
+// Módulos generales activables por paquete. El agente IA, comprobantes,
+// recordatorios y conversaciones son core (siempre incluidos).
+enum PlanModule {
+  CAMPAIGNS
+  CRM
+  FLOWS
+  QUICK_REPLIES
+  FUNNEL
+  META_PROVIDER
+}
+
+enum VoucherType {
+  PLAN
+  CREDIT
+}
+
+enum CreditTxType {
+  VOUCHER
+  ADMIN_ADJUST
+  LEAD_CHARGE
+}
+
+// Paquete/plan comercial de la plataforma. Editables desde la consola
+// superadmin; los isPublic se muestran en la sección Precios del landing.
+model PlatformPlan {
+  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String
+  description       String?
+  priceUsd          Decimal               @default(0) @db.Decimal(10, 2)
+  pricePen          Decimal               @default(0) @db.Decimal(10, 2)
+  // Límite de leads (Customers NUEVOS) por mes calendario. null = ilimitado.
+  monthlyLeadLimit  Int?
+  // Precio en S/ por lead extra (sobre el límite, o todo lead en modo créditos).
+  // null = el plan no admite leads extra ni modo créditos.
+  extraLeadPricePen Decimal?              @db.Decimal(10, 2)
+  verticals         BusinessVertical[]    @default([INFOPRODUCT])
+  modules           PlanModule[]          @default([])
+  isPublic          Boolean               @default(false)
+  isHighlighted     Boolean               @default(false) // badge "Más popular"
+  sortOrder         Int                   @default(0)
+  isActive          Boolean               @default(true)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  subscriptions     CompanySubscription[]
+  vouchers          Voucher[]
+}
+
+// Suscripción SaaS del tenant a un paquete. UNA fila "actual" por empresa
+// (extender/cambiar de plan muta la fila). El estado NO se persiste: se
+// deriva de expiresAt + canceledAt + gracia + saldo de créditos
+// (ACTIVE | GRACE | CREDITS | EXPIRED | CANCELED; sin fila = LEGACY, acceso libre).
+model CompanySubscription {
+  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId    String       @unique @db.Uuid
+  planId       String       @db.Uuid
+  startsAt     DateTime     @default(now())
+  expiresAt    DateTime
+  months       Int          @default(1) // meses del último alta/cambio (informativo)
+  source       String       @default("SUPERADMIN") // SUPERADMIN | VOUCHER
+  voucherId    String?      @db.Uuid // último vale de paquete aplicado
+  canceledAt   DateTime?
+  lastNoticeAt DateTime?    // dedupe de avisos de vencimiento
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  company      Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  plan         PlatformPlan @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([expiresAt])
+}
+
+// Saldo de créditos (S/) del tenant. Materializado para poder descontar de
+// forma atómica (updateMany con balancePen >= precio).
+model CompanyWallet {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String   @unique @db.Uuid
+  balancePen Decimal  @default(0) @db.Decimal(12, 2)
+  updatedAt  DateTime @updatedAt
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+// Ledger de movimientos de créditos (auditoría + UI de "Mi plan").
+model CreditTransaction {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId       String       @db.Uuid
+  type            CreditTxType
+  amountPen       Decimal      @db.Decimal(12, 2) // + recarga, - consumo
+  balanceAfterPen Decimal      @db.Decimal(12, 2)
+  note            String?
+  voucherId       String?      @db.Uuid
+  customerPhone   String?      // lead cobrado (LEAD_CHARGE)
+  createdAt       DateTime     @default(now())
+  company         Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, createdAt])
+}
+
+// Vale/cupón canjeable por el tenant: activa/extiende un paquete (PLAN) o
+// recarga saldo de créditos (CREDIT). Se generan por lote desde la consola.
+model Voucher {
+  id                  String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                String        @unique
+  name                String        // nombre del lote (ej. "profesional x 1 mes #3")
+  type                VoucherType   @default(PLAN)
+  planId              String?       @db.Uuid // requerido si type=PLAN
+  months              Int? // requerido si type=PLAN
+  creditAmountPen     Decimal?      @db.Decimal(12, 2) // requerido si type=CREDIT
+  redeemedAt          DateTime?
+  redeemedByCompanyId String?       @db.Uuid
+  redeemedByUserId    String?       @db.Uuid
+  createdAt           DateTime      @default(now())
+  plan                PlatformPlan? @relation(fields: [planId], references: [id], onDelete: Restrict)
+  redeemedByCompany   Company?      @relation("RedeemedVouchers", fields: [redeemedByCompanyId], references: [id], onDelete: SetNull)
+
+  @@index([type, redeemedAt])
+  @@index([planId])
 }

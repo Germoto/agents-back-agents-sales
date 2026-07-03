@@ -4,6 +4,17 @@ import { smsTools, type SmsToolsCredentials } from "../../lib/smstools-client";
 import { metaWa } from "../../lib/meta-wa-client";
 import { encryptCredential, decryptCredential } from "../../lib/credentials-crypto";
 import { env } from "../../config/env";
+import { getEntitlements } from "../billing/entitlements";
+
+/** El proveedor META es un módulo de paquete: las empresas legacy pasan. */
+async function assertMetaAllowedByPlan(companyId: string) {
+  const ent = await getEntitlements(companyId);
+  if (!ent.legacy && !ent.modules.includes("META_PROVIDER")) {
+    throw new AppError("Tu plan no incluye la API oficial de Meta. Mejora tu paquete para activarla.", 403, {
+      code: "MODULE_NOT_AVAILABLE",
+    });
+  }
+}
 
 async function getCredentials(companyId: string): Promise<SmsToolsCredentials> {
   const config = await prisma.whatsappConfig.findUnique({ where: { companyId } });
@@ -122,6 +133,9 @@ export async function setActiveProvider(companyId: string, provider: "SMSTOOLS" 
   if (provider === "META" && (!config.metaPhoneNumberId || !config.metaAccessToken)) {
     throw new AppError("Faltan credenciales de la API de Meta. Complétalas antes de activarla.", 400);
   }
+  if (provider === "META") {
+    await assertMetaAllowedByPlan(companyId);
+  }
   if (config.provider === provider) {
     // Ya está activo: idempotente, devolvemos la config saneada.
     return { ...config, metaAccessToken: maskToken(config.metaAccessToken) };
@@ -147,6 +161,7 @@ export async function updateMetaConfig(
   companyId: string,
   data: { accessToken?: string | null; phoneNumberId: string; wabaId?: string | null; isActive: boolean },
 ) {
+  await assertMetaAllowedByPlan(companyId);
   const current = await prisma.whatsappConfig.findUnique({ where: { companyId } });
 
   let plainToken = (data.accessToken ?? "").trim();

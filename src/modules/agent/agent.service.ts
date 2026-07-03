@@ -14,6 +14,7 @@ import type { InboundMessage } from "../../lib/smstools-client";
 import { persistInboundMedia } from "../../lib/inbound-media";
 import {
   loadOrCreateConversation,
+  normalizePhone,
   markInboundProcessed,
   recordMessage,
   annotateMessageText,
@@ -42,6 +43,8 @@ import {
   secondsFromNow,
 } from "../scheduler/scheduler.service";
 import { resolveReminderSequence, type ReminderType } from "./reminder-templates";
+import { getEntitlements } from "../billing/entitlements";
+import { gateNewLead } from "../billing/billing.service";
 
 interface FollowupConfig {
   abandonedCartHours?: number;
@@ -222,6 +225,16 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     return;
   }
 
+  // GATE de billing (1/2): suscripción vencida sin créditos => el bot no
+  // responde nada para esta empresa. Cubre SMS Tools + Meta y modos AI/FLOW.
+  const entitlements = await getEntitlements(companyId);
+  if (entitlements.blocked) {
+    console.warn(
+      `[billing] DROP inbound: suscripción vencida (company=${companyId} from=${inbound.fromPhone ?? "-"})`,
+    );
+    return;
+  }
+
   let config;
   try {
     config = await buildBotConfig(companyId, inbound.account ?? undefined);
@@ -255,6 +268,27 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     if (!isPhoneAllowed(inbound.fromPhone, allow)) {
       console.log(`[agent] ignorado por ALLOWLIST: ${inbound.fromPhone}`);
       return;
+    }
+  }
+
+  // GATE de billing (2/2): límite de leads del mes / modo créditos. Solo aplica
+  // a números NUEVOS (sin Customer): los clientes existentes nunca se bloquean
+  // ni se cobran. Si no pasa, el inbound se descarta SIN persistir (no se crea
+  // Customer, no consume lead).
+  if (!entitlements.legacy) {
+    const normalizedFrom = normalizePhone(inbound.fromPhone);
+    const existingCustomer = await prisma.customer.findUnique({
+      where: { companyId_phone: { companyId, phone: normalizedFrom } },
+      select: { id: true },
+    });
+    if (!existingCustomer) {
+      const leadAllowed = await gateNewLead(companyId, normalizedFrom);
+      if (!leadAllowed) {
+        console.warn(
+          `[billing] DROP lead nuevo: límite del plan alcanzado y sin saldo (company=${companyId} from=${normalizedFrom})`,
+        );
+        return;
+      }
     }
   }
 

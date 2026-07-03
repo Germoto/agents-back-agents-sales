@@ -2,6 +2,7 @@ import { BusinessVertical, Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { getEnabledVerticals } from "../platform-config/platform-config.service";
+import { getEntitlements } from "../billing/entitlements";
 import { invalidateFirmaCache } from "../agent/firma";
 
 export async function getBusinessProfile(companyId: string) {
@@ -72,6 +73,16 @@ export async function updateBusinessProfile(companyId: string, data: {
         "Ese rubro no está disponible. Elige uno de los rubros habilitados.",
         409,
         { code: "VERTICAL_NOT_ENABLED" },
+      );
+    }
+    // Además del habilitado global, el rubro debe estar incluido en el paquete
+    // del tenant (las empresas legacy/sin paquete pasan).
+    const ent = await getEntitlements(companyId);
+    if (!ent.legacy && !ent.verticals.includes(data.vertical)) {
+      throw new AppError(
+        "Tu plan no incluye ese rubro. Mejora tu paquete para activarlo.",
+        409,
+        { code: "VERTICAL_NOT_IN_PLAN" },
       );
     }
   }

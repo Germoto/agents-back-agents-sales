@@ -24,8 +24,13 @@ import {
   updateLandingSceneSchema,
   updateVerticalsSchema,
 } from "./admin-console.schemas";
+import billingAdminRoutes from "../billing/billing-admin.routes";
 
 const router = Router();
+
+// Monetización SaaS (paquetes, suscripciones, vales, créditos) — hereda el
+// prefijo oculto /api/control-room-7m4x. Guardas propias adentro.
+router.use(billingAdminRoutes);
 
 router.post("/auth/login", validate({ body: superadminLoginSchema }), asyncHandler(superadminLoginController));
 router.get("/auth/me", requireAuth, requireRole("SUPERADMIN"), asyncHandler(superadminMeController));
