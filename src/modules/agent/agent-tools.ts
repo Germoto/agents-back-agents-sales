@@ -1382,13 +1382,32 @@ export async function executeTool(
     }
 
     case "validar_pago": {
+      // ¿Hay un comprobante con datos leídos por visión? (monto/op/código). Se usa
+      // en la guarda de secuencia y en la de "nada con qué validar".
+      const lastReceipt = ctx.state.lastReceipt;
+      const hasReceiptData = !!(
+        lastReceipt &&
+        (lastReceipt.operationNumber || lastReceipt.amountText || lastReceipt.securityCode)
+      );
+
       // Guard de secuencia: no se puede validar si nunca se enviaron los métodos de
-      // pago al cliente (no tendría cómo pagar).
+      // pago al cliente (no tendría cómo pagar). EXCEPCIÓN: con un comprobante real
+      // y fresco, el cliente evidentemente ya tenía los datos y pagó por su cuenta
+      // (cliente recurrente, o el dato salió en texto libre): se habilita el contexto
+      // de pago implícitamente y se valida normal. La frescura evita que un
+      // lastReceipt viejo (no se limpia) habilite esto en estados raros.
       if (!ctx.state.lastPaymentPromptAt) {
-        return JSON.stringify({
-          ok: false,
-          error: "Aún no enviaste los métodos de pago al cliente. Usa primero enviar_metodos_pago; recién cuando el cliente diga que pagó, valida con el N° de operación del comprobante o el nombre del titular.",
-        });
+        const receiptFresh =
+          hasReceiptData &&
+          !!lastReceipt?.at &&
+          Date.now() - new Date(lastReceipt.at).getTime() < 30 * 60 * 1000;
+        if (!receiptFresh) {
+          return JSON.stringify({
+            ok: false,
+            error: "Aún no enviaste los métodos de pago al cliente. Usa primero enviar_metodos_pago; recién cuando el cliente diga que pagó, valida con el N° de operación del comprobante o el nombre del titular.",
+          });
+        }
+        ctx.state.lastPaymentPromptAt = new Date().toISOString();
       }
 
       // SIMULACIÓN: no tocar PaymentReceipt reales; aprobar de frente.
@@ -1422,12 +1441,6 @@ export async function executeTool(
       // validar sin que haya pago real (típico: el cliente mandó una imagen que NO es
       // comprobante estando en contexto de pago). NO le pidas el titular en automático
       // (eso confunde y mete en bucle); deja que el agente decida por contexto.
-      const hasReceiptData = !!(
-        ctx.state.lastReceipt &&
-        (ctx.state.lastReceipt.operationNumber ||
-          ctx.state.lastReceipt.amountText ||
-          ctx.state.lastReceipt.securityCode)
-      );
       if (!hasReceiptData && !payerName && !codes.length) {
         return JSON.stringify({
           ok: false,

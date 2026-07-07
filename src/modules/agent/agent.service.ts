@@ -886,6 +886,14 @@ async function handleInboundImage(
     mediaUrl: imageUrl,
     at: new Date().toISOString(),
   };
+  // Contexto de pago implícito: si nunca se enviaron los métodos por herramienta
+  // (cliente recurrente que paga directo, o el dato salió en texto libre), un
+  // comprobante con datos prueba que el cliente ya los tenía. Así el turno arranca
+  // en esperandoPago y el prompt guía directo a validar_pago (cuya guarda de
+  // secuencia, si esta escritura pierde una carrera, aplica el mismo criterio).
+  if (looksLikeReceipt && !convo.state.lastPaymentPromptAt) {
+    convo.state.lastPaymentPromptAt = new Date().toISOString();
+  }
   await saveState(convo.conversationId, convo.state);
 
   // Reenviar el comprobante al admin (solo aviso; NO pausa el bot, NO responde al cliente).
