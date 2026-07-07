@@ -57,6 +57,8 @@ export async function chatCompletion(opts: {
   temperature?: number;
   messages: ChatMessage[];
   tools?: ToolDefinition[];
+  /** "auto" (default) o forzar una herramienta concreta en esta llamada. */
+  toolChoice?: "auto" | { type: "function"; function: { name: string } };
   maxTokens?: number;
 }): Promise<ChatCompletionResult> {
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -71,7 +73,7 @@ export async function chatCompletion(opts: {
       max_tokens: opts.maxTokens ?? 900,
       messages: opts.messages,
       ...(opts.tools && opts.tools.length
-        ? { tools: opts.tools, tool_choice: "auto" }
+        ? { tools: opts.tools, tool_choice: opts.toolChoice ?? "auto" }
         : {}),
     }),
   });

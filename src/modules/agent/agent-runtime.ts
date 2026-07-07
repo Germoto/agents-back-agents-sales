@@ -27,6 +27,19 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     ...history,
   ];
 
+  // Validación determinista: si la visión ya leyó un CÓDIGO de seguridad, la
+  // validación no puede depender de que el modelo decida llamar la herramienta
+  // (pasó en prod: comprobante perfecto en el estado y el modelo respondió un
+  // genérico sin validar). Se fuerza validar_pago en la primera iteración; el
+  // resto del turno sigue normal con el resultado del tool.
+  const forceValidation = shouldForceValidation(ctx);
+  if (forceValidation) {
+    ctx.state.receiptAutoHandledAt = ctx.state.lastReceipt?.at ?? new Date().toISOString();
+    console.log(
+      `[agent] forzando validar_pago (comprobante leído cód=${ctx.state.lastReceipt?.securityCode}) convo=${ctx.conversationId}`,
+    );
+  }
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await chatCompletion({
       apiKey,
@@ -34,6 +47,10 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       temperature: ctx.config.openai.temperature,
       messages,
       tools: TOOL_DEFINITIONS,
+      toolChoice:
+        i === 0 && forceValidation
+          ? { type: "function", function: { name: "validar_pago" } }
+          : "auto",
     });
 
     if (res.toolCalls.length) {
@@ -75,6 +92,23 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   }).catch(() => null);
 
   return (closing?.content ?? "").trim() || (suppressFallback(ctx, history) ? "" : FALLBACK_TEXT);
+}
+
+/**
+ * ¿Corresponde forzar validar_pago en este turno? Solo el caso Yape con CÓDIGO
+ * de seguridad leído por visión (con código la validación no necesita nada del
+ * modelo; Plin/sin código sigue el flujo conversacional). Condiciones:
+ * comprobante fresco (<10 min), aún no forzado para ESTE comprobante
+ * (receiptAutoHandledAt marca el `at` ya gestionado) y venta no cerrada/derivada.
+ */
+function shouldForceValidation(ctx: TurnContext): boolean {
+  const r = ctx.state.lastReceipt;
+  if (!r?.securityCode || !r.at) return false;
+  if (Date.now() - new Date(r.at).getTime() > 10 * 60 * 1000) return false;
+  if (ctx.state.receiptAutoHandledAt === r.at) return false;
+  const status = ctx.state.status ?? "";
+  if (status === "PAGADO" || status === "ENTREGADO" || status === "ASESOR_HUMANO") return false;
+  return true;
 }
 
 /**
