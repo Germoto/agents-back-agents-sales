@@ -231,7 +231,14 @@ export async function listConversations(companyId: string, limit = 50) {
       botPaused: true,
       state: true,
       lastMessageAt: true,
-      customer: { select: { id: true, phone: true, name: true } },
+      customer: {
+        select: {
+          id: true,
+          phone: true,
+          name: true,
+          tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
+        },
+      },
       messages: {
         orderBy: { createdAt: "desc" },
         take: 1,
@@ -246,9 +253,20 @@ export async function listConversations(companyId: string, limit = 50) {
     // Etapa del embudo (state.status). Distinto de `status` (OPEN/HUMAN/CLOSED).
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
     lastMessageAt: c.lastMessageAt,
-    customer: c.customer,
+    customer: serializeCustomerWithTags(c.customer),
     lastMessage: c.messages[0] ?? null,
   }));
+}
+
+/** Aplana tagLinks → tags para el panel (etiquetas del cliente en la lista de chats). */
+function serializeCustomerWithTags(customer: {
+  id: string;
+  phone: string;
+  name: string | null;
+  tagLinks: Array<{ tag: { id: string; name: string; color: string } }>;
+}) {
+  const { tagLinks, ...rest } = customer;
+  return { ...rest, tags: tagLinks.map((l) => l.tag) };
 }
 
 /**
@@ -265,7 +283,14 @@ export async function getConversationSummary(companyId: string, conversationId: 
       botPaused: true,
       state: true,
       lastMessageAt: true,
-      customer: { select: { id: true, phone: true, name: true } },
+      customer: {
+        select: {
+          id: true,
+          phone: true,
+          name: true,
+          tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
+        },
+      },
       messages: {
         orderBy: { createdAt: "desc" },
         take: 1,
@@ -280,7 +305,7 @@ export async function getConversationSummary(companyId: string, conversationId: 
     botPaused: c.botPaused,
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
     lastMessageAt: c.lastMessageAt,
-    customer: c.customer,
+    customer: serializeCustomerWithTags(c.customer),
     lastMessage: c.messages[0] ?? null,
   };
 }
