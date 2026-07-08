@@ -53,6 +53,21 @@ function sameHolder(input: string, holder: string): boolean {
   return common >= 2; // ≥2 nombres/apellidos en común = es nuestro titular
 }
 
+/** Muletillas del flujo de pago que NO cuentan como evidencia de un nombre de
+ *  titular escrito por el cliente (guarda anti-payerName-inventado de validar_pago):
+ *  aunque aparezcan en sus mensajes, un "listo"/"pago"/"yape" no es un nombre. */
+const PAYMENT_FILLER_WORDS = new Set([
+  "listo", "vale", "claro", "bueno", "buenas", "hola", "gracias", "ahora", "rato",
+  "momento", "luego", "ahorita", "mando", "envio", "confirmo", "pago", "pague",
+  "pagado", "pagare", "yape", "yapee", "plin", "transferencia", "deposito",
+  "comprobante", "captura", "titular", "nombre", "cuenta", "numero", "operacion",
+  "codigo", "señor", "senor", "amigo", "hermano", "todavia", "aun",
+  // stopwords comunes que sobreviven al filtro de ≥3 letras
+  "mas", "una", "uno", "unos", "unas", "este", "esta", "esto", "ese", "esa", "eso",
+  "para", "pero", "porque", "cuando", "donde", "como", "aqui", "alli", "algo",
+  "todo", "nada", "con", "sin", "los", "las", "del", "que", "por",
+]);
+
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
 
@@ -984,7 +999,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "validar_pago",
       description:
-        "Valida automáticamente el pago del cliente buscando un comprobante recibido que coincida por el N° de operación / código del comprobante o por el nombre del titular y el monto. Devuelve si quedó APROBADO. Úsalo cuando el cliente diga que pagó o mande su comprobante. Si el cliente mandó la captura (ya se leyó el N° de operación), NO necesitas el nombre: llama sin payerName. El nombre solo hace falta si el cliente NO mandó imagen.",
+        "Valida automáticamente el pago del cliente buscando un comprobante recibido que coincida por el N° de operación / código del comprobante o por el nombre del titular y el monto. Devuelve si quedó APROBADO. Úsalo SOLO cuando el cliente AFIRME que ya pagó o mande su comprobante; si dice que pagará más tarde o responde un simple ok/listo, NO la llames (todavía no hay pago). Si el cliente mandó la captura (ya se leyó el N° de operación), NO necesitas el nombre: llama sin payerName. El nombre solo hace falta si el cliente NO mandó imagen, y solo si él lo ESCRIBIÓ en el chat (nunca lo inventes ni uses su nombre de perfil).",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1434,7 +1449,28 @@ export async function executeTool(
       // que el cliente haya mandado (ej. "Mio personal"): ese texto no es un nombre de
       // titular útil y solo ensucia las ramas de confusión/intentos. Sin código (Plin)
       // sí usamos el nombre que el cliente dé.
-      const payerName = codes.length ? "" : String(args.payerName ?? "").trim();
+      let payerName = codes.length ? "" : String(args.payerName ?? "").trim();
+
+      // GUARDA anti-nombre-inventado: sin comprobante leído, el nombre del titular
+      // solo sirve si el CLIENTE realmente lo escribió en el chat. El modelo a veces
+      // lo inventa (el nombre del perfil, o un "listo/ok" tomado como nombre) y un
+      // nombre inventado se salta la guarda de abajo → rama timing → recheck a +60s →
+      // derivación a humano por un pago que nunca existió. Se exige que algún token
+      // del nombre (≥3 letras y que no sea muletilla del flujo de pago) aparezca en
+      // los últimos mensajes del cliente.
+      if (!hasReceiptData && payerName) {
+        const recent = await prisma.conversationMessage.findMany({
+          where: { conversationId: ctx.conversationId, role: "USER" },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+          select: { message: true },
+        });
+        const haystack = looseNameNorm(recent.map((m) => m.message ?? "").join(" "));
+        const tokens = looseNameNorm(payerName)
+          .split(" ")
+          .filter((t) => t.length >= 3 && !PAYMENT_FILLER_WORDS.has(t));
+        if (!tokens.length || !tokens.some((t) => haystack.includes(t))) payerName = "";
+      }
 
       // GUARDA: no hay con qué validar. Si NO hay un comprobante con datos leídos
       // (monto/op/código) NI el cliente dio nombre/código, el modelo está intentando
@@ -1445,9 +1481,11 @@ export async function executeTool(
         return JSON.stringify({
           ok: false,
           error:
-            "El cliente todavía no envió un comprobante de pago ni datos del titular. NO valides ni le pidas automáticamente el nombre del titular. " +
+            "El cliente todavía no envió un comprobante de pago ni un nombre de titular escrito por él: NO hay ningún pago que validar. " +
+            "PROHIBIDO decirle que estás validando, verificando o confirmando su pago (no es cierto y quedarías mal al no confirmarle nunca). NO le pidas automáticamente el nombre del titular. " +
             "Si envió una imagen que NO es un comprobante, conversa normal sobre ella según el contexto de la conversación. " +
-            "Si dice que ya pagó, pídele con naturalidad que te mande la CAPTURA del comprobante (o, si paga por Plin, el nombre del titular de su Yape/Plin).",
+            "Si dice que YA pagó, pídele con naturalidad que te mande la CAPTURA del comprobante (o, si paga por Plin, el nombre del titular de su Yape/Plin). " +
+            "Si dice que pagará MÁS TARDE, respóndele natural en una línea y queda atento a su pago.",
         });
       }
 
