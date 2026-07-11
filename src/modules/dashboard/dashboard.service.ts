@@ -39,6 +39,15 @@ function dayKeyFormatter(timezone: string) {
 const r2 = (n: number) => Math.round(n * 100) / 100;
 const pct = (n: number) => Math.round(n * 10000) / 100; // fracción → %
 
+const inRange = (d: Date, a: Date, b: Date) => d.getTime() >= a.getTime() && d.getTime() <= b.getTime();
+const refDate = (r: { occurredAt: Date | null; validatedAt: Date | null; createdAt: Date }) =>
+  r.occurredAt ?? r.validatedAt ?? r.createdAt;
+const receiptProductIds = (r: { productId: string | null; productIds: string[] }) => {
+  const set = new Set<string>(r.productIds ?? []);
+  if (r.productId) set.add(r.productId);
+  return [...set];
+};
+
 export interface DashboardParams {
   companyId: string;
   from?: string; // YYYY-MM-DD
@@ -68,15 +77,6 @@ export async function getDashboardStats(params: DashboardParams) {
   const prevFrom = new Date(prevTo.getTime() - lengthMs);
   const days = Math.round(lengthMs / DAY_MS);
   const granularity: "daily" | "monthly" = days <= 92 ? "daily" : "monthly";
-
-  const inRange = (d: Date, a: Date, b: Date) => d.getTime() >= a.getTime() && d.getTime() <= b.getTime();
-  const refDate = (r: { occurredAt: Date | null; validatedAt: Date | null; createdAt: Date }) =>
-    r.occurredAt ?? r.validatedAt ?? r.createdAt;
-  const receiptProductIds = (r: { productId: string | null; productIds: string[] }) => {
-    const set = new Set<string>(r.productIds ?? []);
-    if (r.productId) set.add(r.productId);
-    return [...set];
-  };
 
   // ---- Comprobantes APROBADOS con producto, en [prevFrom, toDate] (un solo fetch) ----
   const receipts = await prisma.paymentReceipt.findMany({
@@ -305,4 +305,228 @@ function zonedDayBoundary(ymd: string, timeZone: string, end: boolean): Date {
   const base = new Date(`${ymd}T${end ? "23:59:59.999" : "00:00:00.000"}Z`);
   const offset = tzOffsetMs(base, timeZone);
   return new Date(base.getTime() - offset);
+}
+
+/**
+ * Datos completos para el export a Excel del dashboard: los mismos stats de
+ * getDashboardStats (cifras idénticas a las tarjetas) + detalle fila a fila del
+ * periodo ACTUAL (ventas, comprobantes por revisar, clientes nuevos, recordatorios
+ * y conversaciones). El .xlsx lo arma el frontend (ExcelJS).
+ */
+const EXPORT_ROW_CAP = 10000;
+
+export async function getDashboardExportData(params: DashboardParams) {
+  const { companyId, productId } = params;
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { name: true, timezone: true },
+  });
+  const timezone = company?.timezone ?? "America/Lima";
+
+  const stats = await getDashboardStats(params);
+  const fromDate = zonedDayBoundary(stats.range.from, timezone, false);
+  const toDate = zonedDayBoundary(stats.range.to, timezone, true);
+
+  const productClause = productId ? { OR: [{ productId }, { productIds: { has: productId } }] } : {};
+  const toAmount = (paid: string | null, expected: string) => {
+    const a = Number(paid ?? expected);
+    return Number.isFinite(a) && a > 0 ? r2(a) : 0;
+  };
+
+  const [salesRaw, pendingRaw, customersRaw, remindersRaw, conversationsRaw, productName] = await Promise.all([
+    prisma.paymentReceipt.findMany({
+      where: {
+        companyId,
+        status: "APROBADO",
+        OR: [{ productId: { not: null } }, { productIds: { isEmpty: false } }],
+        AND: [
+          {
+            OR: [
+              { occurredAt: { gte: fromDate, lte: toDate } },
+              { validatedAt: { gte: fromDate, lte: toDate } },
+              { createdAt: { gte: fromDate, lte: toDate } },
+            ],
+          },
+          productClause,
+        ],
+      },
+      select: {
+        amountPaid: true,
+        amountExpected: true,
+        currency: true,
+        paymentSource: true,
+        payerName: true,
+        payerPhone: true,
+        operationCode: true,
+        reference: true,
+        source: true,
+        validationMode: true,
+        matchScore: true,
+        customerId: true,
+        productId: true,
+        productIds: true,
+        occurredAt: true,
+        validatedAt: true,
+        createdAt: true,
+        customer: { select: { name: true, phone: true } },
+        product: { select: { name: true } },
+      },
+      orderBy: { createdAt: "asc" },
+      take: EXPORT_ROW_CAP,
+    }),
+    prisma.paymentReceipt.findMany({
+      where: {
+        companyId,
+        status: { in: ["PENDIENTE", "EN_REVISION"] },
+        createdAt: { gte: fromDate, lte: toDate },
+        ...productClause,
+      },
+      select: {
+        status: true,
+        amountPaid: true,
+        amountExpected: true,
+        currency: true,
+        paymentSource: true,
+        payerName: true,
+        source: true,
+        productId: true,
+        productIds: true,
+        createdAt: true,
+        customer: { select: { name: true, phone: true } },
+      },
+      orderBy: { createdAt: "asc" },
+      take: EXPORT_ROW_CAP,
+    }),
+    prisma.customer.findMany({
+      where: { companyId, createdAt: { gte: fromDate, lte: toDate } },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        email: true,
+        origenDeLead: true,
+        createdAt: true,
+        selectedProduct: { select: { name: true } },
+      },
+      orderBy: { createdAt: "asc" },
+      take: EXPORT_ROW_CAP,
+    }),
+    prisma.scheduledMessage.findMany({
+      where: { companyId, status: "SENT", type: { in: FOLLOWUP_TYPES as any }, sentAt: { gte: fromDate, lte: toDate } },
+      select: { type: true, sentAt: true, body: true, customer: { select: { name: true, phone: true } } },
+      orderBy: { sentAt: "asc" },
+      take: EXPORT_ROW_CAP,
+    }),
+    prisma.conversation.findMany({
+      where: { companyId, channel: "whatsapp", createdAt: { gte: fromDate, lte: toDate } },
+      select: {
+        createdAt: true,
+        status: true,
+        botPaused: true,
+        lastMessageAt: true,
+        closedAt: true,
+        customer: { select: { name: true, phone: true } },
+      },
+      orderBy: { createdAt: "asc" },
+      take: EXPORT_ROW_CAP,
+    }),
+    productId
+      ? prisma.product
+          .findFirst({ where: { id: productId, companyId }, select: { name: true } })
+          .then((p) => p?.name ?? null)
+      : Promise.resolve(null),
+  ]);
+
+  // Mismo criterio que el KPI de ventas: fecha de referencia dentro del rango.
+  const salesFiltered = salesRaw
+    .filter((r) => inRange(refDate(r), fromDate, toDate))
+    .sort((a, b) => refDate(a).getTime() - refDate(b).getTime());
+
+  // Nombres de TODOS los productos referenciados (sales + pending) en una query.
+  const allProductIds = new Set<string>();
+  for (const r of salesFiltered) for (const id of receiptProductIds(r)) allProductIds.add(id);
+  for (const r of pendingRaw) for (const id of receiptProductIds(r)) allProductIds.add(id);
+  const prodNames = allProductIds.size
+    ? await prisma.product.findMany({ where: { companyId, id: { in: [...allProductIds] } }, select: { id: true, name: true } })
+    : [];
+  const nameById = new Map(prodNames.map((p) => [p.id, p.name.trim()]));
+  const productsLabel = (r: { productId: string | null; productIds: string[] }) =>
+    receiptProductIds(r)
+      .map((id) => nameById.get(id) ?? "Producto")
+      .join(", ");
+
+  const sales = salesFiltered.map((r) => ({
+    date: refDate(r),
+    customerName: r.customer?.name ?? null,
+    customerPhone: r.customer?.phone ?? null,
+    payerName: r.payerName,
+    payerPhone: r.payerPhone,
+    method: r.paymentSource,
+    amount: toAmount(r.amountPaid, r.amountExpected),
+    currency: r.currency,
+    products: productsLabel(r),
+    validationMode: r.validationMode,
+    operationCode: r.operationCode,
+    reference: r.reference,
+    source: r.source,
+    matchScore: r.matchScore,
+  }));
+
+  const salesCustomerIds = new Set(salesFiltered.map((r) => r.customerId).filter(Boolean) as string[]);
+
+  const pending = pendingRaw.map((r) => ({
+    date: r.createdAt,
+    status: r.status,
+    customerName: r.customer?.name ?? null,
+    customerPhone: r.customer?.phone ?? null,
+    payerName: r.payerName,
+    amountExpected: toAmount(r.amountPaid, r.amountExpected),
+    currency: r.currency,
+    method: r.paymentSource,
+    source: r.source,
+    products: productsLabel(r),
+  }));
+
+  const newCustomers = customersRaw.map((c) => ({
+    date: c.createdAt,
+    name: c.name,
+    phone: c.phone,
+    email: c.email,
+    leadSource: c.origenDeLead,
+    interestedIn: c.selectedProduct?.name ?? null,
+    purchased: salesCustomerIds.has(c.id),
+  }));
+
+  const reminders = remindersRaw.map((m) => ({
+    sentAt: m.sentAt,
+    type: m.type,
+    customerName: m.customer?.name ?? null,
+    customerPhone: m.customer?.phone ?? null,
+    body: m.body,
+  }));
+
+  const conversations = conversationsRaw.map((c) => ({
+    createdAt: c.createdAt,
+    customerName: c.customer?.name ?? null,
+    customerPhone: c.customer?.phone ?? null,
+    status: c.status,
+    botPaused: c.botPaused,
+    lastMessageAt: c.lastMessageAt,
+    closedAt: c.closedAt,
+  }));
+
+  return {
+    stats,
+    meta: {
+      generatedAt: new Date().toISOString(),
+      timezone,
+      companyName: company?.name ?? "Mi negocio",
+      productName,
+    },
+    sales,
+    pending,
+    newCustomers,
+    reminders,
+    conversations,
+  };
 }
