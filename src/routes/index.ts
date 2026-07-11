@@ -20,6 +20,7 @@ import crmRoutes from "../modules/crm/crm.routes";
 import campaignsRoutes from "../modules/campaigns/campaigns.routes";
 import flowsRoutes from "../modules/flows/flows.routes";
 import dashboardRoutes from "../modules/dashboard/dashboard.routes";
+import reportsRoutes from "../modules/reports/reports.routes";
 import setupRoutes from "../modules/setup/setup.routes";
 import adminConsoleRoutes from "../modules/admin-console/admin-console.routes";
 import webhookEndpointsRoutes from "../modules/webhook-endpoints/webhook-endpoints.routes";
@@ -73,6 +74,8 @@ router.use("/campaigns", billingGuard({ module: "CAMPAIGNS" }), campaignsRoutes)
 router.use("/flows", billingGuard({ module: "FLOWS" }), flowsRoutes);
 // Métricas del dashboard del tenant
 router.use("/dashboard", billingGuard(), dashboardRoutes);
+// Reportes automáticos del dashboard (config + envío de prueba)
+router.use("/reports", billingGuard(), reportsRoutes);
 // Estado de activación / onboarding (checklist + % de avance)
 router.use("/setup", setupRoutes);
 router.use("/control-room-7m4x", adminConsoleRoutes);

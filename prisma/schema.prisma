@@ -183,6 +183,7 @@ model Company {
   wallet               CompanyWallet?
   creditTransactions   CreditTransaction[]
   redeemedVouchers     Voucher[]            @relation("RedeemedVouchers")
+  reportConfig         ReportConfig?
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -1225,4 +1226,25 @@ model Voucher {
 
   @@index([type, redeemedAt])
   @@index([planId])
+}
+
+// Config de reportes automáticos del dashboard (Excel por email/WhatsApp) por
+// tenant. Las lastXKey guardan el período cerrado ya enviado por tipo (dedupe
+// y claim optimista del worker).
+model ReportConfig {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String   @unique @db.Uuid
+  email          String?
+  waPhone        String?
+  dailyEnabled   Boolean  @default(false)
+  weeklyEnabled  Boolean  @default(false)
+  monthlyEnabled Boolean  @default(false)
+  sendHour       Int      @default(8) // hora local del tenant (0-23)
+  lastDailyKey   String?  // "YYYY-MM-DD" (ayer) del último diario enviado
+  lastWeeklyKey  String?  // "YYYY-MM-DD" del lunes de la semana enviada
+  lastMonthlyKey String?  // "YYYY-MM" del mes enviado
+  lastError      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }

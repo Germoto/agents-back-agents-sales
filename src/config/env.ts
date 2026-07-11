@@ -40,6 +40,17 @@ const envSchema = z.object({
   // Kill-switch del enforcement de billing: "0" => todas las empresas operan
   // como LEGACY (sin límites ni bloqueos) sin importar su suscripción.
   BILLING_ENFORCEMENT: z.string().default("1"),
+  // --- Reportes automáticos: email vía SMTP genérico ---
+  // Sin SMTP_HOST el canal email queda deshabilitado (los reportes por WhatsApp
+  // siguen funcionando). Sirve cualquier SMTP: Gmail app-password, cPanel, Zoho...
+  SMTP_HOST: z.string().optional().default(""),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  // "1" = TLS implícito (puerto 465); "0" = STARTTLS (587).
+  SMTP_SECURE: z.string().default("0"),
+  SMTP_USER: z.string().optional().default(""),
+  SMTP_PASS: z.string().optional().default(""),
+  // Remitente, ej. 'Reportes <no-reply@tudominio.com>'. Default: SMTP_USER.
+  MAIL_FROM: z.string().optional().default(""),
 });
 
 export const env = envSchema.parse(process.env);
