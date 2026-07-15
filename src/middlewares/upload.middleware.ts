@@ -58,3 +58,39 @@ export const uploadProductFileMiddleware = multer({
     fileSize: env.MAX_UPLOAD_MB * 1024 * 1024,
   },
 }).single("file");
+
+// ---------------------------------------------------------------------------
+// Recursos de capacitación (superadmin): carpeta global fija `training/`
+// (sin companyId) y solo manuales PDF o videos, con su propio límite.
+// ---------------------------------------------------------------------------
+
+const trainingStorage = multer.diskStorage({
+  destination: (_req: Request, _file, cb) => {
+    const dir = path.resolve(process.cwd(), env.UPLOAD_DIR, "training");
+    fs.mkdir(dir, { recursive: true }, (err) => {
+      if (err) return cb(err, dir);
+      cb(null, dir);
+    });
+  },
+  filename: (_req, file, cb) => {
+    const ext = sanitizeExtension(file.originalname, file.mimetype);
+    const id = crypto.randomUUID();
+    cb(null, `${id}${ext}`);
+  },
+});
+
+function trainingFileFilter(_req: Request, file: Express.Multer.File, cb: FileFilterCallback) {
+  const isAllowed = file.mimetype.startsWith("video/") || file.mimetype === "application/pdf";
+  if (!isAllowed) {
+    return cb(new AppError(`Tipo de archivo no permitido: ${file.mimetype} (solo PDF o video)`, 415));
+  }
+  cb(null, true);
+}
+
+export const uploadTrainingFileMiddleware = multer({
+  storage: trainingStorage,
+  fileFilter: trainingFileFilter,
+  limits: {
+    fileSize: env.MAX_TRAINING_UPLOAD_MB * 1024 * 1024,
+  },
+}).single("file");

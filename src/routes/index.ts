@@ -28,6 +28,7 @@ import webhooksRoutes from "../modules/webhooks/webhooks.routes";
 import publicPaymentsRoutes from "../modules/public-payments/public-payments.routes";
 import platformConfigPublicRoutes from "../modules/platform-config/platform-config.routes";
 import billingRoutes from "../modules/billing/billing.routes";
+import trainingRoutes from "../modules/training/training.routes";
 import billingPublicRoutes from "../modules/billing/billing-public.routes";
 import { billingGuard } from "../middlewares/billing.middleware";
 
@@ -93,5 +94,8 @@ router.use("/public/landing", platformConfigPublicRoutes);
 router.use("/billing", billingRoutes);
 // Paquetes públicos para la sección Precios del landing
 router.use("/public/plans", billingPublicRoutes);
+// Recursos de capacitación globales (Centro de ayuda del tenant). Siempre
+// visibles, incluso con la suscripción vencida: NUNCA montarle billingGuard.
+router.use("/training-resources", trainingRoutes);
 
 export default router;

@@ -1158,6 +1158,33 @@ model PlatformPlan {
   vouchers          Voucher[]
 }
 
+// Tipo de recurso de capacitación global (gestionado por el superadmin).
+enum TrainingResourceType {
+  PDF // manual subido
+  VIDEO // video subido (mp4 H.264)
+  YOUTUBE // enlace de YouTube embebido
+  LINK // enlace externo (Drive, web)
+}
+
+// Recurso de capacitación GLOBAL (sin companyId): lo ven todos los tenants
+// en su Centro de ayuda y en Activación. CRUD solo desde la consola superadmin.
+model TrainingResource {
+  id          String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title       String
+  description String?
+  type        TrainingResourceType
+  // YOUTUBE (URL canónica https://www.youtube.com/watch?v=ID) y LINK.
+  url         String?
+  // PDF/VIDEO subidos: ruta relativa bajo UPLOAD_DIR (training/uuid.ext).
+  storagePath String?
+  mimeType    String?
+  size        Int?
+  sortOrder   Int                  @default(0)
+  isActive    Boolean              @default(true)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+}
+
 // Suscripción SaaS del tenant a un paquete. UNA fila "actual" por empresa
 // (extender/cambiar de plan muta la fila). El estado NO se persiste: se
 // deriva de expiresAt + canceledAt + gracia + saldo de créditos
