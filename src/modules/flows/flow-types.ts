@@ -35,7 +35,10 @@ export type FlowNodeType =
   | "list"
   | "flow-control"
   | "handoff"
-  | "reminder";
+  | "reminder"
+  | "crm-move"
+  | "crm-add-tags"
+  | "crm-remove-tags";
 
 export type DetectMode = "contains" | "equals" | "starts_with" | "ends_with";
 
@@ -114,6 +117,19 @@ export interface ReminderData {
   message: string;
 }
 
+/** Mueve al cliente a una columna de un CRM (kanban). */
+export interface CrmMoveData {
+  crmId?: string;
+  crmColumnId?: string;
+  /** Hint de UI (nombre de la columna al configurar); el motor lo ignora. */
+  crmColumnName?: string;
+}
+
+/** Etiquetas a asignar (crm-add-tags) o quitar (crm-remove-tags). */
+export interface CrmTagsData {
+  tagIds: string[];
+}
+
 export type FlowNodeData =
   | SendTextData
   | SendMediaData
@@ -122,6 +138,8 @@ export type FlowNodeData =
   | FlowControlData
   | HandoffData
   | ReminderData
+  | CrmMoveData
+  | CrmTagsData
   | Record<string, never>;
 
 export interface FlowNode {
@@ -179,6 +197,9 @@ export function outputHandlesFor(node: FlowNode): string[] {
       return [...opts, "timeout"];
     }
     case "reminder":
+    case "crm-move":
+    case "crm-add-tags":
+    case "crm-remove-tags":
       return ["next"];
     case "flow-control":
     case "handoff":

@@ -88,6 +88,16 @@ const reminderData = z.object({
   message: z.string().max(2000).default(""),
 });
 
+const crmMoveData = z.object({
+  crmId: z.string().uuid().optional(),
+  crmColumnId: z.string().uuid().optional(),
+  crmColumnName: z.string().max(120).optional(),
+});
+
+const crmTagsData = z.object({
+  tagIds: z.array(z.string().uuid()).max(50).default([]),
+});
+
 export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("start"), position: positionSchema, data: z.object({}).passthrough() }),
   z.object({ id: z.string().min(1), type: z.literal("send-text"), position: positionSchema, data: sendTextData }),
@@ -100,6 +110,9 @@ export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("flow-control"), position: positionSchema, data: flowControlData }),
   z.object({ id: z.string().min(1), type: z.literal("handoff"), position: positionSchema, data: handoffData }),
   z.object({ id: z.string().min(1), type: z.literal("reminder"), position: positionSchema, data: reminderData }),
+  z.object({ id: z.string().min(1), type: z.literal("crm-move"), position: positionSchema, data: crmMoveData }),
+  z.object({ id: z.string().min(1), type: z.literal("crm-add-tags"), position: positionSchema, data: crmTagsData }),
+  z.object({ id: z.string().min(1), type: z.literal("crm-remove-tags"), position: positionSchema, data: crmTagsData }),
 ]);
 
 export const flowEdgeSchema = z

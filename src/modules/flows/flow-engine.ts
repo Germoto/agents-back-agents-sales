@@ -34,9 +34,13 @@ import {
   type FlowControlData,
   type HandoffData,
   type ReminderData,
+  type CrmMoveData,
+  type CrmTagsData,
   flattenListOptions,
   isSendNode,
 } from "./flow-types";
+import { applyCrmAndTagActions } from "../crm/crm.service";
+import { getEntitlements } from "../billing/entitlements";
 
 // ---------------------------------------------------------------------------
 // Estado de sesión (namespace `flow` dentro de Conversation.state)
@@ -496,6 +500,40 @@ async function pause(io: FlowIO): Promise<void> {
   if (!io.simulate) await sleep(OUTBOX_GAP_MS);
 }
 
+/**
+ * Bloques CRM (crm-move / crm-add-tags / crm-remove-tags): side-effect
+ * best-effort sobre el cliente. En simulación no toca datos reales; si el plan
+ * del tenant no incluye el módulo CRM, se omite y el flujo continúa por "next".
+ */
+async function runCrmNode(node: FlowNode, io: FlowIO): Promise<void> {
+  if (io.simulate) {
+    pushTrace(io, node, "crm:simulado (no se aplican cambios reales)");
+    return;
+  }
+  const ent = await getEntitlements(io.companyId); // caché 60s; LEGACY incluye CRM
+  if (!ent.modules.includes("CRM")) {
+    pushTrace(io, node, "crm:omitido (plan sin módulo CRM)");
+    return;
+  }
+  if (node.type === "crm-move") {
+    const data = node.data as CrmMoveData;
+    if (!data.crmId || !data.crmColumnId) return;
+    await applyCrmAndTagActions(io.companyId, io.customerId, {
+      crmId: data.crmId,
+      crmColumnId: data.crmColumnId,
+    });
+  } else {
+    const data = node.data as CrmTagsData;
+    if (!data.tagIds?.length) return;
+    await applyCrmAndTagActions(
+      io.companyId,
+      io.customerId,
+      node.type === "crm-add-tags" ? { tagIds: data.tagIds } : { removeTagIds: data.tagIds },
+    );
+  }
+  pushTrace(io, node, `${node.type}:aplicado`);
+}
+
 const MEDIA_KIND_BY_NODE: Record<string, "image" | "video" | "audio" | "document"> = {
   "send-image": "image",
   "send-video": "video",
@@ -624,6 +662,12 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
           await io.scheduleReminderMsg(data.minutes, renderTemplate(data.message.trim(), io));
           pushTrace(io, node, `reminder:${data.minutes}m`);
         }
+        break;
+      }
+      case "crm-move":
+      case "crm-add-tags":
+      case "crm-remove-tags": {
+        await runCrmNode(node, io);
         break;
       }
     }

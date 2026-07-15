@@ -10,6 +10,8 @@ import {
   type ListData,
   type FlowControlData,
   type ReminderData,
+  type CrmMoveData,
+  type CrmTagsData,
   type SendTextData,
   type SendMediaData,
   outputHandlesFor,
@@ -47,6 +49,9 @@ const NODE_LABEL: Record<string, string> = {
   "flow-control": "Control de Flujo",
   "handoff": "Derivar a humano",
   "reminder": "Recordatorio",
+  "crm-move": "Mover en CRM",
+  "crm-add-tags": "Asignar etiquetas",
+  "crm-remove-tags": "Quitar etiquetas",
 };
 
 function label(node: FlowNode): string {
@@ -258,6 +263,29 @@ export function validateFlow(
           errors.push({
             code: "REMINDER_INVALID",
             message: "«Recordatorio» necesita minutos > 0 y un mensaje.",
+            nodeId: node.id,
+          });
+        }
+        break;
+      }
+      case "crm-move": {
+        const data = node.data as CrmMoveData;
+        if (!data.crmId || !data.crmColumnId) {
+          errors.push({
+            code: "CRM_MOVE_INCOMPLETE",
+            message: "«Mover en CRM» sin tablero o columna seleccionada.",
+            nodeId: node.id,
+          });
+        }
+        break;
+      }
+      case "crm-add-tags":
+      case "crm-remove-tags": {
+        const data = node.data as CrmTagsData;
+        if (!data.tagIds?.length) {
+          errors.push({
+            code: "CRM_TAGS_EMPTY",
+            message: `«${label(node)}» sin etiquetas seleccionadas.`,
             nodeId: node.id,
           });
         }

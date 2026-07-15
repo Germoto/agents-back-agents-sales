@@ -381,14 +381,20 @@ export async function moveCard(
 }
 
 /**
- * Acciones reutilizables sobre un cliente: asignarle etiquetas y/o moverlo a una
- * pestaña de un CRM. Best-effort (no lanza): la usan las respuestas rápidas y las
- * acciones de venta por producto. Ignora tags/CRM/columnas que no sean de la empresa.
+ * Acciones reutilizables sobre un cliente: asignarle/quitarle etiquetas y/o moverlo
+ * a una pestaña de un CRM. Best-effort (no lanza): la usan las respuestas rápidas,
+ * las acciones de venta por producto y los bloques CRM de los flujos. Ignora
+ * tags/CRM/columnas que no sean de la empresa.
  */
 export async function applyCrmAndTagActions(
   companyId: string,
   customerId: string,
-  actions: { tagIds?: string[] | null; crmId?: string | null; crmColumnId?: string | null },
+  actions: {
+    tagIds?: string[] | null;
+    removeTagIds?: string[] | null;
+    crmId?: string | null;
+    crmColumnId?: string | null;
+  },
 ): Promise<void> {
   try {
     if (actions.tagIds?.length) {
@@ -400,6 +406,18 @@ export async function applyCrmAndTagActions(
         await prisma.customerTagLink.createMany({
           data: owned.map((tag) => ({ customerId, tagId: tag.id })),
           skipDuplicates: true,
+        });
+        emitCrmUpdated(companyId);
+      }
+    }
+    if (actions.removeTagIds?.length) {
+      const owned = await prisma.customerTag.findMany({
+        where: { companyId, id: { in: actions.removeTagIds } },
+        select: { id: true },
+      });
+      if (owned.length) {
+        await prisma.customerTagLink.deleteMany({
+          where: { customerId, tagId: { in: owned.map((tag) => tag.id) } },
         });
         emitCrmUpdated(companyId);
       }
