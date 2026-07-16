@@ -53,6 +53,9 @@ const envSchema = z.object({
   SMTP_PASS: z.string().optional().default(""),
   // Remitente, ej. 'Reportes <no-reply@tudominio.com>'. Default: SMTP_USER.
   MAIL_FROM: z.string().optional().default(""),
+  // URL pública del panel (para botones en correos, ej. "Iniciar sesión").
+  // Vacío = los correos van sin botón.
+  FRONTEND_URL: z.string().optional().default(""),
 });
 
 export const env = envSchema.parse(process.env);

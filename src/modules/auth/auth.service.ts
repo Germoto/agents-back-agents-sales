@@ -4,6 +4,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { signAccessToken } from "../../lib/jwt";
 import { normalizeUsername } from "../../lib/identifier";
+import { findPendingActivation } from "../registration/registration.service";
 
 /** Busca por celular exacto O por usuario (lowercase). Compartido con el login del superadmin. */
 export function findUserByIdentifier(identifier: string) {
@@ -18,6 +19,10 @@ export async function login(identifier: string, password: string) {
   const user = await findUserByIdentifier(identifier);
 
   if (!user || !user.isActive) {
+    // Pre-registrado verificado esperando activación: el frontend muestra la
+    // pantalla "Activación en proceso" (sin token).
+    const pending = await findPendingActivation(identifier, password);
+    if (pending) return pending;
     throw new AppError("Credenciales invalidas", 401);
   }
 

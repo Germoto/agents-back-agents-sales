@@ -29,6 +29,7 @@ import publicPaymentsRoutes from "../modules/public-payments/public-payments.rou
 import platformConfigPublicRoutes from "../modules/platform-config/platform-config.routes";
 import billingRoutes from "../modules/billing/billing.routes";
 import trainingRoutes from "../modules/training/training.routes";
+import registrationRoutes from "../modules/registration/registration.routes";
 import billingPublicRoutes from "../modules/billing/billing-public.routes";
 import { billingGuard } from "../middlewares/billing.middleware";
 
@@ -97,5 +98,7 @@ router.use("/public/plans", billingPublicRoutes);
 // Recursos de capacitación globales (Centro de ayuda del tenant). Siempre
 // visibles, incluso con la suscripción vencida: NUNCA montarle billingGuard.
 router.use("/training-resources", trainingRoutes);
+// Pre-registro público del landing (sin auth, con rate limiting propio).
+router.use("/public/registration", registrationRoutes);
 
 export default router;

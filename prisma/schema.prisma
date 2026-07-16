@@ -1165,6 +1165,49 @@ model PlatformPlan {
   updatedAt         DateTime              @updatedAt
   subscriptions     CompanySubscription[]
   vouchers          Voucher[]
+  preRegistrations  PreRegistration[]
+}
+
+// Estado de una solicitud de registro del landing público.
+enum PreRegistrationStatus {
+  EMAIL_PENDING // creado, esperando el código de verificación de correo
+  VERIFIED // correo verificado; listo para que el superadmin lo active
+  CONVERTED // convertido en Company + User reales
+  REJECTED // rechazado por el superadmin
+}
+
+// Solicitud de registro pública (pre-registro). El superadmin la revisa,
+// coordina con el cliente y la convierte en cuenta real desde la consola.
+model PreRegistration {
+  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  status             PreRegistrationStatus @default(EMAIL_PENDING)
+  planId             String?               @db.Uuid
+  companyName        String
+  fullName           String
+  email              String // lowercase
+  countryCode        String                @default("+51")
+  phone              String // solo dígitos, CON código de país
+  username           String // lowercase
+  passwordHash       String // bcrypt de la contraseña elegida por el cliente
+  vertical           BusinessVertical      @default(INFOPRODUCT)
+  // Verificación de correo (código de 6 dígitos, hasheado)
+  emailCodeHash      String? // sha256 hex
+  emailCodeExpiresAt DateTime?
+  emailCodeAttempts  Int                   @default(0)
+  emailCodeSentAt    DateTime?
+  verifiedAt         DateTime?
+  // Resolución
+  convertedAt        DateTime?
+  convertedCompanyId String?               @db.Uuid
+  rejectedAt         DateTime?
+  rejectionReason    String?
+  adminNotes         String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  plan               PlatformPlan?         @relation(fields: [planId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([email])
 }
 
 // Tipo de recurso de capacitación global (gestionado por el superadmin).

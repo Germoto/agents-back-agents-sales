@@ -10,6 +10,10 @@ import { env } from "./config/env";
 
 export const app = express();
 
+// Detrás del proxy de producción (Caddy): necesario para que el rate limiting
+// vea la IP real del cliente (X-Forwarded-For) y no la del proxy.
+app.set("trust proxy", 1);
+
 const uploadDir = path.resolve(process.cwd(), env.UPLOAD_DIR);
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
