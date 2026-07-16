@@ -152,7 +152,20 @@ export async function sendReport(companyId: string, kind: ReportKind): Promise<S
       const sender = await loadWhatsappSender(companyId);
       if (!sender) throw new Error("La empresa no tiene un canal de WhatsApp activo.");
       const to = config.waPhone.replace(/\D/g, "");
-      const caption = `📊 ${period.label} — ${company.name} (${period.from} a ${period.to})`;
+      // Resumen de KPIs en el caption (mismo dato a primera vista que el correo).
+      const k = data.stats.kpis;
+      const money = (n: number) => `${data.stats.currency} ${n.toFixed(2)}`;
+      const caption = [
+        `📊 *${period.label} — ${company.name}*`,
+        `📅 ${period.from} a ${period.to}`,
+        "",
+        `💰 Ingresos: ${money(k.revenue.value)}`,
+        `🛒 Ventas: ${k.sales.value}`,
+        `🎫 Ticket promedio: ${money(k.avgTicket.value)}`,
+        `📈 Tasa de conversión: ${k.conversionRate.value}%`,
+        "",
+        "El detalle completo va en el Excel adjunto 📎",
+      ].join("\n");
       await sendMedia(sender, to, "document", url, caption, fileName);
       result.whatsapp = "sent";
     } catch (err) {

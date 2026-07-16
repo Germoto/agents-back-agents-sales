@@ -211,6 +211,11 @@ model User {
   // así nunca colisiona con un celular). null = solo entra por celular.
   username     String?  @unique
   passwordHash String
+  // Recuperación de contraseña (código de 6 dígitos al correo, hasheado).
+  resetCodeHash      String?
+  resetCodeExpiresAt DateTime?
+  resetCodeAttempts  Int       @default(0)
+  resetCodeSentAt    DateTime?
   role         UserRole
   isActive     Boolean  @default(true)
   uiTheme      Json?

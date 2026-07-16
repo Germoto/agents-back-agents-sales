@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { passwordPolicySchema } from "../registration/registration.schemas";
 
 // Login por celular O usuario en el mismo campo. `phone` queda como alias
 // legacy del frontend anterior (compat entre deploys).
@@ -9,6 +10,23 @@ export const loginSchema = z
     password: z.string().min(6).max(100),
   })
   .refine((v) => Boolean(v.identifier || v.phone), { message: "Ingresa tu celular o usuario" });
+
+// Recuperación de contraseña (código de 6 dígitos al correo registrado).
+export const requestResetSchema = z.object({
+  identifier: z.string().trim().min(4).max(80),
+});
+
+export const confirmResetSchema = z.object({
+  id: z.string().uuid(),
+  code: z.string().regex(/^\d{6}$/, "Código de 6 dígitos"),
+  newPassword: passwordPolicySchema,
+});
+
+// Cambio de contraseña con sesión activa.
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(6).max(100),
+  newPassword: passwordPolicySchema,
+});
 
 export const updateUiThemeSchema = z.object({
   mode: z.enum(["dark", "light"]),
