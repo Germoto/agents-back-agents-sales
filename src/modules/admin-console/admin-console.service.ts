@@ -1,5 +1,5 @@
 import bcrypt from "bcrypt";
-import { Prisma, UserRole } from "@prisma/client";
+import { BusinessVertical, Prisma, UserRole } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { signAccessToken } from "../../lib/jwt";
@@ -139,22 +139,38 @@ export async function listClients() {
   return companies.map(mapClient);
 }
 
-export async function createClient(payload: {
+export interface ProvisionClientInput {
   companyName: string;
   slug: string;
   adminName: string;
+  /** Email para la cuenta interna de SMS Tools (no se persiste ahí). */
   adminEmail: string;
   adminPhone: string;
-  password: string;
+  /** Hash bcrypt ya calculado (permite conservar la contraseña de un pre-registro). */
+  passwordHash: string;
+  /** Password en claro SOLO para la cuenta del proveedor SMS Tools (descartable). */
+  smsToolsPassword: string;
   timezone: string;
   isActive: boolean;
   whatsappProvider?: "SMSTOOLS" | "META";
   planId?: string;
   planMonths?: number;
+  vertical?: BusinessVertical;
+  /** Username único de login (lowercase) — opcional. */
+  username?: string | null;
+  /** Email de contacto persistido en User — opcional. */
+  email?: string | null;
   metaAccessToken?: string;
   metaPhoneNumberId?: string;
   metaWabaId?: string;
-}) {
+}
+
+/**
+ * Aprovisiona un cliente completo: cuenta SMS Tools (si aplica), Company,
+ * User ADMIN, configs base y suscripción. Compartido por el alta manual
+ * (createClient) y la conversión de pre-registros.
+ */
+export async function provisionClient(payload: ProvisionClientInput) {
   const existingCompany = await prisma.company.findUnique({
     where: { slug: payload.slug },
     select: { id: true },
@@ -181,7 +197,15 @@ export async function createClient(payload: {
     throw new AppError("Ya existe un usuario con ese celular", 409);
   }
 
-  const passwordHash = await bcrypt.hash(payload.password, 10);
+  const username = payload.username ? normalizeUsername(payload.username) : null;
+  if (username) {
+    const usernameClash = await prisma.user.findUnique({ where: { username }, select: { id: true } });
+    if (usernameClash) {
+      throw new AppError("Ese usuario ya está en uso", 409);
+    }
+  }
+
+  const passwordHash = payload.passwordHash;
 
   const provider = payload.whatsappProvider ?? "SMSTOOLS";
 
@@ -195,7 +219,7 @@ export async function createClient(payload: {
     const createdUser = await smsToolsAdmin.createUser({
       name: payload.adminName,
       email: payload.adminEmail,
-      password: payload.password,
+      password: payload.smsToolsPassword,
       timezone: payload.timezone,
     });
     const parsedSmsToolsUserId = Number(createdUser?.id);
@@ -243,6 +267,7 @@ export async function createClient(payload: {
         adminPhone: payload.adminPhone,
         timezone: payload.timezone,
         isActive: payload.isActive,
+        ...(payload.vertical ? { vertical: payload.vertical } : {}),
       },
     });
 
@@ -251,6 +276,8 @@ export async function createClient(payload: {
         companyId: createdCompany.id,
         name: payload.adminName,
         phone: payload.adminPhone,
+        username,
+        email: payload.email ?? null,
         passwordHash,
         role: "ADMIN",
         isActive: payload.isActive,
@@ -337,6 +364,32 @@ export async function createClient(payload: {
   }
 
   return mapClient(company);
+}
+
+/** Alta manual desde la consola (flujo original): hashea la password del form. */
+export async function createClient(payload: {
+  companyName: string;
+  slug: string;
+  adminName: string;
+  adminEmail: string;
+  adminPhone: string;
+  password: string;
+  timezone: string;
+  isActive: boolean;
+  whatsappProvider?: "SMSTOOLS" | "META";
+  planId?: string;
+  planMonths?: number;
+  metaAccessToken?: string;
+  metaPhoneNumberId?: string;
+  metaWabaId?: string;
+}) {
+  const passwordHash = await bcrypt.hash(payload.password, 10);
+  return provisionClient({
+    ...payload,
+    passwordHash,
+    smsToolsPassword: payload.password,
+    email: payload.adminEmail,
+  });
 }
 
 export async function updateClientStatus(companyId: string, isActive: boolean) {

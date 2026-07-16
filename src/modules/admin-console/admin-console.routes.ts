@@ -28,6 +28,7 @@ import {
 } from "./admin-console.schemas";
 import billingAdminRoutes from "../billing/billing-admin.routes";
 import trainingAdminRoutes from "../training/training-admin.routes";
+import registrationAdminRoutes from "../registration/registration-admin.routes";
 
 const router = Router();
 
@@ -36,6 +37,8 @@ const router = Router();
 router.use(billingAdminRoutes);
 // Recursos de capacitación globales (Centro de ayuda) — mismas guardas propias.
 router.use(trainingAdminRoutes);
+// Pre-registros del landing (revisión, edición y conversión) — guardas propias.
+router.use(registrationAdminRoutes);
 
 router.post("/auth/login", validate({ body: superadminLoginSchema }), asyncHandler(superadminLoginController));
 router.get("/auth/me", requireAuth, requireRole("SUPERADMIN"), asyncHandler(superadminMeController));
