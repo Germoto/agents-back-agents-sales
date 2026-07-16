@@ -3,12 +3,19 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { signAccessToken } from "../../lib/jwt";
+import { normalizeUsername } from "../../lib/identifier";
 
-export async function login(phone: string, password: string) {
-  const user = await prisma.user.findUnique({
-    where: { phone },
+/** Busca por celular exacto O por usuario (lowercase). Compartido con el login del superadmin. */
+export function findUserByIdentifier(identifier: string) {
+  const value = identifier.trim();
+  return prisma.user.findFirst({
+    where: { OR: [{ phone: value }, { username: normalizeUsername(value) }] },
     include: { company: true },
   });
+}
+
+export async function login(identifier: string, password: string) {
+  const user = await findUserByIdentifier(identifier);
 
   if (!user || !user.isActive) {
     throw new AppError("Credenciales invalidas", 401);
@@ -38,6 +45,8 @@ export async function login(phone: string, password: string) {
       id: user.id,
       name: user.name,
       phone: user.phone,
+      username: user.username,
+      email: user.email,
       companyId: user.companyId,
       // El frontend enruta por rol: SUPERADMIN va a la consola de control.
       role: user.role,
@@ -53,6 +62,8 @@ export async function getAuthenticatedUser(userId: string) {
       id: true,
       name: true,
       phone: true,
+      username: true,
+      email: true,
       companyId: true,
       role: true,
       isActive: true,

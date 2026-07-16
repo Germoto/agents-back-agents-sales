@@ -8,6 +8,8 @@ import { encryptCredential } from "../../lib/credentials-crypto";
 import { env } from "../../config/env";
 import { addMonthsUtc } from "../billing/billing.service";
 import { deriveBillingState } from "../billing/entitlements";
+import { findUserByIdentifier } from "../auth/auth.service";
+import { normalizeUsername, normalizePhoneDigits } from "../../lib/identifier";
 
 function defaultRules() {
   return [
@@ -55,6 +57,8 @@ function mapClient(company: ClientRow) {
           id: adminUser.id,
           name: adminUser.name,
           phone: adminUser.phone,
+          email: adminUser.email,
+          username: adminUser.username,
           role: adminUser.role,
           isActive: adminUser.isActive,
           createdAt: adminUser.createdAt,
@@ -74,11 +78,8 @@ function mapClient(company: ClientRow) {
   };
 }
 
-export async function loginSuperadmin(phone: string, password: string) {
-  const user = await prisma.user.findUnique({
-    where: { phone },
-    include: { company: true },
-  });
+export async function loginSuperadmin(identifier: string, password: string) {
+  const user = await findUserByIdentifier(identifier);
 
   if (!user || !user.isActive || user.role !== "SUPERADMIN") {
     throw new AppError("Credenciales invalidas", 401);
@@ -369,6 +370,90 @@ export async function updateClientStatus(companyId: string, isActive: boolean) {
   });
 
   return mapClient(company);
+}
+
+export interface UpdateClientInput {
+  companyName?: string;
+  adminName?: string;
+  adminEmail?: string | null;
+  username?: string | null;
+  adminPhone?: string;
+  newPassword?: string;
+  timezone?: string;
+}
+
+/**
+ * Edición de datos del cliente por el superadmin. Si cambia el número:
+ * User.phone y Company.adminPhone se actualizan siempre; el notificationPhone
+ * de pagos solo si coincidía con el número anterior (no pisa personalizaciones).
+ * El cliente deberá re-vincular su WhatsApp con el nuevo número.
+ */
+export async function updateClient(companyId: string, input: UpdateClientInput) {
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    include: CLIENT_INCLUDE,
+  });
+  if (!company) throw new AppError("Cliente no encontrado", 404);
+
+  const adminUser =
+    company.users.find((u) => u.role === "ADMIN") ?? company.users[0] ?? null;
+  if (!adminUser) throw new AppError("El cliente no tiene un usuario administrador", 409);
+
+  const oldPhone = adminUser.phone;
+  const phoneChanged = Boolean(input.adminPhone && input.adminPhone !== oldPhone);
+
+  // Unicidad de celular y usuario (excluyendo al propio admin).
+  if (phoneChanged) {
+    const clash = await prisma.user.findUnique({ where: { phone: input.adminPhone! } });
+    if (clash && clash.id !== adminUser.id) {
+      throw new AppError("Ya existe un usuario con ese celular", 409);
+    }
+  }
+  if (input.username) {
+    const uname = normalizeUsername(input.username);
+    const clash = await prisma.user.findUnique({ where: { username: uname } });
+    if (clash && clash.id !== adminUser.id) {
+      throw new AppError("Ese usuario ya está en uso", 409);
+    }
+  }
+
+  const passwordHash = input.newPassword ? await bcrypt.hash(input.newPassword, 10) : undefined;
+
+  const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.user.update({
+      where: { id: adminUser.id },
+      data: {
+        ...(input.adminName !== undefined ? { name: input.adminName } : {}),
+        ...(input.adminEmail !== undefined ? { email: input.adminEmail } : {}),
+        ...(input.username !== undefined
+          ? { username: input.username ? normalizeUsername(input.username) : null }
+          : {}),
+        ...(input.adminPhone !== undefined ? { phone: input.adminPhone } : {}),
+        ...(passwordHash ? { passwordHash } : {}),
+      },
+    });
+
+    await tx.company.update({
+      where: { id: companyId },
+      data: {
+        ...(input.companyName !== undefined ? { name: input.companyName } : {}),
+        ...(input.timezone !== undefined ? { timezone: input.timezone } : {}),
+        ...(phoneChanged ? { adminPhone: input.adminPhone } : {}),
+      },
+    });
+
+    // Seguir el número en la notificación de pagos solo si apuntaba al anterior.
+    if (phoneChanged) {
+      await tx.paymentConfig.updateMany({
+        where: { companyId, notificationPhone: oldPhone },
+        data: { notificationPhone: input.adminPhone! },
+      });
+    }
+
+    return tx.company.findUniqueOrThrow({ where: { id: companyId }, include: CLIENT_INCLUDE });
+  });
+
+  return { ...mapClient(updated), phoneChanged };
 }
 
 export async function deleteClient(companyId: string) {

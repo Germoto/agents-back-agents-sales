@@ -21,6 +21,8 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
         companyId: true,
         name: true,
         phone: true,
+        username: true,
+        email: true,
         role: true,
         isActive: true,
       },

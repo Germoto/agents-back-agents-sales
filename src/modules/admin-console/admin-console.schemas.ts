@@ -1,13 +1,30 @@
 import { z } from "zod";
 import { businessVerticalSchema } from "../business/business.schemas";
+import { usernameSchema } from "../../lib/identifier";
 
 export const updateVerticalsSchema = z.object({
   enabledVerticals: z.array(businessVerticalSchema).min(1, "Debes habilitar al menos un rubro."),
 });
 
-export const superadminLoginSchema = z.object({
-  phone: z.string().min(6).max(20),
-  password: z.string().min(6).max(100),
+// Acepta identifier (celular o usuario) con `phone` como alias legacy.
+export const superadminLoginSchema = z
+  .object({
+    identifier: z.string().trim().min(4).max(30).optional(),
+    phone: z.string().trim().min(4).max(30).optional(),
+    password: z.string().min(6).max(100),
+  })
+  .refine((v) => Boolean(v.identifier || v.phone), { message: "Ingresa tu celular o usuario" });
+
+// Edición de datos del cliente por el superadmin. Todos opcionales: solo se
+// actualiza lo enviado. username null = quitar el usuario.
+export const updateClientSchema = z.object({
+  companyName: z.string().trim().min(2).max(80).optional(),
+  adminName: z.string().trim().min(2).max(80).optional(),
+  adminEmail: z.string().trim().toLowerCase().email().nullable().optional(),
+  username: usernameSchema.nullable().optional(),
+  adminPhone: z.string().trim().regex(/^\+?\d{8,20}$/).optional(),
+  newPassword: z.string().min(8, "Mínimo 8 caracteres").max(100).optional(),
+  timezone: z.string().min(3).optional(),
 });
 
 export const createClientSchema = z.object({

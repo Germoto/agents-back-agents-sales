@@ -12,6 +12,7 @@ import {
   listClientsController,
   superadminLoginController,
   superadminMeController,
+  updateClientController,
   updateClientStatusController,
   updateLandingSceneController,
   updateVerticalsController,
@@ -20,6 +21,7 @@ import {
   clientIdParamsSchema,
   createClientSchema,
   superadminLoginSchema,
+  updateClientSchema,
   updateClientStatusSchema,
   updateLandingSceneSchema,
   updateVerticalsSchema,
@@ -39,6 +41,13 @@ router.post("/auth/login", validate({ body: superadminLoginSchema }), asyncHandl
 router.get("/auth/me", requireAuth, requireRole("SUPERADMIN"), asyncHandler(superadminMeController));
 router.get("/clients", requireAuth, requireRole("SUPERADMIN"), asyncHandler(listClientsController));
 router.post("/clients", requireAuth, requireRole("SUPERADMIN"), validate({ body: createClientSchema }), asyncHandler(createClientController));
+router.put(
+  "/clients/:id",
+  requireAuth,
+  requireRole("SUPERADMIN"),
+  validate({ params: clientIdParamsSchema, body: updateClientSchema }),
+  asyncHandler(updateClientController),
+);
 router.put(
   "/clients/:id/status",
   requireAuth,

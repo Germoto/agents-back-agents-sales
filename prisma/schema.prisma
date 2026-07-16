@@ -205,6 +205,11 @@ model User {
   companyId    String   @db.Uuid
   name         String
   phone        String   @unique
+  // Correo de contacto (del pre-registro o editado por el superadmin).
+  email        String?
+  // Usuario alternativo de login (lowercase, requiere al menos una letra —
+  // así nunca colisiona con un celular). null = solo entra por celular.
+  username     String?  @unique
   passwordHash String
   role         UserRole
   isActive     Boolean  @default(true)

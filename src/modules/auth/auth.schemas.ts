@@ -1,9 +1,14 @@
 import { z } from "zod";
 
-export const loginSchema = z.object({
-  phone: z.string().min(6).max(20),
-  password: z.string().min(6).max(100),
-});
+// Login por celular O usuario en el mismo campo. `phone` queda como alias
+// legacy del frontend anterior (compat entre deploys).
+export const loginSchema = z
+  .object({
+    identifier: z.string().trim().min(4).max(30).optional(),
+    phone: z.string().trim().min(4).max(30).optional(),
+    password: z.string().min(6).max(100),
+  })
+  .refine((v) => Boolean(v.identifier || v.phone), { message: "Ingresa tu celular o usuario" });
 
 export const updateUiThemeSchema = z.object({
   mode: z.enum(["dark", "light"]),

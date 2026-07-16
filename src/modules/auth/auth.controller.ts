@@ -2,7 +2,8 @@ import { Request, Response } from "express";
 import { login, getAuthenticatedUser, updateUiTheme } from "./auth.service";
 
 export async function loginController(req: Request, res: Response) {
-  const result = await login(req.body.phone, req.body.password);
+  // `identifier` (celular o usuario); `phone` es el alias legacy del front anterior.
+  const result = await login(req.body.identifier ?? req.body.phone, req.body.password);
   return res.json(result);
 }
 

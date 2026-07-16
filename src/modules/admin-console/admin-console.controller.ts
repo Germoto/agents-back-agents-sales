@@ -6,6 +6,7 @@ import {
   impersonateClientAdmin,
   listClients,
   loginSuperadmin,
+  updateClient,
   updateClientStatus,
 } from "./admin-console.service";
 import {
@@ -18,7 +19,7 @@ import {
 } from "../platform-config/platform-config.service";
 
 export async function superadminLoginController(req: Request, res: Response) {
-  const result = await loginSuperadmin(req.body.phone, req.body.password);
+  const result = await loginSuperadmin(req.body.identifier ?? req.body.phone, req.body.password);
   return res.json(result);
 }
 
@@ -35,6 +36,12 @@ export async function listClientsController(_req: Request, res: Response) {
 export async function createClientController(req: Request, res: Response) {
   const client = await createClient(req.body);
   return res.status(201).json(client);
+}
+
+export async function updateClientController(req: Request, res: Response) {
+  const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const client = await updateClient(companyId, req.body);
+  return res.json(client);
 }
 
 export async function updateClientStatusController(req: Request, res: Response) {
