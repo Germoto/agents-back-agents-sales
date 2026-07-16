@@ -33,4 +33,12 @@ export const updateUiThemeSchema = z.object({
   accentFrom: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   accentTo: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   preset: z.string().max(40).optional(),
+  // Fondo del chat de Conversaciones (color + doodles estilo WhatsApp).
+  chatBg: z
+    .object({
+      color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+      doodles: z.boolean(),
+    })
+    .nullable()
+    .optional(),
 });
