@@ -20,7 +20,7 @@ import {
   type ConversationState,
 } from "../agent/conversation.service";
 import { loadWhatsappSender, sendText, type WhatsappSender } from "../agent/outbound";
-import { deliver, sleep, OUTBOX_GAP_MS } from "../agent/delivery";
+import { deliver, gapMsFor, sleep, OUTBOX_GAP_MS } from "../agent/delivery";
 import { cancelPendingReminders, scheduleReminder, minutesFromNow } from "../scheduler/scheduler.service";
 import type { OutboxMessage, TurnContext } from "../agent/agent-tools";
 import {
@@ -94,6 +94,8 @@ export interface FlowIO {
   scheduleReminderMsg(minutes: number, body: string): Promise<void>;
   simulate?: boolean;
   trace?: FlowTraceEntry[];
+  /** Pausa (ms) entre bloques encadenados; default OUTBOX_GAP_MS. */
+  gapMs?: number;
 }
 
 const MAX_CHAIN_PER_TURN = 10;
@@ -497,7 +499,7 @@ async function armTimeout(flow: LoadedFlow, node: FlowNode, io: FlowIO): Promise
 }
 
 async function pause(io: FlowIO): Promise<void> {
-  if (!io.simulate) await sleep(OUTBOX_GAP_MS);
+  if (!io.simulate) await sleep(io.gapMs ?? OUTBOX_GAP_MS);
 }
 
 /**
@@ -744,7 +746,7 @@ export async function resumeFlowOnTimeout(msg: ScheduledMessage): Promise<void> 
 
   const company = await prisma.company.findUnique({
     where: { id: convo.companyId },
-    select: { timezone: true },
+    select: { timezone: true, messageGapEnabled: true, messageGapSeconds: true },
   });
 
   fs.awaitingNodeId = undefined;
@@ -757,6 +759,7 @@ export async function resumeFlowOnTimeout(msg: ScheduledMessage): Promise<void> 
     customerPhone: convo.customer.phone,
     customerName: convo.customer.name,
     timezone: company?.timezone ?? "America/Lima",
+    gapMs: gapMsFor(company),
     state,
     sender,
     ownerPhone: null, // se resuelve adentro si hace falta (handoff tras timeout)
@@ -784,6 +787,8 @@ interface WhatsappIOOpts {
   sender: WhatsappSender;
   /** Número del dueño para avisos (handoff); si null se resuelve de PaymentConfig/Company. */
   ownerPhone: string | null;
+  /** Pausa (ms) entre bloques encadenados; default OUTBOX_GAP_MS. */
+  gapMs?: number;
 }
 
 function buildWhatsappFlowIO(opts: WhatsappIOOpts): FlowIO {
@@ -801,6 +806,7 @@ function buildWhatsappFlowIO(opts: WhatsappIOOpts): FlowIO {
     customerPhone: opts.customerPhone,
     customerName: opts.customerName,
     timezone: opts.timezone,
+    gapMs: opts.gapMs,
     state: opts.state,
     async emit(msg) {
       await deliver(opts.sender, to, msg, ids);
@@ -870,7 +876,7 @@ function buildWhatsappFlowIO(opts: WhatsappIOOpts): FlowIO {
 /** FlowIO real construido desde el TurnContext del pipeline del agente. */
 export function buildRealFlowIO(ctx: TurnContext, sender: WhatsappSender): FlowIO {
   const config = ctx.config as {
-    business: { timezone?: string };
+    business: { timezone?: string; messageGapEnabled?: boolean; messageGapSeconds?: number };
     payment?: { notification?: { whatsappPhone?: string | null } };
   };
   return buildWhatsappFlowIO({
@@ -880,6 +886,7 @@ export function buildRealFlowIO(ctx: TurnContext, sender: WhatsappSender): FlowI
     customerPhone: ctx.customerPhone,
     customerName: null, // se resuelve abajo de forma lazy en renderTemplate vía override
     timezone: config.business.timezone ?? "America/Lima",
+    gapMs: gapMsFor(config.business),
     state: ctx.state,
     sender,
     ownerPhone: config.payment?.notification?.whatsappPhone ?? null,

@@ -30,7 +30,7 @@ import {
 import { loadWhatsappSender, sendText, sendMedia, type WhatsappSender } from "./outbound";
 import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
-import { deliver, flushOutbox, sleep, OUTBOX_GAP_MS } from "./delivery";
+import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
 import { runFlowTurn, buildRealFlowIO, trailingUserText } from "../flows/flow-engine";
 import { tryApprovePayment, muteCustomerToHuman, autoSaleNotice, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
@@ -600,13 +600,15 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     return true;
   });
 
-  // Enviar adjuntos/mensajes acumulados por las herramientas, en orden
-  await flushOutbox(sender, customerPhone, ctx.outbox, ctx);
+  // Enviar adjuntos/mensajes acumulados por las herramientas, en orden, con la
+  // pausa entre mensajes configurada por la empresa (Empresa → Ritmo de mensajes).
+  const gapMs = gapMsFor(ctx.config.business);
+  await flushOutbox(sender, customerPhone, ctx.outbox, ctx, gapMs);
 
   // Enviar y registrar el texto final (tras una pausa si ya se envió algo, para
   // que llegue DESPUÉS de la multimedia).
   if (finalText) {
-    if (ctx.outbox.length) await sleep(OUTBOX_GAP_MS);
+    if (ctx.outbox.length) await sleep(gapMs);
     await deliver(sender, customerPhone, { kind: "text", text: finalText }, ctx);
   }
 
@@ -742,11 +744,17 @@ export async function recheckPayment(msg: {
           /* best-effort */
         }
       }
-      await flushOutbox(sender, to, result.deliveryOutbox, {
-        companyId: msg.companyId,
-        customerId: msg.customerId,
-        conversationId,
-      });
+      await flushOutbox(
+        sender,
+        to,
+        result.deliveryOutbox,
+        {
+          companyId: msg.companyId,
+          customerId: msg.customerId,
+          conversationId,
+        },
+        gapMsFor(config.business),
+      );
       await saveState(conversationId, state as ConversationState);
       // Aviso al dueño por cada venta automática (entrega por inventario).
       if (result.autoSales?.length) {

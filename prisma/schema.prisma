@@ -151,6 +151,10 @@ model Company {
   // firmaEnabled, se agrega `*_<firmaText>:_*` al final de cada texto saliente.
   firmaEnabled      Boolean               @default(false)
   firmaText         String?
+  // Pausa entre mensajes consecutivos del bot en un mismo turno (presentación,
+  // multimedia, entrega, bloques de flujo). Desactivado = ritmo estándar (~1s).
+  messageGapEnabled Boolean               @default(false)
+  messageGapSeconds Int                   @default(3)
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
   users             User[]

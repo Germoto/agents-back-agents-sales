@@ -33,4 +33,8 @@ export const updateBusinessSchema = z.object({
   // Firma anexada a los mensajes automáticos (agente IA + flujos).
   firmaEnabled: z.boolean().default(false),
   firmaText: z.string().trim().max(60).nullable().optional(),
+  // Pausa entre mensajes consecutivos del bot (presentación, multimedia, entrega,
+  // bloques de flujo). Desactivada = ritmo estándar (~1s).
+  messageGapEnabled: z.boolean().optional(),
+  messageGapSeconds: z.coerce.number().int().min(1).max(30).optional(),
 });

@@ -45,6 +45,8 @@ export async function updateBusinessProfile(companyId: string, data: {
   deliveryConfig?: DeliveryConfigInput | null;
   firmaEnabled?: boolean;
   firmaText?: string | null;
+  messageGapEnabled?: boolean;
+  messageGapSeconds?: number;
 }) {
   const existing = await prisma.company.findUnique({
     where: { id: companyId },

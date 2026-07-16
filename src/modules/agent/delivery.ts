@@ -15,6 +15,18 @@ import type { OutboxMessage } from "./agent-tools";
  */
 export const OUTBOX_GAP_MS = 900;
 
+/**
+ * Gap efectivo entre mensajes consecutivos del bot según la config de la
+ * empresa: si activó la pausa (Empresa → Ritmo de mensajes) se usan sus
+ * segundos; si no, el ritmo estándar OUTBOX_GAP_MS.
+ */
+export function gapMsFor(business: { messageGapEnabled?: boolean; messageGapSeconds?: number } | null | undefined): number {
+  if (business?.messageGapEnabled && business.messageGapSeconds && business.messageGapSeconds > 0) {
+    return business.messageGapSeconds * 1000;
+  }
+  return OUTBOX_GAP_MS;
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -80,9 +92,10 @@ export async function flushOutbox(
   to: string,
   outbox: OutboxMessage[],
   ids: DeliveryIds,
+  gapMs: number = OUTBOX_GAP_MS,
 ): Promise<void> {
   for (let i = 0; i < outbox.length; i++) {
     await deliver(sender, to, outbox[i], ids);
-    if (i < outbox.length - 1) await sleep(OUTBOX_GAP_MS);
+    if (i < outbox.length - 1) await sleep(gapMs);
   }
 }

@@ -135,6 +135,9 @@ export async function buildBotConfig(companyId: string, account?: string) {
       deliveryConfig: (whatsappConfig.company.deliveryConfig ?? null) as Record<string, unknown> | null,
       timezone: whatsappConfig.company.timezone,
       botMode,
+      // Pausa configurable entre mensajes consecutivos del bot (ver delivery.gapMsFor).
+      messageGapEnabled: whatsappConfig.company.messageGapEnabled,
+      messageGapSeconds: whatsappConfig.company.messageGapSeconds,
     },
     openai: {
       model: agentConfig.openaiModel,
