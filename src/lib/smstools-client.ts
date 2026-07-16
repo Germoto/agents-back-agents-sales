@@ -329,7 +329,10 @@ export const smsTools = {
       const name = (fileName && fileName.trim()) || guessFileNameFromUrl(mediaUrl, "documento.pdf");
       fields.document_url = mediaUrl;
       fields.document_name = name;
-      fields.document_type = name.toLowerCase().endsWith(".pdf") ? "pdf" : "file";
+      // SMS Tools espera la EXTENSIÓN real como document_type (pdf, xlsx, docx…);
+      // "file" lo rechaza con "Invalid Document Type!".
+      const ext = name.toLowerCase().match(/\.([a-z0-9]{1,8})$/)?.[1];
+      fields.document_type = ext ?? "pdf";
     } else {
       fields.media_type = kind; // image | video | audio
       fields.media_url = mediaUrl;
