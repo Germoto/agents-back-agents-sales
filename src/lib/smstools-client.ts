@@ -100,7 +100,9 @@ async function smsToolsRequest<T = unknown>(
   try {
     response = await fetch(url.toString(), {
       method: options.method ?? "GET",
-      body: options.body,
+      // Buffer es un Uint8Array válido como body en runtime; el tipo BodyInit
+      // de lib.dom no lo incluye, de ahí el cast.
+      body: options.body as BodyInit | undefined,
       headers: options.headers,
     });
   } catch (error) {
