@@ -329,10 +329,16 @@ export const smsTools = {
       const name = (fileName && fileName.trim()) || guessFileNameFromUrl(mediaUrl, "documento.pdf");
       fields.document_url = mediaUrl;
       fields.document_name = name;
-      // SMS Tools espera la EXTENSIÓN real como document_type (pdf, xlsx, docx…);
-      // "file" lo rechaza con "Invalid Document Type!".
-      const ext = name.toLowerCase().match(/\.([a-z0-9]{1,8})$/)?.[1];
-      fields.document_type = ext ?? "pdf";
+      // document_type: SMS Tools solo entiende los tipos CLÁSICOS ("file" lo
+      // rechaza con "Invalid Document Type!"; "xlsx" lo acepta pero entrega el
+      // archivo con MIME application/zip — los .xlsx son zip por dentro y su
+      // detección cae ahí). Se mapean los formatos modernos de Office a su tipo
+      // clásico: WhatsApp entrega con MIME de Office y el teléfono lo abre con
+      // Excel/Word (que leen el contenido moderno sin problema). El nombre del
+      // archivo conserva la extensión real.
+      const ext = name.toLowerCase().match(/\.([a-z0-9]{1,8})$/)?.[1] ?? "pdf";
+      const DOC_TYPE_ALIAS: Record<string, string> = { xlsx: "xls", docx: "doc", pptx: "ppt" };
+      fields.document_type = DOC_TYPE_ALIAS[ext] ?? ext;
     } else {
       fields.media_type = kind; // image | video | audio
       fields.media_url = mediaUrl;
