@@ -174,6 +174,8 @@ export interface CrmBoardCard {
   customerId: string;
   customer: { id: string; name: string | null; phone: string };
   conversationId: string | null;
+  /** Inicio de la conversación (para ordenar tarjetas por fecha). */
+  conversationOpenedAt: Date | null;
   botPaused: boolean;
   lastMessage: {
     message: string | null;
@@ -219,6 +221,7 @@ export async function getBoard(companyId: string, crmId: string) {
       customerId: true,
       botPaused: true,
       lastMessageAt: true,
+      openedAt: true,
       customer: { select: { id: true, name: true, phone: true } },
       messages: {
         orderBy: { createdAt: "desc" },
@@ -280,6 +283,7 @@ export async function getBoard(companyId: string, crmId: string) {
       customerId: customer.id,
       customer,
       conversationId: convo?.id ?? null,
+      conversationOpenedAt: convo?.openedAt ?? null,
       botPaused: convo?.botPaused ?? false,
       lastMessage: convo?.messages[0] ?? null,
       tags: tagsByCustomer.get(customer.id) ?? [],

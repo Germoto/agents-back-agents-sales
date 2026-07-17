@@ -231,6 +231,7 @@ export async function listConversations(companyId: string, limit = 50) {
       botPaused: true,
       state: true,
       lastMessageAt: true,
+      openedAt: true,
       customer: {
         select: {
           id: true,
@@ -253,6 +254,7 @@ export async function listConversations(companyId: string, limit = 50) {
     // Etapa del embudo (state.status). Distinto de `status` (OPEN/HUMAN/CLOSED).
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
     lastMessageAt: c.lastMessageAt,
+    openedAt: c.openedAt,
     customer: serializeCustomerWithTags(c.customer),
     lastMessage: c.messages[0] ?? null,
   }));
@@ -283,6 +285,7 @@ export async function getConversationSummary(companyId: string, conversationId: 
       botPaused: true,
       state: true,
       lastMessageAt: true,
+      openedAt: true,
       customer: {
         select: {
           id: true,
@@ -305,6 +308,7 @@ export async function getConversationSummary(companyId: string, conversationId: 
     botPaused: c.botPaused,
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
     lastMessageAt: c.lastMessageAt,
+    openedAt: c.openedAt,
     customer: serializeCustomerWithTags(c.customer),
     lastMessage: c.messages[0] ?? null,
   };
