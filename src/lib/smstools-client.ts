@@ -78,7 +78,7 @@ export function extractTokenFromUrl(url: string | undefined | null): string | nu
 type RequestOptions = {
   query?: Record<string, string | number | boolean | undefined | null>;
   method?: "GET" | "POST" | "DELETE";
-  body?: FormData | URLSearchParams | string;
+  body?: FormData | URLSearchParams | string | Buffer;
   headers?: Record<string, string>;
   responseType?: "json" | "binary";
 };
@@ -326,19 +326,42 @@ export const smsTools = {
     };
 
     if (kind === "document") {
+      // Los documentos van como BINARIO (document_file) en vez de document_url:
+      // con URL, SMS Tools descarga el archivo, hace sniffing del contenido y
+      // re-sube a WhatsApp con ese MIME — un .xlsx (contenedor zip por dentro)
+      // llegaba como application/zip aunque document_type fuera válido. Con el
+      // part binario el archivo viaja con su nombre y Content-Type reales.
       const name = (fileName && fileName.trim()) || guessFileNameFromUrl(mediaUrl, "documento.pdf");
+      const ext = name.toLowerCase().match(/\.([a-z0-9]{1,8})$/)?.[1] ?? "pdf";
+      let fileData: Buffer | null = null;
+      try {
+        const res = await fetch(mediaUrl);
+        if (res.ok) fileData = Buffer.from(await res.arrayBuffer());
+      } catch {
+        /* fallback abajo */
+      }
+
+      if (fileData) {
+        const { body, contentType } = buildMultipart(fields, [
+          {
+            name: "document_file",
+            filename: name,
+            contentType: DOCUMENT_MIME[ext] ?? "application/octet-stream",
+            data: fileData,
+          },
+        ]);
+        return smsToolsRequest<SmsToolsMessage>(base, "/send/whatsapp", {
+          method: "POST",
+          body,
+          headers: { "Content-Type": contentType },
+        });
+      }
+
+      // Fallback: no se pudo leer el archivo — enviar por URL (peor MIME que nada).
+      console.warn("[smstools] no se pudo leer el documento para envío binario, usando document_url:", mediaUrl);
       fields.document_url = mediaUrl;
       fields.document_name = name;
-      // document_type: SMS Tools solo entiende los tipos CLÁSICOS ("file" lo
-      // rechaza con "Invalid Document Type!"; "xlsx" lo acepta pero entrega el
-      // archivo con MIME application/zip — los .xlsx son zip por dentro y su
-      // detección cae ahí). Se mapean los formatos modernos de Office a su tipo
-      // clásico: WhatsApp entrega con MIME de Office y el teléfono lo abre con
-      // Excel/Word (que leen el contenido moderno sin problema). El nombre del
-      // archivo conserva la extensión real.
-      const ext = name.toLowerCase().match(/\.([a-z0-9]{1,8})$/)?.[1] ?? "pdf";
-      const DOC_TYPE_ALIAS: Record<string, string> = { xlsx: "xls", docx: "doc", pptx: "ppt" };
-      fields.document_type = DOC_TYPE_ALIAS[ext] ?? ext;
+      fields.document_type = DOCUMENT_MIME[ext] ? ext : "pdf";
     } else {
       fields.media_type = kind; // image | video | audio
       fields.media_url = mediaUrl;
@@ -358,19 +381,46 @@ export const smsTools = {
  * porque /send/whatsapp rechaza el multipart del FormData estándar ("Invalid
  * Parameters!"). Campos vacíos se omiten.
  */
-function buildMultipart(fields: Record<string, string | undefined | null>): { body: string; contentType: string } {
+type MultipartFile = { name: string; filename: string; contentType: string; data: Buffer };
+
+function buildMultipart(
+  fields: Record<string, string | undefined | null>,
+  files: MultipartFile[] = [],
+): { body: Buffer; contentType: string } {
   const boundary = `----salesAgentBoundary${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
-  let body = "";
+  const chunks: Buffer[] = [];
   for (const [key, raw] of Object.entries(fields)) {
     if (raw === undefined || raw === null || raw === "") continue;
-    body += `--${boundary}\r\n`;
-    body += `Content-Disposition: form-data; name="${key}"\r\n\r\n`;
-    body += String(raw);
-    body += "\r\n";
+    chunks.push(
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${String(raw)}\r\n`,
+        "utf8",
+      ),
+    );
   }
-  body += `--${boundary}--\r\n`;
-  return { body, contentType: `multipart/form-data; boundary=${boundary}` };
+  for (const file of files) {
+    chunks.push(
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${file.name}"; filename="${file.filename}"\r\nContent-Type: ${file.contentType}\r\n\r\n`,
+        "utf8",
+      ),
+      file.data,
+      Buffer.from("\r\n", "utf8"),
+    );
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, "utf8"));
+  return { body: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
 }
+
+/** MIME por extensión para el part binario de documentos. */
+const DOCUMENT_MIME: Record<string, string> = {
+  pdf: "application/pdf",
+  xml: "application/xml",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+};
 
 /** Deriva un nombre de archivo legible desde una URL (para document_name). */
 function guessFileNameFromUrl(url: string, fallback: string): string {
