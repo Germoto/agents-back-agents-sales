@@ -38,7 +38,10 @@ export type FlowNodeType =
   | "reminder"
   | "crm-move"
   | "crm-add-tags"
-  | "crm-remove-tags";
+  | "crm-remove-tags"
+  | "condition"
+  | "wait"
+  | "question";
 
 export type DetectMode = "contains" | "equals" | "starts_with" | "ends_with";
 
@@ -130,6 +133,33 @@ export interface CrmTagsData {
   tagIds: string[];
 }
 
+/** Rama Sí/No según una variable, una etiqueta del cliente o si ya compró. */
+export interface ConditionData {
+  source: "variable" | "tag" | "purchased";
+  /** source=variable: nombre de la variable ({{nombre}}, {{telefono}} o guardadas). */
+  variable?: string;
+  operator?: "equals" | "contains" | "not_empty" | "empty";
+  value?: string;
+  /** source=tag: etiqueta que debe tener el cliente. */
+  tagId?: string;
+}
+
+/** Pausa de N segundos entre bloques. */
+export interface WaitData {
+  seconds: number;
+}
+
+/** Pide un dato, lo valida por tipo y lo guarda en una variable. */
+export interface QuestionData {
+  message: string;
+  varType: "text" | "number" | "email" | "phone";
+  saveVariable: string;
+  /** Mensaje al recibir un dato inválido (default genérico). */
+  invalidMessage?: string;
+  /** >0 habilita la salida "timeout" (N minutos sin responder). */
+  timeoutMinutes?: number;
+}
+
 export type FlowNodeData =
   | SendTextData
   | SendMediaData
@@ -140,6 +170,9 @@ export type FlowNodeData =
   | ReminderData
   | CrmMoveData
   | CrmTagsData
+  | ConditionData
+  | WaitData
+  | QuestionData
   | Record<string, never>;
 
 export interface FlowNode {
@@ -200,7 +233,14 @@ export function outputHandlesFor(node: FlowNode): string[] {
     case "crm-move":
     case "crm-add-tags":
     case "crm-remove-tags":
+    case "wait":
       return ["next"];
+    case "condition":
+      return ["yes", "no"];
+    case "question": {
+      const data = node.data as QuestionData;
+      return (data.timeoutMinutes ?? 0) > 0 ? ["next", "timeout"] : ["next"];
+    }
     case "flow-control":
     case "handoff":
       return [];

@@ -12,6 +12,9 @@ import {
   type ReminderData,
   type CrmMoveData,
   type CrmTagsData,
+  type ConditionData,
+  type WaitData,
+  type QuestionData,
   type SendTextData,
   type SendMediaData,
   outputHandlesFor,
@@ -52,6 +55,9 @@ const NODE_LABEL: Record<string, string> = {
   "crm-move": "Mover en CRM",
   "crm-add-tags": "Asignar etiquetas",
   "crm-remove-tags": "Quitar etiquetas",
+  "condition": "Condición",
+  "wait": "Esperar",
+  "question": "Pregunta",
 };
 
 function label(node: FlowNode): string {
@@ -289,6 +295,62 @@ export function validateFlow(
             nodeId: node.id,
           });
         }
+        break;
+      }
+      case "condition": {
+        const data = node.data as ConditionData;
+        const incomplete =
+          (data.source === "variable" && (!data.variable?.trim() || !data.operator)) ||
+          (data.source === "tag" && !data.tagId) ||
+          (data.source === "variable" &&
+            (data.operator === "equals" || data.operator === "contains") &&
+            !data.value?.trim());
+        if (incomplete) {
+          errors.push({
+            code: "CONDITION_INCOMPLETE",
+            message: "«Condición» sin configurar por completo.",
+            nodeId: node.id,
+          });
+        }
+        if (!edgeFrom(node.id, "yes") && !edgeFrom(node.id, "no")) {
+          errors.push({
+            code: "CONDITION_NO_OUTPUTS",
+            message: "«Condición» no tiene ninguna salida conectada.",
+            nodeId: node.id,
+          });
+        } else if (!edgeFrom(node.id, "yes") || !edgeFrom(node.id, "no")) {
+          warnings.push({
+            code: "CONDITION_ONE_OUTPUT",
+            message: "«Condición» tiene solo una rama conectada; la otra terminará el flujo.",
+            nodeId: node.id,
+          });
+        }
+        break;
+      }
+      case "wait": {
+        const data = node.data as WaitData;
+        if (!Number.isFinite(data.seconds) || data.seconds < 1 || data.seconds > 120) {
+          errors.push({
+            code: "WAIT_INVALID",
+            message: "«Esperar» necesita entre 1 y 120 segundos.",
+            nodeId: node.id,
+          });
+        }
+        break;
+      }
+      case "question": {
+        const data = node.data as QuestionData;
+        if (!data.message?.trim()) {
+          errors.push({ code: "QUESTION_INCOMPLETE", message: "«Pregunta» sin mensaje.", nodeId: node.id });
+        }
+        if (!data.saveVariable?.trim()) {
+          errors.push({
+            code: "QUESTION_INCOMPLETE",
+            message: "«Pregunta» sin variable donde guardar la respuesta.",
+            nodeId: node.id,
+          });
+        }
+        validateTimeout(node, data.timeoutMinutes, edgeFrom, errors, warnings);
         break;
       }
     }

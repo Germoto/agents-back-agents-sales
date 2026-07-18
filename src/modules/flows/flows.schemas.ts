@@ -98,6 +98,40 @@ const crmTagsData = z.object({
   tagIds: z.array(z.string().uuid()).max(50).default([]),
 });
 
+const conditionData = z
+  .object({
+    source: z.enum(["variable", "tag", "purchased"]).default("variable"),
+    variable: z.string().trim().max(40).optional(),
+    operator: z.enum(["equals", "contains", "not_empty", "empty"]).optional(),
+    value: z.string().max(500).optional(),
+    tagId: z.string().uuid().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.source === "variable") {
+      if (!data.variable?.trim()) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["variable"], message: "Variable requerida" });
+      }
+      if (!data.operator) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["operator"], message: "Operador requerido" });
+      }
+    }
+    if (data.source === "tag" && !data.tagId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["tagId"], message: "Etiqueta requerida" });
+    }
+  });
+
+const waitData = z.object({
+  seconds: z.number().int().min(1).max(120).default(5),
+});
+
+const questionData = z.object({
+  message: z.string().max(2000).default(""),
+  varType: z.enum(["text", "number", "email", "phone"]).default("text"),
+  saveVariable: z.string().trim().max(40).default(""),
+  invalidMessage: z.string().max(2000).optional(),
+  timeoutMinutes: z.number().int().min(0).max(60 * 24 * 7).optional(),
+});
+
 export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("start"), position: positionSchema, data: z.object({}).passthrough() }),
   z.object({ id: z.string().min(1), type: z.literal("send-text"), position: positionSchema, data: sendTextData }),
@@ -113,6 +147,9 @@ export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("crm-move"), position: positionSchema, data: crmMoveData }),
   z.object({ id: z.string().min(1), type: z.literal("crm-add-tags"), position: positionSchema, data: crmTagsData }),
   z.object({ id: z.string().min(1), type: z.literal("crm-remove-tags"), position: positionSchema, data: crmTagsData }),
+  z.object({ id: z.string().min(1), type: z.literal("condition"), position: positionSchema, data: conditionData }),
+  z.object({ id: z.string().min(1), type: z.literal("wait"), position: positionSchema, data: waitData }),
+  z.object({ id: z.string().min(1), type: z.literal("question"), position: positionSchema, data: questionData }),
 ]);
 
 export const flowEdgeSchema = z

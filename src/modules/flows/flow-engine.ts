@@ -36,6 +36,9 @@ import {
   type ReminderData,
   type CrmMoveData,
   type CrmTagsData,
+  type ConditionData,
+  type WaitData,
+  type QuestionData,
   flattenListOptions,
   isSendNode,
 } from "./flow-types";
@@ -49,7 +52,7 @@ import { getEntitlements } from "../billing/entitlements";
 export interface FlowSessionState {
   sessionFlowId?: string;
   awaitingNodeId?: string;
-  awaitingKind?: "reply" | "options";
+  awaitingKind?: "reply" | "options" | "question";
   variables?: Record<string, string>;
   /** flowId -> ISO del último disparo (para reactivationMinutes). */
   lastTriggeredAt?: Record<string, string>;
@@ -335,6 +338,34 @@ export async function runFlowTurn(io: FlowIO, inboundText: string, history?: Cha
 
     if (flow && node) {
       await io.cancelTimeouts();
+
+      // Pregunta validada: validar/normalizar según el tipo de dato
+      if (node.type === "question") {
+        const qdata = node.data as QuestionData;
+        const value = validateQuestionAnswer(qdata, inboundText);
+        if (value === null) {
+          pushTrace(io, node, "invalid-answer");
+          const msg =
+            qdata.invalidMessage?.trim() || "Mmm, ese dato no parece válido. Inténtalo de nuevo 🙏";
+          await io.emit({ kind: "text", text: renderTemplate(msg, io) });
+          await armTimeout(flow, node, io);
+          return; // sigue esperando en el mismo nodo
+        }
+        if (qdata.saveVariable?.trim()) {
+          fs.variables = { ...(fs.variables ?? {}), [qdata.saveVariable.trim()]: value };
+        }
+        fs.awaitingNodeId = undefined;
+        fs.awaitingKind = undefined;
+        pushTrace(io, node, "resolved:next");
+        const edge = edgeFrom(flow, node.id, "next");
+        if (!edge) {
+          clearSession(fs);
+          return;
+        }
+        await runChain(flow, edge.target, io);
+        return;
+      }
+
       const resolved = resolveAwaiting(node, inboundText);
 
       if (resolved.kind === "no-match") {
@@ -490,7 +521,7 @@ async function emitQuestion(node: FlowNode, io: FlowIO): Promise<void> {
 }
 
 async function armTimeout(flow: LoadedFlow, node: FlowNode, io: FlowIO): Promise<void> {
-  const data = node.data as AnswersData | ListData;
+  const data = node.data as AnswersData | ListData | QuestionData;
   const minutes = Number(data.timeoutMinutes ?? 0);
   if (minutes > 0 && edgeFrom(flow, node.id, "timeout")) {
     await io.scheduleTimeout(flow.id, node.id, minutes);
@@ -500,6 +531,76 @@ async function armTimeout(flow: LoadedFlow, node: FlowNode, io: FlowIO): Promise
 
 async function pause(io: FlowIO): Promise<void> {
   if (!io.simulate) await sleep(io.gapMs ?? OUTBOX_GAP_MS);
+}
+
+/**
+ * Valida la respuesta a una «Pregunta» según el tipo de dato. Devuelve el
+ * valor normalizado (phone: solo dígitos; email: minúsculas) o null si no
+ * cumple el formato.
+ */
+function validateQuestionAnswer(data: QuestionData, inbound: string): string | null {
+  const text = inbound.trim();
+  if (!text) return null;
+  switch (data.varType) {
+    case "number": {
+      const cleaned = text.replace(/\s/g, "").replace(",", ".");
+      return /^-?\d+(\.\d+)?$/.test(cleaned) ? cleaned : null;
+    }
+    case "email": {
+      const candidate = text.toLowerCase();
+      return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(candidate) ? candidate : null;
+    }
+    case "phone": {
+      const digits = text.replace(/\D/g, "");
+      return digits.length >= 6 && digits.length <= 15 ? digits : null;
+    }
+    case "text":
+    default:
+      return text;
+  }
+}
+
+/** Evalúa una «Condición»: variable guardada, etiqueta del cliente o compra previa. */
+async function evalCondition(node: FlowNode, io: FlowIO): Promise<boolean> {
+  const data = node.data as ConditionData;
+
+  if (data.source === "purchased") {
+    const purchased = io.state.purchasedProductIds;
+    return Array.isArray(purchased) && purchased.length > 0;
+  }
+
+  if (data.source === "tag") {
+    if (!data.tagId) return false;
+    // En simulación sí consultamos (solo lectura, sin side-effects)
+    const link = await prisma.customerTagLink.findFirst({
+      where: { customerId: io.customerId, tagId: data.tagId },
+      select: { customerId: true },
+    });
+    return Boolean(link);
+  }
+
+  // source === "variable"
+  const fs = flowStateOf(io.state);
+  const name = (data.variable ?? "").trim();
+  const raw =
+    name === "nombre"
+      ? (io.customerName ?? "")
+      : name === "telefono"
+        ? io.customerPhone
+        : (fs.variables?.[name] ?? "");
+  const val = normalize(String(raw));
+  const cmp = normalize(String(data.value ?? ""));
+  switch (data.operator) {
+    case "equals":
+      return val === cmp;
+    case "contains":
+      return cmp.length > 0 && val.includes(cmp);
+    case "empty":
+      return val.length === 0;
+    case "not_empty":
+    default:
+      return val.length > 0;
+  }
 }
 
 /**
@@ -557,6 +658,9 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
       clearSession(fs);
       return;
     }
+
+    // Handle de continuación; los bloques con ramas (condition) lo sobreescriben.
+    let nextHandle = "next";
 
     switch (node.type) {
       case "start": {
@@ -672,9 +776,39 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
         await runCrmNode(node, io);
         break;
       }
+
+      case "condition": {
+        const result = await evalCondition(node, io);
+        nextHandle = result ? "yes" : "no";
+        pushTrace(io, node, `condition:${nextHandle}`);
+        break;
+      }
+
+      case "wait": {
+        const data = node.data as WaitData;
+        const secs = Math.min(Math.max(Number(data.seconds) || 0, 0), 120);
+        if (secs > 0 && !io.simulate) await sleep(secs * 1000);
+        pushTrace(io, node, `wait:${secs}s`);
+        break;
+      }
+
+      case "question": {
+        const data = node.data as QuestionData;
+        if (emitted > 0) await pause(io);
+        if (data.message?.trim()) {
+          await io.emit({ kind: "text", text: renderTemplate(data.message.trim(), io) });
+        }
+        emitted++;
+        fs.awaitingNodeId = node.id;
+        fs.awaitingKind = "question";
+        fs.sessionFlowId = activeFlow.id;
+        await armTimeout(activeFlow, node, io);
+        pushTrace(io, node, "awaiting-question");
+        return;
+      }
     }
 
-    // Encadenar por "next" (send-*, reminder)
+    // Encadenar por "next" (send-*, reminder) o la rama elegida (condition)
     const replyEdge = isSendNode(node.type) ? edgeFrom(activeFlow, node.id, "reply") : undefined;
     if (replyEdge) {
       fs.awaitingNodeId = node.id;
@@ -683,7 +817,7 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
       pushTrace(io, node, "awaiting-reply");
       return;
     }
-    const nextEdge = edgeFrom(activeFlow, node.id, "next");
+    const nextEdge = edgeFrom(activeFlow, node.id, nextHandle);
     if (!nextEdge) {
       clearSession(fs);
       return;
