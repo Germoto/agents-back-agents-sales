@@ -9,7 +9,7 @@
 
 import { prisma } from "../../lib/prisma";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
-import { parseSendConfig } from "./campaigns.types";
+import { parseSendConfig, type CampaignSendConfig } from "./campaigns.types";
 import { runRecipientActions } from "./campaign-runner";
 
 interface DriverState {
@@ -19,15 +19,98 @@ interface DriverState {
 
 const drivers = new Map<string, DriverState>();
 
+/** Motivo de la espera actual (se persiste en Campaign.pauseReason y va en el socket). */
+type PauseReason = "auto" | "daily-limit" | "schedule";
+
 function emitProgress(
   companyId: string,
   campaignId: string,
-  data: { status: string; totalCount: number; sentCount: number; failedCount: number; currentPhone?: string | null },
+  data: {
+    status: string;
+    totalCount: number;
+    sentCount: number;
+    failedCount: number;
+    currentPhone?: string | null;
+    /** ISO de cuándo se procesa el próximo contacto (countdown en la UI). */
+    nextAt?: string | null;
+    pauseReason?: PauseReason | null;
+  },
 ): void {
   socketService.emitToCompany(companyId, SOCKET_EVENTS.CAMPAIGN_PROGRESS, {
     campaignId,
     ...data,
   });
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Medianoche de HOY en la zona horaria del negocio (mismo patrón que flow-engine). */
+function startOfTodayInTz(tz: string): Date {
+  const now = new Date();
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const [y, m, d] = fmt.format(now).split("-").map(Number);
+    const utcGuess = new Date(Date.UTC(y, m - 1, d));
+    const tzDate = new Date(utcGuess.toLocaleString("en-US", { timeZone: tz }));
+    const offset = tzDate.getTime() - utcGuess.getTime();
+    return new Date(utcGuess.getTime() - offset);
+  } catch {
+    const local = new Date(now);
+    local.setHours(0, 0, 0, 0);
+    return local;
+  }
+}
+
+/** Hoy a las HH:mm en la zona horaria del negocio. */
+function todayAtInTz(tz: string, hhmm: string): Date {
+  const [h, m] = hhmm.split(":").map(Number);
+  return new Date(startOfTodayInTz(tz).getTime() + h * 3_600_000 + m * 60_000);
+}
+
+/**
+ * Gates anti-ban: horario de envío y límite diario. Se evalúan antes de tomar
+ * el siguiente destinatario; si bloquean, la campaña espera hasta `resumeAt`.
+ */
+async function checkSendGate(
+  campaignId: string,
+  cfg: CampaignSendConfig,
+  tz: string,
+): Promise<{ allowed: true } | { allowed: false; resumeAt: Date; reason: PauseReason }> {
+  const now = Date.now();
+
+  if (cfg.sendFrom && cfg.sendUntil) {
+    const from = todayAtInTz(tz, cfg.sendFrom).getTime();
+    const until = todayAtInTz(tz, cfg.sendUntil).getTime();
+    if (from < until) {
+      if (now < from) return { allowed: false, resumeAt: new Date(from), reason: "schedule" };
+      if (now >= until) return { allowed: false, resumeAt: new Date(from + DAY_MS), reason: "schedule" };
+    } else {
+      // Ventana nocturna (ej. 20:00 → 02:00): bloqueado solo entre until y from
+      if (now >= until && now < from) return { allowed: false, resumeAt: new Date(from), reason: "schedule" };
+    }
+  }
+
+  if (cfg.dailyLimit > 0) {
+    const sentToday = await prisma.campaignRecipient.count({
+      where: { campaignId, status: "SENT", sentAt: { gte: startOfTodayInTz(tz) } },
+    });
+    if (sentToday >= cfg.dailyLimit) {
+      const midnight = startOfTodayInTz(tz).getTime() + DAY_MS;
+      let resumeAt = new Date(midnight);
+      if (cfg.sendFrom) {
+        const nextFrom = todayAtInTz(tz, cfg.sendFrom).getTime() + DAY_MS;
+        if (nextFrom > midnight) resumeAt = new Date(nextFrom);
+      }
+      return { allowed: false, resumeAt, reason: "daily-limit" };
+    }
+  }
+
+  return { allowed: true };
 }
 
 export function isDriverRunning(campaignId: string): boolean {
@@ -89,7 +172,10 @@ async function tick(companyId: string, campaignId: string): Promise<void> {
 
   if (!next) {
     await prisma.campaign
-      .update({ where: { id: campaignId }, data: { status: "COMPLETED", completedAt: new Date() } })
+      .update({
+        where: { id: campaignId },
+        data: { status: "COMPLETED", completedAt: new Date(), nextSendAt: null, pauseReason: null },
+      })
       .catch(() => undefined);
     emitProgress(companyId, campaignId, {
       status: "COMPLETED",
@@ -99,6 +185,29 @@ async function tick(companyId: string, campaignId: string): Promise<void> {
     });
     drivers.delete(campaignId);
     return;
+  }
+
+  // Gates anti-ban (horario / límite diario): esperar hasta resumeAt sin tomar el contacto.
+  if ((cfg.sendFrom && cfg.sendUntil) || cfg.dailyLimit > 0) {
+    const company = await prisma.company
+      .findUnique({ where: { id: companyId }, select: { timezone: true } })
+      .catch(() => null);
+    const gate = await checkSendGate(campaignId, cfg, company?.timezone ?? "America/Lima");
+    if (!gate.allowed) {
+      await prisma.campaign
+        .update({ where: { id: campaignId }, data: { nextSendAt: gate.resumeAt, pauseReason: gate.reason } })
+        .catch(() => undefined);
+      emitProgress(companyId, campaignId, {
+        status: "RUNNING",
+        totalCount: campaign.totalCount,
+        sentCount: campaign.sentCount,
+        failedCount: campaign.failedCount,
+        nextAt: gate.resumeAt.toISOString(),
+        pauseReason: gate.reason,
+      });
+      scheduleNext(companyId, campaignId, Math.max(1000, gate.resumeAt.getTime() - Date.now() + 1000));
+      return;
+    }
   }
 
   // Claim atómico: solo procede quien gana el UPDATE PENDING→SENDING.
@@ -150,25 +259,42 @@ async function tick(companyId: string, campaignId: string): Promise<void> {
     where: { id: campaignId },
     select: { status: true, totalCount: true, sentCount: true, failedCount: true },
   });
-  if (fresh) {
-    emitProgress(companyId, campaignId, {
-      status: fresh.status,
-      totalCount: fresh.totalCount,
-      sentCount: fresh.sentCount,
-      failedCount: fresh.failedCount,
-      currentPhone: next.phone,
-    });
-  }
 
   // Si pausaron/cancelaron mientras procesábamos, no agendar el siguiente.
-  if (fresh && fresh.status !== "RUNNING") {
+  if (!fresh || fresh.status !== "RUNNING") {
+    if (fresh) {
+      emitProgress(companyId, campaignId, {
+        status: fresh.status,
+        totalCount: fresh.totalCount,
+        sentCount: fresh.sentCount,
+        failedCount: fresh.failedCount,
+        currentPhone: next.phone,
+      });
+    }
     drivers.delete(campaignId);
     return;
   }
 
-  const processed = (fresh?.sentCount ?? 0) + (fresh?.failedCount ?? 0);
+  const processed = fresh.sentCount + fresh.failedCount;
   const isPausePoint = cfg.pauseEvery > 0 && processed > 0 && processed % cfg.pauseEvery === 0;
-  const delayMs = (isPausePoint ? cfg.pauseSec : cfg.intervalSec) * 1000;
+  let delayMs = (isPausePoint ? cfg.pauseSec : cfg.intervalSec) * 1000;
+  // Jitter anti-ban: ±25% para no enviar con tiempos exactos de robot.
+  if (cfg.randomize && delayMs > 0) delayMs = Math.round(delayMs * (0.75 + Math.random() * 0.5));
+
+  const nextAt = new Date(Date.now() + delayMs);
+  const pauseReason: PauseReason | null = isPausePoint ? "auto" : null;
+  await prisma.campaign
+    .update({ where: { id: campaignId }, data: { nextSendAt: nextAt, pauseReason } })
+    .catch(() => undefined);
+  emitProgress(companyId, campaignId, {
+    status: fresh.status,
+    totalCount: fresh.totalCount,
+    sentCount: fresh.sentCount,
+    failedCount: fresh.failedCount,
+    currentPhone: next.phone,
+    nextAt: nextAt.toISOString(),
+    pauseReason,
+  });
   scheduleNext(companyId, campaignId, delayMs);
 }
 

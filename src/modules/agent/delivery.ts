@@ -37,12 +37,17 @@ export interface DeliveryIds {
   conversationId: string;
 }
 
+/**
+ * Envía un mensaje y lo registra en la conversación. Devuelve true si el
+ * gateway lo aceptó; false si falló (el error se traga aquí para no romper el
+ * turno del agente/flujo — las campañas sí usan el retorno para marcar FAILED).
+ */
 export async function deliver(
   sender: WhatsappSender,
   to: string,
   msg: OutboxMessage,
   ids: DeliveryIds,
-): Promise<void> {
+): Promise<boolean> {
   try {
     if (msg.kind === "media" && msg.mediaUrl) {
       // La firma se aplica solo cuando el media trae caption con texto.
@@ -84,7 +89,9 @@ export async function deliver(
         `⚠️ No se pudo enviar un archivo al cliente por WhatsApp (Meta).\nMotivo: ${reason}`,
       ).catch(() => undefined);
     }
+    return false;
   }
+  return true;
 }
 
 export async function flushOutbox(
@@ -93,9 +100,14 @@ export async function flushOutbox(
   outbox: OutboxMessage[],
   ids: DeliveryIds,
   gapMs: number = OUTBOX_GAP_MS,
-): Promise<void> {
+): Promise<{ sent: number; failed: number }> {
+  let sent = 0;
+  let failed = 0;
   for (let i = 0; i < outbox.length; i++) {
-    await deliver(sender, to, outbox[i], ids);
+    const ok = await deliver(sender, to, outbox[i], ids);
+    if (ok) sent++;
+    else failed++;
     if (i < outbox.length - 1) await sleep(gapMs);
   }
+  return { sent, failed };
 }

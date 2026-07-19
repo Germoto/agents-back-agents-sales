@@ -1086,6 +1086,10 @@ model Campaign {
   totalCount  Int                 @default(0)
   sentCount   Int                 @default(0)
   failedCount Int                 @default(0)
+  // Cuándo el driver procesará el próximo contacto (para el countdown en la UI).
+  nextSendAt  DateTime?
+  // Motivo de la espera actual: "auto" (pausa entre lotes) | "daily-limit" | "schedule".
+  pauseReason String?
   startedAt   DateTime?
   completedAt DateTime?
   createdAt   DateTime            @default(now())

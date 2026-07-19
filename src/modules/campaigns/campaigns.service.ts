@@ -78,6 +78,8 @@ export async function getCampaign(companyId: string, id: string) {
     totalCount: c.totalCount,
     sentCount: c.sentCount,
     failedCount: c.failedCount,
+    nextSendAt: c.nextSendAt,
+    pauseReason: c.pauseReason,
     startedAt: c.startedAt,
     completedAt: c.completedAt,
     createdAt: c.createdAt,
@@ -270,7 +272,10 @@ export async function pauseCampaign(companyId: string, id: string) {
   const campaign = await ensureCampaign(companyId, id);
   if (campaign.status !== "RUNNING") throw new AppError("La campaña no está en ejecución", 409);
   stopDriver(id);
-  await prisma.campaign.update({ where: { id }, data: { status: "PAUSED" } });
+  await prisma.campaign.update({
+    where: { id },
+    data: { status: "PAUSED", nextSendAt: null, pauseReason: null },
+  });
   return getCampaign(companyId, id);
 }
 
@@ -295,7 +300,7 @@ export async function cancelCampaign(companyId: string, id: string) {
   stopDriver(id);
   await prisma.campaign.update({
     where: { id },
-    data: { status: "CANCELLED", completedAt: new Date() },
+    data: { status: "CANCELLED", completedAt: new Date(), nextSendAt: null, pauseReason: null },
   });
   return getCampaign(companyId, id);
 }

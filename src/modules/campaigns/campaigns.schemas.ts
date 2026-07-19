@@ -50,6 +50,10 @@ const sendConfigSchema = z.object({
   intervalSec: z.coerce.number().int().min(0).max(3600).default(10),
   pauseEvery: z.coerce.number().int().min(0).max(10000).default(10),
   pauseSec: z.coerce.number().int().min(0).max(86400).default(60),
+  randomize: z.boolean().default(true),
+  dailyLimit: z.coerce.number().int().min(0).max(100000).default(0),
+  sendFrom: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),
+  sendUntil: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),
   excludeMuted: z.boolean().default(true),
   metaTemplate: campaignMetaTemplateSchema.nullable().optional(),
 });

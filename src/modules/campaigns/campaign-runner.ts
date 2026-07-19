@@ -163,7 +163,16 @@ export async function runRecipientActions(
           customerId: customerId!,
           conversationId: conversationId!,
         };
-        await flushOutbox(sender, to, outbox, ids);
+        const result = await flushOutbox(sender, to, outbox, ids);
+        // A diferencia del agente (donde el error se traga para no romper el
+        // turno), en campañas un rechazo del gateway debe marcar el FAILED.
+        if (result.failed > 0) {
+          throw new Error(
+            result.sent === 0
+              ? "El gateway rechazó el envío del mensaje"
+              : `El gateway rechazó ${result.failed} de ${result.sent + result.failed} mensajes`,
+          );
+        }
       }
     } else if (action.type === "wait") {
       await sleep(Math.max(0, action.seconds) * 1000);
