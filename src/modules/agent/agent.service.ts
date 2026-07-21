@@ -865,21 +865,18 @@ export async function handleExternalPaymentApproved(opts: {
     if (!sender) return;
     const to = convo.customer.phone.replace(/\D/g, "");
 
-    // Fuera de "cobrar antes de entregar": registrar el pago y avisar al dueño,
-    // sin entrega automática (contraentrega/manual la coordina el negocio).
-    const deliverNow = config.payment.paymentMode === "before_delivery";
-
-    const result = deliverNow
-      ? await approveExternalPayment({
-          companyId: opts.companyId,
-          customerId: convo.customerId,
-          conversationId: opts.conversationId,
-          config,
-          state,
-          productIds: opts.productIds,
-        })
-      : ({ approved: true, customerMessage: "¡Pago confirmado! ✅ Gracias por tu compra 🙌" } as const);
-    if (!deliverNow) state.status = "PAGADO";
+    // La entrega digital SIEMPRE va tras el pago aprobado (igual que el flujo de
+    // comprobantes: tryApprovePayment/recheckPayment no consultan paymentMode —
+    // ese modo gobierna pedidos físicos). assignAndBuildDelivery solo entrega
+    // digitales; para físicos devuelve vacío → queda PAGADO + aviso al dueño.
+    const result = await approveExternalPayment({
+      companyId: opts.companyId,
+      customerId: convo.customerId,
+      conversationId: opts.conversationId,
+      config,
+      state,
+      productIds: opts.productIds,
+    });
 
     if ("kind" in result && result.kind === "already") {
       console.log(`[agent] pago externo (${provider}) ignorado: conversación ya pagada (conv=${opts.conversationId})`);
@@ -914,7 +911,7 @@ export async function handleExternalPaymentApproved(opts: {
           adminPhone,
           `💳 Pago por ${provider} confirmado: *${opts.amountText}* de ${convo.customer.phone}` +
             (opts.payerName ? ` (${opts.payerName})` : "") +
-            (delivered?.length ? `. Producto entregado automáticamente ✅` : deliverNow ? "" : ". Coordina la entrega con el cliente."),
+            (delivered?.length ? `. Producto entregado automáticamente ✅` : ". Coordina la entrega con el cliente."),
         );
       } catch {
         /* best-effort */

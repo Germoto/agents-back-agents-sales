@@ -83,6 +83,7 @@ export async function processMercadoPagoWebhook(
       data: {
         companyId,
         customerId: convo?.customerId ?? null,
+        productId: ref.productIds?.[0] ?? null,
         productIds: ref.productIds ?? [],
         amountExpected: String(payment.transaction_amount ?? 0),
         amountPaid: String(payment.transaction_amount ?? 0),
