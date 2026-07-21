@@ -86,7 +86,15 @@ function renderVerticalData(vertical: string | undefined, vData: unknown, basePr
     .join(" · ");
 }
 
-function renderProduct(p: BotProduct, index: number, vertical: string | undefined): string {
+/**
+ * Renderiza un producto para el prompt. `full=true` incluye la base de
+ * conocimiento COMPLETA (faqs/objeciones con respuestas íntegras, links
+ * incluidos) — se usa para el producto en foco y para catálogos chicos.
+ * `full=false` es el modo compacto (primeras N) para no inflar el prompt en
+ * catálogos grandes; el sufijo "+N más" le enseña al modelo a completar con
+ * buscar_producto.
+ */
+function renderProduct(p: BotProduct, index: number, vertical: string | undefined, full: boolean): string {
   const secundario = (p as { showInCatalog?: boolean }).showInCatalog === false;
   const parts = [
     `${index + 1}. [${p.id}] ${p.name} — ${p.priceText ?? p.price}${
@@ -102,15 +110,32 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
   if (p.aliases?.length) parts.push(`   alias: ${p.aliases.join(", ")}`);
   const vd = renderVerticalData(vertical, p.verticalData, p.priceText ?? p.price);
   if (vd) parts.push(`   ${vertical === "STREAMER" ? "plan" : "detalle"}: ${vd}`);
-  if (p.benefits?.length) parts.push(`   beneficios: ${p.benefits.slice(0, 5).join("; ")}`);
-  if (p.includes?.length) parts.push(`   incluye: ${p.includes.slice(0, 5).join("; ")}`);
-  if (p.bonuses?.length) parts.push(`   bonos: ${p.bonuses.slice(0, 6).join("; ")}`);
-  if (p.faqs?.length)
-    parts.push(`   faq: ${p.faqs.slice(0, 4).map((f) => `${f.question} -> ${f.answer}`).join(" | ")}`);
-  if (p.objections?.length)
-    parts.push(
-      `   objeciones: ${p.objections.slice(0, 4).map((o) => `${o.question} -> ${o.answer}`).join(" | ")}`,
-    );
+  if (p.benefits?.length) parts.push(`   beneficios: ${p.benefits.slice(0, full ? 20 : 5).join("; ")}`);
+  if (p.includes?.length) parts.push(`   incluye: ${p.includes.slice(0, full ? 20 : 5).join("; ")}`);
+  if (p.bonuses?.length) parts.push(`   bonos: ${p.bonuses.slice(0, full ? 20 : 6).join("; ")}`);
+  if (p.faqs?.length) {
+    if (full) {
+      const lines = p.faqs.slice(0, 30).map((f) => `     - ${f.question} -> ${f.answer}`);
+      parts.push(`   faq:\n${lines.join("\n")}`);
+    } else {
+      const extra = p.faqs.length > 4 ? ` (+${p.faqs.length - 4} faqs más: llama buscar_producto para verlas todas)` : "";
+      parts.push(`   faq: ${p.faqs.slice(0, 4).map((f) => `${f.question} -> ${f.answer}`).join(" | ")}${extra}`);
+    }
+  }
+  if (p.objections?.length) {
+    if (full) {
+      const lines = p.objections.slice(0, 20).map((o) => `     - ${o.question} -> ${o.answer}`);
+      parts.push(`   objeciones:\n${lines.join("\n")}`);
+    } else {
+      const extra =
+        p.objections.length > 4
+          ? ` (+${p.objections.length - 4} más: llama buscar_producto para verlas todas)`
+          : "";
+      parts.push(
+        `   objeciones: ${p.objections.slice(0, 4).map((o) => `${o.question} -> ${o.answer}`).join(" | ")}${extra}`,
+      );
+    }
+  }
   if (p.files?.length) {
     // Listamos cada archivo con su id, tipo, descripción y si entra en la
     // presentación inicial. Así el modelo puede responder desde esas descripciones
@@ -143,11 +168,18 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
   return parts.join("\n");
 }
 
-function renderCatalog(products: BotConfig["products"], vertical: string | undefined): string {
+function renderCatalog(
+  products: BotConfig["products"],
+  vertical: string | undefined,
+  selectedProductId?: string | null,
+): string {
   if (!products.length) return "(sin productos activos)";
+  // Base de conocimiento completa para catálogos chicos o para el producto en
+  // foco de la conversación; compacta para el resto (control del prompt).
+  const isFull = (p: BotProduct) => products.length <= 3 || p.id === selectedProductId;
   const hasCategories = products.some((p) => p.category && p.category.trim());
   if (!hasCategories) {
-    return products.map((p, i) => renderProduct(p, i, vertical)).join("\n\n");
+    return products.map((p, i) => renderProduct(p, i, vertical, isFull(p))).join("\n\n");
   }
   // Agrupado por categoría (menú por secciones / planes por servicio).
   const groups = new Map<string, BotProduct[]>();
@@ -159,7 +191,7 @@ function renderCatalog(products: BotConfig["products"], vertical: string | undef
   let idx = 0;
   const sections: string[] = [];
   for (const [cat, items] of groups) {
-    const lines = items.map((p) => renderProduct(p, idx++, vertical));
+    const lines = items.map((p) => renderProduct(p, idx++, vertical, isFull(p)));
     sections.push(`== ${cat} ==\n${lines.join("\n\n")}`);
   }
   return sections.join("\n\n");
@@ -238,8 +270,10 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "- NO agregues al carrito ni envíes métodos de pago solo porque el cliente mencione o pregunte por un producto. Primero preséntalo y resuelve sus dudas/objeciones con la base de conocimiento (faq, objeciones, beneficios). Agrega al carrito (agregar_carrito) o cobra (enviar_metodos_pago) SOLO cuando el cliente confirme que quiere comprarlo.",
     "- Puedes ofrecer y vender MÚLTIPLES productos del catálogo. Usa el carrito si el cliente quiere más de uno.",
     "- Responde preguntas abiertas usando la base de conocimiento del producto (descripción, beneficios, incluye, bonos, faq, objeciones). No te limites a un guion: si el cliente pregunta algo, contéstalo.",
+    "- INTERPRETA la intención de cada consulta y RELACIÓNALA con la base de conocimiento configurada: aunque el cliente lo diga con otras palabras, si una FAQ u objeción cubre lo que pregunta, ESA respuesta configurada es tu fuente. Transmítela con naturalidad (puedes adaptar el tono, NO el contenido) e incluye CUALQUIER enlace/URL que contenga, copiado EXACTO carácter por carácter. NUNCA digas que enviaste o pasaste algo (videos, muestras, links) sin incluirlo realmente en tu mensaje o haberlo enviado con una herramienta. Los enlaces dentro de FAQs/objeciones (muestras, demos, tutoriales, grupos) son material que el dueño configuró para compartir: SÍ puedes enviarlos; NO son el enlace de entrega del producto.",
+    "- Si la duda del cliente debería estar cubierta por el producto pero no ves esa FAQ en el catálogo (productos marcados con '+N faqs más'), llama a buscar_producto para obtener su base de conocimiento completa ANTES de responder.",
     "- Para mostrar archivos (imágenes, PDF, video, audio u otros) usa la herramienta enviar_multimedia; ella los envía con el formato correcto según el tipo. Para dar los datos de pago usa SIEMPRE enviar_metodos_pago: tú NO conoces los números de cuenta ni los titulares. Aunque el cliente pregunte solo un dato puntual (ej. '¿a qué número yapeo?', '¿a nombre de quién?'), llama a la herramienta; NUNCA escribas números de pago en texto libre ni los inventes.",
-    "- NUNCA reveles el enlace de entrega digital antes de que el pago esté APROBADO. Puedes explicar cómo es la entrega sin dar el link.",
+    "- NUNCA reveles el enlace de entrega digital antes de que el pago esté APROBADO. Puedes explicar cómo es la entrega sin dar el link. (Esto aplica SOLO al acceso que envía entregar_producto; los links que aparecen dentro de FAQs, objeciones o la descripción sí son compartibles.)",
     "- SECUENCIA DE PAGO (obligatoria): cuando el cliente confirme que quiere comprar, lo PRIMERO es usar enviar_metodos_pago — esa herramienta ya le envía el monto y los datos de pago. NUNCA pidas el nombre del titular ni llames a validar_pago si todavía no enviaste los métodos de pago en esta conversación (el cliente no tendría cómo pagar). No mezcles los pasos: no pidas el nombre 'para enviarte los métodos'; los métodos los manda la herramienta, no el nombre. Recién DESPUÉS de enviarlos, espera a que el cliente diga que ya pagó y entonces pídele el nombre del titular que aparece en su Yape/Plin (o el código de la operación) y llama a validar_pago. Solo entrega el producto digital (entregar_producto) cuando validar_pago confirme APROBADO. EXCEPCIÓN: si el estado tiene 'comprobanteLeido', el cliente ya pagó por su cuenta (ya tenía los datos de pago): llama a validar_pago DIRECTO aunque nunca hayas enviado los métodos en este chat; NO digas que falta enviar los métodos ni los envíes después del pago.",
     "- VALIDACIÓN DE PAGO (delicado — el cliente se pone nervioso): la validación es AUTOMÁTICA y puede tardar 1 o 2 minutos mientras el comprobante entra al sistema. Si validar_pago responde que aún no encuentra el pago (pending), NO digas que está mal, que no existe o que el nombre no coincide: dile con calma y SEGURIDAD que estás validando su pago y que en un momentito le confirmas (el sistema reintenta solo y, si hace falta, lo revisa un asesor). Nunca des a entender que desconfías de él. OJO: esto aplica ÚNICAMENTE cuando llamaste a validar_pago en ese turno y respondió pending. Si el cliente NO mandó comprobante y NO afirmó haber pagado, tienes PROHIBIDO decirle que estás validando, verificando o confirmando un pago: no existe ningún pago que validar y quedarías mal al no confirmarle nunca.",
     "- VALIDAR EL PAGO: cuando el cliente diga que YA pagó o mande la captura del comprobante, llama a validar_pago. Si el cliente NO escribió un nombre, llámala SIN parámetros (con la captura basta en Yape→Yape). NUNCA inventes el payerName: pásalo SOLO si el cliente escribió ese nombre de titular en sus mensajes; su nombre de perfil de WhatsApp o palabras sueltas de la conversación NO son el titular. El sistema hace TODO: si puede, aprueba solo; si falta el nombre (p. ej. pagos por Plin), validar_pago ya le pide el dato al cliente; si tarda, ya lo tranquiliza; y tras varios intentos lo deriva a un asesor. NO compongas tú los mensajes de pago ni inventes que está validado: validar_pago YA le responde al cliente. Después de llamarla, deja tu texto final VACÍO.",
@@ -254,7 +288,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "- Usa derivar_humano SOLO si el cliente pide EXPLÍCITAMENTE hablar con una persona/asesor, o si hay un problema real fuera de tu alcance (un reclamo, un error de pago, un pedido muy especial). NUNCA derives por preguntas que puedes responder, por no encontrar un producto (ofrece el catálogo) ni por saludos o dudas normales. Ante una duda: pregunta o responde, no derives.",
     "",
     "Catálogo disponible:",
-    renderCatalog(config.products, vertical),
+    renderCatalog(config.products, vertical, state.selectedProductId),
     "",
     "Métodos de pago configurados:",
     renderPaymentMethods(config.payment),
