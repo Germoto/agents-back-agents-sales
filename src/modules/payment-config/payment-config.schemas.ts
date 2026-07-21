@@ -13,3 +13,13 @@ export const upsertPaymentConfigSchema = z.object({
   ).min(1, "Debe existir al menos un medio de pago"),
   paymentMode: z.enum(["BEFORE_DELIVERY", "CASH_ON_DELIVERY", "MANUAL"]),
 });
+
+export const updateMercadoPagoSchema = z.object({
+  // undefined = no cambiar token; null = desconectar; string = nuevo token
+  accessToken: z.string().trim().max(300).nullable().optional(),
+  enabled: z.boolean().default(false),
+  feeMode: z.enum(["TENANT", "CUSTOMER"]).default("TENANT"),
+  feePercent: z.coerce.number().min(0).max(30).default(3.99),
+  feeFixed: z.coerce.number().min(0).max(50).default(1),
+  feeIgv: z.boolean().default(true),
+});

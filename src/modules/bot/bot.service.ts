@@ -162,6 +162,16 @@ export async function buildBotConfig(companyId: string, account?: string) {
       notification: {
         whatsappPhone: paymentConfig.notificationPhone,
       },
+      // Mercado Pago: el token viaja CIFRADO tal como está en BD; se descifra
+      // recién al crear la preference (agent-tools) para no exponerlo en logs.
+      mp: {
+        enabled: paymentConfig.mpEnabled && Boolean(paymentConfig.mpAccessToken),
+        accessTokenEnc: paymentConfig.mpAccessToken,
+        feeMode: paymentConfig.mpFeeMode,
+        feePercent: Number(paymentConfig.mpFeePercent),
+        feeFixed: Number(paymentConfig.mpFeeFixed),
+        feeIgv: paymentConfig.mpFeeIgv,
+      },
     },
     agent: {
       basePrompt: agentConfig.basePrompt,

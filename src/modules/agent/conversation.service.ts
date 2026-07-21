@@ -50,6 +50,9 @@ export interface ConversationState {
   paymentAttempts?: number;
   /** SIMULACIÓN: productIds del combo capturados al validar pago (el carrito se cierra antes de entregar). */
   pendingDeliveryProductIds?: string[];
+  /** Mercado Pago: preference del último link de pago enviado y su monto (para el webhook). */
+  mpPreferenceId?: string | null;
+  mpAmount?: number | null;
   [key: string]: unknown;
 }
 

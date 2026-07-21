@@ -19,7 +19,11 @@ import {
   summarizeCart,
   renderCartText,
   checkoutCart,
+  parsePrice,
 } from "./cart.service";
+import { env } from "../../config/env";
+import { decryptCredential } from "../../lib/credentials-crypto";
+import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
 import {
   matchPayments,
   claimPayment,
@@ -574,6 +578,89 @@ async function registerStreamingSubscriptions(opts: {
       reminder: renewal,
     });
   }
+}
+
+/**
+ * Aprueba una venta cuyo pago YA fue confirmado por una pasarela externa
+ * (Mercado Pago vía webhook verificado contra su API): sin matching de
+ * comprobantes. Reutiliza el mismo camino post-aprobación de tryApprovePayment
+ * (checkout del carrito, cancelar recordatorios, entrega digital,
+ * suscripciones, estado de la conversación).
+ */
+export async function approveExternalPayment(opts: {
+  companyId: string;
+  customerId: string;
+  conversationId: string;
+  config: BotConfig;
+  state: ConversationState;
+  productIds?: string[];
+}): Promise<ApprovePaymentResult> {
+  const { companyId, customerId, config, state } = opts;
+  const status = state.status ?? "";
+  if (status === "PAGADO" || status === "ENTREGADO") {
+    return { approved: true, kind: "already" };
+  }
+
+  const cart = await summarizeCart(companyId, customerId);
+  const productIds = opts.productIds?.length
+    ? opts.productIds
+    : cart.productIds.length
+    ? cart.productIds
+    : state.selectedProductId
+    ? [state.selectedProductId]
+    : [];
+  const planByProduct = planByProductFromCart(cart);
+
+  if (cart.items.length) await checkoutCart(companyId, customerId, cart.totalText);
+  state.pendingRecheckAt = null;
+  state.paymentAttempts = 0;
+  state.mpPreferenceId = null;
+  try {
+    await cancelPendingReminders(companyId, customerId, [
+      ScheduledMessageType.ABANDONED_CART,
+      ScheduledMessageType.LEFT_ON_READ,
+      ScheduledMessageType.OFFER_COUNTDOWN,
+      ScheduledMessageType.POST_SALE,
+    ]);
+  } catch {
+    /* best-effort */
+  }
+
+  const del = await assignAndBuildDelivery(config, productIds, {
+    companyId,
+    customerId,
+    conversationId: opts.conversationId,
+    planByProduct,
+  });
+  if (del.delivered.length || del.manualNeeded.length) {
+    state.status = del.delivered.length ? "ENTREGADO" : "PAGADO";
+    if (del.offeredCrossSellId) state.offeredCrossSellProductId = del.offeredCrossSellId;
+    await registerStreamingSubscriptions({
+      config,
+      companyId,
+      customerId,
+      conversationId: opts.conversationId,
+      productIds,
+      planByProduct,
+    });
+    return {
+      approved: true,
+      deliveryOutbox: del.outbox,
+      delivered: del.delivered,
+      offeredCrossSellId: del.offeredCrossSellId,
+      shouldPauseHuman: del.shouldPauseHuman || del.manualNeeded.length > 0,
+      manualNeeded: del.manualNeeded,
+      outOfStock: del.outOfStock,
+      autoSales: del.autoSales,
+      customerMessage: del.delivered.length
+        ? "¡Pago confirmado! ✅ Te entrego tu acceso ahora mismo 👇"
+        : "¡Pago confirmado! ✅",
+    };
+  }
+  // Sin entrega digital automática (producto físico/servicio o sin productos):
+  // marcar pagado; el dueño recibe el aviso desde el caller.
+  state.status = "PAGADO";
+  return { approved: true, customerMessage: "¡Pago confirmado! ✅ Gracias por tu compra 🙌" };
 }
 
 /**
@@ -1359,7 +1446,8 @@ export async function executeTool(
     }
 
     case "enviar_metodos_pago": {
-      if (!ctx.config.payment.enabled || !ctx.config.payment.methods.length) {
+      const mpCfg = ctx.config.payment.mp;
+      if (!ctx.config.payment.enabled || (!ctx.config.payment.methods.length && !mpCfg?.enabled)) {
         return JSON.stringify({ ok: false, error: "pagos no configurados" });
       }
       const cart = await summarizeCart(ctx.companyId, ctx.customerId);
@@ -1379,21 +1467,71 @@ export async function executeTool(
         }
       }
       let amountText = cart.totalText;
+      let amountNum = cart.total;
+      let mpTitle = "Compra";
       if (!cart.items.length && ctx.state.selectedProductId) {
         const p = findProductById(ctx, ctx.state.selectedProductId);
         amountText = p?.priceText ?? p?.price ?? amountText;
+        amountNum = parsePrice(p?.priceText ?? p?.price);
+        if (p?.name) mpTitle = p.name;
+      } else if (cart.items.length === 1) {
+        mpTitle = cart.items[0].name;
+      } else if (cart.items.length > 1) {
+        mpTitle = `Pedido (${cart.items.length} productos)`;
       }
+
+      // Mercado Pago: link de pago (Checkout Pro) junto a los métodos manuales.
+      // Si falla la creación (token vencido, red), degradar sin romper el cobro.
+      let mpLine = "";
+      if (!ctx.simulate && mpCfg?.enabled && mpCfg.accessTokenEnc && amountNum > 0) {
+        try {
+          const token = decryptCredential(mpCfg.accessTokenEnc);
+          const linkAmount = mpLinkAmount(amountNum, mpCfg);
+          const pref = await mpCreatePreference(token, {
+            title: mpTitle,
+            amount: linkAmount,
+            externalReference: JSON.stringify({
+              conversationId: ctx.conversationId,
+              productIds: newIds.length ? newIds : chargeIds,
+            }),
+            notificationUrl: `${env.PUBLIC_BASE_URL}/api/webhooks/mercadopago/${ctx.companyId}`,
+          });
+          mpLine =
+            mpCfg.feeMode === "CUSTOMER" && linkAmount > amountNum
+              ? `\n\n💳 O paga con tarjeta u otros medios por Mercado Pago (total S/ ${linkAmount.toFixed(2)}, incluye la comisión de la pasarela):\n${pref.init_point}`
+              : `\n\n💳 También puedes pagar con tarjeta u otros medios aquí:\n${pref.init_point}`;
+          ctx.state.mpPreferenceId = pref.id;
+          ctx.state.mpAmount = linkAmount;
+        } catch (err) {
+          console.error(
+            `[agent] MP preference falló company=${ctx.companyId}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+
       const methods = ctx.config.payment.methods
         .map((m) => `• ${m.method}: *${m.number}* (titular: ${m.holder})`)
         .join("\n");
-      const text =
-        `El monto a pagar es: *${amountText}*\n\n` +
-        `Puedes pagar con:\n${methods}\n\n` +
-        `Cuando pagues, mándame la *captura del comprobante* o el *nombre del titular* de tu Yape/Plin (la cuenta DESDE donde pagaste) y validamos tu pago al instante ✅`;
+      const manualBlock = methods
+        ? `Puedes pagar con:\n${methods}\n\n` +
+          `Cuando pagues, mándame la *captura del comprobante* o el *nombre del titular* de tu Yape/Plin (la cuenta DESDE donde pagaste) y validamos tu pago al instante ✅`
+        : `Paga de forma segura con el link de abajo; en cuanto se confirme el pago te llega tu pedido automáticamente ✅`;
+      const text = `El monto a pagar es: *${amountText}*\n\n` + manualBlock + mpLine;
       ctx.outbox.push({ kind: "text", text });
       ctx.state.status = "ESPERANDO_PAGO";
       ctx.state.lastPaymentPromptAt = new Date().toISOString();
-      return JSON.stringify({ ok: true, amount: amountText, sent: true, nota: "Ya envié el monto y los métodos de pago al cliente. NO los repitas en tu texto final; cierra breve o deja el texto vacío." });
+      return JSON.stringify({
+        ok: true,
+        amount: amountText,
+        sent: true,
+        mercadoPagoLink: Boolean(mpLine),
+        nota:
+          "Ya envié el monto y los métodos de pago al cliente. NO los repitas en tu texto final; cierra breve o deja el texto vacío." +
+          (mpLine
+            ? " Si el cliente paga por el link de Mercado Pago, la confirmación y la entrega son AUTOMÁTICAS: no le pidas comprobante por ese medio."
+            : ""),
+      });
     }
 
     case "validar_pago": {

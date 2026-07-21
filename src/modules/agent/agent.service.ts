@@ -32,7 +32,7 @@ import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
 import { runFlowTurn, buildRealFlowIO, trailingUserText } from "../flows/flow-engine";
-import { tryApprovePayment, muteCustomerToHuman, autoSaleNotice, type TurnContext } from "./agent-tools";
+import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
 import { getLinkedPhone } from "../whatsapp-config/whatsapp-config.service";
@@ -827,6 +827,129 @@ export async function recheckPayment(msg: {
     console.log(`[agent] recheckPayment: sin match → derivado a humano (conv=${conversationId})`);
   } catch (err) {
     console.warn("[agent] recheckPayment falló:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * Un pago YA CONFIRMADO por una pasarela externa (Mercado Pago, webhook
+ * verificado contra su API) llegó para esta conversación: marcar pagado y
+ * entregar automáticamente, fuera de un turno del modelo. Molde de
+ * recheckPayment, pero sin matching (la pasarela es la fuente de verdad).
+ */
+export async function handleExternalPaymentApproved(opts: {
+  companyId: string;
+  conversationId: string;
+  productIds: string[];
+  amountText: string;
+  payerName?: string | null;
+  provider?: string;
+}): Promise<void> {
+  const provider = opts.provider ?? "Mercado Pago";
+  try {
+    const convo = await prisma.conversation.findFirst({
+      where: { id: opts.conversationId, companyId: opts.companyId },
+      select: { customerId: true, customer: { select: { phone: true } } },
+    });
+    if (!convo) return;
+    const runtime = await getConversationRuntime(opts.conversationId);
+    if (!runtime) return;
+    const state = runtime.state ?? {};
+
+    let config: Awaited<ReturnType<typeof buildBotConfig>>;
+    try {
+      config = await buildBotConfig(opts.companyId);
+    } catch {
+      return;
+    }
+    const sender = await loadWhatsappSender(opts.companyId);
+    if (!sender) return;
+    const to = convo.customer.phone.replace(/\D/g, "");
+
+    // Fuera de "cobrar antes de entregar": registrar el pago y avisar al dueño,
+    // sin entrega automática (contraentrega/manual la coordina el negocio).
+    const deliverNow = config.payment.paymentMode === "before_delivery";
+
+    const result = deliverNow
+      ? await approveExternalPayment({
+          companyId: opts.companyId,
+          customerId: convo.customerId,
+          conversationId: opts.conversationId,
+          config,
+          state,
+          productIds: opts.productIds,
+        })
+      : ({ approved: true, customerMessage: "¡Pago confirmado! ✅ Gracias por tu compra 🙌" } as const);
+    if (!deliverNow) state.status = "PAGADO";
+
+    if ("kind" in result && result.kind === "already") {
+      console.log(`[agent] pago externo (${provider}) ignorado: conversación ya pagada (conv=${opts.conversationId})`);
+      return;
+    }
+
+    if (result.customerMessage && to) {
+      try {
+        await sendText(sender, to, result.customerMessage);
+      } catch {
+        /* best-effort */
+      }
+    }
+    const deliveryOutbox = "deliveryOutbox" in result ? result.deliveryOutbox : undefined;
+    if (deliveryOutbox?.length) {
+      await flushOutbox(
+        sender,
+        to,
+        deliveryOutbox,
+        { companyId: opts.companyId, customerId: convo.customerId, conversationId: opts.conversationId },
+        gapMsFor(config.business),
+      );
+    }
+    await saveState(opts.conversationId, state as ConversationState);
+
+    const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+    const delivered = "delivered" in result ? result.delivered : undefined;
+    if (adminPhone) {
+      try {
+        await sendText(
+          sender,
+          adminPhone,
+          `💳 Pago por ${provider} confirmado: *${opts.amountText}* de ${convo.customer.phone}` +
+            (opts.payerName ? ` (${opts.payerName})` : "") +
+            (delivered?.length ? `. Producto entregado automáticamente ✅` : deliverNow ? "" : ". Coordina la entrega con el cliente."),
+        );
+      } catch {
+        /* best-effort */
+      }
+      const autoSales = "autoSales" in result ? result.autoSales : undefined;
+      if (autoSales?.length) {
+        for (const s of autoSales) {
+          try {
+            await sendText(sender, adminPhone, autoSaleNotice(s, convo.customer.phone));
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+    }
+
+    const shouldPauseHuman = "shouldPauseHuman" in result ? result.shouldPauseHuman : false;
+    if (shouldPauseHuman) {
+      await muteCustomerToHuman(opts.companyId, opts.conversationId, convo.customer.phone);
+      const manualNeeded = ("manualNeeded" in result ? result.manualNeeded : undefined) ?? [];
+      if (adminPhone && manualNeeded.length) {
+        try {
+          await sendText(
+            sender,
+            adminPhone,
+            `🔔 Falta ENTREGAR MANUALMENTE: ${manualNeeded.join(", ")} (pago por ${provider} ya confirmado). El chat quedó en atención humana.`,
+          );
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+    console.log(`[agent] pago externo (${provider}) aprobado y gestionado (conv=${opts.conversationId})`);
+  } catch (err) {
+    console.warn("[agent] handleExternalPaymentApproved falló:", err instanceof Error ? err.message : err);
   }
 }
 

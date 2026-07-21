@@ -290,6 +290,17 @@ model PaymentConfig {
   enabled           Boolean         @default(true)
   paymentMode       PaymentMode
   notificationPhone String?
+  // --- Mercado Pago (link de pago + autovalidación por webhook) ---
+  // Access Token de la aplicación MP del tenant, cifrado AES-256-GCM (credentials-crypto).
+  mpEnabled         Boolean         @default(false)
+  mpAccessToken     String?
+  // Comisión de MP: quién la asume y cómo se calcula el recargo del link.
+  // TENANT = el negocio la absorbe (link por el precio exacto); CUSTOMER = se
+  // traslada al cliente (link con gross-up: (precio + fijo·igv) / (1 − %·igv)).
+  mpFeeMode         String          @default("TENANT")
+  mpFeePercent      Decimal         @default(3.99) @db.Decimal(5, 2)
+  mpFeeFixed        Decimal         @default(1.00) @db.Decimal(8, 2)
+  mpFeeIgv          Boolean         @default(true)
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
   company           Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)

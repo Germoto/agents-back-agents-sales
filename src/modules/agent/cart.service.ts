@@ -40,7 +40,7 @@ export interface CartSummary {
 
 const CURRENCY = "S/";
 
-function parsePrice(value: string | null | undefined): number {
+export function parsePrice(value: string | null | undefined): number {
   if (!value) return 0;
   const n = Number(String(value).replace(/[^0-9.]/g, ""));
   return Number.isFinite(n) ? n : 0;
