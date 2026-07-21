@@ -394,6 +394,7 @@ export async function assignAndBuildDelivery(
   const find = (id: string) => config.products.find((p) => p.id === id || p.slug === id);
   const outbox: OutboxMessage[] = [];
   const delivered: string[] = [];
+  const deliveredIds: string[] = [];
   const manualNeeded: string[] = [];
   const outOfStock: string[] = [];
   const autoSales: AutoSaleInfo[] = [];
@@ -438,6 +439,7 @@ export async function assignAndBuildDelivery(
       const crossId = pushCrossSell(outbox, p, dd, find, shouldPauseHuman);
       if (crossId) offeredCrossSellId = crossId;
       delivered.push(p.name);
+      deliveredIds.push(p.id);
       // Aviso al dueño (solo venta real por inventario): cuenta entregada + stock restante.
       if (!opts.simulate) {
         const remaining = await countAvailable(opts.companyId, p.id, optionLabel);
@@ -458,6 +460,7 @@ export async function assignAndBuildDelivery(
     const crossId = pushCrossSell(outbox, p, dd, find, shouldPauseHuman);
     if (crossId) offeredCrossSellId = crossId;
     delivered.push(p.name);
+    deliveredIds.push(p.id);
   }
 
   // Invitación al resto del catálogo (solo si hubo entrega automática, sin cross-sell,
@@ -490,6 +493,30 @@ export async function assignAndBuildDelivery(
       manualText = `Y para *${manualNeeded.join(", ")}* un asesor te enviará el acceso en breve 🙏`;
     }
     outbox.push({ kind: "text", text: manualText });
+  }
+
+  // Acciones de venta configuradas por producto (mover en CRM / etiquetar / quitar
+  // etiquetas): aquí cubren TODOS los caminos de entrega — tool entregar_producto,
+  // auto-validación de comprobantes, recheck y webhook de Mercado Pago. Best-effort.
+  if (!opts.simulate) {
+    for (const pid of deliveredIds) {
+      const dd = find(pid)?.digitalDelivery;
+      if (
+        dd &&
+        (dd.onSaleCrmId || (dd.onSaleTagIds?.length ?? 0) > 0 || (dd.onSaleRemoveTagIds?.length ?? 0) > 0)
+      ) {
+        try {
+          await applyCrmAndTagActions(opts.companyId, opts.customerId, {
+            tagIds: dd.onSaleTagIds,
+            removeTagIds: dd.onSaleRemoveTagIds,
+            crmId: dd.onSaleCrmId,
+            crmColumnId: dd.onSaleCrmColumnId,
+          });
+        } catch (err) {
+          console.error("[agent] acciones CRM de venta fallaron:", err instanceof Error ? err.message : err);
+        }
+      }
+    }
   }
 
   return { outbox, delivered, manualNeeded, outOfStock, autoSales, offeredCrossSellId, offeredCatalog, shouldPauseHuman };
@@ -1259,10 +1286,16 @@ export async function executeTool(
       // por producto presentado (la guarda `presented.includes` arriba ya hizo return).
       if (!ctx.simulate) {
         const ddPres = product.digitalDelivery;
-        if (ddPres && (ddPres.onPresentationCrmId || (ddPres.onPresentationTagIds?.length ?? 0) > 0)) {
+        if (
+          ddPres &&
+          (ddPres.onPresentationCrmId ||
+            (ddPres.onPresentationTagIds?.length ?? 0) > 0 ||
+            (ddPres.onPresentationRemoveTagIds?.length ?? 0) > 0)
+        ) {
           try {
             await applyCrmAndTagActions(ctx.companyId, ctx.customerId, {
               tagIds: ddPres.onPresentationTagIds,
+              removeTagIds: ddPres.onPresentationRemoveTagIds,
               crmId: ddPres.onPresentationCrmId,
               crmColumnId: ddPres.onPresentationCrmColumnId,
             });
@@ -1521,6 +1554,33 @@ export async function executeTool(
       ctx.outbox.push({ kind: "text", text });
       ctx.state.status = "ESPERANDO_PAGO";
       ctx.state.lastPaymentPromptAt = new Date().toISOString();
+
+      // Acciones CRM "cliente caliente" configuradas por producto: al enviar los
+      // métodos de pago, mover al cliente de pestaña y/o etiquetar/quitar etiquetas
+      // (best-effort, no rompe el cobro).
+      if (!ctx.simulate) {
+        for (const pid of Array.from(new Set(chargeIds))) {
+          const ddPay = findProductById(ctx, pid)?.digitalDelivery;
+          if (
+            ddPay &&
+            (ddPay.onPaymentCrmId ||
+              (ddPay.onPaymentTagIds?.length ?? 0) > 0 ||
+              (ddPay.onPaymentRemoveTagIds?.length ?? 0) > 0)
+          ) {
+            try {
+              await applyCrmAndTagActions(ctx.companyId, ctx.customerId, {
+                tagIds: ddPay.onPaymentTagIds,
+                removeTagIds: ddPay.onPaymentRemoveTagIds,
+                crmId: ddPay.onPaymentCrmId,
+                crmColumnId: ddPay.onPaymentCrmColumnId,
+              });
+            } catch (err) {
+              console.error("[agent] acciones CRM al cobrar fallaron:", err instanceof Error ? err.message : err);
+            }
+          }
+        }
+      }
+
       return JSON.stringify({
         ok: true,
         amount: amountText,
@@ -1792,20 +1852,8 @@ export async function executeTool(
         });
       }
 
-      // Acciones de venta configuradas por producto: mover al cliente a una pestaña
-      // del CRM y/o asignarle etiquetas (best-effort, no rompe la entrega).
-      if (!ctx.simulate) {
-        for (const pid of ids) {
-          const dd = findProductById(ctx, pid)?.digitalDelivery;
-          if (dd && (dd.onSaleCrmId || (dd.onSaleTagIds && dd.onSaleTagIds.length))) {
-            await applyCrmAndTagActions(ctx.companyId, ctx.customerId, {
-              tagIds: dd.onSaleTagIds,
-              crmId: dd.onSaleCrmId,
-              crmColumnId: dd.onSaleCrmColumnId,
-            });
-          }
-        }
-      }
+      // (Las acciones CRM de venta las aplica assignAndBuildDelivery para cubrir
+      // también los caminos de entrega automática.)
 
       // Entrega MANUAL / sin stock: pasar el chat a atención humana y avisar al asesor.
       if (needsHandoff) {

@@ -107,10 +107,17 @@ export const productBodySchema = z.object({
     onSaleCrmId: z.string().uuid().nullable().optional(),
     onSaleCrmColumnId: z.string().uuid().nullable().optional(),
     onSaleTagIds: z.array(z.string().uuid()).optional().default([]),
+    onSaleRemoveTagIds: z.array(z.string().uuid()).optional().default([]),
     // Acciones al ENVIAR la info completa (presentación): mismo patrón que onSale*.
     onPresentationCrmId: z.string().uuid().nullable().optional(),
     onPresentationCrmColumnId: z.string().uuid().nullable().optional(),
     onPresentationTagIds: z.array(z.string().uuid()).optional().default([]),
+    onPresentationRemoveTagIds: z.array(z.string().uuid()).optional().default([]),
+    // Acciones al ENVIAR LOS MÉTODOS DE PAGO (cliente caliente): mismo patrón.
+    onPaymentCrmId: z.string().uuid().nullable().optional(),
+    onPaymentCrmColumnId: z.string().uuid().nullable().optional(),
+    onPaymentTagIds: z.array(z.string().uuid()).optional().default([]),
+    onPaymentRemoveTagIds: z.array(z.string().uuid()).optional().default([]),
   }).nullable().optional(),
   physicalDelivery: z.object({
     requiresAddress: z.boolean().default(true),

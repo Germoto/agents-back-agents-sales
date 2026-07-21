@@ -63,9 +63,15 @@ type ProductPayload = {
     onSaleCrmId?: string | null;
     onSaleCrmColumnId?: string | null;
     onSaleTagIds?: string[];
+    onSaleRemoveTagIds?: string[];
     onPresentationCrmId?: string | null;
     onPresentationCrmColumnId?: string | null;
     onPresentationTagIds?: string[];
+    onPresentationRemoveTagIds?: string[];
+    onPaymentCrmId?: string | null;
+    onPaymentCrmColumnId?: string | null;
+    onPaymentTagIds?: string[];
+    onPaymentRemoveTagIds?: string[];
   } | null;
   physicalDelivery?: {
     requiresAddress: boolean;
@@ -266,9 +272,15 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
       onSaleCrmId: payload.digitalDelivery.onSaleCrmId ?? null,
       onSaleCrmColumnId: payload.digitalDelivery.onSaleCrmColumnId ?? null,
       onSaleTagIds: payload.digitalDelivery.onSaleTagIds ?? [],
+      onSaleRemoveTagIds: payload.digitalDelivery.onSaleRemoveTagIds ?? [],
       onPresentationCrmId: payload.digitalDelivery.onPresentationCrmId ?? null,
       onPresentationCrmColumnId: payload.digitalDelivery.onPresentationCrmColumnId ?? null,
       onPresentationTagIds: payload.digitalDelivery.onPresentationTagIds ?? [],
+      onPresentationRemoveTagIds: payload.digitalDelivery.onPresentationRemoveTagIds ?? [],
+      onPaymentCrmId: payload.digitalDelivery.onPaymentCrmId ?? null,
+      onPaymentCrmColumnId: payload.digitalDelivery.onPaymentCrmColumnId ?? null,
+      onPaymentTagIds: payload.digitalDelivery.onPaymentTagIds ?? [],
+      onPaymentRemoveTagIds: payload.digitalDelivery.onPaymentRemoveTagIds ?? [],
     };
     await tx.digitalDelivery.upsert({
       where: { productId },

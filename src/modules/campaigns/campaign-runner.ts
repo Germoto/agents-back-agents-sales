@@ -43,6 +43,8 @@ export interface RunnerCampaign {
   contextProductId?: string | null;
   /** Etiquetas a aplicar a cada destinatario alcanzado. */
   contextTagIds?: string[];
+  /** Etiquetas a QUITAR a cada destinatario alcanzado. */
+  contextRemoveTagIds?: string[];
   /** Plantilla de Meta para destinatarios fuera de la ventana de 24h (opcional). */
   metaTemplate?: CampaignMetaTemplate | null;
 }
@@ -99,7 +101,9 @@ export async function runRecipientActions(
   if (!to) throw new Error("Teléfono inválido");
 
   const contextTagIds = uniqueIds(campaign.contextTagIds ?? []);
-  const hasContext = Boolean(campaign.contextProductId) || contextTagIds.length > 0;
+  const contextRemoveTagIds = uniqueIds(campaign.contextRemoveTagIds ?? []);
+  const hasContext =
+    Boolean(campaign.contextProductId) || contextTagIds.length > 0 || contextRemoveTagIds.length > 0;
 
   let customerId = recipient.customerId ?? null;
   let conversationId: string | null = null;
@@ -120,8 +124,11 @@ export async function runRecipientActions(
         () => undefined,
       );
     }
-    if (contextTagIds.length && customerId) {
-      await applyCrmAndTagActions(companyId, customerId, { tagIds: contextTagIds }).catch(() => undefined);
+    if ((contextTagIds.length || contextRemoveTagIds.length) && customerId) {
+      await applyCrmAndTagActions(companyId, customerId, {
+        tagIds: contextTagIds,
+        removeTagIds: contextRemoveTagIds,
+      }).catch(() => undefined);
     }
   }
 

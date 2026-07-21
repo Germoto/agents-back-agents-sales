@@ -79,6 +79,7 @@ export const updateCampaignSchema = z.object({
   audience: audienceSchema.optional(),
   contextProductId: z.string().uuid().nullable().optional(),
   contextTagIds: z.array(z.string().uuid()).max(20).optional(),
+  contextRemoveTagIds: z.array(z.string().uuid()).max(20).optional(),
 });
 
 export const campaignIdParamsSchema = z.object({ id: z.string().uuid() });

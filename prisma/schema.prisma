@@ -492,11 +492,18 @@ model DigitalDelivery {
   onSaleCrmId        String?  @db.Uuid
   onSaleCrmColumnId  String?  @db.Uuid
   onSaleTagIds       String[] @default([]) @db.Uuid
+  onSaleRemoveTagIds String[] @default([]) @db.Uuid
   // Acciones al ENVIAR la info completa (presentación): mismo patrón que onSale*.
   // Mueve al cliente a una pestaña del CRM y/o le asigna etiquetas cuando el bot presenta.
   onPresentationCrmId       String?  @db.Uuid
   onPresentationCrmColumnId String?  @db.Uuid
   onPresentationTagIds      String[] @default([]) @db.Uuid
+  onPresentationRemoveTagIds String[] @default([]) @db.Uuid
+  // Acciones al ENVIAR LOS MÉTODOS DE PAGO (cliente caliente/interesado): mismo patrón.
+  onPaymentCrmId       String?  @db.Uuid
+  onPaymentCrmColumnId String?  @db.Uuid
+  onPaymentTagIds      String[] @default([]) @db.Uuid
+  onPaymentRemoveTagIds String[] @default([]) @db.Uuid
   product      Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
@@ -1094,6 +1101,8 @@ model Campaign {
   contextProductId String?        @db.Uuid
   // Etiquetas que se aplican a cada destinatario alcanzado por la campaña.
   contextTagIds    String[]       @default([])
+  // Etiquetas a QUITAR a cada destinatario alcanzado (complemento de contextTagIds).
+  contextRemoveTagIds String[]    @default([])
   totalCount  Int                 @default(0)
   sentCount   Int                 @default(0)
   failedCount Int                 @default(0)

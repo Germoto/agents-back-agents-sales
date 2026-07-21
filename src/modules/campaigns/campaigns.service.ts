@@ -75,6 +75,7 @@ export async function getCampaign(companyId: string, id: string) {
     audience: parseAudience(c.audience),
     contextProductId: c.contextProductId,
     contextTagIds: c.contextTagIds ?? [],
+    contextRemoveTagIds: c.contextRemoveTagIds ?? [],
     totalCount: c.totalCount,
     sentCount: c.sentCount,
     failedCount: c.failedCount,
@@ -152,6 +153,7 @@ export async function updateCampaign(
     audience?: unknown;
     contextProductId?: string | null;
     contextTagIds?: string[];
+    contextRemoveTagIds?: string[];
   },
 ) {
   const existing = await ensureCampaign(companyId, id);
@@ -162,7 +164,8 @@ export async function updateCampaign(
     data.sendConfig !== undefined ||
     data.audience !== undefined ||
     data.contextProductId !== undefined ||
-    data.contextTagIds !== undefined;
+    data.contextTagIds !== undefined ||
+    data.contextRemoveTagIds !== undefined;
   if (editingContent && existing.status !== "DRAFT") {
     throw new AppError("Solo puedes editar el contenido de una campaña en borrador", 409);
   }
@@ -174,6 +177,7 @@ export async function updateCampaign(
   if (data.audience !== undefined) patch.audience = data.audience as Prisma.InputJsonValue;
   if (data.contextProductId !== undefined) patch.contextProductId = data.contextProductId;
   if (data.contextTagIds !== undefined) patch.contextTagIds = data.contextTagIds;
+  if (data.contextRemoveTagIds !== undefined) patch.contextRemoveTagIds = data.contextRemoveTagIds;
 
   await prisma.campaign.update({ where: { id }, data: patch });
   return getCampaign(companyId, id);
@@ -326,6 +330,7 @@ export async function testCampaign(
       actions: campaign.actions,
       contextProductId: campaign.contextProductId,
       contextTagIds: campaign.contextTagIds ?? [],
+      contextRemoveTagIds: campaign.contextRemoveTagIds ?? [],
       metaTemplate: parseSendConfig(campaign.sendConfig).metaTemplate,
     },
     { phone, name: name ?? null },

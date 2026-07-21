@@ -18,6 +18,8 @@ export type QuickReplyMessageInput = z.infer<typeof quickReplyMessageSchema>;
 export const quickReplyActionsSchema = z.object({
   // Etiquetas internas que se le AÑADEN al cliente
   tagIds: z.array(z.string().uuid()).max(20).default([]),
+  // Etiquetas internas que se le QUITAN al cliente
+  removeTagIds: z.array(z.string().uuid()).max(20).default([]),
   // Mover al cliente a una pestaña de un CRM (ambos o ninguno)
   crmId: z.string().uuid().nullable().optional(),
   crmColumnId: z.string().uuid().nullable().optional(),

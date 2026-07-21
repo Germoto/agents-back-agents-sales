@@ -223,9 +223,15 @@ export function mapBotProduct(
             onSaleCrmId: product.digitalDelivery?.onSaleCrmId ?? null,
             onSaleCrmColumnId: product.digitalDelivery?.onSaleCrmColumnId ?? null,
             onSaleTagIds: product.digitalDelivery?.onSaleTagIds ?? [],
+            onSaleRemoveTagIds: product.digitalDelivery?.onSaleRemoveTagIds ?? [],
             onPresentationCrmId: product.digitalDelivery?.onPresentationCrmId ?? null,
             onPresentationCrmColumnId: product.digitalDelivery?.onPresentationCrmColumnId ?? null,
             onPresentationTagIds: product.digitalDelivery?.onPresentationTagIds ?? [],
+            onPresentationRemoveTagIds: product.digitalDelivery?.onPresentationRemoveTagIds ?? [],
+            onPaymentCrmId: product.digitalDelivery?.onPaymentCrmId ?? null,
+            onPaymentCrmColumnId: product.digitalDelivery?.onPaymentCrmColumnId ?? null,
+            onPaymentTagIds: product.digitalDelivery?.onPaymentTagIds ?? [],
+            onPaymentRemoveTagIds: product.digitalDelivery?.onPaymentRemoveTagIds ?? [],
           }
         : null,
     physicalDelivery:

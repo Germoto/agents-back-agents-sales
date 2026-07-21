@@ -295,6 +295,7 @@ async function applyQuickReplyActions(
   if (!actions) return;
   await applyCrmAndTagActions(companyId, customerId, {
     tagIds: actions.tagIds,
+    removeTagIds: actions.removeTagIds,
     crmId: actions.crmId,
     crmColumnId: actions.crmColumnId,
   });
