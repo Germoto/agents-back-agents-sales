@@ -6,6 +6,7 @@
 
 import { chatCompletion, type ChatMessage } from "../../lib/openai";
 import { buildSystemPrompt } from "./agent-prompt";
+import { buildKnowledgeHint, trailingUserText } from "./faq-match";
 import { TOOL_DEFINITIONS, executeTool, type TurnContext } from "./agent-tools";
 
 const MAX_ITERATIONS = 6;
@@ -26,6 +27,19 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     { role: "system", content: buildSystemPrompt(ctx.config, ctx.state) },
     ...history,
   ];
+
+  // FAQ determinística: si la consulta coincide claramente con una FAQ/objeción
+  // configurada, se inyecta la respuesta al FINAL (recency) con instrucción de
+  // usarla. No puede depender solo del modelo (las reglas de herramientas le
+  // ganaban a la FAQ y enviaba archivos de otro tema como si fueran lo pedido).
+  const inboundText = trailingUserText(history);
+  if (inboundText && !inboundText.includes("[el cliente envió una imagen")) {
+    const hint = buildKnowledgeHint(ctx.config.products, ctx.state.selectedProductId, inboundText);
+    if (hint) {
+      messages.push({ role: "system", content: hint });
+      console.log(`[agent] FAQ determinística inyectada convo=${ctx.conversationId}`);
+    }
+  }
 
   // Validación determinista: si la visión ya leyó un CÓDIGO de seguridad, la
   // validación no puede depender de que el modelo decida llamar la herramienta
