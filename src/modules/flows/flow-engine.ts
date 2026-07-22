@@ -19,7 +19,7 @@ import {
   setBotPaused,
   type ConversationState,
 } from "../agent/conversation.service";
-import { loadWhatsappSender, sendText, type WhatsappSender } from "../agent/outbound";
+import { loadWhatsappSender, sendText, webSender, type WhatsappSender } from "../agent/outbound";
 import { deliver, gapMsFor, sleep, OUTBOX_GAP_MS } from "../agent/delivery";
 import { cancelPendingReminders, scheduleReminder, minutesFromNow } from "../scheduler/scheduler.service";
 import type { OutboxMessage, TurnContext } from "../agent/agent-tools";
@@ -858,7 +858,7 @@ export async function resumeFlowOnTimeout(msg: ScheduledMessage): Promise<void> 
       customer: { select: { name: true, phone: true } },
     },
   });
-  if (!convo || convo.botPaused || convo.channel !== "whatsapp") return;
+  if (!convo || convo.botPaused || (convo.channel !== "whatsapp" && convo.channel !== "web")) return;
 
   const state = (convo.state as ConversationState) ?? {};
   const fs = flowStateOf(state);
@@ -875,7 +875,7 @@ export async function resumeFlowOnTimeout(msg: ScheduledMessage): Promise<void> 
   const edge = node ? edgeFrom(flow, node.id, "timeout") : undefined;
   if (!node || !edge) return;
 
-  const sender = await loadWhatsappSender(convo.companyId);
+  const sender = convo.channel === "web" ? webSender(convo.id) : await loadWhatsappSender(convo.companyId);
   if (!sender) return;
 
   const company = await prisma.company.findUnique({

@@ -11,10 +11,21 @@ import { smsTools } from "../../lib/smstools-client";
 import { metaWa, META_MEDIA_LIMITS, mediaTooLargeReason } from "../../lib/meta-wa-client";
 import { AppError } from "../../lib/app-error";
 import { decryptCredential } from "../../lib/credentials-crypto";
+import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 
+// El canal WEB (widget embebible) es un sender más: el mensaje se emite por
+// Socket.IO a la room del visitante en lugar de ir a un gateway de WhatsApp.
+// Así deliver/flushOutbox, el motor de flujos y las entregas de pago funcionan
+// sin bifurcar; la persistencia la sigue haciendo recordMessage en deliver().
 export type WhatsappSender =
   | { provider: "SMSTOOLS"; apiUrl: string; secret: string; account: string }
-  | { provider: "META"; accessToken: string; phoneNumberId: string };
+  | { provider: "META"; accessToken: string; phoneNumberId: string }
+  | { provider: "WEB"; conversationId: string };
+
+/** Sender del chat web para una conversación (canal "web"). */
+export function webSender(conversationId: string): WhatsappSender {
+  return { provider: "WEB", conversationId };
+}
 
 /**
  * Devuelve las credenciales de envio de la empresa segun su proveedor, o null
@@ -80,6 +91,15 @@ export async function sendText(
   to: string,
   message: string,
 ): Promise<SendResult> {
+  if (sender.provider === "WEB") {
+    socketService.emitToWebchat(sender.conversationId, SOCKET_EVENTS.WEBCHAT_MESSAGE, {
+      conversationId: sender.conversationId,
+      role: "ASSISTANT",
+      message,
+      createdAt: new Date().toISOString(),
+    });
+    return { gatewayId: null };
+  }
   if (sender.provider === "META") {
     const res = await metaWa.sendText(sender, to, message);
     return { gatewayId: res.wamid };
@@ -101,6 +121,18 @@ export async function sendMedia(
   caption?: string,
   fileName?: string,
 ): Promise<SendResult> {
+  if (sender.provider === "WEB") {
+    socketService.emitToWebchat(sender.conversationId, SOCKET_EVENTS.WEBCHAT_MESSAGE, {
+      conversationId: sender.conversationId,
+      role: "ASSISTANT",
+      message: caption ?? null,
+      mediaUrl,
+      mediaType: kind,
+      fileName: fileName ?? null,
+      createdAt: new Date().toISOString(),
+    });
+    return { gatewayId: null };
+  }
   if (sender.provider === "META") {
     // Subir el archivo a Meta primero (en vez de enviarlo por link): preserva
     // el orden de la secuencia y da errores de tamaño/formato claros.

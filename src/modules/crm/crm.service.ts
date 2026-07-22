@@ -212,9 +212,9 @@ export async function getBoard(companyId: string, crmId: string) {
   });
   if (!crm) throw new AppError("CRM no encontrado", 404);
 
-  // 2) Conversaciones whatsapp con su último mensaje (misma forma que listConversations)
+  // 2) Conversaciones whatsapp + web con su último mensaje (misma forma que listConversations)
   const conversations = await prisma.conversation.findMany({
-    where: { companyId, channel: "whatsapp" },
+    where: { companyId, channel: { in: ["whatsapp", "web"] } },
     orderBy: { lastMessageAt: "desc" },
     select: {
       id: true,
@@ -230,7 +230,12 @@ export async function getBoard(companyId: string, crmId: string) {
       },
     },
   });
-  const convoByCustomer = new Map(conversations.map((c) => [c.customerId, c]));
+  // Un cliente puede tener conversación de WhatsApp Y de web: nos quedamos con
+  // la más reciente (la lista viene ordenada por lastMessageAt desc).
+  const convoByCustomer = new Map<string, (typeof conversations)[number]>();
+  for (const c of conversations) {
+    if (!convoByCustomer.has(c.customerId)) convoByCustomer.set(c.customerId, c);
+  }
 
   const placedCustomerIds = new Set(
     crm.columns.flatMap((col) => col.cards.map((card) => card.customerId)),

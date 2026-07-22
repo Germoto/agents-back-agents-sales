@@ -27,7 +27,7 @@ import {
   getConversationRuntime,
   type ConversationState,
 } from "./conversation.service";
-import { loadWhatsappSender, sendText, sendMedia, type WhatsappSender } from "./outbound";
+import { loadWhatsappSender, sendText, sendMedia, webSender, type WhatsappSender } from "./outbound";
 import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
@@ -430,7 +430,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
 // mensajes están persistidos, el siguiente inbound del cliente lo re-dispara con
 // el historial completo. Para multi-instancia habría que mover el lock a Postgres.
 
-interface TurnJob {
+export interface TurnJob {
   companyId: string;
   conversationId: string;
   customerId: string;
@@ -457,7 +457,9 @@ const receiptReadsInFlight = new Map<string, number>();
 const turnDeferrals = new Map<string, number>();
 const MAX_TURN_DEFERRALS = 10; // ~15s (10 × 1500ms)
 
-function scheduleTurn(job: TurnJob): void {
+// Exportado: el módulo webchat agenda turnos con el MISMO debounce (el canal
+// se resuelve dentro del turno leyendo Conversation.channel).
+export function scheduleTurn(job: TurnJob): void {
   const key = job.conversationId;
   let p = pendingTurns.get(key);
   if (!p) {
@@ -541,7 +543,11 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     return;
   }
 
-  const sender = await loadWhatsappSender(companyId);
+  // Canal web (widget embebido): el sender emite por socket al visitante; los
+  // avisos al ADMIN siguen saliendo por WhatsApp si la empresa lo tiene activo.
+  const isWeb = runtime.channel === "web";
+  const waSender = await loadWhatsappSender(companyId);
+  const sender = isWeb ? webSender(conversationId) : waSender;
   if (!sender) {
     console.warn(`[agent] empresa ${companyId} sin WhatsappConfig activa con account`);
     return;
@@ -644,13 +650,13 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
   // dejado en visto y post-venta.
   await scheduleAutoReminders(companyId, customerId, conversationId, ctx.state, config);
 
-  // Avisos al admin (pedidos registrados, etc.)
-  if (ctx.adminNotices.length) {
+  // Avisos al admin (pedidos registrados, etc.) — siempre por WhatsApp.
+  if (ctx.adminNotices.length && waSender) {
     const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
     if (adminPhone) {
       for (const notice of ctx.adminNotices) {
         try {
-          await sendText(sender, adminPhone, notice);
+          await sendText(waSender, adminPhone, notice);
         } catch {
           /* best-effort */
         }
@@ -661,7 +667,7 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
   // Derivación a humano
   if (ctx.state.status === "ASESOR_HUMANO") {
     await setBotPaused(companyId, conversationId, true);
-    await notifyAdmin(sender, config, customerPhone, ctx.state.pendingAction);
+    if (waSender) await notifyAdmin(waSender, config, customerPhone, ctx.state.pendingAction);
   }
 }
 
@@ -714,7 +720,8 @@ export async function recheckPayment(msg: {
     } catch {
       return;
     }
-    const sender = await loadWhatsappSender(msg.companyId);
+    const waSender = await loadWhatsappSender(msg.companyId);
+    const sender = runtime.channel === "web" ? webSender(conversationId) : waSender;
     if (!sender) return;
     const to = (md.customerPhone ?? "").replace(/\D/g, "");
 
@@ -757,12 +764,12 @@ export async function recheckPayment(msg: {
       );
       await saveState(conversationId, state as ConversationState);
       // Aviso al dueño por cada venta automática (entrega por inventario).
-      if (result.autoSales?.length) {
+      if (result.autoSales?.length && waSender) {
         const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
         if (adminPhone) {
           for (const s of result.autoSales) {
             try {
-              await sendText(sender, adminPhone, autoSaleNotice(s, md.customerPhone ?? to));
+              await sendText(waSender, adminPhone, autoSaleNotice(s, md.customerPhone ?? to));
             } catch {
               /* best-effort */
             }
@@ -773,7 +780,9 @@ export async function recheckPayment(msg: {
       // entregar_producto): por pauseHumanAfterSale, o por entrega manual / sin stock.
       if (result.shouldPauseHuman) {
         await muteCustomerToHuman(msg.companyId, conversationId, md.customerPhone ?? to);
-        const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+        const adminPhone = waSender
+          ? (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "")
+          : "";
         if (adminPhone) {
           const manual = result.manualNeeded ?? [];
           const adminMsg = manual.length
@@ -782,7 +791,7 @@ export async function recheckPayment(msg: {
               ` El chat quedó en atención humana (Agente IA → Atención humana).`
             : `✅ Venta entregada a ${md.customerPhone ?? to}. Pasé el chat a atención humana automáticamente (configurado en el producto). Lo ves en Agente IA → Atención humana.`;
           try {
-            await sendText(sender, adminPhone, adminMsg);
+            await sendText(waSender!, adminPhone, adminMsg);
           } catch {
             /* best-effort */
           }
@@ -812,14 +821,16 @@ export async function recheckPayment(msg: {
         /* best-effort */
       }
     }
-    const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+    const adminPhone = waSender
+      ? (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "")
+      : "";
     if (adminPhone) {
       const caption =
         `🔔 Pago por validar de ${md.customerPhone ?? to}. No se encontró el comprobante automáticamente tras 1 min. ` +
         `Revísalo y confírmalo desde Comprobantes/Conversaciones. El bot quedó en atención humana para este cliente.`;
       try {
-        if (md.receiptMediaUrl) await sendMedia(sender, adminPhone, "image", md.receiptMediaUrl, caption);
-        else await sendText(sender, adminPhone, caption);
+        if (md.receiptMediaUrl) await sendMedia(waSender!, adminPhone, "image", md.receiptMediaUrl, caption);
+        else await sendText(waSender!, adminPhone, caption);
       } catch {
         /* best-effort */
       }
@@ -848,7 +859,7 @@ export async function handleExternalPaymentApproved(opts: {
   try {
     const convo = await prisma.conversation.findFirst({
       where: { id: opts.conversationId, companyId: opts.companyId },
-      select: { customerId: true, customer: { select: { phone: true } } },
+      select: { customerId: true, channel: true, customer: { select: { phone: true } } },
     });
     if (!convo) return;
     const runtime = await getConversationRuntime(opts.conversationId);
@@ -861,9 +872,14 @@ export async function handleExternalPaymentApproved(opts: {
     } catch {
       return;
     }
-    const sender = await loadWhatsappSender(opts.companyId);
+    // Canal web: la entrega va por socket al widget; los avisos al admin por WhatsApp.
+    const isWeb = convo.channel === "web";
+    const waSender = await loadWhatsappSender(opts.companyId);
+    const sender = isWeb ? webSender(opts.conversationId) : waSender;
     if (!sender) return;
-    const to = convo.customer.phone.replace(/\D/g, "");
+    // El sender WEB ignora `to`; el placeholder evita que un visitante anónimo
+    // (phone sintético sin dígitos) se salte los guards `if (to)`.
+    const to = isWeb ? "web" : convo.customer.phone.replace(/\D/g, "");
 
     // La entrega digital SIEMPRE va tras el pago aprobado (igual que el flujo de
     // comprobantes: tryApprovePayment/recheckPayment no consultan paymentMode —
@@ -902,14 +918,16 @@ export async function handleExternalPaymentApproved(opts: {
     }
     await saveState(opts.conversationId, state as ConversationState);
 
-    const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+    const adminPhone = waSender
+      ? (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "")
+      : "";
     const delivered = "delivered" in result ? result.delivered : undefined;
     if (adminPhone) {
       try {
         await sendText(
-          sender,
+          waSender!,
           adminPhone,
-          `💳 Pago por ${provider} confirmado: *${opts.amountText}* de ${convo.customer.phone}` +
+          `💳 Pago por ${provider} confirmado: *${opts.amountText}* de ${isWeb ? "un cliente del chat web" : convo.customer.phone}` +
             (opts.payerName ? ` (${opts.payerName})` : "") +
             (delivered?.length ? `. Producto entregado automáticamente ✅` : ". Coordina la entrega con el cliente."),
         );
@@ -920,7 +938,7 @@ export async function handleExternalPaymentApproved(opts: {
       if (autoSales?.length) {
         for (const s of autoSales) {
           try {
-            await sendText(sender, adminPhone, autoSaleNotice(s, convo.customer.phone));
+            await sendText(waSender!, adminPhone, autoSaleNotice(s, convo.customer.phone));
           } catch {
             /* best-effort */
           }
@@ -935,7 +953,7 @@ export async function handleExternalPaymentApproved(opts: {
       if (adminPhone && manualNeeded.length) {
         try {
           await sendText(
-            sender,
+            waSender!,
             adminPhone,
             `🔔 Falta ENTREGAR MANUALMENTE: ${manualNeeded.join(", ")} (pago por ${provider} ya confirmado). El chat quedó en atención humana.`,
           );

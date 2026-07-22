@@ -15,6 +15,8 @@ import receiptsRoutes from "../modules/receipts/receipts.routes";
 import botRoutes from "../modules/bot/bot.routes";
 import agentRoutes from "../modules/agent/agent.routes";
 import metaWebhookRoutes from "../modules/meta-webhook/meta-webhook.routes";
+import webchatRoutes from "../modules/webchat/webchat.routes";
+import webchatConfigRoutes from "../modules/webchat/webchat-config.routes";
 import quickRepliesRoutes from "../modules/quick-replies/quick-replies.routes";
 import crmRoutes from "../modules/crm/crm.routes";
 import campaignsRoutes from "../modules/campaigns/campaigns.routes";
@@ -61,6 +63,11 @@ router.use("/agent", agentRoutes);
 // Webhook de la API oficial de Meta WhatsApp (verificación GET + inbound/statuses
 // POST firmados con X-Hub-Signature-256; tenant por metadata.phone_number_id)
 router.use("/meta", metaWebhookRoutes);
+// Canal web embebible: rutas públicas de los visitantes del widget (el gate de
+// leads/billing se aplica adentro, como en el inbound del agente).
+router.use("/webchat", webchatRoutes);
+// Configuración del Chat Web desde el panel del tenant
+router.use("/webchat-config", billingGuard(), webchatConfigRoutes);
 // Respuestas rápidas del panel de conversaciones
 router.use("/quick-replies", billingGuard({ module: "QUICK_REPLIES" }), quickRepliesRoutes);
 // CRM kanban (tableros, etiquetas internas, valores de negocio). El embudo

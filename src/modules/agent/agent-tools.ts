@@ -128,7 +128,12 @@ export async function muteCustomerToHuman(
 ): Promise<boolean> {
   try {
     const digits = customerPhone.replace(/\D/g, "");
-    if (!digits) return false;
+    // Visitante web anónimo (phone sintético sin dígitos): no hay número que
+    // mutear, pero la conversación SÍ debe pasar a atención humana.
+    if (!digits || customerPhone.startsWith("web:")) {
+      await setBotPaused(companyId, conversationId, true);
+      return true;
+    }
     const cfg = await prisma.agentConfig.findUnique({
       where: { companyId },
       select: { mutedNumbers: true },

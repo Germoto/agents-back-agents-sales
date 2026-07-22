@@ -100,7 +100,9 @@ export async function listRecipients(companyId: string, id: string) {
 /** Contactos guardados del tenant (con sus etiquetas) para el paso de audiencia. */
 export async function listContacts(companyId: string) {
   const rows = await prisma.customer.findMany({
-    where: { companyId },
+    // Excluye visitantes anónimos del chat web (phone sintético "web:…"): no
+    // tienen WhatsApp adonde enviar la campaña.
+    where: { companyId, NOT: { phone: { startsWith: "web:" } } },
     orderBy: { lastInteractionAt: "desc" },
     take: 5000,
     select: {
@@ -232,6 +234,7 @@ export async function startCampaign(companyId: string, id: string) {
   const seen = new Set<string>();
   const finalRecipients: AudienceRecipient[] = [];
   for (const r of audience.recipients) {
+    if (String(r.phone ?? "").startsWith("web:")) continue; // visitante web sin WhatsApp
     const d = digitsOf(r.phone);
     if (d.length < 8) continue;
     if (seen.has(d)) continue;

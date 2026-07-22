@@ -13,7 +13,7 @@ import { env } from "../../config/env";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { deleteCustomer } from "../customers/customers.service";
-import { loadWhatsappSender, sendText, sendMedia } from "./outbound";
+import { loadWhatsappSender, sendText, sendMedia, webSender } from "./outbound";
 import { applyFirma } from "./firma";
 import type { ChatMessage } from "../../lib/openai";
 
@@ -225,7 +225,8 @@ export async function annotateMessageText(messageId: string, text: string): Prom
 // -------------------------------------------------------------------------
 export async function listConversations(companyId: string, limit = 50) {
   const rows = await prisma.conversation.findMany({
-    where: { companyId, channel: "whatsapp" }, // excluye la conversación del simulador (canal "sim")
+    // whatsapp + web (chat embebido); excluye la conversación del simulador (canal "sim")
+    where: { companyId, channel: { in: ["whatsapp", "web"] } },
     orderBy: { lastMessageAt: "desc" },
     take: limit,
     select: {
@@ -233,6 +234,7 @@ export async function listConversations(companyId: string, limit = 50) {
       status: true,
       botPaused: true,
       state: true,
+      channel: true,
       lastMessageAt: true,
       openedAt: true,
       customer: {
@@ -254,6 +256,7 @@ export async function listConversations(companyId: string, limit = 50) {
     id: c.id,
     status: c.status,
     botPaused: c.botPaused,
+    channel: c.channel,
     // Etapa del embudo (state.status). Distinto de `status` (OPEN/HUMAN/CLOSED).
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
     lastMessageAt: c.lastMessageAt,
@@ -281,12 +284,13 @@ function serializeCustomerWithTags(customer: {
  */
 export async function getConversationSummary(companyId: string, conversationId: string) {
   const c = await prisma.conversation.findFirst({
-    where: { id: conversationId, companyId, channel: "whatsapp" },
+    where: { id: conversationId, companyId, channel: { in: ["whatsapp", "web"] } },
     select: {
       id: true,
       status: true,
       botPaused: true,
       state: true,
+      channel: true,
       lastMessageAt: true,
       openedAt: true,
       customer: {
@@ -309,6 +313,7 @@ export async function getConversationSummary(companyId: string, conversationId: 
     id: c.id,
     status: c.status,
     botPaused: c.botPaused,
+    channel: c.channel,
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
     lastMessageAt: c.lastMessageAt,
     openedAt: c.openedAt,
@@ -323,13 +328,13 @@ export async function getConversationSummary(companyId: string, conversationId: 
  */
 export async function getConversationRuntime(
   conversationId: string,
-): Promise<{ state: ConversationState; botPaused: boolean } | null> {
+): Promise<{ state: ConversationState; botPaused: boolean; channel: string } | null> {
   const c = await prisma.conversation.findUnique({
     where: { id: conversationId },
-    select: { state: true, botPaused: true },
+    select: { state: true, botPaused: true, channel: true },
   });
   if (!c) return null;
-  return { state: (c.state as ConversationState) ?? {}, botPaused: c.botPaused };
+  return { state: (c.state as ConversationState) ?? {}, botPaused: c.botPaused, channel: c.channel };
 }
 
 /** customerId de una conversación (para reset/cancelar recordatorios desde el panel). */
@@ -344,15 +349,16 @@ export async function getConversationCustomerId(
   return convo?.customerId ?? null;
 }
 
-/** Envía un mensaje manual (humano/asesor) al cliente por WhatsApp y lo registra. */
+/** Envía un mensaje manual (humano/asesor) al cliente por su canal y lo registra. */
 export async function sendHumanReply(companyId: string, conversationId: string, message: string) {
   const convo = await prisma.conversation.findFirst({
     where: { id: conversationId, companyId },
-    select: { id: true, customerId: true, customer: { select: { phone: true } } },
+    select: { id: true, channel: true, customerId: true, customer: { select: { phone: true } } },
   });
   if (!convo) throw new AppError("Conversación no encontrada", 404);
 
-  const sender = await loadWhatsappSender(companyId);
+  // Canal web: el mensaje viaja por socket al widget del visitante, no por WhatsApp.
+  const sender = convo.channel === "web" ? webSender(convo.id) : await loadWhatsappSender(companyId);
   if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
 
   const to = convo.customer.phone.replace(/\D/g, "");
@@ -422,11 +428,11 @@ export async function sendHumanMedia(
 ) {
   const convo = await prisma.conversation.findFirst({
     where: { id: conversationId, companyId },
-    select: { id: true, customerId: true, customer: { select: { phone: true } } },
+    select: { id: true, channel: true, customerId: true, customer: { select: { phone: true } } },
   });
   if (!convo) throw new AppError("Conversación no encontrada", 404);
 
-  const sender = await loadWhatsappSender(companyId);
+  const sender = convo.channel === "web" ? webSender(convo.id) : await loadWhatsappSender(companyId);
   if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
 
   const to = convo.customer.phone.replace(/\D/g, "");

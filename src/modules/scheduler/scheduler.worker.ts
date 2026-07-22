@@ -89,6 +89,19 @@ async function processDue(): Promise<void> {
     // se pausara (cuando la cancelación proactiva no alcanzó). Los internos
     // (FLOW_TIMEOUT/PAYMENT_RECHECK) se saltan el guard: deben correr siempre.
     if (!isInternal) {
+      // Visitante del chat web SIN WhatsApp (phone sintético "web:…"): no hay
+      // adónde enviar el recordatorio. Si el visitante dejó su número real, el
+      // recordatorio sale por WhatsApp normalmente (cross-channel).
+      if (msg.customer.phone.startsWith("web:")) {
+        await prisma.scheduledMessage.updateMany({
+          where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
+          data: {
+            status: ScheduledMessageStatus.CANCELLED,
+            failureReason: "visitante del chat web sin número de WhatsApp",
+          },
+        });
+        continue;
+      }
       const convo = msg.conversationId
         ? await prisma.conversation.findUnique({
             where: { id: msg.conversationId },

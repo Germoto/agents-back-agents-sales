@@ -12,7 +12,7 @@
 
 import { Server as HttpServer } from "http";
 import { Server as SocketServer, Socket } from "socket.io";
-import { verifyAccessToken } from "./jwt";
+import { verifyAccessToken, verifyWebchatToken } from "./jwt";
 import { prisma } from "./prisma";
 
 // Eventos emitidos por el servidor al frontend
@@ -25,6 +25,7 @@ export const SOCKET_EVENTS = {
   BOOKING_NEW:          "booking.new",          // reserva de servicio registrada por el agente
   CRM_UPDATED:          "crm.updated",          // tablero CRM cambió (move/columnas/CRUD)
   CAMPAIGN_PROGRESS:    "campaign.progress",    // avance de una campaña masiva (enviados/fallos/estado)
+  WEBCHAT_MESSAGE:      "webchat.message",      // mensaje saliente hacia un visitante del chat web
 } as const;
 
 class SocketService {
@@ -42,6 +43,15 @@ class SocketService {
     // Middleware de autenticación JWT
     this.io.use(async (socket: Socket, next) => {
       try {
+        // Visitante del chat web embebido: entra con su sessionToken (kind
+        // "webchat") y SOLO a la room de SU conversación — nunca a company:*.
+        const webchatToken = socket.handshake.auth?.webchatToken as string | undefined;
+        if (webchatToken) {
+          const wc = verifyWebchatToken(webchatToken);
+          (socket as any).webchatConversationId = wc.conversationId;
+          return next();
+        }
+
         const token = socket.handshake.auth?.token as string | undefined;
         if (!token) return next(new Error("Token requerido"));
 
@@ -62,6 +72,13 @@ class SocketService {
     });
 
     this.io.on("connection", (socket: Socket) => {
+      const webchatConversationId = (socket as any).webchatConversationId as string | undefined;
+      if (webchatConversationId) {
+        void socket.join(`webchat:${webchatConversationId}`);
+        socket.on("disconnect", () => undefined);
+        return;
+      }
+
       const companyId = (socket as any).companyId as string;
       if (!companyId) {
         socket.disconnect();
@@ -84,6 +101,12 @@ class SocketService {
   emitToCompany(companyId: string, event: string, data: unknown): void {
     if (!this.io) return;
     this.io.to(`company:${companyId}`).emit(event, data);
+  }
+
+  /** Emite un evento al visitante del chat web de UNA conversación */
+  emitToWebchat(conversationId: string, event: string, data: unknown): void {
+    if (!this.io) return;
+    this.io.to(`webchat:${conversationId}`).emit(event, data);
   }
 }
 

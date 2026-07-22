@@ -172,6 +172,7 @@ model Company {
   digitalSales      DigitalSale[]
   paymentReceipts   PaymentReceipt[]
   webhookEndpoints  WebhookEndpoint[]
+  webchatConfig     WebchatConfig?
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
   crms                 Crm[]
@@ -258,6 +259,22 @@ model AgentConfig {
 enum WhatsappProviderType {
   SMSTOOLS
   META
+}
+
+// Canal Web: widget de chat embebible en la web del tenant. El `token` es
+// público (va en el snippet); la protección real es la allowlist de orígenes
+// + rate limiting + JWT de sesión por visitante.
+model WebchatConfig {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String   @unique @db.Uuid
+  enabled        Boolean  @default(false)
+  token          String   @unique
+  allowedOrigins String[] @default([])
+  welcomeMessage String   @default("")
+  accentColor    String   @default("")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
 model WhatsappConfig {
