@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { AppError } from "../../lib/app-error";
 import {
   createSession,
+  getWebchatMeta,
   getSessionHistory,
   postVisitorMessage,
   postVisitorImage,
@@ -15,6 +16,12 @@ import type { WebchatRequest } from "./webchat-auth.middleware";
 
 export async function createSessionController(req: Request, res: Response) {
   res.json(await createSession(req.body));
+}
+
+export async function getMetaController(req: Request, res: Response) {
+  const token = String(req.query.token ?? "");
+  if (!token) throw new AppError("Token requerido", 400);
+  res.json(await getWebchatMeta(token));
 }
 
 export async function getHistoryController(req: WebchatRequest, res: Response) {

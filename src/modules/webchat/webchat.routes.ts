@@ -14,6 +14,7 @@ import { webchatUploadMiddleware } from "./webchat-upload.middleware";
 import { createSessionSchema, postMessageSchema } from "./webchat.schemas";
 import {
   createSessionController,
+  getMetaController,
   getHistoryController,
   postMessageController,
   postUploadController,
@@ -41,6 +42,14 @@ const uploadLimiter = makeRateLimiter({
   keyGenerator: (req) => (req as WebchatRequest).webchat?.conversationId ?? req.ip ?? "anon",
 });
 
+const metaLimiter = makeRateLimiter({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: "Demasiadas solicitudes.",
+});
+
+// Meta-info del chat (branding + phone obligatorio) para el pre-chat del widget
+router.get("/meta", metaLimiter, asyncHandler(getMetaController));
 router.post("/session", sessionLimiter, validate({ body: createSessionSchema }), asyncHandler(createSessionController));
 router.get("/history", requireWebchatSession, asyncHandler(getHistoryController));
 router.post(

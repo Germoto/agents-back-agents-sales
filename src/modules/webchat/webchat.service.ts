@@ -20,11 +20,12 @@ import { buildBotConfig } from "../bot/bot.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
 import { getEntitlements } from "../billing/entitlements";
 import { gateNewLead } from "../billing/billing.service";
+import { isPlatformSalesCompany } from "../platform-config/platform-config.service";
 import type { CreateSessionInput, UpdateWebchatConfigInput } from "./webchat.schemas";
 
 const HISTORY_LIMIT = 50;
 
-function newWidgetToken(): string {
+export function newWidgetToken(): string {
   return `wc_${crypto.randomBytes(16).toString("hex")}`;
 }
 
@@ -105,6 +106,31 @@ export async function regenerateWebchatToken(companyId: string) {
 // Sesión del visitante (público)
 // ---------------------------------------------------------------------------
 
+/**
+ * Meta-info pública del chat por token, para el pre-chat del widget (ANTES de
+ * abrir sesión): branding + si el WhatsApp es obligatorio (solo el chat de
+ * ventas de la plataforma; para tenants siempre false — comportamiento intacto).
+ */
+export async function getWebchatMeta(token: string) {
+  const cfg = await prisma.webchatConfig.findUnique({
+    where: { token },
+    select: {
+      companyId: true,
+      enabled: true,
+      welcomeMessage: true,
+      accentColor: true,
+      company: { select: { name: true } },
+    },
+  });
+  if (!cfg || !cfg.enabled) throw new AppError("Chat no disponible", 404);
+  return {
+    companyName: cfg.company.name,
+    welcomeMessage: cfg.welcomeMessage,
+    accentColor: cfg.accentColor,
+    requirePhone: await isPlatformSalesCompany(cfg.companyId),
+  };
+}
+
 export async function createSession(input: CreateSessionInput) {
   const cfg = await prisma.webchatConfig.findUnique({
     where: { token: input.token },
@@ -131,6 +157,11 @@ export async function createSession(input: CreateSessionInput) {
   const phoneDigits = (input.phone ?? "").replace(/\D/g, "");
   if (input.phone && phoneDigits.length < 8) {
     throw new AppError("El número de WhatsApp no es válido", 400);
+  }
+  // Chat de ventas de la PLATAFORMA: el WhatsApp es obligatorio (para contactar
+  // al prospecto). Los chats web de los tenants siguen con phone opcional.
+  if (phoneDigits.length < 8 && (await isPlatformSalesCompany(companyId))) {
+    throw new AppError("El WhatsApp es obligatorio para iniciar el chat", 400);
   }
   const phone = phoneDigits.length >= 8 ? normalizePhone(phoneDigits) : syntheticPhone();
 

@@ -67,6 +67,68 @@ export async function setLandingScene(scene: string): Promise<string> {
   return config.landingScene;
 }
 
+// ---------------------------------------------------------------------------
+// Agente de ventas de la PLATAFORMA (chat del landing que capta tenants).
+// El agente vive como un tenant oculto; aquí solo el puntero + conocimiento.
+// ---------------------------------------------------------------------------
+
+export async function getSalesAgentPointer(): Promise<{
+  companyId: string | null;
+  knowledge: Record<string, string> | null;
+}> {
+  const config = await prisma.platformConfig.findUnique({
+    where: { id: PLATFORM_CONFIG_ID },
+    select: { salesAgentCompanyId: true, salesAgentKnowledge: true },
+  });
+  return {
+    companyId: config?.salesAgentCompanyId ?? null,
+    knowledge: (config?.salesAgentKnowledge as Record<string, string> | null) ?? null,
+  };
+}
+
+export async function setSalesAgentPointer(
+  companyId: string,
+  knowledge: Record<string, string>,
+): Promise<void> {
+  await prisma.platformConfig.upsert({
+    where: { id: PLATFORM_CONFIG_ID },
+    update: { salesAgentCompanyId: companyId, salesAgentKnowledge: knowledge },
+    create: {
+      id: PLATFORM_CONFIG_ID,
+      enabledVerticals: ALL_VERTICALS,
+      salesAgentCompanyId: companyId,
+      salesAgentKnowledge: knowledge,
+    },
+  });
+}
+
+/** ¿companyId es el tenant del agente de ventas de la plataforma? (webchat: phone obligatorio) */
+export async function isPlatformSalesCompany(companyId: string): Promise<boolean> {
+  const { companyId: salesId } = await getSalesAgentPointer();
+  return !!salesId && salesId === companyId;
+}
+
+/**
+ * Token del chat de ventas para el landing público, o null si aún no está listo
+ * (sin tenant, chat desactivado o sin API key de OpenAI → sin burbuja).
+ */
+export async function getPublicSalesChatToken(): Promise<string | null> {
+  const { companyId } = await getSalesAgentPointer();
+  if (!companyId) return null;
+  const [webchat, agent] = await Promise.all([
+    prisma.webchatConfig.findUnique({
+      where: { companyId },
+      select: { enabled: true, token: true },
+    }),
+    prisma.agentConfig.findUnique({
+      where: { companyId },
+      select: { openaiApiKey: true },
+    }),
+  ]);
+  if (!webchat?.enabled || !agent?.openaiApiKey) return null;
+  return webchat.token;
+}
+
 /**
  * Actualiza la lista global de rubros habilitados. Exige al menos uno.
  */

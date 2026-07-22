@@ -16,6 +16,9 @@ import {
   updateClientStatusController,
   updateLandingSceneController,
   updateVerticalsController,
+  getSalesAgentController,
+  updateSalesAgentController,
+  impersonateSalesAgentController,
 } from "./admin-console.controller";
 import {
   clientIdParamsSchema,
@@ -25,6 +28,7 @@ import {
   updateClientStatusSchema,
   updateLandingSceneSchema,
   updateVerticalsSchema,
+  updateSalesAgentSchema,
 } from "./admin-console.schemas";
 import billingAdminRoutes from "../billing/billing-admin.routes";
 import trainingAdminRoutes from "../training/training-admin.routes";
@@ -81,6 +85,23 @@ router.put(
   requireRole("SUPERADMIN"),
   validate({ body: updateVerticalsSchema }),
   asyncHandler(updateVerticalsController),
+);
+
+// Agente de ventas de la PLATAFORMA (chat del landing que capta tenants):
+// config del tenant oculto + impersonación 1-clic para ver CRM/conversaciones.
+router.get("/sales-agent", requireAuth, requireRole("SUPERADMIN"), asyncHandler(getSalesAgentController));
+router.put(
+  "/sales-agent",
+  requireAuth,
+  requireRole("SUPERADMIN"),
+  validate({ body: updateSalesAgentSchema }),
+  asyncHandler(updateSalesAgentController),
+);
+router.post(
+  "/sales-agent/impersonate",
+  requireAuth,
+  requireRole("SUPERADMIN"),
+  asyncHandler(impersonateSalesAgentController),
 );
 
 // Config global de plataforma: animación 3D del landing público.

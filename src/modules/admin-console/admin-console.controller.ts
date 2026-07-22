@@ -17,6 +17,11 @@ import {
   setEnabledVerticals,
   setLandingScene,
 } from "../platform-config/platform-config.service";
+import {
+  ensureSalesAgentTenant,
+  getSalesAgentAdmin,
+  updateSalesAgentAdmin,
+} from "./sales-agent.service";
 
 export async function superadminLoginController(req: Request, res: Response) {
   const result = await loginSuperadmin(req.body.identifier ?? req.body.phone, req.body.password);
@@ -87,4 +92,24 @@ export async function getLandingSceneController(_req: Request, res: Response) {
 export async function updateLandingSceneController(req: Request, res: Response) {
   const scene = await setLandingScene(req.body.scene);
   return res.json({ all: LANDING_SCENES, scene });
+}
+
+// ---------------------------------------------------------------------------
+// Agente de ventas de la plataforma (chat del landing que capta tenants)
+// ---------------------------------------------------------------------------
+
+export async function getSalesAgentController(req: Request, res: Response) {
+  const result = await getSalesAgentAdmin({ id: req.user!.id, phone: req.user!.phone });
+  return res.json(result);
+}
+
+export async function updateSalesAgentController(req: Request, res: Response) {
+  const result = await updateSalesAgentAdmin({ id: req.user!.id, phone: req.user!.phone }, req.body);
+  return res.json(result);
+}
+
+export async function impersonateSalesAgentController(req: Request, res: Response) {
+  const companyId = await ensureSalesAgentTenant({ id: req.user!.id, phone: req.user!.phone });
+  const result = await impersonateClientAdmin(req.user!.id, companyId);
+  return res.json(result);
 }

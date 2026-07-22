@@ -198,6 +198,10 @@ model PlatformConfig {
   id               String             @id @default("global")
   enabledVerticals BusinessVertical[]
   landingScene     String             @default("constelacion")
+  // Agente de ventas de la PLATAFORMA (chat del landing que capta tenants):
+  // puntero al tenant oculto "FlowApp Ventas" + base de conocimiento estructurada.
+  salesAgentCompanyId String?          @db.Uuid
+  salesAgentKnowledge Json?
   updatedAt        DateTime           @updatedAt
 }
 
