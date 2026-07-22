@@ -635,7 +635,7 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
     where: { conversationId, role: { in: ["USER", "ASSISTANT", "ADMIN"] } },
     orderBy: { createdAt: "desc" },
     take: limit,
-    select: { role: true, message: true, mediaUrl: true },
+    select: { role: true, message: true, mediaUrl: true, mediaType: true },
   });
   rows.reverse();
   return rows.map((r) => {
@@ -648,8 +648,11 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
 
     let content = (r.message ?? "").trim();
     if (!content && r.mediaUrl) {
+      const isAudio = (r.mediaType ?? "").toLowerCase() === "audio";
       content = isUser
-        ? "[el cliente envió una imagen]"
+        ? isAudio
+          ? "[el cliente envió un audio que no se pudo transcribir: pídele amablemente que lo repita por texto]"
+          : "[el cliente envió una imagen]"
         : "[se envió una imagen/archivo al cliente]";
     }
     if (isHuman) content = `${HUMAN_AGENT_TAG} ${content}`;

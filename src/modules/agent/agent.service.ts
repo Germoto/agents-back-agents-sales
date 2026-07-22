@@ -45,6 +45,7 @@ import {
 import { resolveReminderSequence, type ReminderType } from "./reminder-templates";
 import { getEntitlements } from "../billing/entitlements";
 import { gateNewLead } from "../billing/billing.service";
+import { transcribeAudio } from "./audio-transcribe";
 
 interface FollowupConfig {
   abandonedCartHours?: number;
@@ -251,6 +252,19 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     if (local) inbound.mediaUrl = local;
   }
 
+  // Nota de voz: transcribirla ANTES de persistir el mensaje, para que el texto
+  // quede como el mensaje del cliente (el panel muestra audio + transcripción y
+  // el agente responde al contenido real, no a "[imagen]"). Best-effort.
+  if (inbound.type === "audio" && inbound.mediaUrl) {
+    const transcript = await transcribeAudio((config as any).openai?.apiKey, inbound.mediaUrl);
+    if (transcript) {
+      inbound.text = inbound.text?.trim() ? `${inbound.text}\n${transcript}` : transcript;
+      console.log(`[agent] audio transcrito (${transcript.length} chars) de ${inbound.fromPhone}`);
+    } else {
+      console.warn(`[agent] no se pudo transcribir el audio de ${inbound.fromPhone}`);
+    }
+  }
+
   // Comandos del dueño (canal de control = número de notificación de pago). Si el
   // mensaje viene de ese número y es un comando, se procesa y NO se corre el agente.
   const ownerPhone = (config as any).payment?.notification?.whatsappPhone as string | null | undefined;
@@ -369,7 +383,8 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   console.log(
     `[agent] inbound de ${inbound.fromPhone}: type=${inbound.type} media=${inbound.mediaUrl ? "yes" : "no"} textLen=${(inbound.text ?? "").trim().length} pay=${paymentsEnabled} payCtx=${isPaymentContext(convo.state)}`,
   );
-  if (inbound.mediaUrl && inbound.type !== "text") {
+  // El audio NUNCA va a visión (un .ogg no es una imagen): ya quedó transcrito arriba.
+  if (inbound.mediaUrl && inbound.type !== "text" && inbound.type !== "audio") {
     await processInboundReceiptImage(companyId, config, convo, inbound, userMessageId);
   }
 
