@@ -1,8 +1,10 @@
 import { Request, Response } from "express";
+import { AppError } from "../../lib/app-error";
 import {
   createSession,
   getSessionHistory,
   postVisitorMessage,
+  postVisitorImage,
   getWebchatConfig,
   updateWebchatConfig,
   regenerateWebchatToken,
@@ -21,6 +23,12 @@ export async function getHistoryController(req: WebchatRequest, res: Response) {
 
 export async function postMessageController(req: WebchatRequest, res: Response) {
   res.json(await postVisitorMessage(req.webchat!, req.body.message));
+}
+
+export async function postUploadController(req: WebchatRequest, res: Response) {
+  if (!req.file) throw new AppError("No se recibió ninguna imagen", 400);
+  const caption = typeof req.body?.message === "string" ? req.body.message.slice(0, 2000) : null;
+  res.json(await postVisitorImage(req.webchat!, { filename: req.file.filename }, caption));
 }
 
 // --- Panel (config Chat Web del tenant) ---

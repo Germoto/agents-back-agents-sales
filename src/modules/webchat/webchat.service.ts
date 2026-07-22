@@ -13,8 +13,10 @@ import { ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { signWebchatToken, type WebchatJwtPayload } from "../../lib/jwt";
-import { normalizePhone, recordMessage } from "../agent/conversation.service";
-import { scheduleTurn } from "../agent/agent.service";
+import { env } from "../../config/env";
+import { normalizePhone, recordMessage, type ConversationState } from "../agent/conversation.service";
+import { scheduleTurn, processInboundReceiptImage } from "../agent/agent.service";
+import { buildBotConfig } from "../bot/bot.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
 import { getEntitlements } from "../billing/entitlements";
 import { gateNewLead } from "../billing/billing.service";
@@ -243,4 +245,82 @@ export async function postVisitorMessage(session: WebchatJwtPayload, message: st
   }
 
   return { id: messageId, queued: !convo.botPaused };
+}
+
+/**
+ * Imagen subida por el visitante (constancia de pago Yape/Plin, foto, etc.).
+ * Corre el MISMO pipeline de comprobantes que WhatsApp: visión lee la imagen y
+ * deja state.lastReceipt para que el agente valide/entregue en su turno.
+ */
+export async function postVisitorImage(
+  session: WebchatJwtPayload,
+  file: { filename: string },
+  caption: string | null,
+) {
+  const convo = await prisma.conversation.findFirst({
+    where: { id: session.conversationId, companyId: session.companyId, channel: "web" },
+    select: {
+      id: true,
+      customerId: true,
+      botPaused: true,
+      state: true,
+      customer: { select: { phone: true } },
+    },
+  });
+  if (!convo) throw new AppError("Sesión inválida", 401);
+
+  const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
+  const mediaUrl = `${base}/uploads/inbound/${session.companyId}/${file.filename}`;
+  const text = (caption ?? "").trim() || null;
+
+  const messageId = await recordMessage({
+    companyId: session.companyId,
+    customerId: convo.customerId,
+    conversationId: convo.id,
+    role: "USER",
+    message: text,
+    mediaUrl,
+    mediaType: "image",
+  });
+
+  await prisma.customer
+    .update({ where: { id: convo.customerId }, data: { lastInteractionAt: new Date() } })
+    .catch(() => undefined);
+
+  // Pipeline de comprobante (visión + lastReceipt + gate del turno). Se espera
+  // ANTES de agendar el turno, igual que el inbound de WhatsApp, para que el
+  // agente valide con el código ya leído.
+  try {
+    const config = await buildBotConfig(session.companyId);
+    await processInboundReceiptImage(
+      session.companyId,
+      config,
+      {
+        conversationId: convo.id,
+        customerId: convo.customerId,
+        state: (convo.state as ConversationState) ?? {},
+      },
+      { fromPhone: convo.customer.phone, mediaUrl, text: text ?? "" },
+      messageId,
+    );
+  } catch (err) {
+    console.warn("[webchat] pipeline de comprobante falló:", err instanceof Error ? err.message : err);
+  }
+
+  await cancelPendingReminders(session.companyId, convo.customerId, [
+    ScheduledMessageType.LEFT_ON_READ,
+    ScheduledMessageType.ABANDONED_CART,
+  ]).catch(() => undefined);
+
+  if (!convo.botPaused) {
+    scheduleTurn({
+      companyId: session.companyId,
+      conversationId: convo.id,
+      customerId: convo.customerId,
+      customerPhone: convo.customer.phone,
+      account: null,
+    });
+  }
+
+  return { id: messageId, queued: !convo.botPaused, mediaUrl };
 }

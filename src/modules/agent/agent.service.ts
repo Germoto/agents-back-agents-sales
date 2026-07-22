@@ -369,21 +369,8 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   console.log(
     `[agent] inbound de ${inbound.fromPhone}: type=${inbound.type} media=${inbound.mediaUrl ? "yes" : "no"} textLen=${(inbound.text ?? "").trim().length} pay=${paymentsEnabled} payCtx=${isPaymentContext(convo.state)}`,
   );
-  if (inbound.mediaUrl && inbound.type !== "text" && paymentsEnabled) {
-    // Marca que hay un comprobante leyéndose para esta conversación: el turno del
-    // agente debe ESPERAR a que termine (y se guarde el código en lastReceipt) antes
-    // de validar. Si no, un texto que llega aparte (ej. "Listo") dispara su turno con
-    // el debounce ANTES de que la visión guarde el código → valida con code=[] →
-    // pide el nombre del titular en vano → bucle. (race del debounce vs. visión)
-    const rk = convo.conversationId;
-    receiptReadsInFlight.set(rk, (receiptReadsInFlight.get(rk) ?? 0) + 1);
-    try {
-      await handleInboundImage(companyId, config, convo, inbound, userMessageId);
-    } finally {
-      const n = (receiptReadsInFlight.get(rk) ?? 1) - 1;
-      if (n > 0) receiptReadsInFlight.set(rk, n);
-      else receiptReadsInFlight.delete(rk);
-    }
+  if (inbound.mediaUrl && inbound.type !== "text") {
+    await processInboundReceiptImage(companyId, config, convo, inbound, userMessageId);
   }
 
   // El cliente respondió => cancelar follow-ups de silencio/abandono pendientes.
@@ -988,11 +975,40 @@ function isPaymentContext(state: ConversationState): boolean {
  *     como pago ni se avisa al dueño. Se anota en el mensaje del cliente QUÉ muestra la
  *     imagen (description) para que el agente la interprete y siga la conversación.
  */
+/**
+ * Pipeline de comprobante para una imagen entrante (WhatsApp o chat web), con el
+ * gate `receiptReadsInFlight`: mientras la visión lee la imagen, el turno del
+ * agente se DIFIERE para que valide con el código ya guardado en lastReceipt.
+ * Si no, un texto que llega aparte (ej. "Listo") dispara su turno con el debounce
+ * ANTES de que la visión guarde el código → valida con code=[] → pide el nombre
+ * del titular en vano → bucle. (race del debounce vs. visión)
+ * No hace nada si la empresa no tiene cobros habilitados. Channel-agnóstico:
+ * de `inbound` solo usa fromPhone, mediaUrl y text (caption).
+ */
+export async function processInboundReceiptImage(
+  companyId: string,
+  config: Awaited<ReturnType<typeof buildBotConfig>>,
+  convo: { conversationId: string; customerId: string; state: ConversationState },
+  inbound: Pick<InboundMessage, "fromPhone" | "mediaUrl" | "text">,
+  userMessageId: string,
+): Promise<void> {
+  if (!(config as { payment?: { enabled?: boolean } }).payment?.enabled) return;
+  const rk = convo.conversationId;
+  receiptReadsInFlight.set(rk, (receiptReadsInFlight.get(rk) ?? 0) + 1);
+  try {
+    await handleInboundImage(companyId, config, convo, inbound, userMessageId);
+  } finally {
+    const n = (receiptReadsInFlight.get(rk) ?? 1) - 1;
+    if (n > 0) receiptReadsInFlight.set(rk, n);
+    else receiptReadsInFlight.delete(rk);
+  }
+}
+
 async function handleInboundImage(
   companyId: string,
   config: Awaited<ReturnType<typeof buildBotConfig>>,
   convo: { conversationId: string; customerId: string; state: ConversationState },
-  inbound: InboundMessage,
+  inbound: Pick<InboundMessage, "fromPhone" | "mediaUrl" | "text">,
   userMessageId: string,
 ): Promise<void> {
   const imageUrl = inbound.mediaUrl;
