@@ -188,48 +188,56 @@ export interface CrmBoardCard {
   sortOrder: number | null;
 }
 
+/** Fila del último mensaje por conversación (raw DISTINCT ON). */
+interface LastMessageRow {
+  conversationId: string;
+  message: string | null;
+  role: string;
+  mediaType: string | null;
+  createdAt: Date;
+}
+
 export async function getBoard(companyId: string, crmId: string) {
-  // 1) CRM + columnas + cards (con su customer)
-  const crm = await prisma.crm.findFirst({
-    where: { id: crmId, companyId },
-    select: {
-      ...crmSelect,
-      columns: {
-        orderBy: { sortOrder: "asc" },
-        select: {
-          ...columnSelect,
-          cards: {
-            orderBy: { sortOrder: "asc" },
-            select: {
-              customerId: true,
-              sortOrder: true,
-              customer: { select: { id: true, name: true, phone: true } },
+  // 1+2 en paralelo: CRM + columnas + cards, y conversaciones del tenant.
+  // OJO rendimiento: el `messages: { take: 1 }` anidado de antes generaba una
+  // subconsulta lateral POR CADA conversación (miles con data real = 3-5 s).
+  // Ahora los últimos mensajes se resuelven en UNA sola query DISTINCT ON.
+  const [crm, conversations] = await Promise.all([
+    prisma.crm.findFirst({
+      where: { id: crmId, companyId },
+      select: {
+        ...crmSelect,
+        columns: {
+          orderBy: { sortOrder: "asc" },
+          select: {
+            ...columnSelect,
+            cards: {
+              orderBy: { sortOrder: "asc" },
+              select: {
+                customerId: true,
+                sortOrder: true,
+                customer: { select: { id: true, name: true, phone: true } },
+              },
             },
           },
         },
       },
-    },
-  });
+    }),
+    prisma.conversation.findMany({
+      where: { companyId, channel: { in: ["whatsapp", "web"] } },
+      orderBy: { lastMessageAt: "desc" },
+      select: {
+        id: true,
+        customerId: true,
+        botPaused: true,
+        lastMessageAt: true,
+        openedAt: true,
+        customer: { select: { id: true, name: true, phone: true } },
+      },
+    }),
+  ]);
   if (!crm) throw new AppError("CRM no encontrado", 404);
 
-  // 2) Conversaciones whatsapp + web con su último mensaje (misma forma que listConversations)
-  const conversations = await prisma.conversation.findMany({
-    where: { companyId, channel: { in: ["whatsapp", "web"] } },
-    orderBy: { lastMessageAt: "desc" },
-    select: {
-      id: true,
-      customerId: true,
-      botPaused: true,
-      lastMessageAt: true,
-      openedAt: true,
-      customer: { select: { id: true, name: true, phone: true } },
-      messages: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { message: true, role: true, mediaType: true, createdAt: true },
-      },
-    },
-  });
   // Un cliente puede tener conversación de WhatsApp Y de web: nos quedamos con
   // la más reciente (la lista viene ordenada por lastMessageAt desc).
   const convoByCustomer = new Map<string, (typeof conversations)[number]>();
@@ -243,12 +251,41 @@ export async function getBoard(companyId: string, crmId: string) {
   const allCustomerIds = [
     ...new Set([...placedCustomerIds, ...conversations.map((c) => c.customerId)]),
   ];
+  // Solo necesitamos el último mensaje de la conversación que se muestra por
+  // cliente (la más reciente), no de todas.
+  const shownConversationIds = [...convoByCustomer.values()].map((c) => c.id);
 
-  // 3) Tags por cliente
-  const tagLinks = await prisma.customerTagLink.findMany({
-    where: { customerId: { in: allCustomerIds }, tag: { companyId } },
-    select: { customerId: true, tag: { select: { id: true, name: true, color: true } } },
-  });
+  // 3-5 + últimos mensajes, en paralelo (todas dependen solo de los IDs).
+  const [lastMessages, tagLinks, receipts, dealSums] = await Promise.all([
+    // Último mensaje por conversación en UNA query (usa el índice
+    // ConversationMessage(conversationId, createdAt)).
+    shownConversationIds.length
+      ? prisma.$queryRaw<LastMessageRow[]>`
+          SELECT DISTINCT ON ("conversationId")
+            "conversationId", "message", "role"::text AS "role", "mediaType", "createdAt"
+          FROM "ConversationMessage"
+          WHERE "conversationId" = ANY(${shownConversationIds}::uuid[])
+          ORDER BY "conversationId", "createdAt" DESC`
+      : Promise.resolve([] as LastMessageRow[]),
+    prisma.customerTagLink.findMany({
+      where: { customerId: { in: allCustomerIds }, tag: { companyId } },
+      select: { customerId: true, tag: { select: { id: true, name: true, color: true } } },
+    }),
+    // Suma de comprobantes APROBADOS (amounts son String legacy => sumar en JS)
+    prisma.paymentReceipt.findMany({
+      where: { companyId, status: "APROBADO", customerId: { in: allCustomerIds } },
+      select: { customerId: true, amountPaid: true, amountExpected: true },
+    }),
+    // Suma de valores de negocio manuales
+    prisma.customerDeal.groupBy({
+      by: ["customerId"],
+      where: { companyId, customerId: { in: allCustomerIds } },
+      _sum: { amount: true },
+    }),
+  ]);
+
+  const lastMessageByConvo = new Map(lastMessages.map((m) => [m.conversationId, m]));
+
   const tagsByCustomer = new Map<string, Array<{ id: string; name: string; color: string }>>();
   for (const link of tagLinks) {
     const list = tagsByCustomer.get(link.customerId) ?? [];
@@ -256,11 +293,6 @@ export async function getBoard(companyId: string, crmId: string) {
     tagsByCustomer.set(link.customerId, list);
   }
 
-  // 4) Suma de comprobantes APROBADOS (amounts son String legacy => sumar en JS)
-  const receipts = await prisma.paymentReceipt.findMany({
-    where: { companyId, status: "APROBADO", customerId: { in: allCustomerIds } },
-    select: { customerId: true, amountPaid: true, amountExpected: true },
-  });
   const receiptsByCustomer = new Map<string, number>();
   for (const r of receipts) {
     if (!r.customerId) continue;
@@ -269,12 +301,6 @@ export async function getBoard(companyId: string, crmId: string) {
     receiptsByCustomer.set(r.customerId, (receiptsByCustomer.get(r.customerId) ?? 0) + amount);
   }
 
-  // 5) Suma de valores de negocio manuales
-  const dealSums = await prisma.customerDeal.groupBy({
-    by: ["customerId"],
-    where: { companyId, customerId: { in: allCustomerIds } },
-    _sum: { amount: true },
-  });
   const dealsByCustomer = new Map(
     dealSums.map((d) => [d.customerId, Number(d._sum.amount ?? 0)]),
   );
@@ -284,13 +310,16 @@ export async function getBoard(companyId: string, crmId: string) {
     sortOrder: number | null,
   ): CrmBoardCard {
     const convo = convoByCustomer.get(customer.id) ?? null;
+    const last = convo ? lastMessageByConvo.get(convo.id) ?? null : null;
     return {
       customerId: customer.id,
       customer,
       conversationId: convo?.id ?? null,
       conversationOpenedAt: convo?.openedAt ?? null,
       botPaused: convo?.botPaused ?? false,
-      lastMessage: convo?.messages[0] ?? null,
+      lastMessage: last
+        ? { message: last.message, role: last.role, mediaType: last.mediaType, createdAt: last.createdAt }
+        : null,
       tags: tagsByCustomer.get(customer.id) ?? [],
       totalValue:
         (receiptsByCustomer.get(customer.id) ?? 0) + (dealsByCustomer.get(customer.id) ?? 0),
@@ -327,7 +356,11 @@ export async function moveCard(
   companyId: string,
   crmId: string,
   data: { customerId: string; toColumnId: string | null; position?: number },
+  // emit:false = el caller (bulkMoveCards) emite crm.updated UNA sola vez al
+  // final, en vez de un refetch del board por cada lead movido.
+  opts: { emit?: boolean } = {},
 ) {
+  const emit = opts.emit ?? true;
   await assertCrmOwned(companyId, crmId);
 
   const customer = await prisma.customer.findFirst({
@@ -339,7 +372,7 @@ export async function moveCard(
   if (data.toColumnId === null) {
     // Volver al Inbox: quitar el placement de este CRM
     await prisma.crmCard.deleteMany({ where: { crmId, customerId: data.customerId } });
-    emitCrmUpdated(companyId, crmId);
+    if (emit) emitCrmUpdated(companyId, crmId);
     return;
   }
 
@@ -386,7 +419,7 @@ export async function moveCard(
     `;
   }, { timeout: 15000 });
 
-  emitCrmUpdated(companyId, crmId);
+  if (emit) emitCrmUpdated(companyId, crmId);
 }
 
 /**
@@ -405,6 +438,9 @@ export async function applyCrmAndTagActions(
     crmColumnId?: string | null;
   },
 ): Promise<void> {
+  // Un solo crm.updated al final aunque se apliquen varias acciones (antes se
+  // emitían hasta 3 por respuesta rápida → 3 refetches del board).
+  let changed = false;
   try {
     if (actions.tagIds?.length) {
       const owned = await prisma.customerTag.findMany({
@@ -416,7 +452,7 @@ export async function applyCrmAndTagActions(
           data: owned.map((tag) => ({ customerId, tagId: tag.id })),
           skipDuplicates: true,
         });
-        emitCrmUpdated(companyId);
+        changed = true;
       }
     }
     if (actions.removeTagIds?.length) {
@@ -428,15 +464,22 @@ export async function applyCrmAndTagActions(
         await prisma.customerTagLink.deleteMany({
           where: { customerId, tagId: { in: owned.map((tag) => tag.id) } },
         });
-        emitCrmUpdated(companyId);
+        changed = true;
       }
     }
     if (actions.crmId && actions.crmColumnId) {
-      await moveCard(companyId, actions.crmId, { customerId, toColumnId: actions.crmColumnId });
+      await moveCard(
+        companyId,
+        actions.crmId,
+        { customerId, toColumnId: actions.crmColumnId },
+        { emit: false },
+      );
+      changed = true;
     }
   } catch (err) {
     console.error("[crm] acciones (tag/mover) fallaron:", err instanceof Error ? err.message : err);
   }
+  if (changed) emitCrmUpdated(companyId, actions.crmId ?? undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -545,8 +588,9 @@ export async function bulkMoveCards(
   }
   const ids = await ownedCustomerIds(companyId, data.customerIds);
   for (const customerId of ids) {
-    // Reusa moveCard (maneja upsert + renumber + inbox). Append al final de la columna.
-    await moveCard(companyId, crmId, { customerId, toColumnId: data.toColumnId });
+    // Reusa moveCard (maneja upsert + renumber + inbox). Append al final de la
+    // columna. emit:false → un solo crm.updated al final (no N refetches).
+    await moveCard(companyId, crmId, { customerId, toColumnId: data.toColumnId }, { emit: false });
   }
   emitCrmUpdated(companyId, crmId);
   return { moved: ids.length };

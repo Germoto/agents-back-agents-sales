@@ -1055,6 +1055,8 @@ model PaymentReceipt {
   @@index([companyId, status, createdAt])
   @@index([companyId, amountPaid])
   @@index([companyId, occurredAt])
+  // Board/embudo del CRM: suma de aprobados filtrando por customerId IN (...)
+  @@index([companyId, status, customerId])
 }
 
 model WebhookEndpoint {
