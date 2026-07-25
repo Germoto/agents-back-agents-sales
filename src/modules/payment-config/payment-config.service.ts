@@ -2,6 +2,17 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { encryptCredential, decryptCredential } from "../../lib/credentials-crypto";
 import { mpGetMe } from "../../lib/mercadopago-client";
+import { getEntitlements } from "../billing/entitlements";
+
+/** Mercado Pago es un módulo de paquete: las empresas legacy pasan. */
+async function assertMpAllowedByPlan(companyId: string) {
+  const ent = await getEntitlements(companyId);
+  if (!ent.legacy && !ent.modules.includes("MERCADOPAGO")) {
+    throw new AppError("Tu paquete no incluye Mercado Pago. Mejora tu plan para activarlo.", 403, {
+      code: "MODULE_NOT_AVAILABLE",
+    });
+  }
+}
 
 type PaymentMode = "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL";
 
@@ -101,6 +112,10 @@ export async function updateMercadoPagoConfig(
     feeIgv: boolean;
   },
 ) {
+  // Conectar o activar MP exige el módulo del paquete; desconectar siempre se permite.
+  if (data.enabled || (data.accessToken && data.accessToken.trim())) {
+    await assertMpAllowedByPlan(companyId);
+  }
   let account: { nickname: string; email?: string } | null = null;
   const update: Record<string, unknown> = {
     mpEnabled: data.enabled,

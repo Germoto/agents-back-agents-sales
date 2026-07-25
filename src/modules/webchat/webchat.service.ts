@@ -123,6 +123,10 @@ export async function getWebchatMeta(token: string) {
     },
   });
   if (!cfg || !cfg.enabled) throw new AppError("Chat no disponible", 404);
+  const ent = await getEntitlements(cfg.companyId);
+  if (!ent.legacy && !ent.modules.includes("WEBCHAT")) {
+    throw new AppError("Chat no disponible", 404);
+  }
   return {
     companyName: cfg.company.name,
     welcomeMessage: cfg.welcomeMessage,
@@ -165,9 +169,12 @@ export async function createSession(input: CreateSessionInput) {
   }
   const phone = phoneDigits.length >= 8 ? normalizePhone(phoneDigits) : syntheticPhone();
 
-  // GATE de billing: mismo criterio que el inbound de WhatsApp — solo los
-  // números NUEVOS cuentan/descartan como lead.
+  // GATE de billing: (1) el Chat Web es un módulo de paquete; (2) mismo criterio
+  // de leads que el inbound de WhatsApp — solo los números NUEVOS cuentan.
   const entitlements = await getEntitlements(companyId);
+  if (!entitlements.legacy && !entitlements.modules.includes("WEBCHAT")) {
+    throw new AppError("Chat no disponible", 404);
+  }
   if (!entitlements.legacy) {
     const existing = await prisma.customer.findUnique({
       where: { companyId_phone: { companyId, phone } },

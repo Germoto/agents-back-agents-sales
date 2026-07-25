@@ -1181,6 +1181,10 @@ enum PlanModule {
   QUICK_REPLIES
   FUNNEL
   META_PROVIDER
+  WEBCHAT
+  MERCADOPAGO
+  REPORTS
+  WEBHOOKS
 }
 
 enum VoucherType {

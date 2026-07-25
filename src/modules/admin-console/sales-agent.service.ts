@@ -87,6 +87,11 @@ const MODULE_LABELS: Record<string, string> = {
   FUNNEL: "Embudo de ventas",
   FLOWS: "Flujos de chatbot",
   QUICK_REPLIES: "Respuestas rápidas",
+  META_PROVIDER: "API oficial de Meta WhatsApp",
+  WEBCHAT: "Chat Web para tu página",
+  MERCADOPAGO: "Links de pago Mercado Pago",
+  REPORTS: "Reportes automáticos",
+  WEBHOOKS: "Webhooks / API de integraciones",
 };
 
 function renderPlans(plans: Awaited<ReturnType<typeof listPublicPlans>>): string {

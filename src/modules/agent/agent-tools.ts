@@ -24,6 +24,7 @@ import {
 import { env } from "../../config/env";
 import { decryptCredential } from "../../lib/credentials-crypto";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
+import { getEntitlements } from "../billing/entitlements";
 import {
   matchPayments,
   claimPayment,
@@ -1520,8 +1521,16 @@ export async function executeTool(
 
       // Mercado Pago: link de pago (Checkout Pro) junto a los métodos manuales.
       // Si falla la creación (token vencido, red), degradar sin romper el cobro.
+      // El módulo MERCADOPAGO del paquete gatea el link (si el plan lo perdió,
+      // quedan solo los métodos manuales; legacy pasa; cache 60s → costo nulo).
       let mpLine = "";
-      if (!ctx.simulate && mpCfg?.enabled && mpCfg.accessTokenEnc && amountNum > 0) {
+      const mpAllowed =
+        !ctx.simulate && mpCfg?.enabled && mpCfg.accessTokenEnc && amountNum > 0
+          ? await getEntitlements(ctx.companyId)
+              .then((ent) => ent.legacy || ent.modules.includes("MERCADOPAGO"))
+              .catch(() => true)
+          : false;
+      if (mpAllowed && mpCfg?.accessTokenEnc) {
         try {
           const token = decryptCredential(mpCfg.accessTokenEnc);
           const linkAmount = mpLinkAmount(amountNum, mpCfg);

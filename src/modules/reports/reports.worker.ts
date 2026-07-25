@@ -12,6 +12,7 @@ import cron from "node-cron";
 import { prisma } from "../../lib/prisma";
 import { sendReport } from "./reports.service";
 import { closedPeriodFor, zonedNowParts, type ReportKind } from "./reports.periods";
+import { getEntitlements } from "../billing/entitlements";
 
 let started = false;
 let running = false;
@@ -69,6 +70,9 @@ async function tick(): Promise<void> {
     for (const cfg of configs) {
       if (!cfg.company.isActive) continue;
       if (!cfg.email && !cfg.waPhone) continue;
+      // Módulo REPORTS del paquete: sin él no se envían reportes (legacy pasa).
+      const ent = await getEntitlements(cfg.companyId).catch(() => null);
+      if (ent && !ent.legacy && !ent.modules.includes("REPORTS")) continue;
       const tz = cfg.company.timezone || "America/Lima";
 
       let hour: number;

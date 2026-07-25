@@ -28,7 +28,18 @@ export type Entitlements = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const ALL_MODULES: PlanModule[] = ["CAMPAIGNS", "CRM", "FLOWS", "QUICK_REPLIES", "FUNNEL", "META_PROVIDER"];
+const ALL_MODULES: PlanModule[] = [
+  "CAMPAIGNS",
+  "CRM",
+  "FLOWS",
+  "QUICK_REPLIES",
+  "FUNNEL",
+  "META_PROVIDER",
+  "WEBCHAT",
+  "MERCADOPAGO",
+  "REPORTS",
+  "WEBHOOKS",
+];
 const ALL_VERTICALS: BusinessVertical[] = [
   "INFOPRODUCT",
   "PHYSICAL_GOODS",

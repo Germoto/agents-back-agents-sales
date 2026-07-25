@@ -66,8 +66,8 @@ router.use("/meta", metaWebhookRoutes);
 // Canal web embebible: rutas públicas de los visitantes del widget (el gate de
 // leads/billing se aplica adentro, como en el inbound del agente).
 router.use("/webchat", webchatRoutes);
-// Configuración del Chat Web desde el panel del tenant
-router.use("/webchat-config", billingGuard(), webchatConfigRoutes);
+// Configuración del Chat Web desde el panel del tenant (módulo de paquete)
+router.use("/webchat-config", billingGuard({ module: "WEBCHAT" }), webchatConfigRoutes);
 // Respuestas rápidas del panel de conversaciones
 router.use("/quick-replies", billingGuard({ module: "QUICK_REPLIES" }), quickRepliesRoutes);
 // CRM kanban (tableros, etiquetas internas, valores de negocio). El embudo
@@ -84,12 +84,15 @@ router.use("/flows", billingGuard({ module: "FLOWS" }), flowsRoutes);
 // Métricas del dashboard del tenant
 router.use("/dashboard", billingGuard(), dashboardRoutes);
 // Reportes automáticos del dashboard (config + envío de prueba)
-router.use("/reports", billingGuard(), reportsRoutes);
+router.use("/reports", billingGuard({ module: "REPORTS" }), reportsRoutes);
 // Estado de activación / onboarding (checklist + % de avance)
 router.use("/setup", setupRoutes);
 router.use("/control-room-7m4x", adminConsoleRoutes);
 // Gestión de endpoints de webhook (CRUD para admins)
-router.use("/webhook-endpoints", webhookEndpointsRoutes);
+// Configuración de endpoints de webhook (módulo de paquete). El procesamiento
+// INBOUND (/webhooks, HMAC) NO se gatea: los endpoints ya configurados siguen
+// validando pagos aunque el plan pierda el módulo.
+router.use("/webhook-endpoints", billingGuard({ module: "WEBHOOKS" }), webhookEndpointsRoutes);
 // Recepción de webhooks entrantes (público, autenticado via HMAC)
 router.use("/webhooks", webhooksRoutes);
 // API pública para n8n (consulta y actualización de comprobantes; sin token,
