@@ -63,6 +63,24 @@ export const extendSubscriptionSchema = z.object({
   months: z.coerce.number().int().min(1).max(36),
 });
 
+// Plan PERSONALIZADO (snapshot por cliente): precio negociado + módulos a medida.
+export const customSubscriptionSchema = z.object({
+  companyId: z.string().uuid(),
+  months: z.coerce.number().int().min(1).max(36).default(1),
+  pricePen: z.coerce.number().min(0.01).transform(round2),
+  priceUsd: moneySchema.default(0),
+  modules: z.array(planModuleSchema).default([]),
+  verticals: z.array(businessVerticalSchema).optional(),
+  monthlyLeadLimit: nullableNumber(z.number().int().min(1)).default(null),
+  extraLeadPricePen: nullableNumber(z.number().min(0.01).transform(round2)).default(null),
+  name: z.string().trim().min(2).max(80).nullish().transform((v) => (v ? v : null)),
+});
+
+export const updateCustomSubscriptionSchema = customSubscriptionSchema.omit({
+  companyId: true,
+  months: true,
+});
+
 // ---------------- Vales ----------------
 
 export const voucherBatchSchema = z

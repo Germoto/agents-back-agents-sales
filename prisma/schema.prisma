@@ -1215,6 +1215,10 @@ model PlatformPlan {
   modules           PlanModule[]          @default([])
   isPublic          Boolean               @default(false)
   isHighlighted     Boolean               @default(false) // badge "Más popular"
+  // Snapshot de plan PERSONALIZADO de UN cliente (precio negociado, módulos a
+  // medida): oculto del landing y de los listados de paquetes; se gestiona
+  // desde la suscripción del cliente.
+  isCustom          Boolean               @default(false)
   sortOrder         Int                   @default(0)
   isActive          Boolean               @default(true)
   createdAt         DateTime              @default(now())

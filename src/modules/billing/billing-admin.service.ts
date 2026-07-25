@@ -54,6 +54,9 @@ const PLAN_INCLUDE = { _count: { select: { subscriptions: true, vouchers: true }
 
 export async function listPlans() {
   const plans = await prisma.platformPlan.findMany({
+    // Los snapshots personalizados (uno por cliente) no son paquetes del
+    // catálogo: se gestionan desde la suscripción del cliente.
+    where: { isCustom: false },
     include: PLAN_INCLUDE,
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
   });
@@ -130,6 +133,14 @@ function mapSubscription(sub: SubRow, balancePen: number) {
     planName: sub.plan.name,
     priceUsd: Number(sub.plan.priceUsd),
     pricePen: Number(sub.plan.pricePen),
+    // Plan personalizado (snapshot del cliente): el front muestra el badge y
+    // permite editar módulos/precio con estos campos prefilled.
+    planIsCustom: sub.plan.isCustom,
+    planModules: sub.plan.modules,
+    planVerticals: sub.plan.verticals,
+    planMonthlyLeadLimit: sub.plan.monthlyLeadLimit,
+    planExtraLeadPricePen:
+      sub.plan.extraLeadPricePen === null ? null : Number(sub.plan.extraLeadPricePen),
     startsAt: sub.startsAt,
     expiresAt: sub.expiresAt,
     graceEndsAt,
@@ -178,6 +189,107 @@ export async function assignSubscription(companyId: string, planId: string, mont
   return mapSubscription(sub, balances.get(companyId) ?? 0);
 }
 
+// ---------------------------------------------------------------
+// Plan PERSONALIZADO: snapshot de PlatformPlan por cliente (precio negociado,
+// módulos a medida). Oculto del landing (isPublic=false) y de los listados
+// (isCustom=true); entitlements/Mi plan/renovaciones funcionan sin cambios
+// porque todo lee sub.plan.* vivo.
+// ---------------------------------------------------------------
+
+export type CustomPlanInput = {
+  companyId: string;
+  months: number;
+  pricePen: number;
+  priceUsd?: number;
+  modules: PlanModule[];
+  verticals?: BusinessVertical[];
+  monthlyLeadLimit?: number | null;
+  extraLeadPricePen?: number | null;
+  name?: string | null;
+};
+
+const ALL_PLAN_VERTICALS: BusinessVertical[] = [
+  "INFOPRODUCT",
+  "PHYSICAL_GOODS",
+  "RESTAURANT",
+  "STREAMER",
+  "SERVICE",
+  "OTHER",
+];
+
+function customPlanData(input: CustomPlanInput, companyName: string) {
+  return {
+    name: input.name?.trim() || `Personalizado — ${companyName}`,
+    description: "Plan a medida (precio y funcionalidades acordados directamente).",
+    priceUsd: input.priceUsd ?? 0,
+    pricePen: input.pricePen,
+    monthlyLeadLimit: input.monthlyLeadLimit ?? null,
+    extraLeadPricePen: input.extraLeadPricePen ?? null,
+    verticals: input.verticals?.length ? input.verticals : ALL_PLAN_VERTICALS,
+    modules: input.modules,
+    isPublic: false,
+    isHighlighted: false,
+    isCustom: true,
+    sortOrder: 9999,
+    isActive: true,
+  };
+}
+
+/**
+ * Asigna (o renegocia) un plan personalizado: crea el snapshot del cliente si no
+ * existe, o actualiza el que ya tiene, y (re)inicia la suscripción desde hoy.
+ */
+export async function assignCustomSubscription(input: CustomPlanInput) {
+  const company = await prisma.company.findUnique({
+    where: { id: input.companyId },
+    select: { id: true, name: true },
+  });
+  if (!company) throw new AppError("Empresa no encontrada", 404);
+
+  const currentSub = await prisma.companySubscription.findUnique({
+    where: { companyId: input.companyId },
+    include: { plan: { select: { id: true, isCustom: true } } },
+  });
+
+  const data = customPlanData(input, company.name);
+  let planId: string;
+  if (currentSub?.plan.isCustom) {
+    // Renegociación: reutilizar la fila snapshot del cliente.
+    await prisma.platformPlan.update({ where: { id: currentSub.plan.id }, data });
+    planId = currentSub.plan.id;
+  } else {
+    const created = await prisma.platformPlan.create({ data, select: { id: true } });
+    planId = created.id;
+  }
+  return assignSubscription(input.companyId, planId, input.months);
+}
+
+/** Edita el snapshot personalizado de un cliente (precio/módulos) SIN tocar fechas. */
+export async function updateCustomSubscriptionPlan(
+  companyId: string,
+  input: Omit<CustomPlanInput, "companyId" | "months">,
+) {
+  const sub = await prisma.companySubscription.findUnique({
+    where: { companyId },
+    include: SUB_INCLUDE,
+  });
+  if (!sub) throw new AppError("Suscripción no encontrada", 404);
+  if (!sub.plan.isCustom) {
+    throw new AppError("La suscripción de esta empresa no usa un plan personalizado", 409);
+  }
+  await prisma.platformPlan.update({
+    where: { id: sub.planId },
+    data: customPlanData({ ...input, companyId, months: sub.months }, sub.company.name),
+  });
+  invalidateEntitlements(companyId);
+  const fresh = await prisma.companySubscription.findUnique({
+    where: { companyId },
+    include: SUB_INCLUDE,
+  });
+  const balances = await walletBalances([companyId]);
+  return mapSubscription(fresh!, balances.get(companyId) ?? 0);
+}
+
 export async function extendSubscription(id: string, months: number) {
   const current = await prisma.companySubscription.findUnique({ where: { id } });
   if (!current) throw new AppError("Suscripción no encontrada", 404);
@@ -208,9 +320,17 @@ export async function cancelSubscription(id: string) {
 
 /** Elimina la suscripción: la empresa vuelve a LEGACY (acceso libre sin límites). */
 export async function deleteSubscription(id: string) {
-  const current = await prisma.companySubscription.findUnique({ where: { id } });
+  const current = await prisma.companySubscription.findUnique({
+    where: { id },
+    include: { plan: { select: { id: true, isCustom: true } } },
+  });
   if (!current) throw new AppError("Suscripción no encontrada", 404);
   await prisma.companySubscription.delete({ where: { id } });
+  // Snapshot personalizado huérfano: limpiarlo (best-effort; si tiene vales u
+  // otras referencias, el delete falla y se conserva).
+  if (current.plan.isCustom) {
+    await prisma.platformPlan.delete({ where: { id: current.plan.id } }).catch(() => undefined);
+  }
   invalidateEntitlements(current.companyId);
 }
 

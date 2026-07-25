@@ -6,6 +6,8 @@ import { validate } from "../../middlewares/validate";
 import {
   adjustCreditsController,
   assignSubscriptionController,
+  assignCustomSubscriptionController,
+  updateCustomSubscriptionController,
   cancelSubscriptionController,
   companyCreditTransactionsController,
   createPlanController,
@@ -22,6 +24,8 @@ import {
 import {
   adjustCreditsSchema,
   assignSubscriptionSchema,
+  customSubscriptionSchema,
+  updateCustomSubscriptionSchema,
   billingCompanyIdParamsSchema,
   billingIdParamsSchema,
   extendSubscriptionSchema,
@@ -51,6 +55,17 @@ router.delete("/plans/:id", validate({ params: billingIdParamsSchema }), asyncHa
 // Suscripciones de tenants
 router.get("/subscriptions", asyncHandler(listSubscriptionsController));
 router.post("/subscriptions", validate({ body: assignSubscriptionSchema }), asyncHandler(assignSubscriptionController));
+// Plan personalizado: crea/renegocia el snapshot del cliente y (re)asigna
+router.post(
+  "/subscriptions/custom",
+  validate({ body: customSubscriptionSchema }),
+  asyncHandler(assignCustomSubscriptionController),
+);
+router.put(
+  "/subscriptions/custom/:companyId",
+  validate({ body: updateCustomSubscriptionSchema }),
+  asyncHandler(updateCustomSubscriptionController),
+);
 router.put(
   "/subscriptions/:id/extend",
   validate({ params: billingIdParamsSchema, body: extendSubscriptionSchema }),

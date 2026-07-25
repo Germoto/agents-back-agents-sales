@@ -2,6 +2,8 @@ import type { Request, Response } from "express";
 import {
   adjustCredits,
   assignSubscription,
+  assignCustomSubscription,
+  updateCustomSubscriptionPlan,
   cancelSubscription,
   createPlan,
   createVoucherBatch,
@@ -44,6 +46,14 @@ export async function deletePlanController(req: Request, res: Response) {
 
 export async function listSubscriptionsController(_req: Request, res: Response) {
   return res.json(await listSubscriptions());
+}
+
+export async function assignCustomSubscriptionController(req: Request, res: Response) {
+  return res.status(201).json(await assignCustomSubscription(req.body));
+}
+
+export async function updateCustomSubscriptionController(req: Request, res: Response) {
+  return res.json(await updateCustomSubscriptionPlan(paramId(req, "companyId"), req.body));
 }
 
 export async function assignSubscriptionController(req: Request, res: Response) {
