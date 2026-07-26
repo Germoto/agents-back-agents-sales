@@ -276,6 +276,8 @@ export async function listPublicPlans() {
     description: p.description,
     priceUsd: Number(p.priceUsd),
     pricePen: Number(p.pricePen),
+    priceUsdYearly: p.priceUsdYearly === null ? null : Number(p.priceUsdYearly),
+    pricePenYearly: p.pricePenYearly === null ? null : Number(p.pricePenYearly),
     monthlyLeadLimit: p.monthlyLeadLimit,
     extraLeadPricePen: p.extraLeadPricePen === null ? null : Number(p.extraLeadPricePen),
     modules: p.modules,

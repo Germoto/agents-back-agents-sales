@@ -36,11 +36,14 @@ export const planInputSchema = z.object({
   description: z
     .string()
     .trim()
-    .max(500)
+    .max(1000)
     .nullish()
     .transform((v) => (v ? v : null)),
   priceUsd: moneySchema.default(0),
   pricePen: moneySchema.default(0),
+  // Precio anual con descuento; null = el plan no ofrece modalidad anual.
+  priceUsdYearly: nullableNumber(z.number().min(0.01).transform(round2)).default(null),
+  pricePenYearly: nullableNumber(z.number().min(0.01).transform(round2)).default(null),
   monthlyLeadLimit: nullableNumber(z.number().int().min(1)).default(null),
   extraLeadPricePen: nullableNumber(z.number().min(0.01).transform(round2)).default(null),
   verticals: z.array(businessVerticalSchema).min(1, "Elige al menos un rubro").default(["INFOPRODUCT"]),

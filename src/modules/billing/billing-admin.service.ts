@@ -19,6 +19,8 @@ export type PlanInput = {
   description?: string | null;
   priceUsd: number;
   pricePen: number;
+  priceUsdYearly?: number | null;
+  pricePenYearly?: number | null;
   monthlyLeadLimit?: number | null;
   extraLeadPricePen?: number | null;
   verticals: BusinessVertical[];
@@ -36,6 +38,8 @@ function mapPlan(plan: Prisma.PlatformPlanGetPayload<{ include: { _count: { sele
     description: plan.description,
     priceUsd: Number(plan.priceUsd),
     pricePen: Number(plan.pricePen),
+    priceUsdYearly: plan.priceUsdYearly === null ? null : Number(plan.priceUsdYearly),
+    pricePenYearly: plan.pricePenYearly === null ? null : Number(plan.pricePenYearly),
     monthlyLeadLimit: plan.monthlyLeadLimit,
     extraLeadPricePen: plan.extraLeadPricePen === null ? null : Number(plan.extraLeadPricePen),
     verticals: plan.verticals,

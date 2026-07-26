@@ -88,8 +88,8 @@ const MODULE_LABELS: Record<string, string> = {
   FLOWS: "Flujos de chatbot",
   QUICK_REPLIES: "Respuestas rápidas",
   META_PROVIDER: "API oficial de Meta WhatsApp",
-  WEBCHAT: "Chat Web para tu página",
-  MERCADOPAGO: "Links de pago Mercado Pago",
+  WEBCHAT: "Chat web con agente IA",
+  MERCADOPAGO: "Links de pago con Mercado Pago",
   REPORTS: "Reportes automáticos",
   WEBHOOKS: "Webhooks / API de integraciones",
 };

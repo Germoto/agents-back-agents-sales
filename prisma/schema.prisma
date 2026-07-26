@@ -1206,6 +1206,9 @@ model PlatformPlan {
   description       String?
   priceUsd          Decimal               @default(0) @db.Decimal(10, 2)
   pricePen          Decimal               @default(0) @db.Decimal(10, 2)
+  // Precio con pago ANUAL (descuento). null = el plan no ofrece modalidad anual.
+  priceUsdYearly    Decimal?              @db.Decimal(10, 2)
+  pricePenYearly    Decimal?              @db.Decimal(10, 2)
   // Límite de leads (Customers NUEVOS) por mes calendario. null = ilimitado.
   monthlyLeadLimit  Int?
   // Precio en S/ por lead extra (sobre el límite, o todo lead en modo créditos).
