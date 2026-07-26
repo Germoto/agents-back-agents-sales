@@ -173,6 +173,7 @@ model Company {
   paymentReceipts   PaymentReceipt[]
   webhookEndpoints  WebhookEndpoint[]
   webchatConfig     WebchatConfig?
+  platformPayments  PlatformPayment[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
   crms                 Crm[]
@@ -202,6 +203,10 @@ model PlatformConfig {
   // puntero al tenant oculto "FlowApp Ventas" + base de conocimiento estructurada.
   salesAgentCompanyId String?          @db.Uuid
   salesAgentKnowledge Json?
+  // Cobros de la PLATAFORMA con Mercado Pago (los tenants pagan su plan/créditos
+  // solos desde Mi plan). Token cifrado con credentials-crypto.
+  mpBillingEnabled     Boolean          @default(false)
+  mpBillingAccessToken String?
   updatedAt        DateTime           @updatedAt
 }
 
@@ -1196,6 +1201,7 @@ enum CreditTxType {
   VOUCHER
   ADMIN_ADJUST
   LEAD_CHARGE
+  MP_TOPUP
 }
 
 // Paquete/plan comercial de la plataforma. Editables desde la consola
@@ -1336,6 +1342,27 @@ model CompanyWallet {
 }
 
 // Ledger de movimientos de créditos (auditoría + UI de "Mi plan").
+// Compra de PLATAFORMA por Mercado Pago (el tenant paga su plan o recarga
+// créditos desde Mi plan). El webhook la aplica al aprobarse (idempotente por
+// mpPaymentId único + status).
+model PlatformPayment {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId       String    @db.Uuid
+  kind            String // PLAN | CREDITS
+  planId          String?   @db.Uuid
+  months          Int?
+  amountPen       Decimal   @db.Decimal(10, 2)
+  creditAmountPen Decimal?  @db.Decimal(10, 2)
+  mpPreferenceId  String?
+  mpPaymentId     String?   @unique
+  status          String    @default("PENDING") // PENDING | APPROVED
+  createdAt       DateTime  @default(now())
+  paidAt          DateTime?
+  company         Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, createdAt])
+}
+
 model CreditTransaction {
   id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId       String       @db.Uuid

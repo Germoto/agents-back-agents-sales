@@ -16,6 +16,8 @@ import {
   getLandingScene,
   setEnabledVerticals,
   setLandingScene,
+  getPlatformMpBillingAdmin,
+  setPlatformMpBilling,
 } from "../platform-config/platform-config.service";
 import {
   ensureSalesAgentTenant,
@@ -112,4 +114,16 @@ export async function impersonateSalesAgentController(req: Request, res: Respons
   const companyId = await ensureSalesAgentTenant({ id: req.user!.id, phone: req.user!.phone });
   const result = await impersonateClientAdmin(req.user!.id, companyId);
   return res.json(result);
+}
+
+// ---------------------------------------------------------------------------
+// Cobros de la plataforma con Mercado Pago (tenants pagan plan/créditos solos)
+// ---------------------------------------------------------------------------
+
+export async function getPlatformMpController(_req: Request, res: Response) {
+  return res.json(await getPlatformMpBillingAdmin());
+}
+
+export async function updatePlatformMpController(req: Request, res: Response) {
+  return res.json(await setPlatformMpBilling(req.body));
 }

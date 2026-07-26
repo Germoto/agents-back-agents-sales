@@ -19,6 +19,8 @@ import {
   getSalesAgentController,
   updateSalesAgentController,
   impersonateSalesAgentController,
+  getPlatformMpController,
+  updatePlatformMpController,
 } from "./admin-console.controller";
 import {
   clientIdParamsSchema,
@@ -29,6 +31,7 @@ import {
   updateLandingSceneSchema,
   updateVerticalsSchema,
   updateSalesAgentSchema,
+  updatePlatformMpSchema,
 } from "./admin-console.schemas";
 import billingAdminRoutes from "../billing/billing-admin.routes";
 import trainingAdminRoutes from "../training/training-admin.routes";
@@ -102,6 +105,16 @@ router.post(
   requireAuth,
   requireRole("SUPERADMIN"),
   asyncHandler(impersonateSalesAgentController),
+);
+
+// Cobros de la plataforma con Mercado Pago (checkout de Mi plan de los tenants)
+router.get("/config/mercadopago", requireAuth, requireRole("SUPERADMIN"), asyncHandler(getPlatformMpController));
+router.put(
+  "/config/mercadopago",
+  requireAuth,
+  requireRole("SUPERADMIN"),
+  validate({ body: updatePlatformMpSchema }),
+  asyncHandler(updatePlatformMpController),
 );
 
 // Config global de plataforma: animación 3D del landing público.

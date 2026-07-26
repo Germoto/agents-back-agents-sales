@@ -3,6 +3,7 @@ import { asyncHandler } from "../../lib/async-handler";
 import { hmacVerify } from "../../middlewares/hmac-verify.middleware";
 import { processWebhook } from "./webhooks.service";
 import { processMercadoPagoWebhook } from "./mercadopago-webhook.service";
+import { processPlatformMpWebhook } from "../billing/billing-mp.service";
 
 const router = Router();
 
@@ -37,6 +38,24 @@ router.post(
  * backend lo verifica contra la API de MP con el token del tenant (fuente de
  * verdad). Siempre responde 200 rápido (MP reintenta ante errores).
  */
+/**
+ * Webhook de Mercado Pago de la PLATAFORMA (cobros de FlowApp a sus tenants:
+ * plan/créditos desde Mi plan). Público, verificado contra la API de MP con el
+ * token de plataforma; siempre 200 (MP reintenta).
+ */
+router.post(
+  "/platform/mercadopago",
+  asyncHandler(async (req: Request, res: Response) => {
+    try {
+      const result = await processPlatformMpWebhook(req.body, req.query as Record<string, unknown>);
+      res.json({ success: true, data: result });
+    } catch (err) {
+      console.error("[platform-mp-webhook] error:", err instanceof Error ? err.message : err);
+      res.json({ success: true, data: { ok: false } });
+    }
+  }),
+);
+
 router.post(
   "/mercadopago/:companyId",
   asyncHandler(async (req: Request, res: Response) => {

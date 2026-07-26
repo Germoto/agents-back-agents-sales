@@ -1,6 +1,8 @@
 import { BusinessVertical } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import { encryptCredential, decryptCredential } from "../../lib/credentials-crypto";
+import { mpGetMe } from "../../lib/mercadopago-client";
 
 const PLATFORM_CONFIG_ID = "global";
 
@@ -127,6 +129,69 @@ export async function getPublicSalesChatToken(): Promise<string | null> {
   ]);
   if (!webchat?.enabled || !agent?.openaiApiKey) return null;
   return webchat.token;
+}
+
+// ---------------------------------------------------------------------------
+// Cobros de la PLATAFORMA con Mercado Pago: los tenants pagan su plan y
+// recargan créditos solos desde Mi plan. Token de la cuenta MP del dueño.
+// ---------------------------------------------------------------------------
+
+function maskToken(token: string): string {
+  if (token.length <= 10) return "•••";
+  return `${token.slice(0, 8)}…${token.slice(-4)}`;
+}
+
+/** Uso interno (checkout/webhook): token descifrado + habilitado. */
+export async function getPlatformMpBilling(): Promise<{ enabled: boolean; accessToken: string | null }> {
+  const config = await prisma.platformConfig.findUnique({
+    where: { id: PLATFORM_CONFIG_ID },
+    select: { mpBillingEnabled: true, mpBillingAccessToken: true },
+  });
+  const token = config?.mpBillingAccessToken ? decryptCredential(config.mpBillingAccessToken) : null;
+  return { enabled: !!config?.mpBillingEnabled && !!token, accessToken: token };
+}
+
+/** Vista para la consola: nunca expone el token en claro. */
+export async function getPlatformMpBillingAdmin() {
+  const { enabled, accessToken } = await getPlatformMpBilling();
+  const config = await prisma.platformConfig.findUnique({
+    where: { id: PLATFORM_CONFIG_ID },
+    select: { mpBillingEnabled: true },
+  });
+  return {
+    enabled: config?.mpBillingEnabled ?? false,
+    connected: !!accessToken,
+    maskedToken: accessToken ? maskToken(accessToken) : null,
+  };
+}
+
+export async function setPlatformMpBilling(data: { accessToken?: string | null; enabled: boolean }) {
+  const update: Record<string, unknown> = { mpBillingEnabled: data.enabled };
+  let account: { nickname: string } | null = null;
+
+  if (data.accessToken === null) {
+    update.mpBillingAccessToken = null;
+    update.mpBillingEnabled = false;
+  } else if (data.accessToken && data.accessToken.trim()) {
+    const token = data.accessToken.trim();
+    try {
+      const me = await mpGetMe(token);
+      account = { nickname: me.nickname };
+    } catch (err) {
+      throw new AppError(
+        `El Access Token no es válido: ${err instanceof Error ? err.message : "error de Mercado Pago"}`,
+        400,
+      );
+    }
+    update.mpBillingAccessToken = encryptCredential(token);
+  }
+
+  await prisma.platformConfig.upsert({
+    where: { id: PLATFORM_CONFIG_ID },
+    update,
+    create: { id: PLATFORM_CONFIG_ID, enabledVerticals: ALL_VERTICALS, ...update },
+  });
+  return { ...(await getPlatformMpBillingAdmin()), account };
 }
 
 /**

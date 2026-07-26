@@ -87,3 +87,10 @@ export const updateSalesAgentSchema = z.object({
     .regex(/^$|^#[0-9a-fA-F]{3,8}$/, "Color inválido")
     .optional(),
 });
+
+// Cobros de plataforma con Mercado Pago
+export const updatePlatformMpSchema = z.object({
+  // undefined = no cambiar token; null = desconectar; string = reemplazar
+  accessToken: z.string().trim().max(300).nullish(),
+  enabled: z.boolean(),
+});

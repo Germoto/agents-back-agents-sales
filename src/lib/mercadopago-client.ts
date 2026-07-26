@@ -62,6 +62,10 @@ export function mpCreatePreference(
     currency?: string;
     externalReference: string;
     notificationUrl?: string;
+    /** URLs de retorno tras el checkout (success/failure/pending). */
+    backUrls?: { success: string; failure: string; pending: string };
+    /** Con backUrls: volver automáticamente al aprobar. */
+    autoReturn?: boolean;
   },
 ): Promise<MpPreference> {
   return mpFetch<MpPreference>(accessToken, "/checkout/preferences", {
@@ -77,6 +81,8 @@ export function mpCreatePreference(
       ],
       external_reference: opts.externalReference,
       ...(opts.notificationUrl ? { notification_url: opts.notificationUrl } : {}),
+      ...(opts.backUrls ? { back_urls: opts.backUrls } : {}),
+      ...(opts.backUrls && opts.autoReturn ? { auto_return: "approved" } : {}),
     }),
   });
 }

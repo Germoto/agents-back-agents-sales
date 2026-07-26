@@ -130,3 +130,16 @@ export const billingIdParamsSchema = z.object({
 export const billingCompanyIdParamsSchema = z.object({
   companyId: z.string().uuid(),
 });
+
+// Checkout de plataforma con Mercado Pago (el tenant paga su plan o créditos)
+export const mpCheckoutSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("PLAN"),
+    planId: z.string().uuid(),
+    cycle: z.enum(["monthly", "yearly"]),
+  }),
+  z.object({
+    kind: z.literal("CREDITS"),
+    amountPen: z.coerce.number().min(10, "Mínimo S/ 10").max(5000, "Máximo S/ 5000").transform(round2),
+  }),
+]);

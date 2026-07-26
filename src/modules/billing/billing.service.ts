@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import { getPlatformMpBilling } from "../platform-config/platform-config.service";
 import {
   countMonthlyLeads,
   deriveBillingState,
@@ -33,10 +34,11 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 // ---------------------------------------------------------------
 
 export async function getBillingMe(companyId: string) {
-  const [ent, company, wallet] = await Promise.all([
+  const [ent, company, wallet, mpBilling] = await Promise.all([
     getEntitlements(companyId),
     prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } }),
     prisma.companyWallet.findUnique({ where: { companyId } }),
+    getPlatformMpBilling().catch(() => ({ enabled: false, accessToken: null })),
   ]);
   // El saldo se lee directo (no de la caché de entitlements) para que la UI
   // refleje recargas/cobros al instante.
@@ -59,6 +61,7 @@ export async function getBillingMe(companyId: string) {
           description: sub.plan.description,
           priceUsd: Number(sub.plan.priceUsd),
           pricePen: Number(sub.plan.pricePen),
+          pricePenYearly: sub.plan.pricePenYearly === null ? null : Number(sub.plan.pricePenYearly),
           monthlyLeadLimit: sub.plan.monthlyLeadLimit,
           extraLeadPricePen:
             sub.plan.extraLeadPricePen === null ? null : Number(sub.plan.extraLeadPricePen),
@@ -77,6 +80,8 @@ export async function getBillingMe(companyId: string) {
       extraLeadPricePen:
         sub?.plan.extraLeadPricePen != null ? Number(sub.plan.extraLeadPricePen) : null,
     },
+    // Checkout de Mercado Pago de la plataforma (pagar plan / recargar créditos)
+    mpCheckout: mpBilling.enabled,
   };
 }
 
