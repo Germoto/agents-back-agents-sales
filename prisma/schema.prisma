@@ -1216,6 +1216,8 @@ model PlatformPlan {
   extraLeadPricePen Decimal?              @db.Decimal(10, 2)
   verticals         BusinessVertical[]    @default([INFOPRODUCT])
   modules           PlanModule[]          @default([])
+  // Atributos comerciales del plan (texto libre): "Soporte prioritario", etc.
+  perks             String[]              @default([])
   isPublic          Boolean               @default(false)
   isHighlighted     Boolean               @default(false) // badge "Más popular"
   // Snapshot de plan PERSONALIZADO de UN cliente (precio negociado, módulos a

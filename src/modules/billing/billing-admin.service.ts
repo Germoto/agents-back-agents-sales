@@ -25,6 +25,7 @@ export type PlanInput = {
   extraLeadPricePen?: number | null;
   verticals: BusinessVertical[];
   modules: PlanModule[];
+  perks?: string[];
   isPublic: boolean;
   isHighlighted: boolean;
   sortOrder: number;
@@ -44,6 +45,7 @@ function mapPlan(plan: Prisma.PlatformPlanGetPayload<{ include: { _count: { sele
     extraLeadPricePen: plan.extraLeadPricePen === null ? null : Number(plan.extraLeadPricePen),
     verticals: plan.verticals,
     modules: plan.modules,
+    perks: plan.perks,
     isPublic: plan.isPublic,
     isHighlighted: plan.isHighlighted,
     sortOrder: plan.sortOrder,

@@ -64,6 +64,7 @@ export async function getBillingMe(companyId: string) {
             sub.plan.extraLeadPricePen === null ? null : Number(sub.plan.extraLeadPricePen),
           modules: sub.plan.modules,
           verticals: sub.plan.verticals,
+          perks: sub.plan.perks,
         }
       : null,
     startsAt: sub?.startsAt ?? null,
@@ -282,6 +283,7 @@ export async function listPublicPlans() {
     extraLeadPricePen: p.extraLeadPricePen === null ? null : Number(p.extraLeadPricePen),
     modules: p.modules,
     verticals: p.verticals,
+    perks: p.perks,
     isHighlighted: p.isHighlighted,
   }));
 }

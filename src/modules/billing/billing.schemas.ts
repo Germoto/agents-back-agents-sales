@@ -48,6 +48,8 @@ export const planInputSchema = z.object({
   extraLeadPricePen: nullableNumber(z.number().min(0.01).transform(round2)).default(null),
   verticals: z.array(businessVerticalSchema).min(1, "Elige al menos un rubro").default(["INFOPRODUCT"]),
   modules: z.array(planModuleSchema).default([]),
+  // Atributos comerciales ("Soporte prioritario"…): texto libre, cortos.
+  perks: z.array(z.string().trim().min(2).max(60)).max(12).default([]),
   isPublic: z.boolean().default(false),
   isHighlighted: z.boolean().default(false),
   sortOrder: z.coerce.number().int().min(0).max(999).default(0),
