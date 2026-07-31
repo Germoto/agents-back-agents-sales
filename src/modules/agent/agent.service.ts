@@ -47,6 +47,7 @@ import { getEntitlements } from "../billing/entitlements";
 import { gateNewLead } from "../billing/billing.service";
 import { transcribeAudio } from "./audio-transcribe";
 import { extractInboundUsername } from "./inbound-username";
+import { enrichCustomerFromWhatsapp } from "../customers/lead-enrich.service";
 
 interface FollowupConfig {
   abandonedCartHours?: number;
@@ -326,6 +327,13 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
         data: { name: waUsername },
       })
       .catch(() => undefined);
+  }
+
+  // Enriquecimiento del lead (API lead de SMS Tools): SOLO en lead nuevo o si
+  // llegó con username y aún no fue enriquecido. Fire-and-forget (no bloquea el
+  // turno); el caché interno (TTL 7 días) evita llamadas repetidas.
+  if (convo.isNewCustomer || waUsername) {
+    void enrichCustomerFromWhatsapp(companyId, convo.customerId).catch(() => undefined);
   }
 
   // Idempotencia: si ya procesamos este messageId, no repetir

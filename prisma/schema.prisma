@@ -638,6 +638,11 @@ model Customer {
   name              String?
   email             String?
   status            String
+  // Identidad de WhatsApp (API lead de SMS Tools): contacto username con
+  // número oculto (LID) y foto de perfil persistida en /uploads/avatars.
+  // El detalle (pushName, isBusiness, about, pictureId…) vive en metadata.waContact.
+  waIsLid           Boolean               @default(false)
+  avatarUrl         String?
   selectedProductId String?               @db.Uuid
   // Ficha de contacto editable desde el panel de Conversaciones.
   sexo              String?

@@ -9,6 +9,7 @@ import {
   createNote,
   deleteNote,
 } from "./customers.service";
+import { enrichCustomerFromWhatsapp } from "./lead-enrich.service";
 
 export async function listCustomersController(req: Request, res: Response) {
   const customers = await listCustomers(req.user!.companyId);
@@ -17,6 +18,15 @@ export async function listCustomersController(req: Request, res: Response) {
 
 export async function getCustomerController(req: Request, res: Response) {
   return res.json(await getCustomer(req.user!.companyId, String(req.params.id)));
+}
+
+/** Botón "Obtener datos de WhatsApp": fuerza el enriquecimiento y devuelve la ficha. */
+export async function enrichCustomerController(req: Request, res: Response) {
+  const companyId = req.user!.companyId;
+  const customerId = String(req.params.id);
+  const result = await enrichCustomerFromWhatsapp(companyId, customerId, { force: true });
+  const customer = await getCustomer(companyId, customerId);
+  return res.json({ result, customer });
 }
 
 export async function updateCustomerController(req: Request, res: Response) {

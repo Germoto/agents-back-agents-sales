@@ -158,7 +158,49 @@ async function smsToolsRequest<T = unknown>(
   return (envelope?.data as T) ?? (parsed as T);
 }
 
+/** Identidad de un contacto de WhatsApp (API /api/lead/whatsapp, bajo demanda). */
+export interface SmsToolsLeadInfo {
+  jid?: string | null;
+  phone?: string | null;
+  /** true = contacto username con número oculto (phone es un pseudo-número LID). */
+  is_lid?: boolean;
+  /** Nombre que el contacto se puso en WhatsApp (mejor fuente para is_lid). */
+  push_name?: string | null;
+  first_name?: string | null;
+  full_name?: string | null;
+  business_name?: string | null;
+  is_business?: boolean;
+  /** Texto "about" del contacto. */
+  status?: string | null;
+  /** URL TEMPORAL de la foto de perfil (descargar para persistir). */
+  avatar_url?: string | null;
+  picture_id?: string | null;
+}
+
 export const smsTools = {
+  /**
+   * Datos de identidad de un lead (nombre, foto, LID, negocio). Best-effort:
+   * devuelve null si no hay datos (404) o ante cualquier error — nunca lanza.
+   */
+  async getLeadInfo(
+    creds: SmsToolsCredentials,
+    unique: string,
+    phone: string,
+  ): Promise<SmsToolsLeadInfo | null> {
+    try {
+      const base = deriveApiBase(creds.apiUrl);
+      const body = new URLSearchParams({ secret: creds.secret, unique, phone });
+      const data = await smsToolsRequest<SmsToolsLeadInfo | null>(base, "/lead/whatsapp", {
+        method: "POST",
+        body,
+      });
+      return data && typeof data === "object" ? data : null;
+    } catch (err) {
+      console.warn("[smstools] getLeadInfo falló:", err instanceof Error ? err.message : err);
+      return null;
+    }
+  },
+
   async getServers(creds: SmsToolsCredentials): Promise<SmsToolsServer[]> {
     const base = deriveApiBase(creds.apiUrl);
     const data = await smsToolsRequest<SmsToolsServer[]>(base, "/get/wa.servers", {

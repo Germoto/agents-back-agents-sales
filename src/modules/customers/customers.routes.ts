@@ -5,6 +5,7 @@ import { validate } from "../../middlewares/validate";
 import {
   listCustomersController,
   getCustomerController,
+  enrichCustomerController,
   updateCustomerController,
   deleteCustomerController,
   deleteCustomersBulkController,
@@ -30,6 +31,8 @@ router.post("/:id/notes", validate({ body: createNoteSchema }), asyncHandler(cre
 
 // Ficha de contacto
 router.get("/:id", asyncHandler(getCustomerController));
+// Enriquecer la ficha con la API de identidad de WhatsApp de SMS Tools
+router.post("/:id/enrich-whatsapp", asyncHandler(enrichCustomerController));
 router.put("/:id", validate({ body: updateCustomerSchema }), asyncHandler(updateCustomerController));
 router.delete("/:id", asyncHandler(deleteCustomerController));
 

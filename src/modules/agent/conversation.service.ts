@@ -62,6 +62,8 @@ export interface LoadedConversation {
   state: ConversationState;
   botPaused: boolean;
   lastInboundId: string | null;
+  /** true si el Customer se creó en esta llamada (lead nuevo → enriquecer). */
+  isNewCustomer: boolean;
 }
 
 export function normalizePhone(value: string) {
@@ -80,6 +82,11 @@ export async function loadOrCreateConversation(
 ): Promise<LoadedConversation> {
   const phone = normalizePhone(fromPhone);
 
+  // find→upsert para saber si el lead es NUEVO (dispara el enriquecimiento).
+  const existingCustomer = await prisma.customer.findUnique({
+    where: { companyId_phone: { companyId, phone } },
+    select: { id: true },
+  });
   const customer = await prisma.customer.upsert({
     where: { companyId_phone: { companyId, phone } },
     update: { lastInteractionAt: new Date() },
@@ -108,6 +115,7 @@ export async function loadOrCreateConversation(
     state: (conversation.state as ConversationState) ?? {},
     botPaused: conversation.botPaused,
     lastInboundId: conversation.lastInboundId,
+    isNewCustomer: !existingCustomer,
   };
 }
 
