@@ -250,6 +250,7 @@ export async function listConversations(companyId: string, limit = 50) {
           id: true,
           phone: true,
           name: true,
+          avatarUrl: true,
           tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
         },
       },
@@ -279,6 +280,7 @@ function serializeCustomerWithTags(customer: {
   id: string;
   phone: string;
   name: string | null;
+  avatarUrl?: string | null;
   tagLinks: Array<{ tag: { id: string; name: string; color: string } }>;
 }) {
   const { tagLinks, ...rest } = customer;
@@ -306,6 +308,7 @@ export async function getConversationSummary(companyId: string, conversationId: 
           id: true,
           phone: true,
           name: true,
+          avatarUrl: true,
           tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
         },
       },
