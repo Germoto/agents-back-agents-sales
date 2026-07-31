@@ -317,16 +317,40 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
 
   const convo = await loadOrCreateConversation(companyId, inbound.fromPhone, inbound.messageId);
 
-  // Nombre del contacto desde el username de WhatsApp: solo si aún no tiene
-  // nombre (no pisa nombres puestos por el dueño). updateMany condicional por
-  // PK = 1 write la primera vez, count 0 después.
+  // Nombre del contacto desde el username de WhatsApp. El username MANDA sobre
+  // el push_name del enriquecimiento (caso real: push_name "E." pisaba a
+  // "@jahrmedd"): se aplica si el nombre está vacío O si el nombre actual lo
+  // puso el enriquecimiento (== pushName/fullName). Los nombres puestos a mano
+  // por el dueño no se tocan. Además se persiste en metadata.waContact.username.
   if (waUsername) {
-    await prisma.customer
-      .updateMany({
-        where: { id: convo.customerId, OR: [{ name: null }, { name: "" }] },
-        data: { name: waUsername },
-      })
-      .catch(() => undefined);
+    try {
+      const cust = await prisma.customer.findUnique({
+        where: { id: convo.customerId },
+        select: { name: true, metadata: true },
+      });
+      if (cust) {
+        const md = (cust.metadata ?? {}) as Record<string, unknown>;
+        const wa = (md.waContact ?? {}) as Record<string, unknown>;
+        const current = (cust.name ?? "").trim();
+        const fromEnrich =
+          current !== "" &&
+          (current === ((wa.pushName as string) ?? "").trim() ||
+            current === ((wa.fullName as string) ?? "").trim());
+        const shouldRename = current === "" || fromEnrich;
+        const usernameChanged = ((wa.username as string) ?? null) !== waUsername;
+        if (shouldRename || usernameChanged) {
+          await prisma.customer.update({
+            where: { id: convo.customerId },
+            data: {
+              ...(shouldRename ? { name: waUsername } : {}),
+              metadata: { ...md, waContact: { ...wa, username: waUsername } } as object,
+            },
+          });
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
   }
 
   // Enriquecimiento del lead (API lead de SMS Tools): SOLO en lead nuevo o si

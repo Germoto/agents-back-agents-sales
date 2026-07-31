@@ -24,6 +24,8 @@ const ENRICH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export interface WaContactMeta {
   jid?: string | null;
   isLid?: boolean;
+  /** Username de WhatsApp (@usuario) capturado por el interceptor de inbound. */
+  username?: string | null;
   pushName?: string | null;
   fullName?: string | null;
   businessName?: string | null;
@@ -129,12 +131,13 @@ export async function enrichCustomerFromWhatsapp(
   const fullName = (info.full_name ?? info.first_name ?? "").trim() || null;
   const bestName = pushName ?? fullName;
 
-  // Nombre: con is_lid el push_name manda (es la única identidad visible);
-  // con teléfono real solo se rellena si estaba vacío. El phone NO se toca.
+  // Nombre: push_name/full_name solo RELLENAN si estaba vacío — NUNCA pisan un
+  // nombre existente (ni el username del interceptor ni uno puesto por el
+  // dueño). Caso real: un push_name pobre ("E.") reemplazaba a "@jahrmedd".
+  // El pushName crudo queda igual en metadata.waContact. El phone NO se toca.
   let name = customer.name;
-  if (bestName) {
-    if (isLid) name = bestName;
-    else if (!customer.name || !customer.name.trim()) name = bestName;
+  if (bestName && (!customer.name || !customer.name.trim())) {
+    name = bestName;
   }
 
   // Foto: re-descargar solo si cambió picture_id (o no teníamos avatar).
@@ -149,6 +152,8 @@ export async function enrichCustomerFromWhatsapp(
   const waContact: WaContactMeta = {
     jid: info.jid ?? null,
     isLid,
+    // El username solo llega por el interceptor de inbound: preservarlo.
+    username: existing?.username ?? null,
     pushName,
     fullName,
     businessName: (info.business_name ?? "").trim() || null,
