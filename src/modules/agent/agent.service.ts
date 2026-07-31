@@ -317,40 +317,22 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
 
   const convo = await loadOrCreateConversation(companyId, inbound.fromPhone, inbound.messageId);
 
-  // Nombre del contacto desde el username de WhatsApp. El username MANDA sobre
-  // el push_name del enriquecimiento (caso real: push_name "E." pisaba a
-  // "@jahrmedd"): se aplica si el nombre está vacío O si el nombre actual lo
-  // puso el enriquecimiento (== pushName/fullName). Los nombres puestos a mano
-  // por el dueño no se tocan. Además se persiste en metadata.waContact.username.
+  // @username de WhatsApp: se persiste en su PROPIA columna (waUsername) y se
+  // muestra en el panel junto al nombre ("E. @jahrmedd"). Ya no compite con
+  // `name` (que queda para el nombre manual o el push_name del enriquecimiento).
+  // updateMany condicional por PK: 1 write solo cuando cambia.
   if (waUsername) {
-    try {
-      const cust = await prisma.customer.findUnique({
-        where: { id: convo.customerId },
-        select: { name: true, metadata: true },
-      });
-      if (cust) {
-        const md = (cust.metadata ?? {}) as Record<string, unknown>;
-        const wa = (md.waContact ?? {}) as Record<string, unknown>;
-        const current = (cust.name ?? "").trim();
-        const fromEnrich =
-          current !== "" &&
-          (current === ((wa.pushName as string) ?? "").trim() ||
-            current === ((wa.fullName as string) ?? "").trim());
-        const shouldRename = current === "" || fromEnrich;
-        const usernameChanged = ((wa.username as string) ?? null) !== waUsername;
-        if (shouldRename || usernameChanged) {
-          await prisma.customer.update({
-            where: { id: convo.customerId },
-            data: {
-              ...(shouldRename ? { name: waUsername } : {}),
-              metadata: { ...md, waContact: { ...wa, username: waUsername } } as object,
-            },
-          });
-        }
-      }
-    } catch {
-      /* best-effort */
-    }
+    await prisma.customer
+      .updateMany({
+        // OJO: en SQL `NOT (col = x)` no matchea NULL → el OR explícito cubre
+        // el primer guardado (columna aún NULL).
+        where: {
+          id: convo.customerId,
+          OR: [{ waUsername: null }, { waUsername: { not: waUsername } }],
+        },
+        data: { waUsername },
+      })
+      .catch(() => undefined);
   }
 
   // Enriquecimiento del lead (API lead de SMS Tools): SOLO en lead nuevo o si

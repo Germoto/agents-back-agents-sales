@@ -84,7 +84,7 @@ export async function enrichCustomerFromWhatsapp(
 ): Promise<EnrichResult> {
   const customer = await prisma.customer.findFirst({
     where: { id: customerId, companyId },
-    select: { id: true, phone: true, name: true, metadata: true, avatarUrl: true },
+    select: { id: true, phone: true, name: true, metadata: true, avatarUrl: true, waUsername: true },
   });
   if (!customer) return { ok: false, skipped: "customer" };
 
@@ -131,12 +131,16 @@ export async function enrichCustomerFromWhatsapp(
   const fullName = (info.full_name ?? info.first_name ?? "").trim() || null;
   const bestName = pushName ?? fullName;
 
-  // Nombre: push_name/full_name solo RELLENAN si estaba vacío — NUNCA pisan un
-  // nombre existente (ni el username del interceptor ni uno puesto por el
-  // dueño). Caso real: un push_name pobre ("E.") reemplazaba a "@jahrmedd".
-  // El pushName crudo queda igual en metadata.waContact. El phone NO se toca.
+  // Nombre: push_name/full_name rellenan si estaba vacío O si el nombre actual
+  // es el @username (puesto por el interceptor viejo): el username vive ahora
+  // en su columna waUsername y se muestra al lado, así que el name se "asciende"
+  // al push_name real. Los nombres puestos a mano por el dueño no se tocan.
+  // El phone NO se toca.
   let name = customer.name;
-  if (bestName && (!customer.name || !customer.name.trim())) {
+  const current = (customer.name ?? "").trim();
+  const nameIsUsername =
+    current !== "" && customer.waUsername !== null && current === customer.waUsername.trim();
+  if (bestName && (current === "" || nameIsUsername)) {
     name = bestName;
   }
 
@@ -152,8 +156,6 @@ export async function enrichCustomerFromWhatsapp(
   const waContact: WaContactMeta = {
     jid: info.jid ?? null,
     isLid,
-    // El username solo llega por el interceptor de inbound: preservarlo.
-    username: existing?.username ?? null,
     pushName,
     fullName,
     businessName: (info.business_name ?? "").trim() || null,
