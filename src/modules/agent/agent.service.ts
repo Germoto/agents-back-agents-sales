@@ -46,6 +46,7 @@ import { resolveReminderSequence, type ReminderType } from "./reminder-templates
 import { getEntitlements } from "../billing/entitlements";
 import { gateNewLead } from "../billing/billing.service";
 import { transcribeAudio } from "./audio-transcribe";
+import { extractInboundUsername } from "./inbound-username";
 
 interface FollowupConfig {
   abandonedCartHours?: number;
@@ -198,6 +199,13 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     console.warn("[agent] inbound sin fromPhone, ignorado");
     return;
   }
+
+  // Interceptor de USERNAME de WhatsApp (contactos LID): SMS Tools antepone
+  // "[@usuario]" al texto. Se limpia AQUÍ (único punto de entrada) para que todo
+  // el pipeline vea el mensaje limpio; el username se guarda como nombre del
+  // contacto más abajo (cuando ya existe el Customer). El número no se toca.
+  const { username: waUsername, text: cleanInboundText } = extractInboundUsername(inbound.text);
+  if (waUsername) inbound.text = cleanInboundText;
   // El cliente no puede ser el mismo numero del negocio (evita loops por eco)
   if (inbound.businessPhone && inbound.fromPhone === inbound.businessPhone) {
     return;
@@ -307,6 +315,18 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   }
 
   const convo = await loadOrCreateConversation(companyId, inbound.fromPhone, inbound.messageId);
+
+  // Nombre del contacto desde el username de WhatsApp: solo si aún no tiene
+  // nombre (no pisa nombres puestos por el dueño). updateMany condicional por
+  // PK = 1 write la primera vez, count 0 después.
+  if (waUsername) {
+    await prisma.customer
+      .updateMany({
+        where: { id: convo.customerId, OR: [{ name: null }, { name: "" }] },
+        data: { name: waUsername },
+      })
+      .catch(() => undefined);
+  }
 
   // Idempotencia: si ya procesamos este messageId, no repetir
   if (inbound.messageId && convo.lastInboundId === inbound.messageId) {
