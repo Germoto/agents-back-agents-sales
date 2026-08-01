@@ -172,7 +172,13 @@ export async function reorderColumns(companyId: string, crmId: string, columnIds
 
 export interface CrmBoardCard {
   customerId: string;
-  customer: { id: string; name: string | null; phone: string };
+  customer: {
+    id: string;
+    name: string | null;
+    phone: string;
+    waUsername?: string | null;
+    avatarUrl?: string | null;
+  };
   conversationId: string | null;
   /** Inicio de la conversación (para ordenar tarjetas por fecha). */
   conversationOpenedAt: Date | null;
@@ -216,7 +222,7 @@ export async function getBoard(companyId: string, crmId: string) {
               select: {
                 customerId: true,
                 sortOrder: true,
-                customer: { select: { id: true, name: true, phone: true } },
+                customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true } },
               },
             },
           },
@@ -232,7 +238,7 @@ export async function getBoard(companyId: string, crmId: string) {
         botPaused: true,
         lastMessageAt: true,
         openedAt: true,
-        customer: { select: { id: true, name: true, phone: true } },
+        customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true } },
       },
     }),
   ]);
