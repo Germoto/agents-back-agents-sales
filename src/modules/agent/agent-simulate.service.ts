@@ -242,12 +242,15 @@ export async function getSimMessages(companyId: string, modeParam?: SimMode): Pr
     where: { companyId, conversationId: sim.conversationId, role: { in: ["USER", "ASSISTANT"] } },
     orderBy: { createdAt: "asc" },
     take: 200,
-    select: { role: true, message: true, mediaUrl: true },
+    // mediaType es imprescindible: sin él el panel no sabe si el mensaje trae
+    // un adjunto real y pintaba "archivo adjunto" en mensajes de solo texto.
+    select: { role: true, message: true, mediaUrl: true, mediaType: true },
   });
   return rows.map((r) => ({
     role: r.role === "USER" ? "user" : "assistant",
     text: r.message ?? "",
     mediaUrl: r.mediaUrl,
+    mediaKind: r.mediaType,
   }));
 }
 
