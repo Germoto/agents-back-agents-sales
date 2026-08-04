@@ -23,6 +23,8 @@ const envSchema = z.object({
   MAX_UPLOAD_MB: z.coerce.number().int().positive().default(50),
   // Límite propio para recursos de capacitación del superadmin (PDF/videos).
   MAX_TRAINING_UPLOAD_MB: z.coerce.number().int().positive().default(500),
+  // Límite del ZIP de importación de productos (manifest + multimedia).
+  MAX_IMPORT_MB: z.coerce.number().int().positive().default(500),
   SMSTOOLS_ADMIN_URL: z.string().default("https://smstools.pro/admin"),
   SMSTOOLS_ADMIN_TOKEN: z.string().optional().default(""),
   SMSTOOLS_API_URL: z.string().default("https://smstools.pro/api/send/whatsapp"),
