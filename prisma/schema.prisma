@@ -71,6 +71,7 @@ enum BusinessVertical {
   RESTAURANT
   STREAMER
   SERVICE
+  REAL_ESTATE
   OTHER
 }
 

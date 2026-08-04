@@ -99,7 +99,7 @@ async function resolveProductType(
   });
   const v = company?.vertical;
   if (v === "RESTAURANT" || v === "PHYSICAL_GOODS") return "PHYSICAL";
-  if (v === "INFOPRODUCT" || v === "STREAMER" || v === "SERVICE") return "DIGITAL";
+  if (v === "INFOPRODUCT" || v === "STREAMER" || v === "SERVICE" || v === "REAL_ESTATE") return "DIGITAL";
   return payloadType ?? "DIGITAL"; // OTHER
 }
 

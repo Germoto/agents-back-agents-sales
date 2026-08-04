@@ -63,6 +63,19 @@ function renderVerticalData(vertical: string | undefined, vData: unknown, basePr
       show("seña", "deposit"),
     ].filter(Boolean).join(" · ");
   }
+  if (vertical === "REAL_ESTATE") {
+    return [
+      show("operación", "operation"),
+      show("tipo", "propertyType"),
+      show("área (m²)", "area"),
+      show("dormitorios", "bedrooms"),
+      show("baños", "bathrooms"),
+      show("cocheras", "parking"),
+      show("ubicación", "location"),
+      show("mantenimiento", "maintenance"),
+      show("antigüedad", "antiquity"),
+    ].filter(Boolean).join(" · ");
+  }
   if (vertical === "RESTAURANT") {
     const bits: string[] = [];
     if (v.prepTime != null && String(v.prepTime).trim()) bits.push(`preparación: ${v.prepTime}`);
@@ -224,6 +237,13 @@ function verticalGuidance(vertical: string | undefined): string {
         "Si la herramienta responde que el horario ya no está libre, discúlpate brevemente y ofrece las alternativas que te devuelve. " +
         "Si el cliente no quiere fijar hora todavía, agenda con requestedText (queda SOLICITADA para que un asesor coordine). " +
         "Si hay seña/depósito configurado, cóbralo con enviar_metodos_pago + validar_pago antes de confirmar la cita.";
+    case "REAL_ESTATE":
+      return "Rubro INMOBILIARIA: el catálogo son INMUEBLES en venta o alquiler. Conoces la ficha completa de cada propiedad (operación, tipo, m², dormitorios, baños, cocheras, ubicación/zona, mantenimiento, antigüedad): responde con esos datos concretos y resalta lo más atractivo de cada inmueble. Si preguntan por algo que la ficha no indica, dilo con honestidad y ofrece averiguarlo. Si el cliente pide fotos, planos o video de una propiedad, envíalos con enviar_multimedia. " +
+        "VISITAS: tu objetivo es agendar una VISITA al inmueble. Cuando el cliente quiera verlo, usa SIEMPRE consultar_disponibilidad para ver los horarios libres REALES y ofrécele 2-3 opciones en lenguaje natural ('puedo mostrártelo el martes 10:00 o el jueves 16:00, ¿cuál te queda mejor?'). NUNCA inventes horarios ni prometas uno sin consultar. " +
+        "Cuando elija, agenda con agendar_servicio pasando el startsAt EXACTO que te dio la herramienta; la visita queda CONFIRMADA. Confírmasela al cliente con día y hora completos y dile que le enviaremos un recordatorio antes. " +
+        "Si la herramienta responde que el horario ya no está libre, discúlpate brevemente y ofrece las alternativas que te devuelve. " +
+        "Si el cliente no quiere fijar hora todavía, agenda con requestedText (queda SOLICITADA para que un asesor coordine). " +
+        "El precio de venta/alquiler NO se cobra por el chat; solo si hay una seña/reserva configurada se cobra con enviar_metodos_pago + validar_pago.";
     case "PHYSICAL_GOODS":
       return "Rubro PRODUCTOS FÍSICOS: prioriza catálogo, variantes (talla/color), stock y envío. Cierra con registrar_pedido tras tomar datos de entrega.";
     case "INFOPRODUCT":

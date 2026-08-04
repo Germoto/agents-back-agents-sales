@@ -44,6 +44,7 @@ export const businessVerticalSchema = z.enum([
   "RESTAURANT",
   "STREAMER",
   "SERVICE",
+  "REAL_ESTATE",
   "OTHER",
 ]);
 

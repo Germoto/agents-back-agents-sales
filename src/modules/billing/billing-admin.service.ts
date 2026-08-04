@@ -220,6 +220,7 @@ const ALL_PLAN_VERTICALS: BusinessVertical[] = [
   "RESTAURANT",
   "STREAMER",
   "SERVICE",
+  "REAL_ESTATE",
   "OTHER",
 ];
 

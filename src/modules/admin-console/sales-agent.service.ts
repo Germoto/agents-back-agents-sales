@@ -59,7 +59,7 @@ export const DEFAULT_KNOWLEDGE: SalesAgentKnowledge = {
     "- Campañas masivas de WhatsApp con protección anti-bloqueo (pausas inteligentes, horarios, límite diario), importación desde Excel y resultados detallados.\n" +
     "- Flujos de chatbot guiados (menús con botones) como alternativa o complemento del agente IA, con editor visual.\n" +
     "- Recordatorios y seguimientos automáticos: carritos abandonados, clientes que dejan en visto, post-venta y vencimientos de suscripciones.\n" +
-    "- Sirve para varios rubros: infoproductos, productos físicos, restaurantes, servicios con reserva, venta de cuentas de streaming y más.\n" +
+    "- Sirve para varios rubros: infoproductos, productos físicos, restaurantes, servicios con reserva, inmobiliarias (visitas a inmuebles), venta de cuentas de streaming y más.\n" +
     "- Panel web moderno (funciona como app en el celular), con conversaciones en tiempo real, comprobantes, dashboard de métricas y reportes automáticos.",
   comoEmpezar:
     "1) Crear la cuenta gratis en https://flowapp.pe/registro (toma 2 minutos).\n" +
@@ -69,7 +69,7 @@ export const DEFAULT_KNOWLEDGE: SalesAgentKnowledge = {
   faq:
     "P: ¿Necesito la API oficial de WhatsApp?\nR: No es obligatorio. FlowApp funciona con un número de WhatsApp normal (vía SMS Tools) o, si lo prefieres, con la API oficial de Meta. Tú eliges el proveedor.\n\n" +
     "P: ¿Cómo valida los pagos por Yape o Plin?\nR: El cliente envía la captura de su constancia y la IA la lee (monto, código de seguridad); el sistema la cruza con las notificaciones de pago y aprueba automáticamente. Si algo no cuadra, deriva a una persona.\n\n" +
-    "P: ¿Sirve para mi rubro?\nR: Sí: infoproductos, productos físicos con delivery, restaurantes, servicios con reserva de citas, venta de cuentas de streaming y otros. El agente se adapta al rubro configurado.\n\n" +
+    "P: ¿Sirve para mi rubro?\nR: Sí: infoproductos, productos físicos con delivery, restaurantes, servicios con reserva de citas, inmobiliarias que agendan visitas, venta de cuentas de streaming y otros. El agente se adapta al rubro configurado.\n\n" +
     "P: ¿Puedo probarlo antes de pagar?\nR: Sí, puedes crear tu cuenta y probar el agente con el simulador y este mismo chat es un ejemplo del agente funcionando.\n\n" +
     "P: ¿Puedo atender yo mismo algunas conversaciones?\nR: Sí. Puedes pausar el bot en cualquier chat y responder tú desde el panel (atención humana), y reactivarlo cuando quieras.",
   contacto:

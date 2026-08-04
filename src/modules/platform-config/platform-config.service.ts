@@ -14,6 +14,7 @@ export const VERTICALS: { value: BusinessVertical; label: string }[] = [
   { value: "RESTAURANT", label: "Restaurante / comida" },
   { value: "STREAMER", label: "Streamer / suscripciones" },
   { value: "SERVICE", label: "Servicios" },
+  { value: "REAL_ESTATE", label: "Inmobiliaria (venta y alquiler de inmuebles)" },
   { value: "OTHER", label: "Otro" },
 ];
 
