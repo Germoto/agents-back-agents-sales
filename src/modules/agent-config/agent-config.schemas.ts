@@ -60,6 +60,8 @@ export const coreAgentConfigSchema = z.object({
   basePrompt: z.string().min(1),
   salesStyle: z.string().min(1),
   rules: z.array(z.string().min(1)).default([]),
+  // Si el cliente pide rebaja: intentar una vez y derivar a un asesor humano.
+  negotiationHandoff: z.boolean().optional(),
 });
 
 // PUT /agent-config/reminders — solo followupConfig.

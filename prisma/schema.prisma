@@ -259,6 +259,10 @@ model AgentConfig {
   // ofreció enganche (cross-sell), pasar al cliente a la lista de atención
   // humana automáticamente. Activado por defecto.
   muteAfterSale  Boolean  @default(true)
+  // Negociación de precio: si el cliente pide rebaja/descuento, el agente lo
+  // intenta una vez con el argumento de valor y luego DERIVA a un asesor humano
+  // (en vez de cerrarse con el precio del catálogo). Apagado por defecto.
+  negotiationHandoff Boolean @default(false)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

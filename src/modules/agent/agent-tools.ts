@@ -1223,12 +1223,20 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "derivar_humano",
-      description: "Pausa el bot y avisa a un asesor humano. Úsalo si el cliente lo pide o hay un problema que no puedes resolver.",
+      description:
+        "Pausa el bot y avisa a un asesor humano. Úsalo si el cliente lo pide, si hay un problema que no puedes resolver, o (si la política del negocio lo permite) cuando el cliente insiste en negociar el precio.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["reason"],
-        properties: { reason: { type: "string" } },
+        properties: {
+          reason: { type: "string" },
+          motivo: {
+            type: "string",
+            enum: ["NEGOCIACION", "RECLAMO", "PAGO", "OTRO"],
+            description: "Categoría del traspaso. NEGOCIACION = el cliente pide rebaja/descuento.",
+          },
+        },
       },
     },
   },
@@ -2046,7 +2054,11 @@ export async function executeTool(
 
     case "derivar_humano": {
       ctx.state.status = "ASESOR_HUMANO";
-      ctx.state.pendingAction = `HUMAN: ${String(args.reason ?? "")}`;
+      // El motivo va tipado entre corchetes para que el aviso al dueño y el
+      // panel puedan distinguir una negociación de un reclamo o un problema.
+      const motivo = String(args.motivo ?? "").toUpperCase();
+      const tag = ["NEGOCIACION", "RECLAMO", "PAGO", "OTRO"].includes(motivo) ? `[${motivo}]` : "";
+      ctx.state.pendingAction = `HUMAN${tag}: ${String(args.reason ?? "")}`;
       return JSON.stringify({ ok: true, note: "Conversación marcada para asesor humano. Despídete amablemente indicando que un asesor continuará." });
     }
 

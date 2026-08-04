@@ -232,6 +232,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
   const rules = Array.isArray(config.agent.rules) ? config.agent.rules : [];
   const paymentMode = config.payment.paymentMode; // before_delivery | cash_on_delivery | manual
   const vertical = (config.business as { vertical?: string }).vertical;
+  // Toggle del dueño: ante un pedido de rebaja, derivar a un asesor humano.
+  const negotiationHandoff = !!(config.agent as { negotiationHandoff?: boolean }).negotiationHandoff;
 
   // Entrega a nivel negocio (restaurante): se aplica a todos los productos.
   const biz = config.business as { deliveryConfig?: Record<string, unknown> | null };
@@ -287,6 +289,14 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     `- Modo de pago del negocio: *${paymentMode}*. before_delivery = cobra y valida el pago (enviar_metodos_pago + validar_pago) ANTES de registrar el pedido. cash_on_delivery = toma los datos y registra el pedido (paga contra entrega), sin cobrar antes. manual = registra el pedido y coordina el pago con un asesor.`,
     "- Si el cliente se enfría, deja en visto o tiene un carrito sin pagar, puedes programar un recordatorio con agendar_recordatorio.",
     "- Usa derivar_humano SOLO si el cliente pide EXPLÍCITAMENTE hablar con una persona/asesor, o si hay un problema real fuera de tu alcance (un reclamo, un error de pago, un pedido muy especial). NUNCA derives por preguntas que puedes responder, por no encontrar un producto (ofrece el catálogo) ni por saludos o dudas normales. Ante una duda: pregunta o responde, no derives.",
+    // Política de negociación de precio (toggle del dueño en Agente IA).
+    ...(negotiationHandoff
+      ? [
+          "- NEGOCIACIÓN DE PRECIO (EXCEPCIÓN a la regla anterior de derivación): si el cliente pide rebaja, descuento, 'precio especial', 'me lo dejas en X' o dice que solo tiene cierto monto: (1) la PRIMERA vez responde UNA sola vez destacando el valor del producto con su argumento/objeción configurada — sin ofrecer ningún descuento y SIN decir que el precio es fijo o cerrado; (2) si el cliente INSISTE, menciona un monto concreto, o ya había pedido rebaja antes en esta conversación → usa derivar_humano con motivo NEGOCIACION, indicando en reason el producto, su precio y lo que ofrece el cliente; despídete diciendo que un asesor continúa con él en un momento. NUNCA inventes, prometas ni concedas descuentos tú: eso lo decide el asesor.",
+        ]
+      : [
+          "- El precio del catálogo es el precio final: no ofrezcas ni negocies descuentos. Si piden rebaja, responde con el valor del producto (su argumento/objeción configurada) y continúa el flujo de venta normal.",
+        ]),
     "",
     "Catálogo disponible:",
     renderCatalog(config.products, vertical, state.selectedProductId),

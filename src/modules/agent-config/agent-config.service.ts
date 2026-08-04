@@ -15,6 +15,7 @@ function mapAgentConfig(config: {
   testNumbers?: unknown;
   mutedNumbers?: unknown;
   muteAfterSale?: boolean;
+  negotiationHandoff?: boolean;
   createdAt: Date;
   updatedAt: Date;
 } | null) {
@@ -35,6 +36,7 @@ function mapAgentConfig(config: {
       ? config.mutedNumbers.filter((item): item is string => typeof item === "string")
       : [],
     muteAfterSale: config.muteAfterSale ?? true,
+    negotiationHandoff: config.negotiationHandoff ?? false,
   };
 }
 
@@ -52,6 +54,7 @@ export async function upsertAgentConfig(companyId: string, data: {
   basePrompt: string;
   salesStyle: string;
   rules: string[];
+  negotiationHandoff?: boolean;
 }) {
   const core = {
     openaiModel: data.openaiModel,
@@ -60,6 +63,9 @@ export async function upsertAgentConfig(companyId: string, data: {
     basePrompt: data.basePrompt,
     salesStyle: data.salesStyle,
     rules: data.rules as Prisma.InputJsonValue,
+    ...(typeof data.negotiationHandoff === "boolean"
+      ? { negotiationHandoff: data.negotiationHandoff }
+      : {}),
   };
   const config = await prisma.agentConfig.upsert({
     where: { companyId },

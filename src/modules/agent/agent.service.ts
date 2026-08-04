@@ -1226,12 +1226,19 @@ async function notifyAdmin(
   if (!adminPhone) return;
   const to = adminPhone.replace(/\D/g, "");
   const num = customerPhone.replace(/\D/g, "");
+  // Negociación de precio: encabezado propio para que el dueño sepa que hay
+  // una venta que cerrar (no un problema que resolver).
+  const reasonText = String(reason ?? "—");
+  const isNegotiation = reasonText.includes("[NEGOCIACION]");
+  const header = isNegotiation
+    ? `💬 Negociación de precio: el cliente (${customerPhone}) pide una rebaja.`
+    : `🔔 Un cliente (${customerPhone}) necesita atención humana.`;
   try {
     await sendText(
       sender,
       to,
-      `🔔 Un cliente (${customerPhone}) necesita atención humana.\n` +
-        `Motivo: ${String(reason ?? "—")}\n\n` +
+      `${header}\n` +
+        `Motivo: ${reasonText.replace(/^HUMAN(\[[A-Z]+\])?:\s*/, "")}\n\n` +
         `El bot quedó pausado para este cliente. Para atenderlo tú:\n` +
         `• Responder: *${num} tu mensaje*\n` +
         `• Reactivar el bot: *BOT ${num}*\n` +
