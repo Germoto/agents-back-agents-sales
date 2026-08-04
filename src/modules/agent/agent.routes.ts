@@ -14,7 +14,6 @@ import {
   startConversationController,
   scheduleReminderController,
 } from "./conversations.controller";
-import { listBookingsController, updateBookingStatusController } from "./bookings.controller";
 import {
   simulateMessagesController,
   simulateTurnController,
@@ -53,8 +52,6 @@ router.post("/simulate", requireAuth, simulateTurnController);
 router.post("/simulate/reset", requireAuth, simulateResetController);
 
 // Reservas de servicios (panel)
-router.get("/bookings", requireAuth, listBookingsController);
-router.post("/bookings/:id/status", requireAuth, updateBookingStatusController);
 
 // Recordatorios programados (panel > Recordatorios > Programados): ver y cancelar.
 router.get("/reminders", requireAuth, listRemindersController);

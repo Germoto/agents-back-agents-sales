@@ -81,6 +81,11 @@ async function processDue(): Promise<void> {
   for (const msg of due) {
     const isInternal =
       msg.type === ScheduledMessageType.FLOW_TIMEOUT || msg.type === ScheduledMessageType.PAYMENT_RECHECK;
+    // Recordatorio de CITA: debe salir a SU hora exacta. Se exime del clamp de
+    // horario hábil y del anti-spam (que lo correrían minutos u horas), igual
+    // que los internos, pero sí es un mensaje visible para el cliente.
+    const isBooking = msg.type === ScheduledMessageType.BOOKING_REMINDER;
+    const keepExactTime = isInternal || isBooking;
     const custKey = `${msg.companyId}:${msg.customerId}`;
 
     // Guard de negocio (red de seguridad): un recordatorio de SEGUIMIENTO no debe
@@ -117,7 +122,10 @@ async function processDue(): Promise<void> {
       // (ENTREGADO) y a veces con el chat en atención humana: debe dispararse igual.
       // Por eso se exime del cancel por "cerrado" y por "pausa". El resto de tipos
       // (ABANDONED_CART, LEFT_ON_READ, etc. — infoproductos) se comportan IGUAL que antes.
-      const isRenewal = msg.type === ScheduledMessageType.RENEWAL;
+      // BOOKING_REMINDER se exime igual que RENEWAL: la cita existe aunque la
+      // conversación esté "cerrada" (RESERVA_SOLICITADA es justamente el estado
+      // que deja agendar) o en atención humana.
+      const isRenewal = msg.type === ScheduledMessageType.RENEWAL || isBooking;
       const closed = !isRenewal && ["PAGADO", "ENTREGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status);
       // Recordatorio MANUAL (programado por un humano desde el panel): se envía
       // aunque la conversación esté en atención humana (botPaused) — para eso lo
@@ -141,7 +149,7 @@ async function processDue(): Promise<void> {
     // ni los reintentos de pago, que son urgentes) no se envían fuera de la
     // ventana del tenant; se reprograman al próximo horario válido sin
     // reclamarlos (cubre filas viejas o creadas con anticipación).
-    if (!isInternal) {
+    if (!keepExactTime) {
       const qc = await getQuietConfig(msg.companyId, quietCache);
       if (qc.tz) {
         const next = clampToBusinessHours(now, qc.tz, qc.quiet);
@@ -159,7 +167,7 @@ async function processDue(): Promise<void> {
     // pasada, no encimar el siguiente; reprogramarlo MIN_GAP_MS más tarde (sin
     // reclamarlo). En un tick posterior se reevalúa y vuelve a espaciarse si hace
     // falta, serializando la ráfaga con separación. Los internos no cuentan.
-    if (!isInternal && sentToCustomer.has(custKey)) {
+    if (!keepExactTime && sentToCustomer.has(custKey)) {
       await prisma.scheduledMessage.updateMany({
         where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
         data: { sendAt: new Date(now.getTime() + MIN_GAP_MS) },

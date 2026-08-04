@@ -97,6 +97,11 @@ export function mapAdminProduct(product: ProductWithRelations) {
     category: product.category ?? null,
     verticalData: (product.verticalData ?? null) as Record<string, unknown> | null,
     reminderConfig: (product.reminderConfig ?? null) as Record<string, unknown> | null,
+    // Agenda de citas (rubro SERVICE): el panel y el widget necesitan estos datos.
+    durationMin: product.durationMin,
+    slotCapacity: product.slotCapacity,
+    bookingLeadMinutes: product.bookingLeadMinutes,
+    bookingHorizonDays: product.bookingHorizonDays,
     sortOrder: product.sortOrder,
     aliases: product.aliases.map((item) => item.value),
     benefits: product.benefits.map((item) => item.value),

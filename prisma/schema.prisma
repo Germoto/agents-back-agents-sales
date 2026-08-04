@@ -98,6 +98,7 @@ enum ScheduledMessageType {
   FLOW_TIMEOUT
   PAYMENT_RECHECK
   RENEWAL
+  BOOKING_REMINDER
 }
 
 enum ScheduledMessageStatus {
@@ -142,6 +143,8 @@ model Company {
   // Config de entrega a nivel negocio (restaurante/físico): { cost, time, areas[],
   // pickupAvailable, requiresAddress }. El agente la usa para todos los productos.
   deliveryConfig    Json?
+  // Horario de atención para la AGENDA de citas: [{ day: 0-6, from: "09:00", to: "18:00" }]
+  businessHours     Json?
   timezone          String                @default("America/Lima")
   // Modo de operación del bot: "AI" (agente IA abierto) | "FLOW" (chatbot de
   // flujos guiados). Excluyentes: en modo FLOW el agente IA no responde.
@@ -168,11 +171,13 @@ model Company {
   carts             Cart[]
   scheduledMessages ScheduledMessage[]
   serviceBookings   ServiceBooking[]
+  scheduleBlocks    ScheduleBlock[]
   orders            Order[]
   digitalSales      DigitalSale[]
   paymentReceipts   PaymentReceipt[]
   webhookEndpoints  WebhookEndpoint[]
   webchatConfig     WebchatConfig?
+  bookingWidget     BookingWidgetConfig?
   platformPayments  PlatformPayment[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
@@ -290,6 +295,26 @@ model WebchatConfig {
   company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
+/**
+ * Widget de reservas embebible: el tenant lo pega en su propia web y sus
+ * clientes agendan solos contra el mismo motor de disponibilidad del agente.
+ */
+model BookingWidgetConfig {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String   @unique @db.Uuid
+  enabled        Boolean  @default(false)
+  token          String   @unique
+  allowedOrigins String[] @default([])
+  headline       String   @default("")
+  accentColor    String   @default("")
+  successMessage String   @default("")
+  // Servicios reservables desde el widget (vacío = todos los activos con duración).
+  productIds     String[] @default([])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
 model WhatsappConfig {
   id              String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId       String               @unique @db.Uuid
@@ -368,6 +393,12 @@ model Product {
   price            String
   regularPrice     String?
   stock            Int?
+  // --- Agenda (rubro SERVICE): datos tipados que usa el motor de disponibilidad.
+  // Los campos de texto de verticalData siguen sirviendo de descripción al prompt.
+  durationMin        Int?
+  slotCapacity       Int?     @default(1) // citas simultáneas en el mismo horario
+  bookingLeadMinutes Int?                 // anticipación mínima para reservar
+  bookingHorizonDays Int?                 // hasta cuántos días adelante se puede reservar
   shortDescription String
   fullDescription  String
   // Mensaje de presentación que el bot envía TAL CUAL al presentar el producto
@@ -975,10 +1006,17 @@ model ServiceBooking {
   companyId     String               @db.Uuid
   customerId    String               @db.Uuid
   productId     String               @db.Uuid
-  requestedText String               // p.ej. "este sábado 4pm"
+  requestedText String               // horario tal como lo dijo el cliente (respaldo/histórico)
   modality      String?              // presencial | online | ...
   status        ServiceBookingStatus @default(SOLICITADA)
   notes         String?
+  // --- Agenda real (cita con fecha y hora) ---
+  startsAt      DateTime?            // null = reserva vaga, sin hora fijada
+  endsAt        DateTime?
+  durationMin   Int?
+  bookingCode   String?              @unique
+  source        String               @default("agent") // agent | widget | manual
+  cancelToken   String?              // cancelación desde el widget público
   createdAt     DateTime             @default(now())
   updatedAt     DateTime             @updatedAt
   company       Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -986,6 +1024,21 @@ model ServiceBooking {
   product       Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([companyId, createdAt])
+  @@index([companyId, startsAt])
+}
+
+/// Bloqueo de agenda (feriado, vacaciones, evento): ningún slot disponible
+/// dentro del rango, aunque el horario de atención lo permita.
+model ScheduleBlock {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String   @db.Uuid
+  startsAt  DateTime
+  endsAt    DateTime
+  reason    String?
+  createdAt DateTime @default(now())
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, startsAt])
 }
 
 model Order {

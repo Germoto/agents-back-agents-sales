@@ -57,6 +57,11 @@ export const productBodySchema = z.object({
   price: z.string().min(1),
   regularPrice: z.string().nullable().optional(),
   stock: z.coerce.number().int().nullable().optional(),
+  // Agenda (rubro SERVICE): datos tipados del motor de disponibilidad.
+  durationMin: z.coerce.number().int().min(5).max(600).nullable().optional(),
+  slotCapacity: z.coerce.number().int().min(1).max(50).nullable().optional(),
+  bookingLeadMinutes: z.coerce.number().int().min(0).max(10080).nullable().optional(),
+  bookingHorizonDays: z.coerce.number().int().min(1).max(120).nullable().optional(),
   shortDescription: z.string().min(1),
   // Opcional: varios rubros (restaurante/streaming) no usan descripción completa.
   fullDescription: z.string().optional().default(""),

@@ -8,6 +8,11 @@ import productsRoutes from "../modules/products/products.routes";
 import productFilesRoutes from "../modules/product-files/product-files.routes";
 import customersRoutes from "../modules/customers/customers.routes";
 import ordersRoutes from "../modules/orders/orders.routes";
+import bookingsRoutes from "../modules/bookings/bookings.routes";
+import {
+  bookingWidgetConfigRoutes,
+  bookingWidgetPublicRoutes,
+} from "../modules/bookings/booking-widget.routes";
 import digitalSalesRoutes from "../modules/digital-sales/digital-sales.routes";
 import streamingInventoryRoutes from "../modules/streaming-inventory/streaming-inventory.routes";
 import subscriptionsRoutes from "../modules/subscriptions/subscriptions.routes";
@@ -51,6 +56,10 @@ router.use("/products", billingGuard(), productsRoutes);
 router.use("/product-files", billingGuard(), productFilesRoutes);
 router.use("/customers", billingGuard(), customersRoutes);
 router.use("/orders", billingGuard(), ordersRoutes);
+// Agenda de citas (rubro SERVICE): disponibilidad, citas y bloqueos
+router.use("/bookings", billingGuard(), bookingsRoutes);
+// Config del widget de reservas (panel). El widget público va en /public/booking.
+router.use("/booking-widget", billingGuard(), bookingWidgetConfigRoutes);
 router.use("/digital-sales", billingGuard(), digitalSalesRoutes);
 // Inventario de credenciales/cuentas de streaming (rubro STREAMER)
 router.use("/streaming-inventory", billingGuard(), streamingInventoryRoutes);
@@ -108,6 +117,8 @@ router.use("/public/plans", billingPublicRoutes);
 // Recursos de capacitación globales (Centro de ayuda del tenant). Siempre
 // visibles, incluso con la suscripción vencida: NUNCA montarle billingGuard.
 router.use("/training-resources", trainingRoutes);
+// Widget de reservas embebido en la web del tenant (sin auth: token + dominio).
+router.use("/public/booking", bookingWidgetPublicRoutes);
 // Pre-registro público del landing (sin auth, con rate limiting propio).
 router.use("/public/registration", registrationRoutes);
 

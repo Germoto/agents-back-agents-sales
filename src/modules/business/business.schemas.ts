@@ -30,6 +30,18 @@ export const updateBusinessSchema = z.object({
   botMode: z.enum(["AI", "FLOW"]).default("AI"),
   isActive: z.boolean().default(true),
   deliveryConfig: deliveryConfigSchema,
+  // Horario de atención para la agenda de citas (rubro SERVICE).
+  businessHours: z
+    .array(
+      z.object({
+        day: z.coerce.number().int().min(0).max(6),
+        from: z.string().regex(/^\d{1,2}:\d{2}$/, "Hora inválida (HH:mm)"),
+        to: z.string().regex(/^\d{1,2}:\d{2}$/, "Hora inválida (HH:mm)"),
+      }),
+    )
+    .max(30)
+    .nullable()
+    .optional(),
   // Firma anexada a los mensajes automáticos (agente IA + flujos).
   firmaEnabled: z.boolean().default(false),
   firmaText: z.string().trim().max(60).nullable().optional(),

@@ -31,7 +31,8 @@ import {
   updatePaymentStatus,
 } from "../public-payments/public-payments.service";
 import { createAgentOrder, createOrderFromCart } from "./order.service";
-import { createBooking } from "./booking.service";
+import { createBooking } from "../bookings/bookings.service";
+import { getAvailableSlots, formatSlotLabel } from "../bookings/availability.service";
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
 import { claimAvailableCredential, countAvailable, peekAvailableCredential } from "../streaming-inventory/streaming-inventory.service";
 import { createSubscriptionForSale, type RenewalReminderConfig } from "../subscriptions/subscriptions.service";
@@ -1187,16 +1188,40 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "agendar_servicio",
       description:
-        "Registra una reserva de un SERVICIO (rubro servicios) cuando el cliente acepta y da un horario preferido. Guarda el horario tal cual lo dice el cliente; un asesor confirmará el detalle.",
+        "Agenda la CITA de un SERVICIO. Usa 'startsAt' con uno de los horarios EXACTOS que devolvió consultar_disponibilidad (la cita queda confirmada al instante). Solo si el cliente no quiere fijar hora, manda 'requestedText' con lo que dijo y un asesor coordinará.",
       parameters: {
         type: "object",
         additionalProperties: false,
-        required: ["productId", "requestedText"],
+        required: ["productId"],
         properties: {
           productId: { type: "string", description: "id del servicio" },
-          requestedText: { type: "string", description: "Fecha/hora preferida tal como la dijo el cliente (ej. 'sábado 4pm')" },
+          startsAt: {
+            type: "string",
+            description: "Inicio EXACTO de la cita en ISO (copiado tal cual de consultar_disponibilidad)",
+          },
+          requestedText: { type: "string", description: "Solo si no hay hora exacta: lo que dijo el cliente (ej. 'sábado por la tarde')" },
           modality: { type: "string", description: "presencial | online (si aplica)" },
           notes: { type: "string", description: "Detalles o requisitos del cliente" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "consultar_disponibilidad",
+      description:
+        "Devuelve los horarios LIBRES reales de un servicio para ofrecérselos al cliente. Úsalo SIEMPRE antes de agendar una cita. Nunca inventes horarios.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId"],
+        properties: {
+          productId: { type: "string", description: "id del servicio" },
+          desde: {
+            type: "string",
+            description: "Opcional: fecha ISO desde la que buscar (ej. si el cliente dice 'la próxima semana')",
+          },
         },
       },
     },
@@ -2006,39 +2031,111 @@ export async function executeTool(
       }
     }
 
+    case "consultar_disponibilidad": {
+      const product = findProductById(ctx, String(args.productId ?? ""));
+      if (!product) return JSON.stringify({ ok: false, error: "servicio no encontrado" });
+      if (ctx.simulate) {
+        return JSON.stringify({
+          ok: true,
+          simulated: true,
+          slots: [
+            { startsAt: "2026-01-01T15:00:00.000Z", label: "(simulación) mañana 10:00" },
+            { startsAt: "2026-01-01T16:00:00.000Z", label: "(simulación) mañana 11:00" },
+          ],
+          note: "(simulación) Ofrece estos horarios y agenda con agendar_servicio.",
+        });
+      }
+      try {
+        const desde = args.desde ? new Date(String(args.desde)) : undefined;
+        const { slots, timezone, configured, durationMin } = await getAvailableSlots(ctx.companyId, product.id, {
+          from: desde && !isNaN(desde.getTime()) ? desde : undefined,
+          limit: 8,
+        });
+        if (!configured) {
+          return JSON.stringify({
+            ok: false,
+            error: "el negocio aún no configuró su horario de atención",
+            note: "No inventes horarios: pídele al cliente su preferencia y agenda con requestedText para que un asesor confirme.",
+          });
+        }
+        if (!slots.length) {
+          return JSON.stringify({ ok: true, slots: [], note: "No hay horarios libres en el rango. Ofrece buscar en otra fecha." });
+        }
+        return JSON.stringify({
+          ok: true,
+          timezone,
+          durationMin,
+          slots: slots.map((s) => ({ startsAt: s.startsAt, label: s.label })),
+          note: "Ofrece 2-3 de estos horarios en lenguaje natural. Para agendar usa agendar_servicio con el startsAt EXACTO.",
+        });
+      } catch (err) {
+        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo consultar la agenda" });
+      }
+    }
+
     case "agendar_servicio": {
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "servicio no encontrado" });
       const requestedText = String(args.requestedText ?? "").trim();
-      if (!requestedText) return JSON.stringify({ ok: false, error: "falta el horario solicitado" });
+      const startsAtRaw = String(args.startsAt ?? "").trim();
+      if (!requestedText && !startsAtRaw) {
+        return JSON.stringify({ ok: false, error: "falta el horario: usa consultar_disponibilidad y pasa startsAt" });
+      }
       if (ctx.simulate) {
         ctx.state.status = "RESERVA_SOLICITADA";
         ctx.state.selectedProductId = product.id;
-        return JSON.stringify({ ok: true, bookingId: "SIM-0001", note: "(simulación) Reserva registrada. Un asesor confirmará el horario." });
+        return JSON.stringify({
+          ok: true,
+          bookingId: "SIM-0001",
+          note: startsAtRaw
+            ? "(simulación) Cita agendada. Confirma al cliente la fecha y hora."
+            : "(simulación) Reserva registrada. Un asesor confirmará el horario.",
+        });
       }
       try {
         const booking = await createBooking({
           companyId: ctx.companyId,
           customerId: ctx.customerId,
           productId: product.id,
-          requestedText,
+          requestedText: requestedText || null,
+          startsAt: startsAtRaw || null,
           modality: String(args.modality ?? "").trim() || null,
           notes: String(args.notes ?? "").trim() || null,
         });
         ctx.state.status = "RESERVA_SOLICITADA";
         ctx.state.selectedProductId = product.id;
+        const when = booking.startsAt
+          ? formatSlotLabel(booking.startsAt, (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima")
+          : requestedText;
         ctx.adminNotices.push(
-          `📅 Nueva reserva (${ctx.customerPhone}): ${product.name} — "${requestedText}"${
+          `📅 ${booking.startsAt ? "Nueva CITA" : "Nueva reserva"} (${ctx.customerPhone}): ${product.name} — ${when}${
             args.modality ? ` · ${args.modality}` : ""
-          }.`,
+          }${booking.bookingCode ? ` · ${booking.bookingCode}` : ""}.`,
         );
         return JSON.stringify({
           ok: true,
           bookingId: booking.id,
-          note: "Reserva registrada como SOLICITADA. Confirma al cliente que un asesor coordinará el horario exacto.",
+          bookingCode: booking.bookingCode,
+          startsAt: booking.startsAt,
+          when,
+          note: booking.startsAt
+            ? `Cita CONFIRMADA para ${when}. Confírmasela al cliente con día y hora, y dile que le recordaremos antes.`
+            : "Reserva registrada como SOLICITADA. Confirma al cliente que un asesor coordinará el horario exacto.",
         });
       } catch (err) {
-        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo registrar la reserva" });
+        // Slot ocupado / fuera de horario: devolver alternativas para reproponer.
+        const message = err instanceof Error ? err.message : "no se pudo registrar la reserva";
+        try {
+          const { slots } = await getAvailableSlots(ctx.companyId, product.id, { limit: 5 });
+          return JSON.stringify({
+            ok: false,
+            error: message,
+            alternativas: slots.map((s) => ({ startsAt: s.startsAt, label: s.label })),
+            note: "Ese horario ya no está disponible. Ofrece estas alternativas al cliente.",
+          });
+        } catch {
+          return JSON.stringify({ ok: false, error: message });
+        }
       }
     }
 

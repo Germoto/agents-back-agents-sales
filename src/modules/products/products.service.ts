@@ -16,6 +16,10 @@ type ProductPayload = {
   price: string;
   regularPrice?: string | null;
   stock?: number | null;
+  durationMin?: number | null;
+  slotCapacity?: number | null;
+  bookingLeadMinutes?: number | null;
+  bookingHorizonDays?: number | null;
   shortDescription: string;
   fullDescription?: string;
   presentationMessage?: string | null;
@@ -351,6 +355,10 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         price: payload.price,
         regularPrice: payload.regularPrice ?? null,
         stock: payload.stock ?? null,
+        durationMin: payload.durationMin ?? null,
+        slotCapacity: payload.slotCapacity ?? null,
+        bookingLeadMinutes: payload.bookingLeadMinutes ?? null,
+        bookingHorizonDays: payload.bookingHorizonDays ?? null,
         shortDescription: payload.shortDescription,
         fullDescription: payload.fullDescription ?? "",
         presentationMessage: payload.presentationMessage ?? null,
@@ -395,6 +403,10 @@ export async function updateProduct(companyId: string, productId: string, payloa
         price: payload.price,
         regularPrice: payload.regularPrice ?? null,
         stock: payload.stock ?? null,
+        durationMin: payload.durationMin ?? null,
+        slotCapacity: payload.slotCapacity ?? null,
+        bookingLeadMinutes: payload.bookingLeadMinutes ?? null,
+        bookingHorizonDays: payload.bookingHorizonDays ?? null,
         shortDescription: payload.shortDescription,
         fullDescription: payload.fullDescription ?? "",
         presentationMessage: payload.presentationMessage ?? null,

@@ -218,7 +218,12 @@ function verticalGuidance(vertical: string | undefined): string {
         "COMBOS: el cliente puede llevar varias plataformas a la vez (ej. Netflix + Disney + IPTV) o varias unidades; agrégalas todas al carrito (agregar_carrito) y cobra el total combinado con ver_carrito/enviar_metodos_pago. " +
         "Cobra y, tras validar el pago, entrega el acceso (flujo digital). Haz upsell del plan superior y ofrece renovación cuando esté por vencer.";
     case "SERVICE":
-      return "Rubro SERVICIOS: vendes servicios (citas, asesorías, reservas). Explica alcance, duración y modalidad (presencial/online) y requisitos. Cuando el cliente acepte, pregunta su horario preferido y usa agendar_servicio para registrar la reserva (queda SOLICITADA; un asesor confirma el horario exacto). Si hay seña/depósito configurado, cóbralo con enviar_metodos_pago + validar_pago antes de confirmar. No inventes disponibilidad horaria que no esté configurada.";
+      return "Rubro SERVICIOS: vendes servicios con CITA (asesorías, consultas, sesiones). Explica alcance, duración, modalidad (presencial/online) y requisitos. " +
+        "AGENDA: cuando el cliente quiera reservar, usa SIEMPRE consultar_disponibilidad para ver los horarios libres REALES y ofrécele 2-3 opciones en lenguaje natural ('tengo el martes 10:00 o 16:00, ¿cuál te queda mejor?'). NUNCA inventes horarios ni prometas uno sin consultar. " +
+        "Cuando elija, agenda con agendar_servicio pasando el startsAt EXACTO que te dio la herramienta; la cita queda CONFIRMADA. Confírmasela al cliente con día y hora completos y dile que le enviaremos un recordatorio antes. " +
+        "Si la herramienta responde que el horario ya no está libre, discúlpate brevemente y ofrece las alternativas que te devuelve. " +
+        "Si el cliente no quiere fijar hora todavía, agenda con requestedText (queda SOLICITADA para que un asesor coordine). " +
+        "Si hay seña/depósito configurado, cóbralo con enviar_metodos_pago + validar_pago antes de confirmar la cita.";
     case "PHYSICAL_GOODS":
       return "Rubro PRODUCTOS FÍSICOS: prioriza catálogo, variantes (talla/color), stock y envío. Cierra con registrar_pedido tras tomar datos de entrega.";
     case "INFOPRODUCT":

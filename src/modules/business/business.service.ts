@@ -43,6 +43,7 @@ export async function updateBusinessProfile(companyId: string, data: {
   botMode?: "AI" | "FLOW";
   isActive: boolean;
   deliveryConfig?: DeliveryConfigInput | null;
+  businessHours?: Array<{ day: number; from: string; to: string }> | null;
   firmaEnabled?: boolean;
   firmaText?: string | null;
   messageGapEnabled?: boolean;
@@ -89,13 +90,29 @@ export async function updateBusinessProfile(companyId: string, data: {
     }
   }
 
-  const { deliveryConfig, ...rest } = data;
-  const deliveryValue: Prisma.InputJsonValue | typeof Prisma.JsonNull =
-    deliveryConfig == null ? Prisma.JsonNull : (deliveryConfig as Prisma.InputJsonValue);
+  const { deliveryConfig, businessHours, ...rest } = data;
 
   const updated = await prisma.company.update({
     where: { id: companyId },
-    data: { ...rest, deliveryConfig: deliveryValue },
+    data: {
+      ...rest,
+      // Config de entrega: igual que el horario, solo se toca si vino en el
+      // payload (la pestaña Agenda no envía este bloque y no debe borrarlo).
+      ...(deliveryConfig !== undefined
+        ? {
+            deliveryConfig:
+              deliveryConfig === null ? Prisma.JsonNull : (deliveryConfig as Prisma.InputJsonValue),
+          }
+        : {}),
+      // Horario de atención de la agenda: solo se toca si vino en el payload
+      // (las otras pestañas de Empresa no deben borrarlo).
+      ...(businessHours !== undefined
+        ? {
+            businessHours:
+              businessHours === null ? Prisma.JsonNull : (businessHours as unknown as Prisma.InputJsonValue),
+          }
+        : {}),
+    },
     include: { _count: { select: { products: true } } },
   });
   // La firma se cachea en el módulo de entrega: invalidar tras guardar.

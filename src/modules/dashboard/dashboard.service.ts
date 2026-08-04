@@ -221,7 +221,19 @@ export async function getDashboardStats(params: DashboardParams) {
   const productClause = productId
     ? { OR: [{ productId }, { productIds: { has: productId } }] }
     : {};
-  const [customersWindow, conversationsCur, conversationsPrev, pendingReceipts, remindersCur, remindersPrev, flowsTotal, flowsActive] =
+  const [
+    customersWindow,
+    conversationsCur,
+    conversationsPrev,
+    pendingReceipts,
+    remindersCur,
+    remindersPrev,
+    flowsTotal,
+    flowsActive,
+    bookingsCur,
+    bookingsPrev,
+    bookingsUpcoming,
+  ] =
     await Promise.all([
       // Clientes creados en [prevFrom, toDate] (ids para separar actual/anterior y
       // cruzar con quienes cerraron venta).
@@ -233,6 +245,20 @@ export async function getDashboardStats(params: DashboardParams) {
       prisma.scheduledMessage.count({ where: { companyId, status: "SENT", type: { in: FOLLOWUP_TYPES as any }, sentAt: { gte: prevFrom, lte: prevTo } } }),
       prisma.chatFlow.count({ where: { companyId } }),
       prisma.chatFlow.count({ where: { companyId, isActive: true } }),
+      // Citas agendadas en el periodo (rubro servicios) y las que vienen en 24 h.
+      prisma.serviceBooking.count({
+        where: { companyId, createdAt: { gte: fromDate, lte: toDate }, status: { not: "CANCELADA" } },
+      }),
+      prisma.serviceBooking.count({
+        where: { companyId, createdAt: { gte: prevFrom, lte: prevTo }, status: { not: "CANCELADA" } },
+      }),
+      prisma.serviceBooking.count({
+        where: {
+          companyId,
+          startsAt: { gte: now, lte: new Date(now.getTime() + DAY_MS) },
+          status: { in: ["SOLICITADA", "CONFIRMADA"] },
+        },
+      }),
     ]);
 
   const newIdsCur = customersWindow.filter((c) => inRange(c.createdAt, fromDate, toDate)).map((c) => c.id);
@@ -274,6 +300,8 @@ export async function getDashboardStats(params: DashboardParams) {
       pendingReceipts,
       remindersSent: { value: remindersCur, prev: remindersPrev },
       convertedLeads,
+      bookings: { value: bookingsCur, prev: bookingsPrev },
+      upcomingBookings: bookingsUpcoming,
     },
     series,
     topProducts,
@@ -333,7 +361,8 @@ export async function getDashboardExportData(params: DashboardParams) {
     return Number.isFinite(a) && a > 0 ? r2(a) : 0;
   };
 
-  const [salesRaw, pendingRaw, customersRaw, remindersRaw, conversationsRaw, productName] = await Promise.all([
+  const [salesRaw, pendingRaw, customersRaw, remindersRaw, conversationsRaw, bookingsRaw, productName] =
+    await Promise.all([
     prisma.paymentReceipt.findMany({
       where: {
         companyId,
@@ -426,6 +455,23 @@ export async function getDashboardExportData(params: DashboardParams) {
         lastMessageAt: true,
         closedAt: true,
         customer: { select: { name: true, phone: true } },
+      },
+      orderBy: { createdAt: "asc" },
+      take: EXPORT_ROW_CAP,
+    }),
+    // Citas del periodo (rubro servicios): se exportan por fecha de creación.
+    prisma.serviceBooking.findMany({
+      where: { companyId, createdAt: { gte: fromDate, lte: toDate } },
+      select: {
+        createdAt: true,
+        startsAt: true,
+        durationMin: true,
+        status: true,
+        source: true,
+        bookingCode: true,
+        requestedText: true,
+        customer: { select: { name: true, phone: true } },
+        product: { select: { name: true } },
       },
       orderBy: { createdAt: "asc" },
       take: EXPORT_ROW_CAP,
@@ -528,5 +574,17 @@ export async function getDashboardExportData(params: DashboardParams) {
     newCustomers,
     reminders,
     conversations,
+    bookings: bookingsRaw.map((b) => ({
+      date: b.createdAt,
+      startsAt: b.startsAt,
+      durationMin: b.durationMin,
+      status: b.status,
+      source: b.source,
+      code: b.bookingCode,
+      service: b.product?.name ?? null,
+      customerName: b.customer?.name ?? null,
+      customerPhone: b.customer?.phone ?? null,
+      requestedText: b.requestedText,
+    })),
   };
 }
