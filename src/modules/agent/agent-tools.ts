@@ -31,8 +31,8 @@ import {
   updatePaymentStatus,
 } from "../public-payments/public-payments.service";
 import { createAgentOrder, createOrderFromCart } from "./order.service";
-import { createBooking } from "../bookings/bookings.service";
-import { getAvailableSlots, formatSlotLabel } from "../bookings/availability.service";
+import { createBooking, reasonMessage } from "../bookings/bookings.service";
+import { getAvailableSlots, formatSlotLabel, isSlotAvailable } from "../bookings/availability.service";
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
 import { claimAvailableCredential, countAvailable, peekAvailableCredential } from "../streaming-inventory/streaming-inventory.service";
 import { createSubscriptionForSale, type RenewalReminderConfig } from "../subscriptions/subscriptions.service";
@@ -2034,17 +2034,8 @@ export async function executeTool(
     case "consultar_disponibilidad": {
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "servicio no encontrado" });
-      if (ctx.simulate) {
-        return JSON.stringify({
-          ok: true,
-          simulated: true,
-          slots: [
-            { startsAt: "2026-01-01T15:00:00.000Z", label: "(simulación) mañana 10:00" },
-            { startsAt: "2026-01-01T16:00:00.000Z", label: "(simulación) mañana 11:00" },
-          ],
-          note: "(simulación) Ofrece estos horarios y agenda con agendar_servicio.",
-        });
-      }
+      // La consulta es de SOLO LECTURA: el simulador usa el motor real para que
+      // el dueño vea exactamente los horarios que ofrecería en producción.
       try {
         const desde = args.desde ? new Date(String(args.desde)) : undefined;
         const { slots, timezone, configured, durationMin } = await getAvailableSlots(ctx.companyId, product.id, {
@@ -2082,14 +2073,44 @@ export async function executeTool(
         return JSON.stringify({ ok: false, error: "falta el horario: usa consultar_disponibilidad y pasa startsAt" });
       }
       if (ctx.simulate) {
+        // Validación REAL del slot (solo lectura), sin crear la cita ni
+        // recordatorios: el simulador se comporta igual que producción pero
+        // no toca la agenda.
+        if (startsAtRaw) {
+          const parsed = new Date(startsAtRaw);
+          if (isNaN(parsed.getTime())) {
+            return JSON.stringify({ ok: false, error: "fecha inválida: usa el startsAt EXACTO de consultar_disponibilidad" });
+          }
+          try {
+            const check = await isSlotAvailable(ctx.companyId, product.id, parsed);
+            if (!check.ok) {
+              const { slots } = await getAvailableSlots(ctx.companyId, product.id, { limit: 5 });
+              return JSON.stringify({
+                ok: false,
+                error: reasonMessage(check.reason),
+                alternativas: slots.map((s) => ({ startsAt: s.startsAt, label: s.label })),
+                note: "Ese horario no está disponible. Ofrece estas alternativas al cliente.",
+              });
+            }
+            ctx.state.status = "RESERVA_SOLICITADA";
+            ctx.state.selectedProductId = product.id;
+            const tz = (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima";
+            return JSON.stringify({
+              ok: true,
+              bookingId: "SIM-0001",
+              when: formatSlotLabel(parsed, tz),
+              note: `(simulación) Cita validada contra tu agenda real para ${formatSlotLabel(parsed, tz)}. Confírmasela al cliente. En producción se crearía la cita con código y recordatorios 24h/2h; en el simulador NO se guarda nada.`,
+            });
+          } catch {
+            // Si la validación falla (p. ej. sin horario configurado), cae al flujo genérico.
+          }
+        }
         ctx.state.status = "RESERVA_SOLICITADA";
         ctx.state.selectedProductId = product.id;
         return JSON.stringify({
           ok: true,
           bookingId: "SIM-0001",
-          note: startsAtRaw
-            ? "(simulación) Cita agendada. Confirma al cliente la fecha y hora."
-            : "(simulación) Reserva registrada. Un asesor confirmará el horario.",
+          note: "(simulación) Reserva registrada como SOLICITADA. En producción un asesor confirmaría el horario; en el simulador no se guarda nada.",
         });
       }
       try {

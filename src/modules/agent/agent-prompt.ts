@@ -273,10 +273,31 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     if (parts.length) deliveryLine = `Entrega del negocio (aplica a todo el catálogo): ${parts.join(" · ")}. Valida la dirección del cliente contra estas zonas.`;
   }
 
+  // Fecha/hora actual en la TZ del negocio: sin esto el modelo no puede
+  // convertir "mañana" o "miércoles 05/08" a una fecha real (agenda, vencimientos).
+  const tz = (config.business as { timezone?: string }).timezone || "America/Lima";
+  let nowLine = "";
+  try {
+    const nowFmt = new Intl.DateTimeFormat("es-PE", {
+      timeZone: tz,
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date());
+    nowLine = `Fecha y hora actual: ${nowFmt} (${tz}).`;
+  } catch {
+    nowLine = `Fecha y hora actual (UTC): ${new Date().toISOString()}.`;
+  }
+
   return [
     config.agent.basePrompt,
     "",
     `Negocio: ${config.business.name}. Estilo comercial: ${config.agent.salesStyle}.`,
+    nowLine,
     `Rubro del negocio: ${vertical ?? "INFOPRODUCT"}. ${verticalGuidance(vertical)}`,
     ...(deliveryLine ? [deliveryLine] : []),
     "",

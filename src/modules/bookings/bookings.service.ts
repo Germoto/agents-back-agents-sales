@@ -43,13 +43,21 @@ const bookingInclude = {
 export async function scheduleBookingReminders(bookingId: string): Promise<void> {
   const booking = await prisma.serviceBooking.findUnique({
     where: { id: bookingId },
-    include: { ...bookingInclude, company: { select: { timezone: true, name: true } } },
+    include: {
+      ...bookingInclude,
+      company: { select: { timezone: true, name: true } },
+      product: { select: { id: true, name: true, verticalData: true } },
+    },
   });
   if (!booking?.startsAt) return;
   if (booking.status === "CANCELADA" || booking.status === "COMPLETADA") return;
 
   const tz = booking.company.timezone || "America/Lima";
   const when = formatSlotLabel(booking.startsAt, tz);
+  // Lugar de la cita/visita (pack inmobiliario u otro rubro que lo configure).
+  const vd = (booking.product.verticalData ?? {}) as Record<string, unknown>;
+  const location = String(vd.location ?? vd.address ?? "").trim();
+  const locationLine = location ? `\n📍 ${location}` : "";
   const conversation = await prisma.conversation.findFirst({
     where: { companyId: booking.companyId, customerId: booking.customerId, channel: { in: ["whatsapp", "web"] } },
     orderBy: { lastMessageAt: "desc" },
@@ -62,8 +70,8 @@ export async function scheduleBookingReminders(bookingId: string): Promise<void>
     if (sendAt.getTime() <= now) continue; // ya pasó ese punto
     const body =
       hours >= 24
-        ? `👋 Hola${booking.customer.name ? ` ${booking.customer.name}` : ""}, te recordamos tu cita de *${booking.product.name}* para mañana: ${when}. Si necesitas cambiarla, escríbenos por aquí.`
-        : `⏰ Tu cita de *${booking.product.name}* es hoy a las ${when.split(", ").pop()}. ¡Te esperamos!`;
+        ? `👋 Hola${booking.customer.name ? ` ${booking.customer.name}` : ""}, te recordamos tu cita de *${booking.product.name}* para mañana: ${when}.${locationLine}\nSi necesitas cambiarla, escríbenos por aquí.`
+        : `⏰ Tu cita de *${booking.product.name}* es hoy a las ${when.split(", ").pop()}. ¡Te esperamos!${locationLine}`;
     await prisma.scheduledMessage.create({
       data: {
         companyId: booking.companyId,
@@ -164,7 +172,7 @@ export async function createBooking(input: CreateBookingInput) {
   return booking;
 }
 
-function reasonMessage(reason?: string): string {
+export function reasonMessage(reason?: string): string {
   switch (reason) {
     case "taken":
       return "Ese horario ya está ocupado";
