@@ -11,6 +11,7 @@
 import crypto from "crypto";
 import bcrypt from "bcrypt";
 import { prisma } from "../../lib/prisma";
+import { encryptCredential } from "../../lib/credentials-crypto";
 import { AppError } from "../../lib/app-error";
 import { env } from "../../config/env";
 import {
@@ -340,7 +341,7 @@ export async function updateSalesAgentAdmin(
     data: {
       basePrompt,
       rules: salesAgentRules(),
-      ...(data.openaiApiKey && data.openaiApiKey.trim() ? { openaiApiKey: data.openaiApiKey.trim() } : {}),
+      ...(data.openaiApiKey && data.openaiApiKey.trim() ? { openaiApiKey: encryptCredential(data.openaiApiKey.trim()) } : {}),
       ...(data.openaiModel ? { openaiModel: data.openaiModel } : {}),
     },
   });

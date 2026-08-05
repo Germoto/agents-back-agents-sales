@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
+import { decryptCredential } from "../../lib/credentials-crypto";
 import { AppError } from "../../lib/app-error";
 
 export const aiSuggestBodySchema = z.object({
@@ -223,7 +224,7 @@ export async function aiSuggestProductFieldController(req: Request, res: Respons
   const schema = buildSchemaForField(body.field);
 
   const parsed = (await callOpenAI({
-    apiKey: agentConfig.openaiApiKey,
+    apiKey: decryptCredential(agentConfig.openaiApiKey),
     model,
     systemPrompt,
     userPrompt,

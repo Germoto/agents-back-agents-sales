@@ -1,5 +1,6 @@
 import { AppError } from "../../lib/app-error";
 import { prisma } from "../../lib/prisma";
+import { decryptCredential } from "../../lib/credentials-crypto";
 import { mapBotProduct, productRelations } from "../../lib/product";
 
 function normalizePhone(value: string) {
@@ -141,7 +142,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
     },
     openai: {
       model: agentConfig.openaiModel,
-      apiKey: agentConfig.openaiApiKey,
+      apiKey: decryptCredential(agentConfig.openaiApiKey),
       temperature: Number(agentConfig.temperature),
     },
     whatsapp: {

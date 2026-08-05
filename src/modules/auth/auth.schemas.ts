@@ -41,4 +41,12 @@ export const updateUiThemeSchema = z.object({
     })
     .nullable()
     .optional(),
+  // Flags de sonidos de notificación (por usuario).
+  sounds: z
+    .object({
+      newMessage: z.boolean(),
+      receiptNew: z.boolean(),
+      receiptStatus: z.boolean(),
+    })
+    .optional(),
 });

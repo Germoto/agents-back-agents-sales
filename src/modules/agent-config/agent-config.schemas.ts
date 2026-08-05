@@ -55,7 +55,8 @@ export const followupConfigSchema = z
 // guardan por separado (módulos Recordatorios y Pruebas) para no pisarlos.
 export const coreAgentConfigSchema = z.object({
   openaiModel: z.string().min(1).default("gpt-4o-mini"),
-  openaiApiKey: z.string().min(1, "openaiApiKey es obligatoria"),
+  // Opcional: vacío/ausente conserva la key ya guardada (nunca se reenvía desde el panel).
+  openaiApiKey: z.string().trim().max(200).optional(),
   temperature: z.coerce.number().min(0).max(2).default(0.25),
   basePrompt: z.string().min(1),
   salesStyle: z.string().min(1),

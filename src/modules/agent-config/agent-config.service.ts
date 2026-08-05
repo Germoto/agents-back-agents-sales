@@ -1,5 +1,14 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { decryptCredential, encryptCredential } from "../../lib/credentials-crypto";
+
+/** Máscara para el panel: la key completa NUNCA sale del backend. */
+function maskApiKey(stored: string | null): string | null {
+  if (!stored) return null;
+  const plain = decryptCredential(stored);
+  if (!plain) return null;
+  return `•••${plain.slice(-4)}`;
+}
 
 function mapAgentConfig(config: {
   id: string;
@@ -23,8 +32,12 @@ function mapAgentConfig(config: {
     return null;
   }
 
+  const { openaiApiKey, ...rest } = config;
   return {
-    ...config,
+    ...rest,
+    // Seguridad: la key no se expone; el panel solo sabe si existe (+ máscara).
+    apiKeySet: !!openaiApiKey,
+    openaiApiKeyMasked: maskApiKey(openaiApiKey),
     temperature: Number(config.temperature),
     rules: Array.isArray(config.rules) ? config.rules.filter((item): item is string => typeof item === "string") : [],
     followupConfig: config.followupConfig ?? null,
@@ -49,7 +62,7 @@ export async function getAgentConfig(companyId: string) {
 // testNumbers: esos se manejan en sus propios endpoints (Recordatorios y Pruebas).
 export async function upsertAgentConfig(companyId: string, data: {
   openaiModel: string;
-  openaiApiKey: string;
+  openaiApiKey?: string;
   temperature: number;
   basePrompt: string;
   salesStyle: string;
@@ -58,7 +71,11 @@ export async function upsertAgentConfig(companyId: string, data: {
 }) {
   const core = {
     openaiModel: data.openaiModel,
-    openaiApiKey: data.openaiApiKey,
+    // Solo se escribe si el usuario tipeó una key nueva (guardar sin tocar el
+    // campo conserva la actual); se cifra en reposo (AES-256-GCM).
+    ...(data.openaiApiKey && data.openaiApiKey.trim()
+      ? { openaiApiKey: encryptCredential(data.openaiApiKey.trim()) }
+      : {}),
     temperature: data.temperature.toString(),
     basePrompt: data.basePrompt,
     salesStyle: data.salesStyle,
