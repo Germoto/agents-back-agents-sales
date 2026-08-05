@@ -41,7 +41,9 @@ export type FlowNodeType =
   | "crm-remove-tags"
   | "condition"
   | "wait"
-  | "question";
+  | "question"
+  | "validate-payment"
+  | "book-appointment";
 
 export type DetectMode = "contains" | "equals" | "starts_with" | "ends_with";
 
@@ -115,9 +117,62 @@ export interface HandoffData {
   notifyText?: string;
 }
 
-export interface ReminderData {
+export interface ReminderStep {
+  id: string;
   minutes: number;
   message: string;
+}
+
+/**
+ * Secuencia de recordatorios (hasta 5 envíos con delays ACUMULATIVOS).
+ * Forma legacy: { minutes, message } (un solo envío) — normalizar con
+ * reminderStepsOf() antes de consumir.
+ */
+export interface ReminderData {
+  steps?: ReminderStep[];
+  /** legacy (un solo envío) */
+  minutes?: number;
+  message?: string;
+}
+
+/** Normaliza ReminderData (nueva o legacy) a la lista de pasos. */
+export function reminderStepsOf(d: ReminderData): ReminderStep[] {
+  if (Array.isArray(d.steps) && d.steps.length) return d.steps;
+  return (d.minutes ?? 0) > 0 && d.message?.trim()
+    ? [{ id: "legacy", minutes: d.minutes as number, message: d.message as string }]
+    : [];
+}
+
+/**
+ * Cobra al cliente (métodos manuales Yape/Plin + link de Mercado Pago) y espera
+ * el resultado: aprobado / rechazado / en revisión / timeout.
+ */
+export interface ValidatePaymentData {
+  amountMode: "fixed" | "product";
+  /** Monto en PEN cuando amountMode = fixed. */
+  amount?: number;
+  /** Producto cuyo precio se cobra (y se entrega) cuando amountMode = product. */
+  productId?: string;
+  /** Mensaje previo a los métodos de pago (opcional). */
+  instructions?: string;
+  /** Respuesta cuando el cliente escribe sin evidencia de pago. */
+  retryMessage?: string;
+  /** Respuesta cuando el pago queda en revisión manual. */
+  reviewMessage?: string;
+  /** Minutos sin pagar antes de salir por "timeout" (default 60; 0 = sin timeout). */
+  timeoutMinutes?: number;
+}
+
+/** Ofrece horarios reales de la agenda (motor de bookings) y agenda la cita. */
+export interface BookAppointmentData {
+  /** Servicio (Product con durationMin configurado). */
+  productId?: string;
+  introMessage?: string;
+  noSlotsMessage?: string;
+  /** Variable donde guardar la fecha elegida (además de cita_fecha/cita_codigo). */
+  saveVariable?: string;
+  /** Minutos sin responder antes de salir por "timeout" (default 30; 0 = sin timeout). */
+  timeoutMinutes?: number;
 }
 
 /** Mueve al cliente a una columna de un CRM (kanban). */
@@ -173,6 +228,8 @@ export type FlowNodeData =
   | ConditionData
   | WaitData
   | QuestionData
+  | ValidatePaymentData
+  | BookAppointmentData
   | Record<string, never>;
 
 export interface FlowNode {
@@ -184,7 +241,8 @@ export interface FlowNode {
 
 /**
  * sourceHandle: "next" (llamar al siguiente bloque) | "reply" (cuando responda)
- *   | `opt:<optionId>` (opción de answers/list) | "timeout" (N min sin responder).
+ *   | `opt:<optionId>` (opción de answers/list) | "timeout" (N min sin responder)
+ *   | "approved"/"rejected"/"review" (validate-payment) | "booked"/"no-slots" (book-appointment).
  */
 export interface FlowEdge {
   id: string;
@@ -240,6 +298,16 @@ export function outputHandlesFor(node: FlowNode): string[] {
     case "question": {
       const data = node.data as QuestionData;
       return (data.timeoutMinutes ?? 0) > 0 ? ["next", "timeout"] : ["next"];
+    }
+    case "validate-payment": {
+      const data = node.data as ValidatePaymentData;
+      const base = ["approved", "rejected", "review"];
+      return (data.timeoutMinutes ?? 60) > 0 ? [...base, "timeout"] : base;
+    }
+    case "book-appointment": {
+      const data = node.data as BookAppointmentData;
+      const base = ["booked", "no-slots"];
+      return (data.timeoutMinutes ?? 30) > 0 ? [...base, "timeout"] : base;
     }
     case "flow-control":
     case "handoff":

@@ -83,9 +83,47 @@ const handoffData = z.object({
   notifyText: z.string().max(1000).optional(),
 });
 
+// Retrocompatible: forma nueva { steps[] } o legacy { minutes, message }.
 const reminderData = z.object({
-  minutes: z.number().int().min(0).max(60 * 24 * 30).default(0),
-  message: z.string().max(2000).default(""),
+  minutes: z.number().int().min(0).max(60 * 24 * 30).optional(),
+  message: z.string().max(2000).optional(),
+  steps: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        minutes: z.number().int().min(1).max(60 * 24 * 30),
+        message: z.string().max(2000),
+      }),
+    )
+    .max(5)
+    .optional(),
+});
+
+const validatePaymentData = z
+  .object({
+    amountMode: z.enum(["fixed", "product"]).default("product"),
+    amount: z.number().positive().max(1_000_000).optional(),
+    productId: z.string().uuid().optional(),
+    instructions: z.string().max(2000).optional(),
+    retryMessage: z.string().max(2000).optional(),
+    reviewMessage: z.string().max(2000).optional(),
+    timeoutMinutes: z.number().int().min(0).max(60 * 24 * 7).optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.amountMode === "fixed" && !(d.amount && d.amount > 0)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Indica el monto a cobrar", path: ["amount"] });
+    }
+    if (d.amountMode === "product" && !d.productId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Elige el producto a cobrar", path: ["productId"] });
+    }
+  });
+
+const bookAppointmentData = z.object({
+  productId: z.string().uuid().optional(),
+  introMessage: z.string().max(2000).optional(),
+  noSlotsMessage: z.string().max(2000).optional(),
+  saveVariable: z.string().trim().max(40).optional(),
+  timeoutMinutes: z.number().int().min(0).max(60 * 24 * 7).optional(),
 });
 
 const crmMoveData = z.object({
@@ -150,6 +188,8 @@ export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("condition"), position: positionSchema, data: conditionData }),
   z.object({ id: z.string().min(1), type: z.literal("wait"), position: positionSchema, data: waitData }),
   z.object({ id: z.string().min(1), type: z.literal("question"), position: positionSchema, data: questionData }),
+  z.object({ id: z.string().min(1), type: z.literal("validate-payment"), position: positionSchema, data: validatePaymentData }),
+  z.object({ id: z.string().min(1), type: z.literal("book-appointment"), position: positionSchema, data: bookAppointmentData }),
 ]);
 
 export const flowEdgeSchema = z

@@ -23,6 +23,7 @@ import {
 } from "./cart.service";
 import { env } from "../../config/env";
 import { decryptCredential } from "../../lib/credentials-crypto";
+import { composePaymentMethodsMessage } from "./payment-methods";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
 import {
@@ -1552,52 +1553,19 @@ export async function executeTool(
         mpTitle = `Pedido (${cart.items.length} productos)`;
       }
 
-      // Mercado Pago: link de pago (Checkout Pro) junto a los métodos manuales.
-      // Si falla la creación (token vencido, red), degradar sin romper el cobro.
-      // El módulo MERCADOPAGO del paquete gatea el link (si el plan lo perdió,
-      // quedan solo los métodos manuales; legacy pasa; cache 60s → costo nulo).
-      let mpLine = "";
-      const mpAllowed =
-        !ctx.simulate && mpCfg?.enabled && mpCfg.accessTokenEnc && amountNum > 0
-          ? await getEntitlements(ctx.companyId)
-              .then((ent) => ent.legacy || ent.modules.includes("MERCADOPAGO"))
-              .catch(() => true)
-          : false;
-      if (mpAllowed && mpCfg?.accessTokenEnc) {
-        try {
-          const token = decryptCredential(mpCfg.accessTokenEnc);
-          const linkAmount = mpLinkAmount(amountNum, mpCfg);
-          const pref = await mpCreatePreference(token, {
-            title: mpTitle,
-            amount: linkAmount,
-            externalReference: JSON.stringify({
-              conversationId: ctx.conversationId,
-              productIds: newIds.length ? newIds : chargeIds,
-            }),
-            notificationUrl: `${env.PUBLIC_BASE_URL}/api/webhooks/mercadopago/${ctx.companyId}`,
-          });
-          mpLine =
-            mpCfg.feeMode === "CUSTOMER" && linkAmount > amountNum
-              ? `\n\n💳 O paga con tarjeta u otros medios por Mercado Pago (total S/ ${linkAmount.toFixed(2)}, incluye la comisión de la pasarela):\n${pref.init_point}`
-              : `\n\n💳 También puedes pagar con tarjeta u otros medios aquí:\n${pref.init_point}`;
-          ctx.state.mpPreferenceId = pref.id;
-          ctx.state.mpAmount = linkAmount;
-        } catch (err) {
-          console.error(
-            `[agent] MP preference falló company=${ctx.companyId}:`,
-            err instanceof Error ? err.message : err,
-          );
-        }
-      }
-
-      const methods = ctx.config.payment.methods
-        .map((m) => `• ${m.method}: *${m.number}* (titular: ${m.holder})`)
-        .join("\n");
-      const manualBlock = methods
-        ? `Puedes pagar con:\n${methods}\n\n` +
-          `Cuando pagues, mándame la *captura del comprobante* o el *nombre del titular* de tu Yape/Plin (la cuenta DESDE donde pagaste) y validamos tu pago al instante ✅`
-        : `Paga de forma segura con el link de abajo; en cuanto se confirme el pago te llega tu pedido automáticamente ✅`;
-      const text = `El monto a pagar es: *${amountText}*\n\n` + manualBlock + mpLine;
+      // Texto de cobro compartido (métodos manuales + link MP) — ver payment-methods.ts.
+      const { text, mpLinkIncluded } = await composePaymentMethodsMessage({
+        companyId: ctx.companyId,
+        conversationId: ctx.conversationId,
+        payment: ctx.config.payment,
+        state: ctx.state,
+        amountNum,
+        amountText,
+        title: mpTitle,
+        productIds: newIds.length ? newIds : chargeIds,
+        simulate: ctx.simulate,
+      });
+      const mpLine = mpLinkIncluded ? "x" : "";
       ctx.outbox.push({ kind: "text", text });
       ctx.state.status = "ESPERANDO_PAGO";
       ctx.state.lastPaymentPromptAt = new Date().toISOString();

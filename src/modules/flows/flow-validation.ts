@@ -15,6 +15,9 @@ import {
   type ConditionData,
   type WaitData,
   type QuestionData,
+  type ValidatePaymentData,
+  type BookAppointmentData,
+  reminderStepsOf,
   type SendTextData,
   type SendMediaData,
   outputHandlesFor,
@@ -58,6 +61,8 @@ const NODE_LABEL: Record<string, string> = {
   "condition": "Condición",
   "wait": "Esperar",
   "question": "Pregunta",
+  "validate-payment": "Validar pago",
+  "book-appointment": "Agendar cita",
 };
 
 function label(node: FlowNode): string {
@@ -265,13 +270,70 @@ export function validateFlow(
       }
       case "reminder": {
         const data = node.data as ReminderData;
-        if (!Number.isFinite(data.minutes) || data.minutes <= 0 || !data.message?.trim()) {
+        const steps = reminderStepsOf(data);
+        if (!steps.length || steps.some((st) => !Number.isFinite(st.minutes) || st.minutes <= 0 || !st.message?.trim())) {
           errors.push({
             code: "REMINDER_INVALID",
-            message: "«Recordatorio» necesita minutos > 0 y un mensaje.",
+            message: "«Recordatorio» necesita al menos un envío con minutos > 0 y mensaje.",
             nodeId: node.id,
           });
         }
+        if (steps.length > 5) {
+          warnings.push({
+            code: "REMINDER_TOO_MANY",
+            message: "«Recordatorio» admite hasta 5 envíos; los extras se ignorarán.",
+            nodeId: node.id,
+          });
+        }
+        break;
+      }
+      case "validate-payment": {
+        const data = node.data as ValidatePaymentData;
+        if (data.amountMode === "fixed" && !(Number(data.amount) > 0)) {
+          errors.push({ code: "PAYMENT_NO_AMOUNT", message: "«Validar pago» necesita el monto a cobrar.", nodeId: node.id });
+        }
+        if (data.amountMode === "product" && !data.productId) {
+          errors.push({ code: "PAYMENT_NO_PRODUCT", message: "«Validar pago» necesita el producto a cobrar.", nodeId: node.id });
+        }
+        if (!edgeFrom(node.id, "approved")) {
+          errors.push({
+            code: "PAYMENT_NO_APPROVED",
+            message: "Conecta la salida «Pago aprobado» de «Validar pago» (es el camino feliz del cobro).",
+            nodeId: node.id,
+          });
+        }
+        for (const [handle, label] of [["rejected", "Rechazado"], ["review", "En revisión"]] as const) {
+          if (!edgeFrom(node.id, handle)) {
+            warnings.push({
+              code: "PAYMENT_OUTPUT_UNUSED",
+              message: `La salida «${label}» de «Validar pago» no está conectada; el flujo terminará en silencio en ese caso.`,
+              nodeId: node.id,
+            });
+          }
+        }
+        validateTimeout(node, data.timeoutMinutes ?? 60, edgeFrom, errors, warnings);
+        break;
+      }
+      case "book-appointment": {
+        const data = node.data as BookAppointmentData;
+        if (!data.productId) {
+          errors.push({ code: "BOOKING_NO_PRODUCT", message: "«Agendar cita» necesita el servicio a agendar.", nodeId: node.id });
+        }
+        if (!edgeFrom(node.id, "booked")) {
+          warnings.push({
+            code: "BOOKING_OUTPUT_UNUSED",
+            message: "La salida «Cita agendada» de «Agendar cita» no está conectada.",
+            nodeId: node.id,
+          });
+        }
+        if (!edgeFrom(node.id, "no-slots")) {
+          warnings.push({
+            code: "BOOKING_OUTPUT_UNUSED",
+            message: "La salida «Sin horarios» de «Agendar cita» no está conectada; sin horarios el flujo terminará en silencio.",
+            nodeId: node.id,
+          });
+        }
+        validateTimeout(node, data.timeoutMinutes ?? 30, edgeFrom, errors, warnings);
         break;
       }
       case "crm-move": {

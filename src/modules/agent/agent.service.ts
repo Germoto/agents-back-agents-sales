@@ -31,7 +31,14 @@ import { loadWhatsappSender, sendText, sendMedia, webSender, type WhatsappSender
 import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
-import { runFlowTurn, buildRealFlowIO, trailingUserText } from "../flows/flow-engine";
+import {
+  runFlowTurn,
+  buildRealFlowIO,
+  trailingUserText,
+  resumeFlowOnPaymentOutcome,
+  recheckFlowPayment,
+  type FlowSessionState,
+} from "../flows/flow-engine";
 import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
@@ -750,6 +757,14 @@ export async function recheckPayment(msg: {
     const status = (state.status as string) ?? "";
     if (status === "PAGADO" || status === "ENTREGADO" || runtime.botPaused) return;
 
+    // Modo FLOW con «Validar pago» en espera: el recheck lo resuelve el motor
+    // de flujos (aprueba → rama approved; no → rama review).
+    const fsPay = state.flow as FlowSessionState | undefined;
+    if (fsPay?.awaitingKind === "payment") {
+      await recheckFlowPayment(msg as any, state as ConversationState);
+      return;
+    }
+
     let config: Awaited<ReturnType<typeof buildBotConfig>>;
     try {
       config = await buildBotConfig(msg.companyId);
@@ -999,6 +1014,14 @@ export async function handleExternalPaymentApproved(opts: {
       }
     }
     console.log(`[agent] pago externo (${provider}) aprobado y gestionado (conv=${opts.conversationId})`);
+
+    // Si la conversación es de un FLUJO esperando en «Validar pago», continuar
+    // por la rama aprobada (no-op absoluto en modo AI).
+    await resumeFlowOnPaymentOutcome({
+      companyId: opts.companyId,
+      conversationId: opts.conversationId,
+      outcome: "approved",
+    });
   } catch (err) {
     console.warn("[agent] handleExternalPaymentApproved falló:", err instanceof Error ? err.message : err);
   }

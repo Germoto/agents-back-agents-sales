@@ -6,6 +6,7 @@ import { persistInboundMedia } from "../../lib/inbound-media";
 import { env } from "../../config/env";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { ConversationState, saveState } from "../agent/conversation.service";
+import { resumeFlowOnPaymentOutcome } from "../flows/flow-engine";
 
 export interface ReceiptFilters {
   status?: string | null;
@@ -229,6 +230,14 @@ export async function approveReceipt(
     externalId: updated.externalId,
   });
 
+  // Si un FLUJO estaba esperando este pago («Validar pago»), continuar por la
+  // rama aprobada (no-op absoluto en modo AI).
+  void resumeFlowOnPaymentOutcome({
+    companyId,
+    customerId: receipt.customerId ?? null,
+    outcome: "approved",
+  }).catch(() => undefined);
+
   return updated;
 }
 
@@ -313,6 +322,14 @@ export async function deliverReceiptManually(
     source: updated.source,
     externalId: updated.externalId,
   });
+
+  // Flujo esperando este pago → continuar por la rama aprobada (no-op en modo AI).
+  void resumeFlowOnPaymentOutcome({
+    companyId,
+    conversationId: params.conversationId ?? null,
+    customerId: receipt.customerId ?? null,
+    outcome: "approved",
+  }).catch(() => undefined);
 
   return updated;
 }
@@ -435,6 +452,13 @@ export async function rejectReceipt(companyId: string, receiptId: string, reject
     source: updated.source,
     externalId: updated.externalId,
   });
+
+  // Flujo esperando este pago → continuar por la rama rechazada (no-op en modo AI).
+  void resumeFlowOnPaymentOutcome({
+    companyId,
+    customerId: receipt.customerId ?? null,
+    outcome: "rejected",
+  }).catch(() => undefined);
 
   return updated;
 }
