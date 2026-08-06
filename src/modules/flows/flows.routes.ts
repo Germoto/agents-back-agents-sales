@@ -17,7 +17,9 @@ import {
   updateFlowSchema,
   toggleFlowSchema,
   validateFlowSchema,
+  copilotSchema,
 } from "./flows.schemas";
+import { copilotFlowController } from "./flows.copilot";
 
 const router = Router();
 
@@ -31,6 +33,7 @@ router.post("/", validate({ body: createFlowSchema }), asyncHandler(createFlowCo
 router.get("/:id", asyncHandler(getFlowController));
 router.put("/:id", validate({ body: updateFlowSchema }), asyncHandler(updateFlowController));
 router.post("/:id/duplicate", asyncHandler(duplicateFlowController));
+router.post("/:id/copilot", validate({ body: copilotSchema }), asyncHandler(copilotFlowController));
 router.post("/:id/toggle", validate({ body: toggleFlowSchema }), asyncHandler(toggleFlowController));
 router.delete("/:id", asyncHandler(deleteFlowController));
 

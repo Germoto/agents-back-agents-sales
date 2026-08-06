@@ -224,3 +224,26 @@ export const validateFlowSchema = z.object({
   nodes: z.array(flowNodeSchema).max(200),
   edges: z.array(flowEdgeSchema).max(500),
 });
+
+/**
+ * Copiloto IA. `flow` viaja LAXO a propósito: es el estado del canvas sin
+ * guardar (puede estar a medio editar) y solo sirve de contexto para el modelo
+ * — desde este endpoint nunca se persiste nada.
+ */
+export const copilotSchema = z.object({
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(["user", "assistant"]),
+        content: z.string().min(1).max(4000),
+      }),
+    )
+    .min(1)
+    .max(30)
+    .refine((msgs) => msgs[msgs.length - 1]?.role === "user", "El último mensaje debe ser del usuario"),
+  flow: z.object({
+    trigger: z.unknown(),
+    nodes: z.array(z.unknown()).max(200),
+    edges: z.array(z.unknown()).max(500),
+  }),
+});
