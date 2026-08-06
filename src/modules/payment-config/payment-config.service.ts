@@ -14,7 +14,7 @@ async function assertMpAllowedByPlan(companyId: string) {
   }
 }
 
-type PaymentMode = "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL";
+type PaymentMode = "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL" | "CUSTOMER_CHOICE";
 
 function maskToken(token: string): string {
   if (token.length <= 10) return "•••";

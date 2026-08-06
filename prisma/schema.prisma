@@ -22,6 +22,7 @@ enum PaymentMode {
   BEFORE_DELIVERY
   CASH_ON_DELIVERY
   MANUAL
+  CUSTOMER_CHOICE
 }
 
 enum ConversationRole {

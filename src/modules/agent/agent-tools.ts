@@ -267,6 +267,33 @@ export function matchProduct(query: string, products: BotProduct[]): BotProduct 
   return best?.p ?? null;
 }
 
+/**
+ * Modo de cobro EFECTIVO de un pedido. Si el negocio dejó elegir al cliente
+ * (CUSTOMER_CHOICE), la elección debe venir en el parámetro `cobro` de la tool;
+ * sin ella se devuelve un error que fuerza al modelo a preguntarle al cliente.
+ * En los demás modos manda la configuración y `cobro` se ignora.
+ */
+function resolveOrderPaymentMode(
+  ctx: TurnContext,
+  cobro: unknown,
+): { mode?: "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL"; error?: string } {
+  const configured = (ctx.config.payment as { paymentMode?: string }).paymentMode?.toUpperCase();
+  if (configured === "CUSTOMER_CHOICE") {
+    const choice = String(cobro ?? "").trim().toLowerCase();
+    if (choice === "adelantado") return { mode: "BEFORE_DELIVERY" };
+    if (choice === "contra_entrega") return { mode: "CASH_ON_DELIVERY" };
+    return {
+      error:
+        "Este negocio deja ELEGIR al cliente cómo pagar. Pregúntale si prefiere pago adelantado o contra entrega y vuelve a registrar pasando cobro:'adelantado' o cobro:'contra_entrega'.",
+    };
+  }
+  const mode =
+    configured === "BEFORE_DELIVERY" || configured === "CASH_ON_DELIVERY" || configured === "MANUAL"
+      ? configured
+      : undefined;
+  return { mode };
+}
+
 function findProductById(ctx: TurnContext, productId: string): BotProduct | undefined {
   return ctx.config.products.find((p) => p.id === productId || p.slug === productId);
 }
@@ -1170,6 +1197,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           quantity: { type: "integer", minimum: 1 },
           variant: { type: "string", description: "Variante/opción elegida (talla, color, etc.) si aplica" },
           notes: { type: "string", description: "Notas adicionales del pedido" },
+          cobro: {
+            type: "string",
+            enum: ["adelantado", "contra_entrega"],
+            description:
+              "OBLIGATORIO si el negocio deja elegir al cliente cómo pagar: lo que el cliente eligió (pago adelantado o contra entrega). En otros modos se ignora.",
+          },
         },
       },
     },
@@ -1189,6 +1222,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           address: { type: "string", description: "Dirección de entrega (o 'recojo en local')" },
           reference: { type: "string", description: "Referencia del domicilio" },
           notes: { type: "string", description: "Notas del pedido (ej. sin picante, tocar timbre)" },
+          cobro: {
+            type: "string",
+            enum: ["adelantado", "contra_entrega"],
+            description:
+              "OBLIGATORIO si el negocio deja elegir al cliente cómo pagar: lo que el cliente eligió (pago adelantado o contra entrega). En otros modos se ignora.",
+          },
         },
       },
     },
@@ -1950,6 +1989,8 @@ export async function executeTool(
       if (product.productType !== "physical") {
         return JSON.stringify({ ok: false, error: "registrar_pedido es solo para productos físicos" });
       }
+      const resolvedMode = resolveOrderPaymentMode(ctx, args.cobro);
+      if (resolvedMode.error) return JSON.stringify({ ok: false, error: resolvedMode.error });
       if (ctx.simulate) {
         ctx.state.status = "PEDIDO_REGISTRADO";
         ctx.state.selectedProductId = product.id;
@@ -1962,11 +2003,7 @@ export async function executeTool(
       }
       const variant = String(args.variant ?? "").trim();
       const notes = String(args.notes ?? "").trim() || undefined;
-      const paymentMode = (ctx.config.payment as { paymentMode?: string }).paymentMode?.toUpperCase() as
-        | "BEFORE_DELIVERY"
-        | "CASH_ON_DELIVERY"
-        | "MANUAL"
-        | undefined;
+      const paymentMode = resolvedMode.mode;
 
       try {
         const order = await createAgentOrder({
@@ -2005,6 +2042,8 @@ export async function executeTool(
       if (!customerName || !address) {
         return JSON.stringify({ ok: false, error: "faltan nombre o dirección/recojo" });
       }
+      const resolvedMode = resolveOrderPaymentMode(ctx, args.cobro);
+      if (resolvedMode.error) return JSON.stringify({ ok: false, error: resolvedMode.error });
       if (ctx.simulate) {
         await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
         ctx.state.status = "PEDIDO_REGISTRADO";
@@ -2019,11 +2058,7 @@ export async function executeTool(
           address,
           reference: String(args.reference ?? "").trim(),
           extraNotes: String(args.notes ?? "").trim(),
-          paymentMode: (ctx.config.payment as { paymentMode?: string }).paymentMode?.toUpperCase() as
-            | "BEFORE_DELIVERY"
-            | "CASH_ON_DELIVERY"
-            | "MANUAL"
-            | undefined,
+          paymentMode: resolvedMode.mode,
         });
         await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
         ctx.state.status = "PEDIDO_REGISTRADO";

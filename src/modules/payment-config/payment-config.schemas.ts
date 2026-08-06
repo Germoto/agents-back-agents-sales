@@ -11,7 +11,7 @@ export const upsertPaymentConfigSchema = z.object({
       sortOrder: z.coerce.number().int().min(0).default(0),
     }),
   ).min(1, "Debe existir al menos un medio de pago"),
-  paymentMode: z.enum(["BEFORE_DELIVERY", "CASH_ON_DELIVERY", "MANUAL"]),
+  paymentMode: z.enum(["BEFORE_DELIVERY", "CASH_ON_DELIVERY", "MANUAL", "CUSTOMER_CHOICE"]),
 });
 
 export const updateMercadoPagoSchema = z.object({

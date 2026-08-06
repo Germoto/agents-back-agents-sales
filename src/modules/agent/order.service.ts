@@ -25,18 +25,24 @@ function parseNum(v: string | null | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Estado inicial del pedido según cómo cobra el negocio. */
+/** Estado inicial y método de pago legible del pedido según cómo cobra el negocio. */
 function initialStatusFor(mode: PaymentMode | undefined): {
   status: "PEDIDO_REGISTRADO" | "PENDIENTE_PAGO" | "EN_COORDINACION";
   paymentStatus: string;
+  paymentMethod: string | null;
 } {
   // Contra entrega: el pedido queda por coordinar la entrega (se cobra al entregar).
-  if (mode === "CASH_ON_DELIVERY") return { status: "EN_COORDINACION", paymentStatus: "PENDIENTE_PAGO" };
-  // Pago adelantado / manual: pendiente de pago hasta que se confirme.
-  if (mode === "BEFORE_DELIVERY" || mode === "MANUAL") {
-    return { status: "PENDIENTE_PAGO", paymentStatus: "PENDIENTE_PAGO" };
+  if (mode === "CASH_ON_DELIVERY") {
+    return { status: "EN_COORDINACION", paymentStatus: "PENDIENTE_PAGO", paymentMethod: "Contra entrega" };
   }
-  return { status: "PEDIDO_REGISTRADO", paymentStatus: "PENDIENTE_PAGO" };
+  // Pago adelantado / manual: pendiente de pago hasta que se confirme.
+  if (mode === "BEFORE_DELIVERY") {
+    return { status: "PENDIENTE_PAGO", paymentStatus: "PENDIENTE_PAGO", paymentMethod: "Pago adelantado" };
+  }
+  if (mode === "MANUAL") {
+    return { status: "PENDIENTE_PAGO", paymentStatus: "PENDIENTE_PAGO", paymentMethod: "Coordinación manual" };
+  }
+  return { status: "PEDIDO_REGISTRADO", paymentStatus: "PENDIENTE_PAGO", paymentMethod: null };
 }
 
 function emitOrderNew(
@@ -94,6 +100,7 @@ export async function createAgentOrder(input: CreateOrderInput) {
       notes: input.notes?.trim() || null,
       status: init.status,
       paymentStatus: init.paymentStatus,
+      paymentMethod: init.paymentMethod,
       total: lineTotal,
       items: {
         create: [
@@ -151,6 +158,7 @@ export async function createOrderFromCart(input: {
       notes,
       status: init.status,
       paymentStatus: init.paymentStatus,
+      paymentMethod: init.paymentMethod,
       total: input.cart.totalText,
       items: {
         create: input.cart.items.map((it) => ({
