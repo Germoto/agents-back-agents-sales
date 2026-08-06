@@ -214,6 +214,19 @@ export type CustomPlanInput = {
   name?: string | null;
 };
 
+const ALL_ADMIN_MODULES: PlanModule[] = [
+  "CAMPAIGNS",
+  "CRM",
+  "FLOWS",
+  "QUICK_REPLIES",
+  "FUNNEL",
+  "META_PROVIDER",
+  "WEBCHAT",
+  "MERCADOPAGO",
+  "REPORTS",
+  "WEBHOOKS",
+];
+
 const ALL_PLAN_VERTICALS: BusinessVertical[] = [
   "INFOPRODUCT",
   "PHYSICAL_GOODS",
@@ -240,6 +253,75 @@ function customPlanData(input: CustomPlanInput, companyName: string) {
     sortOrder: 9999,
     isActive: true,
   };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Trial del plan Personalizado: snapshot "Prueba gratuita" (acceso completo,
+ * precio 0) con vencimiento a N días calendario y source TRIAL (sin gracia
+ * extra: el corte es exacto). El admin puede extenderlo o cambiarle el plan
+ * desde Suscripciones → Extender.
+ */
+export async function assignTrialSubscription(companyId: string, days = 7) {
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { id: true, name: true },
+  });
+  if (!company) throw new AppError("Empresa no encontrada", 404);
+
+  const existing = await prisma.companySubscription.findUnique({
+    where: { companyId },
+    include: { plan: { select: { id: true, isCustom: true } } },
+  });
+
+  const planData = {
+    name: "Prueba gratuita (acceso completo)",
+    description:
+      "Acceso completo de prueba por " +
+      days +
+      " días. Contrata tu plan antes del vencimiento para no perder acceso.",
+    priceUsd: 0,
+    pricePen: 0,
+    monthlyLeadLimit: null,
+    extraLeadPricePen: null,
+    verticals: ALL_PLAN_VERTICALS,
+    modules: ALL_ADMIN_MODULES,
+    isPublic: false,
+    isHighlighted: false,
+    isCustom: true,
+    sortOrder: 9999,
+    isActive: true,
+  };
+
+  const plan =
+    existing?.plan.isCustom && existing.plan.id
+      ? await prisma.platformPlan.update({ where: { id: existing.plan.id }, data: planData })
+      : await prisma.platformPlan.create({ data: planData });
+
+  const now = new Date();
+  const sub = await prisma.companySubscription.upsert({
+    where: { companyId },
+    update: {
+      planId: plan.id,
+      startsAt: now,
+      expiresAt: new Date(now.getTime() + days * DAY_MS),
+      months: 0,
+      source: "TRIAL",
+      canceledAt: null,
+    },
+    create: {
+      companyId,
+      planId: plan.id,
+      startsAt: now,
+      expiresAt: new Date(now.getTime() + days * DAY_MS),
+      months: 0,
+      source: "TRIAL",
+    },
+    include: SUB_INCLUDE,
+  });
+  invalidateEntitlements(companyId);
+  return sub;
 }
 
 /**
@@ -297,16 +379,54 @@ export async function updateCustomSubscriptionPlan(
   return mapSubscription(fresh!, balances.get(companyId) ?? 0);
 }
 
-export async function extendSubscription(id: string, months: number) {
-  const current = await prisma.companySubscription.findUnique({ where: { id } });
+export async function extendSubscription(
+  id: string,
+  opts: { months?: number; days?: number; planId?: string },
+) {
+  const current = await prisma.companySubscription.findUnique({
+    where: { id },
+    include: { plan: { select: { id: true, isCustom: true } } },
+  });
   if (!current) throw new AppError("Suscripción no encontrada", 404);
+
+  const months = Math.max(0, Math.floor(opts.months ?? 0));
+  const days = Math.max(0, Math.floor(opts.days ?? 0));
+  const planId = opts.planId && opts.planId !== current.planId ? opts.planId : undefined;
+  if (!months && !days && !planId) {
+    throw new AppError("Indica meses, días o un plan nuevo", 400);
+  }
+
+  // Cambio de plan SIN reiniciar el periodo (a diferencia de asignar).
+  if (planId) {
+    const plan = await prisma.platformPlan.findFirst({ where: { id: planId, isActive: true } });
+    if (!plan) throw new AppError("Plan no encontrado o inactivo", 404);
+  }
+
   const now = new Date();
   const base = current.expiresAt > now ? current.expiresAt : now;
+  let expiresAt = base;
+  if (months > 0) expiresAt = addMonthsUtc(expiresAt, months);
+  if (days > 0) expiresAt = new Date(expiresAt.getTime() + days * DAY_MS);
+
   const sub = await prisma.companySubscription.update({
     where: { id },
-    data: { expiresAt: addMonthsUtc(base, months), canceledAt: null },
+    data: {
+      expiresAt,
+      canceledAt: null,
+      ...(planId
+        ? {
+            planId,
+            // Deja de ser trial al pasar a un plan del catálogo.
+            ...(current.source === "TRIAL" ? { source: "SUPERADMIN" } : {}),
+          }
+        : {}),
+    },
     include: SUB_INCLUDE,
   });
+  // Snapshot personalizado huérfano tras cambiar a un plan del catálogo.
+  if (planId && current.plan.isCustom) {
+    await prisma.platformPlan.delete({ where: { id: current.plan.id } }).catch(() => undefined);
+  }
   invalidateEntitlements(sub.companyId);
   const balances = await walletBalances([sub.companyId]);
   return mapSubscription(sub, balances.get(sub.companyId) ?? 0);

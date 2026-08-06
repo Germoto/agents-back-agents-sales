@@ -114,6 +114,7 @@ export async function updatePreRegistration(id: string, input: UpdatePreRegistra
 export interface ConvertPreRegistrationInput {
   slug: string;
   planMonths?: number;
+  trialDays?: number;
   whatsappProvider?: "SMSTOOLS" | "META";
   isActive?: boolean;
   metaAccessToken?: string;
@@ -148,6 +149,8 @@ export async function convertPreRegistration(id: string, input: ConvertPreRegist
     whatsappProvider: input.whatsappProvider ?? "SMSTOOLS",
     planId: prereg.planId ?? undefined,
     planMonths: input.planMonths ?? 1,
+    // Personalizado (sin plan elegido): trial de acceso completo (default 7 días).
+    trialDays: prereg.planId ? undefined : input.trialDays ?? 7,
     vertical: prereg.vertical,
     username: prereg.username,
     email: prereg.email,

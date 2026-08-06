@@ -64,9 +64,15 @@ export const assignSubscriptionSchema = z.object({
   months: z.coerce.number().int().min(1).max(36).default(1),
 });
 
-export const extendSubscriptionSchema = z.object({
-  months: z.coerce.number().int().min(1).max(36),
-});
+export const extendSubscriptionSchema = z
+  .object({
+    months: z.coerce.number().int().min(0).max(36).optional(),
+    days: z.coerce.number().int().min(0).max(365).optional(),
+    planId: z.string().uuid().optional(),
+  })
+  .refine((d) => (d.months ?? 0) > 0 || (d.days ?? 0) > 0 || !!d.planId, {
+    message: "Indica meses, días o un plan nuevo",
+  });
 
 // Plan PERSONALIZADO (snapshot por cliente): precio negociado + módulos a medida.
 export const customSubscriptionSchema = z.object({

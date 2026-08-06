@@ -155,6 +155,8 @@ export interface ProvisionClientInput {
   whatsappProvider?: "SMSTOOLS" | "META";
   planId?: string;
   planMonths?: number;
+  /** Días de prueba gratis (plan Personalizado sin planId). 0/ausente = LEGACY. */
+  trialDays?: number;
   vertical?: BusinessVertical;
   /** Username único de login (lowercase) — opcional. */
   username?: string | null;
@@ -361,6 +363,15 @@ export async function provisionClient(payload: ProvisionClientInput) {
       }
     }
     throw error;
+  }
+
+  // Plan Personalizado elegido en el registro: trial de acceso completo por N
+  // días (fuera de la transacción: upsertea el snapshot "Prueba gratuita").
+  if (!plan && (payload.trialDays ?? 0) > 0) {
+    const { assignTrialSubscription } = await import("../billing/billing-admin.service");
+    await assignTrialSubscription(company.id, payload.trialDays);
+    const fresh = await prisma.company.findUnique({ where: { id: company.id }, include: CLIENT_INCLUDE });
+    if (fresh) return mapClient(fresh);
   }
 
   return mapClient(company);

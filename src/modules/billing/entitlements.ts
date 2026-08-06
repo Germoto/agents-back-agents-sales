@@ -81,7 +81,11 @@ export function deriveBillingState(
   now = new Date(),
 ): { status: BillingStatus; blocked: boolean; graceEndsAt: Date } {
   const expiresMs = sub.expiresAt.getTime();
-  const graceEndsAt = new Date(expiresMs + env.BILLING_GRACE_DAYS * DAY_MS);
+  // El TRIAL corta en la fecha exacta (sin días de gracia extra).
+  const graceEndsAt =
+    sub.source === "TRIAL"
+      ? sub.expiresAt
+      : new Date(expiresMs + env.BILLING_GRACE_DAYS * DAY_MS);
   const nowMs = now.getTime();
 
   if (sub.canceledAt) {

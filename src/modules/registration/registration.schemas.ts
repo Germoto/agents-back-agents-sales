@@ -70,6 +70,8 @@ export const convertPreRegistrationSchema = z.object({
     .min(2, "Ingresa un slug")
     .regex(/^[a-z0-9-]+$/, "Usa solo minusculas, numeros y guiones"),
   planMonths: z.coerce.number().int().min(1).max(36).default(1),
+  // Días de prueba para pre-registros SIN plan (Personalizado). Default 7.
+  trialDays: z.coerce.number().int().min(1).max(90).optional(),
   whatsappProvider: z.enum(["SMSTOOLS", "META"]).default("SMSTOOLS"),
   isActive: z.boolean().default(true),
   metaAccessToken: z.string().trim().optional(),
