@@ -21,6 +21,8 @@ import type { ChatMessage } from "../../lib/openai";
 export interface ConversationState {
   status?: string;            // NUEVO, INTERESADO, ESPERANDO_PAGO, ENTREGADO, etc.
   selectedProductId?: string | null;
+  /** Pedido pendiente de pago recién registrado (para marcarlo PAGADO al aprobar el pago). */
+  pendingOrderId?: string | null;
   lastPaymentPromptAt?: string | null;
   pendingAction?: string | null;
   offerExpiresAt?: string | null;

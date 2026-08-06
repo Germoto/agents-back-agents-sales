@@ -63,6 +63,10 @@ export const coreAgentConfigSchema = z.object({
   rules: z.array(z.string().min(1)).default([]),
   // Si el cliente pide rebaja: intentar una vez y derivar a un asesor humano.
   negotiationHandoff: z.boolean().optional(),
+  // Rubro Comercial: comportamiento del agente configurable.
+  catalogMode: z.enum(["preguntar", "resumen_humano", "primeros_n"]).optional(),
+  keywordMode: z.enum(["detalle_y_preguntar", "agregar_directo", "auto"]).optional(),
+  trackStock: z.boolean().optional(),
 });
 
 // PUT /agent-config/reminders — solo followupConfig.

@@ -188,8 +188,29 @@ export async function buildBotConfig(companyId: string, account?: string) {
         : [],
       muteAfterSale: agentConfig.muteAfterSale ?? true,
       negotiationHandoff: agentConfig.negotiationHandoff ?? false,
+      // Rubro Comercial: comportamiento configurable del agente.
+      catalogMode: (agentConfig.catalogMode as string) ?? "preguntar",
+      keywordMode: (agentConfig.keywordMode as string) ?? "detalle_y_preguntar",
+      trackStock: agentConfig.trackStock ?? true,
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
-    products: products.map((p) => mapBotProduct(p)),
+    products: products.map((p) => withVariantModifiers(mapBotProduct(p))),
   };
+}
+
+/**
+ * Variantes seleccionables en el carrito: para productos físicos con variantes
+ * (talla/color), derivar modifierGroups sintéticos (priceDelta 0) que el carrito
+ * ya sabe resolver, sin pisar modifierGroups reales (restaurante).
+ */
+function withVariantModifiers(p: ReturnType<typeof mapBotProduct>): ReturnType<typeof mapBotProduct> {
+  if (p.productType !== "PHYSICAL" || !Array.isArray(p.variants) || !p.variants.length) return p;
+  const vd = (p.verticalData ?? {}) as Record<string, unknown>;
+  const existing = Array.isArray(vd.modifierGroups) ? (vd.modifierGroups as unknown[]) : [];
+  const groups = (p.variants as Array<{ name: string; options: string[] }>).map((v) => ({
+    name: v.name,
+    required: true,
+    options: (v.options ?? []).map((o) => ({ label: o, priceDelta: 0 })),
+  }));
+  return { ...p, verticalData: { ...vd, modifierGroups: [...existing, ...groups] } };
 }

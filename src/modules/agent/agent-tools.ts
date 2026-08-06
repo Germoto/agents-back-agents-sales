@@ -32,6 +32,7 @@ import {
   updatePaymentStatus,
 } from "../public-payments/public-payments.service";
 import { createAgentOrder, createOrderFromCart } from "./order.service";
+import { markOrderPaid, findPendingOrderForCustomer } from "../orders/orders.service";
 import { createBooking, reasonMessage } from "../bookings/bookings.service";
 import { getAvailableSlots, formatSlotLabel, isSlotAvailable } from "../bookings/availability.service";
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
@@ -695,6 +696,14 @@ export async function approveExternalPayment(opts: {
   // Sin entrega digital automática (producto físico/servicio o sin productos):
   // marcar pagado; el dueño recibe el aviso desde el caller.
   state.status = "PAGADO";
+  // Rubro Comercial: si hay un pedido pendiente, marcarlo PAGADO (no-op si no existe).
+  const paidOrderId =
+    (state as { pendingOrderId?: string | null }).pendingOrderId ??
+    (await findPendingOrderForCustomer(companyId, customerId));
+  if (paidOrderId) {
+    await markOrderPaid(companyId, paidOrderId, { source: "pago validado" }).catch(() => undefined);
+    (state as { pendingOrderId?: string | null }).pendingOrderId = null;
+  }
   return { approved: true, customerMessage: "¡Pago confirmado! ✅ Gracias por tu compra 🙌" };
 }
 
@@ -1492,6 +1501,30 @@ export async function executeTool(
           });
         }
       }
+      // Stock físico (rubro Comercial): si el negocio controla stock, no agregar
+      // más de lo disponible (cantidad ya en el carrito + la nueva).
+      const trackStock = (ctx.config.agent as { trackStock?: boolean }).trackStock ?? true;
+      if (!ctx.simulate && trackStock && product.productType === "physical") {
+        const stock = (product as { stock?: number | null }).stock;
+        if (stock != null) {
+          const current = await summarizeCart(ctx.companyId, ctx.customerId);
+          const already = current.items
+            .filter((it) => it.productId === product.id)
+            .reduce((acc, it) => acc + it.quantity, 0);
+          if (already + qty > stock) {
+            const left = Math.max(0, stock - already);
+            return JSON.stringify({
+              ok: false,
+              outOfStock: true,
+              available: left,
+              error:
+                left === 0
+                  ? `Sin stock de "${product.name}" por ahora. Ofrece otro producto o avisa que un asesor lo consigue; NO lo agregues.`
+                  : `Solo quedan ${left} de "${product.name}". Ajusta la cantidad.`,
+            });
+          }
+        }
+      }
       const summary = await addToCart(ctx.companyId, ctx.customerId, product.id, qty, modifiers);
       ctx.state.selectedProductId = product.id;
       // Re-enganche tras una venta cerrada: agregar un producto nuevo reabre el embudo.
@@ -1928,8 +1961,12 @@ export async function executeTool(
         return JSON.stringify({ ok: false, error: "faltan nombre o dirección de entrega" });
       }
       const variant = String(args.variant ?? "").trim();
-      const baseNotes = String(args.notes ?? "").trim();
-      const notes = [variant ? `Variante: ${variant}` : "", baseNotes].filter(Boolean).join(" | ") || undefined;
+      const notes = String(args.notes ?? "").trim() || undefined;
+      const paymentMode = (ctx.config.payment as { paymentMode?: string }).paymentMode?.toUpperCase() as
+        | "BEFORE_DELIVERY"
+        | "CASH_ON_DELIVERY"
+        | "MANUAL"
+        | undefined;
 
       try {
         const order = await createAgentOrder({
@@ -1941,9 +1978,12 @@ export async function executeTool(
           address,
           reference: String(args.reference ?? "").trim(),
           notes,
+          variantLabel: variant || undefined,
+          paymentMode,
         });
         ctx.state.status = "PEDIDO_REGISTRADO";
         ctx.state.selectedProductId = product.id;
+        ctx.state.pendingOrderId = order.id;
         ctx.adminNotices.push(
           `🛒 Nuevo pedido ${order.orderCode}: ${order.quantity}x ${product.name} para ${customerName} (${ctx.customerPhone}). Dirección: ${address}.`,
         );
@@ -1979,9 +2019,15 @@ export async function executeTool(
           address,
           reference: String(args.reference ?? "").trim(),
           extraNotes: String(args.notes ?? "").trim(),
+          paymentMode: (ctx.config.payment as { paymentMode?: string }).paymentMode?.toUpperCase() as
+            | "BEFORE_DELIVERY"
+            | "CASH_ON_DELIVERY"
+            | "MANUAL"
+            | undefined,
         });
         await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
         ctx.state.status = "PEDIDO_REGISTRADO";
+        ctx.state.pendingOrderId = order.id;
         const resumen = cart.items
           .map((it) => `${it.quantity}x ${it.name}${it.modifiers.length ? ` (${it.modifiers.map((m) => m.option).join(", ")})` : ""}`)
           .join(", ");

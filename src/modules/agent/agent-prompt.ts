@@ -171,7 +171,15 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
     if (d.deliveryAreas?.length) parts.push(`   zonas de envío: ${d.deliveryAreas.slice(0, 8).join(", ")}`);
   }
   if (p.variants?.length)
-    parts.push(`   variantes: ${p.variants.map((v) => `${v.name} (${v.options.join("/")})`).join(" | ")}`);
+    parts.push(
+      `   variantes (pregúntalas y pásalas como modifiers al agregar_carrito): ${p.variants
+        .map((v) => `${v.name} (${v.options.join("/")})`)
+        .join(" | ")}`,
+    );
+  // Stock disponible (rubro Comercial): el modelo respeta las unidades restantes.
+  if (p.productType === "physical" && (p as { stock?: number | null }).stock != null) {
+    parts.push(`   stock disponible: ${(p as { stock?: number | null }).stock}`);
+  }
   if (p.attributes && typeof p.attributes === "object") {
     const attrs = Object.entries(p.attributes as Record<string, unknown>)
       .filter(([, v]) => v != null && String(v).trim())
@@ -221,7 +229,10 @@ function renderPaymentMethods(payment: BotConfig["payment"]): string {
 }
 
 // Guía de comportamiento según el rubro del negocio (Company.vertical).
-function verticalGuidance(vertical: string | undefined): string {
+function verticalGuidance(
+  vertical: string | undefined,
+  opts?: { catalogMode?: string; keywordMode?: string; trackStock?: boolean },
+): string {
   switch (vertical) {
     case "RESTAURANT":
       return "Rubro RESTAURANTE: el catálogo son platos/combos agrupados por sección del menú (categoría). Arma el pedido con varios ítems en el carrito (agregar_carrito); cuando un plato tenga opciones/extras, pregúntalas y pásalas como `modifiers` en agregar_carrito (el precio de la línea se ajusta solo con sus deltas). Sugiere acompañamientos/bebidas (upsell). Ten en cuenta el tiempo de preparación y la zona de entrega. Cuando el cliente confirme, toma nombre y dirección (o indica recojo en local) y usa registrar_pedido_carrito para registrar TODO el carrito como un pedido. Sé rápido y apetitoso.";
@@ -244,8 +255,34 @@ function verticalGuidance(vertical: string | undefined): string {
         "Si la herramienta responde que el horario ya no está libre, discúlpate brevemente y ofrece las alternativas que te devuelve. " +
         "Si el cliente no quiere fijar hora todavía, agenda con requestedText (queda SOLICITADA para que un asesor coordine). " +
         "El precio de venta/alquiler NO se cobra por el chat; solo si hay una seña/reserva configurada se cobra con enviar_metodos_pago + validar_pago.";
-    case "PHYSICAL_GOODS":
-      return "Rubro PRODUCTOS FÍSICOS: prioriza catálogo, variantes (talla/color), stock y envío. Cierra con registrar_pedido tras tomar datos de entrega.";
+    case "PHYSICAL_GOODS": {
+      const catalogMode = opts?.catalogMode ?? "preguntar";
+      const keywordMode = opts?.keywordMode ?? "detalle_y_preguntar";
+      const trackStock = opts?.trackStock ?? true;
+      const catalogo =
+        catalogMode === "resumen_humano"
+          ? "PRESENTACIÓN: NO listes todo el catálogo. Saluda cálido y menciona en una frase los TIPOS o el rango de lo que vendes (ej. 'tenemos desde cocinas y refrigeradoras hasta licuadoras y microondas') y pregunta qué está buscando. Solo usa enviar_catalogo si el cliente pide expresamente ver todo."
+          : catalogMode === "primeros_n"
+          ? "PRESENTACIÓN: muestra con enviar_catalogo unos primeros productos representativos y pregunta si quiere ver más o qué producto tiene en mente. NO abrumes con la lista completa de golpe."
+          : "PRESENTACIÓN: primero PREGUNTA qué producto o categoría busca; recién entonces muéstrale opciones. No mandes el catálogo completo sin que lo pida.";
+      const keyword =
+        keywordMode === "agregar_directo"
+          ? "MATCH: si el cliente NOMBRA un producto que reconoces (por su nombre o alias), agrégalo al carrito con agregar_carrito (cantidad 1 si no la dijo) y confírmale; NO hace falta mostrar la ficha antes."
+          : keywordMode === "auto"
+          ? "MATCH: si el cliente da una CANTIDAD clara junto al producto (ej. '2 cervezas'), agrégalo directo al carrito; si solo lo nombra sin cantidad, muéstrale la ficha (enviar_ficha) y pregunta cuántos quiere antes de agregar."
+          : "MATCH: cuando identifiques un producto por su nombre/alias, muéstrale la ficha (enviar_ficha) con su precio y pregunta la cantidad ANTES de agregarlo al carrito.";
+      const stock = trackStock
+        ? "STOCK: respeta el stock disponible de cada producto; si el cliente pide más de lo que hay, avísale cuántas unidades quedan. No prometas lo que no hay."
+        : "";
+      return (
+        "Rubro COMERCIAL: vendes productos físicos (ferretería, ropa, licorería, electrodomésticos, juguetes, etc.). Conoces cada producto (precio, descripción, atributos, variantes) y respondes preguntas concretas. Si piden fotos o más imágenes de un producto, envíalas con enviar_multimedia. " +
+        catalogo + " " + keyword + " " +
+        "VARIANTES: si un producto tiene variantes (talla, color, etc.), pregúntalas y pásalas al agregar_carrito como `modifiers` {group:'Talla', option:'M'}; así queda registrado qué eligió el cliente. " +
+        (stock ? stock + " " : "") +
+        "CARRITO Y PEDIDO: arma el pedido en el carrito (agregar_carrito, ver_carrito) sumando varios productos; cuando el cliente confirme, toma su nombre y dirección de entrega (o recojo en local si aplica), valida la zona de envío, y usa registrar_pedido_carrito para registrar TODO el carrito como UN pedido. Para un solo producto puedes usar registrar_pedido. " +
+        "COBRO: si el negocio cobra por adelantado, envía los métodos de pago (enviar_metodos_pago) y valida el pago (validar_pago) ANTES de confirmar; si es contra entrega, registra el pedido y coordina la entrega. Respeta el modo de cobro configurado."
+      );
+    }
     case "INFOPRODUCT":
       return "Rubro INFOPRODUCTOS: cursos, ebooks y accesos digitales. Resuelve dudas, maneja objeciones, cobra y entrega el acceso tras validar el pago.";
     default:
@@ -298,7 +335,11 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "",
     `Negocio: ${config.business.name}. Estilo comercial: ${config.agent.salesStyle}.`,
     nowLine,
-    `Rubro del negocio: ${vertical ?? "INFOPRODUCT"}. ${verticalGuidance(vertical)}`,
+    `Rubro del negocio: ${vertical ?? "INFOPRODUCT"}. ${verticalGuidance(vertical, {
+      catalogMode: (config.agent as { catalogMode?: string }).catalogMode,
+      keywordMode: (config.agent as { keywordMode?: string }).keywordMode,
+      trackStock: (config.agent as { trackStock?: boolean }).trackStock,
+    })}`,
     ...(deliveryLine ? [deliveryLine] : []),
     "",
     "Reglas del negocio configuradas por el dueño:",

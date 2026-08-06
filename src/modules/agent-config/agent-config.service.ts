@@ -68,6 +68,9 @@ export async function upsertAgentConfig(companyId: string, data: {
   salesStyle: string;
   rules: string[];
   negotiationHandoff?: boolean;
+  catalogMode?: string;
+  keywordMode?: string;
+  trackStock?: boolean;
 }) {
   const core = {
     openaiModel: data.openaiModel,
@@ -83,6 +86,9 @@ export async function upsertAgentConfig(companyId: string, data: {
     ...(typeof data.negotiationHandoff === "boolean"
       ? { negotiationHandoff: data.negotiationHandoff }
       : {}),
+    ...(data.catalogMode ? { catalogMode: data.catalogMode } : {}),
+    ...(data.keywordMode ? { keywordMode: data.keywordMode } : {}),
+    ...(typeof data.trackStock === "boolean" ? { trackStock: data.trackStock } : {}),
   };
   const config = await prisma.agentConfig.upsert({
     where: { companyId },

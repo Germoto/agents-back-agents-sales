@@ -31,6 +31,7 @@ import { loadWhatsappSender, sendText, sendMedia, webSender, type WhatsappSender
 import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
+import { markOrderPaid, findPendingOrderForCustomer } from "../orders/orders.service";
 import {
   runFlowTurn,
   buildRealFlowIO,
@@ -1014,6 +1015,14 @@ export async function handleExternalPaymentApproved(opts: {
       }
     }
     console.log(`[agent] pago externo (${provider}) aprobado y gestionado (conv=${opts.conversationId})`);
+
+    // Rubro Comercial: marcar el pedido pendiente como PAGADO (no-op si no hay).
+    const paidOrderId =
+      (state as { pendingOrderId?: string | null }).pendingOrderId ??
+      (await findPendingOrderForCustomer(opts.companyId, convo.customerId));
+    if (paidOrderId) {
+      await markOrderPaid(opts.companyId, paidOrderId, { source: provider }).catch(() => undefined);
+    }
 
     // Si la conversación es de un FLUJO esperando en «Validar pago», continuar
     // por la rama aprobada (no-op absoluto en modo AI).

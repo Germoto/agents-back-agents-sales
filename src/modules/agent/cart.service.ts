@@ -209,6 +209,11 @@ export async function checkoutCart(companyId: string, customerId: string, totalT
   });
 }
 
+/** Etiqueta de variantes/modificadores de una línea, para el snapshot del OrderItem. */
+export function variantLabelFor(it: CartLine): string {
+  return it.modifiers?.length ? it.modifiers.map((m) => `${m.group}: ${m.option}`).join(", ") : "";
+}
+
 function lineLabel(it: CartLine): string {
   const mods = it.modifiers?.length
     ? ` (${it.modifiers.map((m) => m.option).join(", ")})`

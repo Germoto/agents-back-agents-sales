@@ -36,6 +36,10 @@ enum OrderStatus {
   EN_COORDINACION
   DESPACHADO
   CANCELADO
+  // Añadidos para el rubro Comercial (pago adelantado / entrega):
+  PENDIENTE_PAGO
+  PAGADO
+  ENTREGADO
 }
 
 enum DigitalSaleStatus {
@@ -269,6 +273,11 @@ model AgentConfig {
   // intenta una vez con el argumento de valor y luego DERIVA a un asesor humano
   // (en vez de cerrarse con el precio del catálogo). Apagado por defecto.
   negotiationHandoff Boolean @default(false)
+  // Rubro Comercial: cómo presenta el agente el catálogo y maneja el match por
+  // palabra clave, y si controla stock. Configurables por el dueño.
+  catalogMode    String   @default("preguntar")           // preguntar | resumen_humano | primeros_n
+  keywordMode    String   @default("detalle_y_preguntar") // detalle_y_preguntar | agregar_directo | auto
+  trackStock     Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -444,6 +453,7 @@ model Product {
   messages         ConversationMessage[]
   cartItems        CartItem[]
   orders           Order[]
+  orderItems       OrderItem[]
   digitalSales     DigitalSale[]
   paymentReceipts  PaymentReceipt[]
   serviceBookings  ServiceBooking[]
@@ -1054,13 +1064,51 @@ model Order {
   reference    String
   notes        String?
   status       OrderStatus
+  // Rubro Comercial: total del pedido, estado de pago y placeholder de comprobante (Fase 2 Myfact).
+  total         String?
+  paymentStatus String?     // 'PENDIENTE_PAGO' | 'PAGADO' (string, no enum)
+  paymentMethod String?
+  comprobanteId String?     @db.Uuid
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   company      Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
   customer     Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
   product      Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  items         OrderItem[]
+  statusHistory OrderStatusHistory[]
 
   @@index([companyId, createdAt])
+}
+
+/** Ítem de un pedido (multi-producto). productName/unitPrice son snapshots. */
+model OrderItem {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId      String   @db.Uuid
+  productId    String?  @db.Uuid
+  productName  String
+  quantity     Int      @default(1)
+  unitPrice    String
+  variantLabel String?  // "Talla: M, Color: Azul"
+  lineTotal    String
+  createdAt    DateTime @default(now())
+  order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product      Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+}
+
+/** Historial de cambios de estado de un pedido (trazabilidad, transición libre). */
+model OrderStatusHistory {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId    String       @db.Uuid
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  changedBy  String?      // userId del panel, 'agente' o 'sistema'
+  note       String?
+  createdAt  DateTime     @default(now())
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
 }
 
 model DigitalSale {

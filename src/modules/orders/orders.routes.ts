@@ -2,13 +2,18 @@ import { Router } from "express";
 import { asyncHandler } from "../../lib/async-handler";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { validate } from "../../middlewares/validate";
-import { listOrdersController, updateOrderStatusController } from "./orders.controller";
-import { updateOrderStatusParamsSchema, updateOrderStatusSchema } from "./orders.schemas";
+import { getOrderDetailController, listOrdersController, updateOrderStatusController } from "./orders.controller";
+import { orderIdParamsSchema, updateOrderStatusSchema } from "./orders.schemas";
 
 const router = Router();
 
 router.use(requireAuth);
 router.get("/", asyncHandler(listOrdersController));
-router.put("/:id/status", validate({ params: updateOrderStatusParamsSchema, body: updateOrderStatusSchema }), asyncHandler(updateOrderStatusController));
+router.get("/:id", validate({ params: orderIdParamsSchema }), asyncHandler(getOrderDetailController));
+router.put(
+  "/:id/status",
+  validate({ params: orderIdParamsSchema, body: updateOrderStatusSchema }),
+  asyncHandler(updateOrderStatusController),
+);
 
 export default router;
