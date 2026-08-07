@@ -15,6 +15,8 @@ export const aiSuggestBodySchema = z.object({
     "objections",
     "aliases",
     "deliveryInstructions",
+    "attributes",
+    "variantOptions",
   ]),
   context: z.object({
     name: z.string().trim().min(1, "El nombre del producto es obligatorio para sugerir"),
@@ -23,6 +25,8 @@ export const aiSuggestBodySchema = z.object({
     regularPrice: z.string().optional().nullable(),
     shortDescription: z.string().optional().nullable(),
     fullDescription: z.string().optional().nullable(),
+    /** Nombre de la variante (ej. "Talla", "Color") — para field=variantOptions. */
+    variantName: z.string().optional().nullable(),
     existing: z.array(z.string()).optional().default([]),
     existingQa: z
       .array(z.object({ question: z.string(), answer: z.string().optional().nullable() }))
@@ -52,11 +56,20 @@ const FIELD_INSTRUCTIONS: Record<AiSuggestBody["field"], string> = {
     "Genera 6 alias o variaciones de búsqueda para este producto: sinónimos, errores comunes de tipeo, formas coloquiales. NO se muestran al cliente, sirven para que un bot reconozca al producto. Palabras o frases cortas en minúsculas, SIN emojis.",
   deliveryInstructions:
     "Genera un mensaje de entrega cálido y claro que el bot enviará al cliente después de que el pago sea aprobado. Debe: 1) felicitar la compra brevemente, 2) indicar cómo acceder al contenido/producto, 3) qué hacer si tiene dudas. Usa emojis para hacerlo amigable (✅ 🎉 📦 💬 etc.). Máximo 5-7 líneas. Devuelve solo el texto del mensaje.",
+  attributes:
+    "Genera una ficha técnica del producto como líneas 'clave: valor' (una por línea), en español neutro, SIN emojis. Usa entre 4 y 8 atributos RELEVANTES para este tipo de producto (ej. para ropa: Material, Composición, Cuidados; para electrodoméstico: Potencia, Voltaje, Garantía, Dimensiones; para alimento/bebida: Contenido, Presentación, Vencimiento). No inventes valores muy específicos que no puedas conocer: usa marcadores razonables o descripciones genéricas cuando corresponda. Devuelve solo las líneas 'clave: valor'.",
+  variantOptions:
+    "Genera las opciones típicas para la variante indicada de este producto (ej. Talla → S, M, L, XL; Color → Negro, Blanco, Azul; Capacidad → 500ml, 1L). Devuelve entre 2 y 8 opciones cortas, en español, SIN emojis, coherentes con el producto.",
 };
 
-const LIST_FIELDS = new Set<AiSuggestBody["field"]>(["benefits", "includes", "bonuses", "aliases"]);
+const LIST_FIELDS = new Set<AiSuggestBody["field"]>(["benefits", "includes", "bonuses", "aliases", "variantOptions"]);
 const QA_FIELDS = new Set<AiSuggestBody["field"]>(["faqs", "objections"]);
-const TEXT_FIELDS = new Set<AiSuggestBody["field"]>(["shortDescription", "fullDescription", "deliveryInstructions"]);
+const TEXT_FIELDS = new Set<AiSuggestBody["field"]>([
+  "shortDescription",
+  "fullDescription",
+  "deliveryInstructions",
+  "attributes",
+]);
 
 function buildSchemaForField(field: AiSuggestBody["field"]) {
   if (TEXT_FIELDS.has(field)) {
@@ -115,6 +128,9 @@ function buildUserPrompt(body: AiSuggestBody) {
   if (context.regularPrice?.trim()) lines.push(`Precio regular (antes): ${context.regularPrice}`);
   if (context.shortDescription?.trim()) lines.push(`Descripción corta actual: ${context.shortDescription}`);
   if (context.fullDescription?.trim()) lines.push(`Descripción completa actual: ${context.fullDescription}`);
+  if (field === "variantOptions") {
+    lines.push(`Variante para la que generas opciones: ${context.variantName?.trim() || "(sin nombre — infiere una variante razonable, ej. Talla o Color)"}`);
+  }
 
   if (LIST_FIELDS.has(field) && context.existing && context.existing.length > 0) {
     lines.push("");

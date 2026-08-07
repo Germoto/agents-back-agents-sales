@@ -20,6 +20,7 @@ import {
   copilotSchema,
 } from "./flows.schemas";
 import { copilotFlowController } from "./flows.copilot";
+import { flowAiSuggestController, flowAiSuggestSchema } from "./flows.ai";
 
 const router = Router();
 
@@ -27,6 +28,7 @@ router.use(requireAuth);
 
 // Estáticas antes de /:id (Express 5)
 router.post("/validate", validate({ body: validateFlowSchema }), asyncHandler(validateFlowController));
+router.post("/ai-suggest-text", validate({ body: flowAiSuggestSchema }), asyncHandler(flowAiSuggestController));
 
 router.get("/", asyncHandler(listFlowsController));
 router.post("/", validate({ body: createFlowSchema }), asyncHandler(createFlowController));
