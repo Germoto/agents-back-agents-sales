@@ -6,6 +6,7 @@ import { startScheduler } from "./modules/scheduler/scheduler.worker";
 import { startDeliveryStatusWorker } from "./modules/agent/delivery-status.worker";
 import { startReportsWorker } from "./modules/reports/reports.worker";
 import { resumeRunningCampaigns } from "./modules/campaigns/campaign-driver";
+import { ensureSalesAgentBootTouchups } from "./modules/admin-console/sales-agent.service";
 
 const httpServer = createServer(app);
 
@@ -22,4 +23,6 @@ httpServer.listen(env.PORT, () => {
   startReportsWorker();
   // Reanuda las campañas masivas que quedaron en ejecución antes del reinicio
   void resumeRunningCampaigns();
+  // Ajustes idempotentes del tenant de plataforma (agente de ventas del landing)
+  void ensureSalesAgentBootTouchups();
 });

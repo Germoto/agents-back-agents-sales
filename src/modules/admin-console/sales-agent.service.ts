@@ -115,16 +115,31 @@ function renderPlans(plans: Awaited<ReturnType<typeof listPublicPlans>>): string
     .join("\n");
 }
 
-/**
- * Identidad LEAN del asesor comercial. El conocimiento vive en el producto
- * "FlowApp" del catálogo (ficha/beneficios/FAQs) y los precios llegan por la
- * sección viva de planes que inyecta buildBotConfig en cada turno.
- */
-export const SALES_AGENT_LEAN_PROMPT = [
+/** Versión anterior del prompt lean — SOLO para el touch-up de actualización:
+ * si el basePrompt del tenant sigue siendo EXACTAMENTE este, se reemplaza por
+ * la versión vigente; si el dueño lo editó a mano, no se toca. */
+const SALES_AGENT_LEAN_PROMPT_V1 = [
   "Eres el ASESOR COMERCIAL de FlowApp (https://flowapp.pe), la plataforma que le da a cualquier negocio un agente de ventas con IA para WhatsApp y chat web. Atiendes a PROSPECTOS desde el chat del sitio oficial.",
   "REGLAS:",
   "- Toda la información sobre FlowApp está en tu catálogo: usa enviar_ficha para presentarlo y responde con su base de conocimiento (descripción, beneficios, FAQs). No inventes funciones ni promesas.",
   "- Los planes y precios vigentes aparecen en la sección 'PLANES Y PRECIOS VIGENTES'. Usa SOLO esos datos; nunca inventes precios ni descuentos.",
+  "- NO cobras por este chat: para contratar, dirige SIEMPRE a https://flowapp.pe/registro. Nunca envíes métodos de pago ni valides comprobantes.",
+  "- Tu objetivo es resolver dudas, entender el negocio del prospecto (pregunta a qué se dedica) y llevarlo a crear su cuenta. Capta su interés con naturalidad.",
+  "- Si quiere ver la plataforma en acción, ofrécele agendar una demo SOLO si hay disponibilidad configurada (consultar_disponibilidad); si no hay agenda, invítalo a probar el simulador creando su cuenta.",
+  "- Si pide hablar con una persona o algo fuera de tu alcance, usa derivar_humano.",
+  "- Tono cercano, profesional y directo. Respuestas cortas (2-4 oraciones), en el idioma del prospecto. Una pregunta a la vez.",
+].join("\n");
+
+/**
+ * Identidad LEAN del asesor comercial (versión vigente, enruta por intención).
+ * El conocimiento vive en el producto "FlowApp" del catálogo y los precios
+ * llegan por la sección viva de planes que inyecta buildBotConfig en cada turno.
+ */
+export const SALES_AGENT_LEAN_PROMPT = [
+  "Eres el ASESOR COMERCIAL de FlowApp (https://flowapp.pe), la plataforma que le da a cualquier negocio un agente de ventas con IA para WhatsApp y chat web. Atiendes a PROSPECTOS desde el chat del sitio oficial.",
+  "REGLAS:",
+  "- RESPONDE a LO QUE EL PROSPECTO ESCRIBIÓ, nunca con un guion fijo: si pregunta PRECIOS o planes, escríbele TÚ los planes de la sección 'PLANES Y PRECIOS VIGENTES' (montos exactos, en tu propio texto, SIN enviar la ficha). Si pregunta qué es FlowApp o pide información general, preséntalo con enviar_ficha — UNA sola vez por conversación, nunca la repitas. Si SOLO saluda, salúdalo breve y pregúntale a qué se dedica su negocio (sin presentar todavía).",
+  "- Las demás dudas se responden con la base de conocimiento del catálogo (descripción, beneficios, FAQs). No inventes funciones, precios ni promesas. NUNCA digas que 'enviaste' información o precios si no los escribiste en tu mensaje.",
   "- NO cobras por este chat: para contratar, dirige SIEMPRE a https://flowapp.pe/registro. Nunca envíes métodos de pago ni valides comprobantes.",
   "- Tu objetivo es resolver dudas, entender el negocio del prospecto (pregunta a qué se dedica) y llevarlo a crear su cuenta. Capta su interés con naturalidad.",
   "- Si quiere ver la plataforma en acción, ofrécele agendar una demo SOLO si hay disponibilidad configurada (consultar_disponibilidad); si no hay agenda, invítalo a probar el simulador creando su cuenta.",
@@ -330,6 +345,41 @@ async function ensureProductPresentation(companyId: string): Promise<void> {
   });
 }
 
+/**
+ * Touch-up idempotente del prompt: solo si el basePrompt sigue siendo
+ * EXACTAMENTE la versión anterior generada por el sistema se actualiza a la
+ * vigente. Si el dueño lo editó a mano, no se toca.
+ */
+async function ensureAgentPromptCurrent(companyId: string): Promise<void> {
+  const agent = await prisma.agentConfig.findUnique({
+    where: { companyId },
+    select: { basePrompt: true },
+  });
+  if (agent?.basePrompt === SALES_AGENT_LEAN_PROMPT_V1) {
+    await prisma.agentConfig.update({
+      where: { companyId },
+      data: { basePrompt: SALES_AGENT_LEAN_PROMPT },
+    });
+    console.info("[sales-agent] basePrompt del tenant de plataforma actualizado a v2");
+  }
+}
+
+/**
+ * Touch-ups del tenant de plataforma al ARRANCAR el backend (best-effort):
+ * aplican en cada deploy sin depender de que alguien abra la consola. Solo
+ * tocan el tenant apuntado por PlatformConfig — jamás a otra empresa.
+ */
+export async function ensureSalesAgentBootTouchups(): Promise<void> {
+  try {
+    const pointer = await getSalesAgentPointer();
+    if (!pointer.companyId) return;
+    await ensureProductPresentation(pointer.companyId);
+    await ensureAgentPromptCurrent(pointer.companyId);
+  } catch {
+    // best-effort: nunca bloquear el boot
+  }
+}
+
 export async function ensureSalesAgentTenant(superadmin: { id: string; phone: string }): Promise<string> {
   const pointer = await getSalesAgentPointer();
   if (pointer.companyId) {
@@ -340,6 +390,7 @@ export async function ensureSalesAgentTenant(superadmin: { id: string; phone: st
     if (exists) {
       await upgradeLegacyTenant(pointer.companyId);
       await ensureProductPresentation(pointer.companyId);
+      await ensureAgentPromptCurrent(pointer.companyId);
       return pointer.companyId;
     }
   }
