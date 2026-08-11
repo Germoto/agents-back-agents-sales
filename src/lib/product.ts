@@ -157,8 +157,12 @@ export function mapBotProduct(
 ) {
   // TODO: leer currencySymbol de Company.currencySymbol cuando se agregue la columna
   const symbol = opts?.currencySymbol ?? "S/";
-  const fmtPrice = (v: string | null | undefined) =>
-    v === null || v === undefined || v === "" ? null : `${symbol} ${v}`;
+  // El símbolo solo se antepone a precios que EMPIEZAN en número; los textos
+  // libres ("Consultar", "Según el plan elegido") se muestran tal cual.
+  const fmtPrice = (v: string | null | undefined) => {
+    if (v === null || v === undefined || v.trim() === "") return null;
+    return /^\d/.test(v.trim()) ? `${symbol} ${v}` : v;
+  };
 
   return {
     id: product.id,               // UUID real (antes era product.slug)

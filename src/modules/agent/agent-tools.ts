@@ -982,10 +982,12 @@ function renderProductFicha(p: BotProduct, vertical?: string): string {
   if (planLines.length) {
     parts.push(`📋 *Planes y precios:*\n${planLines.join("\n")}`);
   } else {
-    const price = p.priceText ?? p.price;
-    parts.push(
-      p.regularPriceText ? `💰 *${price}*  ~antes ${p.regularPriceText}~` : `💰 *${price}*`,
-    );
+    const price = (p.priceText ?? p.price ?? "").trim();
+    if (price) {
+      parts.push(
+        p.regularPriceText ? `💰 *${price}*  ~antes ${p.regularPriceText}~` : `💰 *${price}*`,
+      );
+    }
   }
   return parts.join("\n\n");
 }

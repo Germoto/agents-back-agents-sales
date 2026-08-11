@@ -249,6 +249,12 @@ async function uniqueSyntheticPhone(): Promise<string> {
   throw new AppError("No se pudo generar un teléfono único para el tenant de plataforma", 500);
 }
 
+/** Presentación CORTA que envía enviar_ficha (en vez de la ficha autogenerada larga). */
+const SALES_PRODUCT_PRESENTATION =
+  "🤖 *FlowApp* es tu agente de ventas con IA: atiende por WhatsApp y chat web 24/7, presenta tus productos, cobra, valida pagos (Yape/Plin/Mercado Pago) y entrega solo — mientras tú ves todo en un panel. Cuéntame, ¿qué vende tu negocio? Así te digo exactamente cómo te ayudaría 😊";
+
+const SALES_PRODUCT_SLUG = "flowapp-agente-de-ventas-ia";
+
 /** Crea el producto "FlowApp" del catálogo del tenant a partir del knowledge. */
 async function createFlowAppProduct(
   tx: Prisma.TransactionClient,
@@ -259,10 +265,11 @@ async function createFlowAppProduct(
   await tx.product.create({
     data: {
       companyId,
-      slug: "flowapp-agente-de-ventas-ia",
+      slug: SALES_PRODUCT_SLUG,
       name: "FlowApp — Agente de ventas IA",
       productType: "DIGITAL",
       price: "Según el plan elegido",
+      presentationMessage: SALES_PRODUCT_PRESENTATION,
       shortDescription: seed.shortDescription,
       fullDescription: seed.fullDescription,
       showInCatalog: true,
@@ -307,6 +314,22 @@ async function upgradeLegacyTenant(companyId: string): Promise<void> {
   console.info("[sales-agent] tenant de plataforma actualizado a SERVICE + producto FlowApp");
 }
 
+/**
+ * Touch-up idempotente: si el producto de plataforma quedó sin mensaje de
+ * presentación (migración previa a este fix), setear el corto. No pisa
+ * ediciones del dueño (solo escribe si está vacío).
+ */
+async function ensureProductPresentation(companyId: string): Promise<void> {
+  await prisma.product.updateMany({
+    where: {
+      companyId,
+      slug: SALES_PRODUCT_SLUG,
+      OR: [{ presentationMessage: null }, { presentationMessage: "" }],
+    },
+    data: { presentationMessage: SALES_PRODUCT_PRESENTATION },
+  });
+}
+
 export async function ensureSalesAgentTenant(superadmin: { id: string; phone: string }): Promise<string> {
   const pointer = await getSalesAgentPointer();
   if (pointer.companyId) {
@@ -316,6 +339,7 @@ export async function ensureSalesAgentTenant(superadmin: { id: string; phone: st
     });
     if (exists) {
       await upgradeLegacyTenant(pointer.companyId);
+      await ensureProductPresentation(pointer.companyId);
       return pointer.companyId;
     }
   }
