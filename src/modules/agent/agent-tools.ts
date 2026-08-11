@@ -33,7 +33,13 @@ import {
 } from "../public-payments/public-payments.service";
 import { createAgentOrder, createOrderFromCart } from "./order.service";
 import { markOrderPaid, findPendingOrderForCustomer } from "../orders/orders.service";
-import { createBooking, reasonMessage } from "../bookings/bookings.service";
+import {
+  createBooking,
+  reasonMessage,
+  findUpcomingBookingForCustomer,
+  updateBookingStatus,
+  rescheduleBooking,
+} from "../bookings/bookings.service";
 import { getAvailableSlots, formatSlotLabel, isSlotAvailable } from "../bookings/availability.service";
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
 import { claimAvailableCredential, countAvailable, peekAvailableCredential } from "../streaming-inventory/streaming-inventory.service";
@@ -1260,6 +1266,41 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "cancelar_cita",
+      description:
+        "Cancela la cita/reserva VIGENTE del cliente (la próxima, o la del bookingCode si lo menciona). Úsala cuando el cliente pida cancelar su cita. NUNCA digas que cancelaste o solicitaste la cancelación sin haber llamado esta herramienta.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          bookingCode: { type: "string", description: "Código de la reserva (solo si el cliente lo menciona)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "reprogramar_cita",
+      description:
+        "Mueve la cita VIGENTE del cliente a un nuevo horario. Usa 'startsAt' con un horario EXACTO que devolvió consultar_disponibilidad. NUNCA digas que cambiaste la cita sin haber llamado esta herramienta.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["startsAt"],
+        properties: {
+          startsAt: {
+            type: "string",
+            description: "Nuevo inicio EXACTO en ISO (copiado tal cual de consultar_disponibilidad)",
+          },
+          bookingCode: { type: "string", description: "Código de la reserva (solo si el cliente lo menciona)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "consultar_disponibilidad",
       description:
         "Devuelve los horarios LIBRES reales de un servicio para ofrecérselos al cliente. Úsalo SIEMPRE antes de agendar una cita. Nunca inventes horarios.",
@@ -2242,6 +2283,91 @@ export async function executeTool(
             error: message,
             alternativas: slots.map((s) => ({ startsAt: s.startsAt, label: s.label })),
             note: "Ese horario ya no está disponible. Ofrece estas alternativas al cliente.",
+          });
+        } catch {
+          return JSON.stringify({ ok: false, error: message });
+        }
+      }
+    }
+
+    case "cancelar_cita": {
+      const booking = await findUpcomingBookingForCustomer(
+        ctx.companyId,
+        ctx.customerId,
+        String(args.bookingCode ?? "").trim() || undefined,
+      );
+      if (!booking) {
+        return JSON.stringify({ ok: false, error: "el cliente no tiene citas vigentes para cancelar" });
+      }
+      const when = booking.startsAt
+        ? formatSlotLabel(booking.startsAt, ctx.config.business.timezone)
+        : booking.requestedText || "sin horario fijado";
+      if (ctx.simulate) {
+        return JSON.stringify({
+          ok: true,
+          bookingCode: booking.bookingCode,
+          note: `(simulación) Cita ${booking.bookingCode ?? ""} (${when}) cancelada; en real se cancela de verdad y se avisa al negocio. Confírmalo al cliente y ofrece reagendar si quiere.`,
+        });
+      }
+      await updateBookingStatus(ctx.companyId, booking.id, "CANCELADA");
+      ctx.adminNotices.push(
+        `🗓️ Cita CANCELADA por el cliente: ${booking.bookingCode ?? booking.id} — ${booking.product?.name ?? "servicio"} (${when}) · ${ctx.customerPhone}`,
+      );
+      return JSON.stringify({
+        ok: true,
+        bookingCode: booking.bookingCode,
+        startsAt: booking.startsAt,
+        note: "Cita cancelada correctamente (los recordatorios también). Confírmalo al cliente y ofrece reagendar cuando quiera.",
+      });
+    }
+
+    case "reprogramar_cita": {
+      const booking = await findUpcomingBookingForCustomer(
+        ctx.companyId,
+        ctx.customerId,
+        String(args.bookingCode ?? "").trim() || undefined,
+      );
+      if (!booking) {
+        return JSON.stringify({ ok: false, error: "el cliente no tiene citas vigentes para reprogramar" });
+      }
+      const newStart = String(args.startsAt ?? "").trim();
+      if (!newStart) return JSON.stringify({ ok: false, error: "falta startsAt (usa un horario de consultar_disponibilidad)" });
+      if (ctx.simulate) {
+        // Validación real de disponibilidad, sin persistir.
+        const parsed = new Date(newStart);
+        if (isNaN(parsed.getTime())) return JSON.stringify({ ok: false, error: "fecha inválida" });
+        const check = await isSlotAvailable(ctx.companyId, booking.productId, parsed, { ignoreBookingId: booking.id });
+        if (!check.ok) {
+          return JSON.stringify({ ok: false, error: reasonMessage(check.reason), note: "Ofrece otro horario de consultar_disponibilidad." });
+        }
+        return JSON.stringify({
+          ok: true,
+          bookingCode: booking.bookingCode,
+          startsAt: newStart,
+          note: `(simulación) Cita movida a ${formatSlotLabel(parsed, ctx.config.business.timezone)}; en real se reprograma de verdad. Confírmalo al cliente.`,
+        });
+      }
+      try {
+        const updated = await rescheduleBooking(ctx.companyId, booking.id, newStart);
+        const when = updated.startsAt ? formatSlotLabel(updated.startsAt, ctx.config.business.timezone) : newStart;
+        ctx.adminNotices.push(
+          `🗓️ Cita REPROGRAMADA por el cliente: ${updated.bookingCode ?? updated.id} — ${updated.product?.name ?? "servicio"} → ${when} · ${ctx.customerPhone}`,
+        );
+        return JSON.stringify({
+          ok: true,
+          bookingCode: updated.bookingCode,
+          startsAt: updated.startsAt,
+          note: `Cita reprogramada y CONFIRMADA para ${when} (recordatorios actualizados). Confírmasela al cliente con día y hora.`,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "no se pudo reprogramar la cita";
+        try {
+          const { slots } = await getAvailableSlots(ctx.companyId, booking.productId, { limit: 5 });
+          return JSON.stringify({
+            ok: false,
+            error: message,
+            alternativas: slots.map((s) => ({ startsAt: s.startsAt, label: s.label })),
+            note: "Ese horario no está disponible. Ofrece estas alternativas al cliente.",
           });
         } catch {
           return JSON.stringify({ ok: false, error: message });

@@ -222,6 +222,35 @@ export async function listBookings(companyId: string, filters: ListBookingsFilte
   return rows;
 }
 
+/**
+ * Cita VIGENTE del cliente (para cancelar/reprogramar desde el agente). Con
+ * `bookingCode` busca esa cita exacta (validando tenant y cliente); sin él,
+ * la próxima SOLICITADA/CONFIRMADA (las vagas sin fecha también cuentan).
+ */
+export async function findUpcomingBookingForCustomer(
+  companyId: string,
+  customerId: string,
+  bookingCode?: string | null,
+) {
+  const activeStatuses: ServiceBookingStatus[] = ["SOLICITADA", "CONFIRMADA"];
+  if (bookingCode?.trim()) {
+    return prisma.serviceBooking.findFirst({
+      where: { companyId, customerId, bookingCode: bookingCode.trim(), status: { in: activeStatuses } },
+      include: bookingInclude,
+    });
+  }
+  return prisma.serviceBooking.findFirst({
+    where: {
+      companyId,
+      customerId,
+      status: { in: activeStatuses },
+      OR: [{ startsAt: { gte: new Date() } }, { startsAt: null }],
+    },
+    orderBy: [{ startsAt: "asc" }],
+    include: bookingInclude,
+  });
+}
+
 export async function updateBookingStatus(companyId: string, id: string, status: ServiceBookingStatus) {
   const existing = await prisma.serviceBooking.findFirst({ where: { id, companyId }, select: { id: true } });
   if (!existing) throw new AppError("Reserva no encontrada", 404);
