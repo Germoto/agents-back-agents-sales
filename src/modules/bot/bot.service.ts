@@ -2,6 +2,7 @@ import { AppError } from "../../lib/app-error";
 import { prisma } from "../../lib/prisma";
 import { decryptCredential } from "../../lib/credentials-crypto";
 import { mapBotProduct, productRelations } from "../../lib/product";
+import { isPlatformSalesCompanyId, getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 
 function normalizePhone(value: string) {
   return value.replace(/\D/g, "");
@@ -126,6 +127,17 @@ export async function buildBotConfig(companyId: string, account?: string) {
     }
   }
 
+  // Tenant de plataforma (agente de ventas del landing): anexar al prompt los
+  // paquetes públicos EN VIVO — precios siempre actualizados sin recompilar.
+  let basePrompt = agentConfig.basePrompt;
+  try {
+    if (await isPlatformSalesCompanyId(companyId)) {
+      basePrompt += await getLivePlansPromptSection();
+    }
+  } catch {
+    // Si billing falla, el chat sigue con el prompt lean sin la sección de precios.
+  }
+
   return {
     success: true,
     business: {
@@ -175,7 +187,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
       },
     },
     agent: {
-      basePrompt: agentConfig.basePrompt,
+      basePrompt,
       salesStyle: agentConfig.salesStyle,
       rules: agentConfig.rules as string[],
       followupConfig: agentConfig.followupConfig ?? null,

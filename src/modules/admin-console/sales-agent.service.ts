@@ -1,17 +1,21 @@
 /**
  * Agente de ventas de la PLATAFORMA: el chat del landing que atiende a
  * prospectos que quieren adquirir el SaaS. Vive como un tenant oculto
- * ("FlowApp Ventas", rubro OTHER, sin productos, pagos off, LEGACY) que
- * reutiliza TODO el runtime existente (agente IA, chat web, CRM,
- * conversaciones). Aquí: provisioning idempotente, base de conocimiento con
- * campos predefinidos y composición del basePrompt (con los paquetes públicos
- * inyectados en vivo al guardar).
+ * ("FlowApp Ventas", rubro SERVICE, pagos off, LEGACY) que reutiliza TODO el
+ * runtime existente (agente IA, chat web, CRM, conversaciones, agenda de demos).
+ *
+ * REDISEÑO "tenant total": la base de conocimiento vive en el PRODUCTO
+ * "FlowApp" del catálogo del tenant (ficha editable en Productos impersonando);
+ * los paquetes públicos y precios se inyectan al prompt EN VIVO en cada turno
+ * (getLivePlansPromptSection, consumido por buildBotConfig); el basePrompt es
+ * una identidad LEAN. La consola solo conserva el toggle de la burbuja del
+ * landing y los accesos por impersonación.
  */
 
 import crypto from "crypto";
 import bcrypt from "bcrypt";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
-import { encryptCredential } from "../../lib/credentials-crypto";
 import { AppError } from "../../lib/app-error";
 import { env } from "../../config/env";
 import {
@@ -111,35 +115,108 @@ function renderPlans(plans: Awaited<ReturnType<typeof listPublicPlans>>): string
     .join("\n");
 }
 
-export function composeSalesAgentPrompt(
-  knowledge: SalesAgentKnowledge,
-  plans: Awaited<ReturnType<typeof listPublicPlans>>,
-): string {
-  const sections: string[] = [
-    `Eres el ASISTENTE COMERCIAL de FlowApp (https://flowapp.pe), la plataforma de agentes de venta con IA para WhatsApp y web. Atiendes a PROSPECTOS interesados en adquirir FlowApp para su negocio, desde el chat del sitio oficial.`,
-    `TU OBJETIVO: resolver sus dudas con la base de conocimiento, entender su negocio (pregunta a qué se dedica y qué vende) y llevarlo a CREAR SU CUENTA en https://flowapp.pe/registro. Si pide hablar con una persona, una demo personalizada o algo que no sabes, usa la herramienta derivar_humano.`,
-    `REGLAS CRÍTICAS:\n- NO eres un vendedor de catálogo: NO uses enviar_ficha, enviar_catalogo, enviar_metodos_pago, validar_pago, entregar_producto, registrar_pedido ni agendar_servicio (no aplican aquí).\n- NUNCA inventes precios, funciones ni promesas: usa SOLO esta base de conocimiento.\n- Responde breve, claro y en el idioma del prospecto. Una pregunta a la vez.\n- Cuando notes interés real, comparte el link de registro: https://flowapp.pe/registro`,
-    `=== QUÉ ES FLOWAPP ===\n${knowledge.queEs}`,
-    `=== FUNCIONES PRINCIPALES ===\n${knowledge.funciones}`,
-    `=== PLANES Y PRECIOS VIGENTES (actualizados automáticamente) ===\n${renderPlans(plans)}`,
-    `=== CÓMO EMPEZAR ===\n${knowledge.comoEmpezar}`,
-    `=== PREGUNTAS FRECUENTES ===\n${knowledge.faq}`,
-    `=== CONTACTO HUMANO ===\n${knowledge.contacto}`,
-  ];
-  if (knowledge.extra.trim()) {
-    sections.push(`=== INFORMACIÓN ADICIONAL ===\n${knowledge.extra}`);
-  }
-  return sections.join("\n\n");
-}
+/**
+ * Identidad LEAN del asesor comercial. El conocimiento vive en el producto
+ * "FlowApp" del catálogo (ficha/beneficios/FAQs) y los precios llegan por la
+ * sección viva de planes que inyecta buildBotConfig en cada turno.
+ */
+export const SALES_AGENT_LEAN_PROMPT = [
+  "Eres el ASESOR COMERCIAL de FlowApp (https://flowapp.pe), la plataforma que le da a cualquier negocio un agente de ventas con IA para WhatsApp y chat web. Atiendes a PROSPECTOS desde el chat del sitio oficial.",
+  "REGLAS:",
+  "- Toda la información sobre FlowApp está en tu catálogo: usa enviar_ficha para presentarlo y responde con su base de conocimiento (descripción, beneficios, FAQs). No inventes funciones ni promesas.",
+  "- Los planes y precios vigentes aparecen en la sección 'PLANES Y PRECIOS VIGENTES'. Usa SOLO esos datos; nunca inventes precios ni descuentos.",
+  "- NO cobras por este chat: para contratar, dirige SIEMPRE a https://flowapp.pe/registro. Nunca envíes métodos de pago ni valides comprobantes.",
+  "- Tu objetivo es resolver dudas, entender el negocio del prospecto (pregunta a qué se dedica) y llevarlo a crear su cuenta. Capta su interés con naturalidad.",
+  "- Si quiere ver la plataforma en acción, ofrécele agendar una demo SOLO si hay disponibilidad configurada (consultar_disponibilidad); si no hay agenda, invítalo a probar el simulador creando su cuenta.",
+  "- Si pide hablar con una persona o algo fuera de tu alcance, usa derivar_humano.",
+  "- Tono cercano, profesional y directo. Respuestas cortas (2-4 oraciones), en el idioma del prospecto. Una pregunta a la vez.",
+].join("\n");
 
 function salesAgentRules(): string[] {
   return [
-    "Eres informativo y consultivo: no vendes productos con fichas ni links de pago.",
     "Tu meta es que el prospecto cree su cuenta en https://flowapp.pe/registro.",
-    "Si piden hablar con una persona o una demo, usa derivar_humano.",
-    "No inventes precios ni funciones: usa solo la base de conocimiento.",
+    "No cobras por el chat: nunca envíes métodos de pago; dirige al registro.",
+    "Si piden hablar con una persona, usa derivar_humano.",
+    "No inventes precios ni funciones: usa el catálogo y la sección de planes vigentes.",
     "Pregunta a qué se dedica el negocio del prospecto para recomendar cómo le sirve FlowApp.",
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Inyección EN VIVO de planes al prompt (consumida por buildBotConfig)
+// ---------------------------------------------------------------------------
+
+/** ¿companyId es el tenant oculto del agente de ventas de la plataforma? */
+export async function isPlatformSalesCompanyId(companyId: string): Promise<boolean> {
+  const pointer = await getSalesAgentPointer();
+  return !!pointer.companyId && pointer.companyId === companyId;
+}
+
+/** Sección de planes/precios ACTUALES para anexar al basePrompt en cada turno. */
+export async function getLivePlansPromptSection(): Promise<string> {
+  const plans = await listPublicPlans();
+  return `\n\n=== PLANES Y PRECIOS VIGENTES (fuente oficial, usa SOLO estos) ===\n${renderPlans(plans)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Mapeo knowledge → producto "FlowApp" (seed único del rediseño)
+// ---------------------------------------------------------------------------
+
+interface KnowledgeProductSeed {
+  shortDescription: string;
+  fullDescription: string;
+  benefits: string[];
+  faqs: Array<{ question: string; answer: string }>;
+}
+
+/** Convierte la base de conocimiento legacy en la ficha del producto. Nunca pierde texto. */
+export function mapKnowledgeToProduct(k: SalesAgentKnowledge): KnowledgeProductSeed {
+  const firstSentence = k.queEs.split(/(?<=\.)\s/)[0]?.slice(0, 180) || k.queEs.slice(0, 180);
+  const fullParts: string[] = [k.queEs];
+
+  // funciones → beneficios (líneas con viñeta); sin viñetas → sección de texto.
+  const bulletLines = k.funciones
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^[-•*]\s+/.test(l))
+    .map((l) => l.replace(/^[-•*]\s+/, "").trim())
+    .filter(Boolean);
+  if (!bulletLines.length && k.funciones.trim()) {
+    fullParts.push(`## Qué hace\n${k.funciones.trim()}`);
+  }
+
+  // faq → pares P/R (heurística); si no parsea, el texto cae íntegro a la descripción.
+  const faqs: Array<{ question: string; answer: string }> = [];
+  let currentQ: string | null = null;
+  let currentA: string[] = [];
+  for (const raw of k.faq.split("\n")) {
+    const line = raw.trim();
+    const qMatch = line.match(/^(?:P:\s*)?(¿.+|.+\?)$/);
+    if (qMatch && (line.startsWith("P:") || line.startsWith("¿") || line.endsWith("?"))) {
+      if (currentQ && currentA.length) faqs.push({ question: currentQ, answer: currentA.join("\n").trim() });
+      currentQ = qMatch[1].trim();
+      currentA = [];
+    } else if (line) {
+      currentA.push(line.replace(/^R:\s*/, ""));
+    }
+  }
+  if (currentQ && currentA.length) faqs.push({ question: currentQ, answer: currentA.join("\n").trim() });
+  if (!faqs.length && k.faq.trim()) {
+    fullParts.push(`## Preguntas frecuentes\n${k.faq.trim()}`);
+  }
+  if (k.comoEmpezar.trim()) {
+    faqs.push({ question: "¿Cómo empiezo a usar FlowApp?", answer: k.comoEmpezar.trim() });
+  }
+
+  if (k.contacto.trim()) fullParts.push(`## Contacto\n${k.contacto.trim()}`);
+  if (k.extra.trim()) fullParts.push(k.extra.trim());
+
+  return {
+    shortDescription: firstSentence,
+    fullDescription: fullParts.join("\n\n"),
+    benefits: bulletLines,
+    faqs,
+  };
 }
 
 function normalizeKnowledge(value: unknown): SalesAgentKnowledge {
@@ -172,6 +249,64 @@ async function uniqueSyntheticPhone(): Promise<string> {
   throw new AppError("No se pudo generar un teléfono único para el tenant de plataforma", 500);
 }
 
+/** Crea el producto "FlowApp" del catálogo del tenant a partir del knowledge. */
+async function createFlowAppProduct(
+  tx: Prisma.TransactionClient,
+  companyId: string,
+  knowledge: SalesAgentKnowledge,
+): Promise<void> {
+  const seed = mapKnowledgeToProduct(knowledge);
+  await tx.product.create({
+    data: {
+      companyId,
+      slug: "flowapp-agente-de-ventas-ia",
+      name: "FlowApp — Agente de ventas IA",
+      productType: "DIGITAL",
+      price: "Según el plan elegido",
+      shortDescription: seed.shortDescription,
+      fullDescription: seed.fullDescription,
+      showInCatalog: true,
+      active: true,
+      benefits: { create: seed.benefits.map((value, i) => ({ value, sortOrder: i })) },
+      faqs: { create: seed.faqs.map((f, i) => ({ question: f.question, answer: f.answer, sortOrder: i })) },
+      aliases: {
+        create: ["flowapp", "agente de ventas", "chatbot", "asistente ia", "agente ia"].map((value) => ({ value })),
+      },
+    },
+  });
+}
+
+/**
+ * Upgrade IDEMPOTENTE del tenant legacy (rediseño "tenant total"): pasa a
+ * vertical SERVICE, seedea el producto FlowApp desde el knowledge de
+ * PlatformConfig (solo si el catálogo está vacío) y reescribe el basePrompt a
+ * la identidad lean UNA sola vez. El marcador es el vertical: si ya es
+ * SERVICE, no se toca nada (protege ediciones posteriores del dueño).
+ */
+async function upgradeLegacyTenant(companyId: string): Promise<void> {
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { vertical: true } });
+  if (!company || company.vertical === "SERVICE") return;
+
+  const pointer = await getSalesAgentPointer();
+  const knowledge = normalizeKnowledge(pointer.knowledge);
+
+  await prisma.$transaction(async (tx) => {
+    // Releer el vertical DENTRO de la transacción (carrera doble GET benigna).
+    const fresh = await tx.company.findUnique({ where: { id: companyId }, select: { vertical: true } });
+    if (!fresh || fresh.vertical === "SERVICE") return;
+    await tx.company.update({ where: { id: companyId }, data: { vertical: "SERVICE" } });
+    const productCount = await tx.product.count({ where: { companyId } });
+    if (productCount === 0) {
+      await createFlowAppProduct(tx, companyId, knowledge);
+    }
+    await tx.agentConfig.update({
+      where: { companyId },
+      data: { basePrompt: SALES_AGENT_LEAN_PROMPT, rules: salesAgentRules() },
+    });
+  });
+  console.info("[sales-agent] tenant de plataforma actualizado a SERVICE + producto FlowApp");
+}
+
 export async function ensureSalesAgentTenant(superadmin: { id: string; phone: string }): Promise<string> {
   const pointer = await getSalesAgentPointer();
   if (pointer.companyId) {
@@ -179,7 +314,10 @@ export async function ensureSalesAgentTenant(superadmin: { id: string; phone: st
       where: { id: pointer.companyId },
       select: { id: true },
     });
-    if (exists) return pointer.companyId;
+    if (exists) {
+      await upgradeLegacyTenant(pointer.companyId);
+      return pointer.companyId;
+    }
   }
 
   // ¿Quedó la Company de una corrida anterior sin puntero? Adoptarla.
@@ -189,12 +327,12 @@ export async function ensureSalesAgentTenant(superadmin: { id: string; phone: st
   });
   if (bySlug) {
     await setSalesAgentPointer(bySlug.id, pointer.knowledge ?? { ...DEFAULT_KNOWLEDGE });
+    await upgradeLegacyTenant(bySlug.id);
     return bySlug.id;
   }
 
   const phone = await uniqueSyntheticPhone();
   const passwordHash = await bcrypt.hash(crypto.randomBytes(24).toString("hex"), 10);
-  const basePrompt = composeSalesAgentPrompt(DEFAULT_KNOWLEDGE, await listPublicPlans());
 
   const company = await prisma.$transaction(async (tx) => {
     const created = await tx.company.create({
@@ -202,7 +340,7 @@ export async function ensureSalesAgentTenant(superadmin: { id: string; phone: st
         name: SALES_COMPANY_NAME,
         slug: SALES_COMPANY_SLUG,
         adminPhone: superadmin.phone,
-        vertical: "OTHER",
+        vertical: "SERVICE",
         timezone: "America/Lima",
         isActive: true,
       },
@@ -227,11 +365,14 @@ export async function ensureSalesAgentTenant(superadmin: { id: string; phone: st
         openaiModel: "gpt-4.1-mini",
         openaiApiKey: "",
         temperature: "0.25",
-        basePrompt,
+        basePrompt: SALES_AGENT_LEAN_PROMPT,
         salesStyle: "consultivo",
         rules: salesAgentRules(),
       },
     });
+
+    // La base de conocimiento vive en el producto FlowApp del catálogo.
+    await createFlowAppProduct(tx, created.id, DEFAULT_KNOWLEDGE);
 
     // buildBotConfig exige la fila (los cobros quedan APAGADOS: agente informativo).
     await tx.paymentConfig.create({
@@ -289,72 +430,36 @@ export async function ensureSalesAgentTenant(superadmin: { id: string; phone: st
 
 export async function getSalesAgentAdmin(superadmin: { id: string; phone: string }) {
   const companyId = await ensureSalesAgentTenant(superadmin);
-  const [pointer, agent, webchat] = await Promise.all([
-    getSalesAgentPointer(),
+  const [agent, webchat] = await Promise.all([
     prisma.agentConfig.findUnique({
       where: { companyId },
-      select: { openaiApiKey: true, openaiModel: true },
+      select: { openaiApiKey: true },
     }),
     prisma.webchatConfig.findUnique({
       where: { companyId },
-      select: { enabled: true, token: true, welcomeMessage: true, accentColor: true },
+      select: { enabled: true },
     }),
   ]);
+  const apiKeySet = !!agent?.openaiApiKey;
+  const enabled = webchat?.enabled ?? false;
   return {
     companyId,
-    knowledge: normalizeKnowledge(pointer.knowledge),
-    knowledgeFields: KNOWLEDGE_FIELDS,
-    apiKeySet: !!agent?.openaiApiKey,
-    openaiModel: agent?.openaiModel ?? "gpt-4.1-mini",
-    webchat: {
-      enabled: webchat?.enabled ?? false,
-      token: webchat?.token ?? "",
-      welcomeMessage: webchat?.welcomeMessage ?? DEFAULT_WELCOME,
-      accentColor: webchat?.accentColor ?? "#7c3aed",
-    },
+    enabled,
+    apiKeySet,
+    status: !enabled ? "disabled" : !apiKeySet ? "missing_key" : "active",
   };
 }
 
+/** Consola mínima: solo el toggle de la burbuja del landing. Todo lo demás se
+ * edita impersonando el tenant (Agente IA, Productos, Chat Web). */
 export async function updateSalesAgentAdmin(
   superadmin: { id: string; phone: string },
-  data: {
-    knowledge?: Partial<SalesAgentKnowledge>;
-    openaiApiKey?: string;
-    openaiModel?: string;
-    enabled?: boolean;
-    welcomeMessage?: string;
-    accentColor?: string;
-  },
+  data: { enabled: boolean },
 ) {
   const companyId = await ensureSalesAgentTenant(superadmin);
-  const pointer = await getSalesAgentPointer();
-  const knowledge = normalizeKnowledge({
-    ...(pointer.knowledge ?? {}),
-    ...(data.knowledge ?? {}),
-  });
-
-  // Re-componer SIEMPRE el prompt al guardar: refresca conocimiento y precios.
-  const basePrompt = composeSalesAgentPrompt(knowledge, await listPublicPlans());
-
-  await prisma.agentConfig.update({
-    where: { companyId },
-    data: {
-      basePrompt,
-      rules: salesAgentRules(),
-      ...(data.openaiApiKey && data.openaiApiKey.trim() ? { openaiApiKey: encryptCredential(data.openaiApiKey.trim()) } : {}),
-      ...(data.openaiModel ? { openaiModel: data.openaiModel } : {}),
-    },
-  });
-
   await prisma.webchatConfig.update({
     where: { companyId },
-    data: {
-      ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
-      ...(data.welcomeMessage !== undefined ? { welcomeMessage: data.welcomeMessage } : {}),
-      ...(data.accentColor !== undefined ? { accentColor: data.accentColor } : {}),
-    },
+    data: { enabled: data.enabled },
   });
-
-  await setSalesAgentPointer(companyId, knowledge as unknown as Record<string, string>);
   return getSalesAgentAdmin(superadmin);
 }

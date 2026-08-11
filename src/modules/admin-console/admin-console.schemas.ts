@@ -66,26 +66,9 @@ export const updateLandingSceneSchema = z.object({
 
 // Agente de ventas de la plataforma (chat del landing que capta tenants)
 export const updateSalesAgentSchema = z.object({
-  knowledge: z
-    .object({
-      queEs: z.string().max(8000).optional(),
-      funciones: z.string().max(8000).optional(),
-      comoEmpezar: z.string().max(8000).optional(),
-      faq: z.string().max(12000).optional(),
-      contacto: z.string().max(4000).optional(),
-      extra: z.string().max(12000).optional(),
-    })
-    .optional(),
-  openaiApiKey: z.string().trim().max(200).optional(),
-  openaiModel: z.string().trim().min(2).max(60).optional(),
-  enabled: z.boolean().optional(),
-  welcomeMessage: z.string().max(500).optional(),
-  accentColor: z
-    .string()
-    .trim()
-    .max(20)
-    .regex(/^$|^#[0-9a-fA-F]{3,8}$/, "Color inválido")
-    .optional(),
+  // Consola mínima: solo el toggle de la burbuja del landing. El resto se
+  // edita impersonando el tenant (Agente IA / Productos / Chat Web).
+  enabled: z.boolean(),
 });
 
 // Cobros de plataforma con Mercado Pago
