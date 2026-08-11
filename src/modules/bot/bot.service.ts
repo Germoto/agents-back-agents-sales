@@ -192,6 +192,11 @@ export async function buildBotConfig(companyId: string, account?: string) {
       catalogMode: (agentConfig.catalogMode as string) ?? "preguntar",
       keywordMode: (agentConfig.keywordMode as string) ?? "detalle_y_preguntar",
       trackStock: agentConfig.trackStock ?? true,
+      // Presentación del catálogo (texto / carta multimedia / ambos).
+      catalogMediaMode: (agentConfig.catalogMediaMode as string) ?? "text",
+      catalogMediaUrl: agentConfig.catalogMediaUrl ?? null,
+      catalogMediaType: agentConfig.catalogMediaType ?? null,
+      catalogMediaFileName: agentConfig.catalogMediaFileName ?? null,
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
     products: products.map((p) => withVariantModifiers(mapBotProduct(p))),

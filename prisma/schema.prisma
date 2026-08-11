@@ -279,6 +279,11 @@ model AgentConfig {
   catalogMode    String   @default("preguntar")           // preguntar | resumen_humano | primeros_n
   keywordMode    String   @default("detalle_y_preguntar") // detalle_y_preguntar | agregar_directo | auto
   trackStock     Boolean  @default(true)
+  // Presentación del catálogo: solo texto, solo carta (PDF/imagen), o ambos.
+  catalogMediaMode     String  @default("text") // text | media | both
+  catalogMediaUrl      String?
+  catalogMediaType     String?
+  catalogMediaFileName String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

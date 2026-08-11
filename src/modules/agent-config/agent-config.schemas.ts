@@ -67,6 +67,12 @@ export const coreAgentConfigSchema = z.object({
   catalogMode: z.enum(["preguntar", "resumen_humano", "primeros_n"]).optional(),
   keywordMode: z.enum(["detalle_y_preguntar", "agregar_directo", "auto"]).optional(),
   trackStock: z.boolean().optional(),
+  // Presentación del catálogo: texto, carta (PDF/imagen) o ambos. null en la
+  // url = quitar la carta guardada.
+  catalogMediaMode: z.enum(["text", "media", "both"]).optional(),
+  catalogMediaUrl: z.string().trim().max(2000).nullable().optional(),
+  catalogMediaType: z.string().trim().max(40).nullable().optional(),
+  catalogMediaFileName: z.string().trim().max(255).nullable().optional(),
 });
 
 // PUT /agent-config/reminders — solo followupConfig.

@@ -71,6 +71,10 @@ export async function upsertAgentConfig(companyId: string, data: {
   catalogMode?: string;
   keywordMode?: string;
   trackStock?: boolean;
+  catalogMediaMode?: string;
+  catalogMediaUrl?: string | null;
+  catalogMediaType?: string | null;
+  catalogMediaFileName?: string | null;
 }) {
   const core = {
     openaiModel: data.openaiModel,
@@ -89,6 +93,11 @@ export async function upsertAgentConfig(companyId: string, data: {
     ...(data.catalogMode ? { catalogMode: data.catalogMode } : {}),
     ...(data.keywordMode ? { keywordMode: data.keywordMode } : {}),
     ...(typeof data.trackStock === "boolean" ? { trackStock: data.trackStock } : {}),
+    ...(data.catalogMediaMode ? { catalogMediaMode: data.catalogMediaMode } : {}),
+    // url/type/fileName: undefined = no tocar; null = limpiar la carta guardada.
+    ...(data.catalogMediaUrl !== undefined ? { catalogMediaUrl: data.catalogMediaUrl || null } : {}),
+    ...(data.catalogMediaType !== undefined ? { catalogMediaType: data.catalogMediaType || null } : {}),
+    ...(data.catalogMediaFileName !== undefined ? { catalogMediaFileName: data.catalogMediaFileName || null } : {}),
   };
   const config = await prisma.agentConfig.upsert({
     where: { companyId },

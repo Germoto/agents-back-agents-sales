@@ -1449,11 +1449,36 @@ export async function executeTool(
       // Solo productos visibles en catálogo (excluye los secundarios/oculto).
       const products = catalogProducts(ctx.config.products);
       if (!products.length) return JSON.stringify({ ok: false, error: "no hay productos en el catálogo" });
-      const body = renderCustomerCatalog(products, (ctx.config.business as { vertical?: string }).vertical);
-      ctx.outbox.push({
-        kind: "text",
-        text: `¡Hola! 👋 Gracias por escribirnos a *${ctx.config.business.name}* ✨ Esto es lo que tenemos para ti:\n\n${body}\n\n¿Cuál te llama la atención? Con gusto te cuento más 😊`,
-      });
+
+      // Carta/catálogo multimedia configurable (Agente IA → Catálogo):
+      // text = solo lista de texto; media = solo la carta (PDF/imagen); both = carta + lista.
+      const agentCfg = ctx.config.agent as {
+        catalogMediaMode?: string;
+        catalogMediaUrl?: string | null;
+        catalogMediaType?: string | null;
+        catalogMediaFileName?: string | null;
+      };
+      const mediaMode = agentCfg.catalogMediaUrl ? (agentCfg.catalogMediaMode ?? "text") : "text";
+
+      if (mediaMode === "media" || mediaMode === "both") {
+        ctx.outbox.push({
+          kind: "media",
+          mediaUrl: agentCfg.catalogMediaUrl as string,
+          mediaKind: mediaKindFor(agentCfg.catalogMediaType ?? "PDF"),
+          caption: `¡Hola! 👋 Aquí tienes la carta de *${ctx.config.business.name}* 📖`,
+          fileName: agentCfg.catalogMediaFileName ?? undefined,
+        });
+      }
+      if (mediaMode !== "media") {
+        const body = renderCustomerCatalog(products, (ctx.config.business as { vertical?: string }).vertical);
+        const saludo =
+          mediaMode === "both"
+            ? `Y aquí un resumen rápido:\n\n${body}\n\n¿Cuál te llama la atención? Con gusto te cuento más 😊`
+            : `¡Hola! 👋 Gracias por escribirnos a *${ctx.config.business.name}* ✨ Esto es lo que tenemos para ti:\n\n${body}\n\n¿Cuál te llama la atención? Con gusto te cuento más 😊`;
+        ctx.outbox.push({ kind: "text", text: saludo });
+      } else {
+        ctx.outbox.push({ kind: "text", text: "¿Qué te provoca? 😋 Cuéntame y lo vamos armando." });
+      }
       return JSON.stringify({ ok: true, count: products.length, sent: true, nota: "Ya envié el catálogo al cliente. NO repitas la lista en tu texto final; deja el texto vacío o cierra con una sola frase breve." });
     }
 
@@ -1596,6 +1621,19 @@ export async function executeTool(
         return JSON.stringify({ ok: false, error: "pagos no configurados" });
       }
       const cart = await summarizeCart(ctx.companyId, ctx.customerId);
+      // Rubros de CARRITO (restaurante/comercial): nunca cobrar con el carrito
+      // vacío — el fallback al selectedProduct cobraría UN solo ítem cuando el
+      // cliente pidió varios (y sin que exista pedido real).
+      const cartVertical =
+        (ctx.config.business as { vertical?: string }).vertical === "RESTAURANT" ||
+        (ctx.config.business as { vertical?: string }).vertical === "PHYSICAL_GOODS";
+      if (cartVertical && !cart.items.length) {
+        return JSON.stringify({
+          ok: false,
+          error:
+            "El carrito está VACÍO: no hay nada que cobrar. Agrega primero CADA producto que pidió el cliente con agregar_carrito (una llamada por ítem), confirma con ver_carrito y recién entonces vuelve a llamar enviar_metodos_pago.",
+        });
+      }
       // Guard anti-reventa: no re-cobrar un producto DIGITAL que el cliente YA compró.
       // (Un físico sí podría re-pedirse; un infoproducto ya entregado no.)
       const purchased = Array.isArray(ctx.state.purchasedProductIds) ? ctx.state.purchasedProductIds : [];
