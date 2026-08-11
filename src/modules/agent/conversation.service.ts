@@ -141,6 +141,7 @@ export async function setBotPaused(
   companyId: string,
   conversationId: string,
   paused: boolean,
+  opts: { reason?: string | null } = {},
 ) {
   const updated = await prisma.conversation.update({
     where: { id: conversationId },
@@ -150,6 +151,9 @@ export async function setBotPaused(
   socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
     conversationId,
     botPaused: paused,
+    // Motivo de la derivación (si vino de derivar_humano): el panel lo muestra
+    // como toast para que la pausa nunca sea silenciosa (clave en chat web).
+    ...(opts.reason ? { humanReason: opts.reason } : {}),
   });
   // Al pasar a atención humana (derivación, "tomar control" o muteado), cancelar
   // los recordatorios de seguimiento pendientes: no queremos que un bot moleste a
@@ -271,11 +275,24 @@ export async function listConversations(companyId: string, limit = 50) {
     channel: c.channel,
     // Etapa del embudo (state.status). Distinto de `status` (OPEN/HUMAN/CLOSED).
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
+    humanReason: humanReasonOf(c.state as ConversationState, c.botPaused),
     lastMessageAt: c.lastMessageAt,
     openedAt: c.openedAt,
     customer: serializeCustomerWithTags(c.customer),
     lastMessage: c.messages[0] ?? null,
   }));
+}
+
+/**
+ * Motivo de la derivación a humano (si el bot está pausado por derivar_humano):
+ * state.pendingAction guarda "HUMAN[MOTIVO]: razón" — se normaliza para el panel.
+ */
+export function humanReasonOf(state: ConversationState | null | undefined, botPaused: boolean): string | null {
+  if (!botPaused) return null;
+  const pending = state?.pendingAction;
+  if (typeof pending !== "string" || !pending.startsWith("HUMAN")) return null;
+  const reason = pending.replace(/^HUMAN(\[[A-Z]+\])?:\s*/, "").trim();
+  return reason || null;
 }
 
 /** Aplana tagLinks → tags para el panel (etiquetas del cliente en la lista de chats). */
@@ -331,6 +348,7 @@ export async function getConversationSummary(companyId: string, conversationId: 
     botPaused: c.botPaused,
     channel: c.channel,
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
+    humanReason: humanReasonOf(c.state as ConversationState, c.botPaused),
     lastMessageAt: c.lastMessageAt,
     openedAt: c.openedAt,
     customer: serializeCustomerWithTags(c.customer),

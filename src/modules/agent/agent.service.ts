@@ -21,6 +21,7 @@ import {
   buildHistory,
   saveState,
   setBotPaused,
+  humanReasonOf,
   sendHumanReply,
   findConversationByCustomerPhone,
   resetConversation,
@@ -710,7 +711,27 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
 
   // Derivación a humano
   if (ctx.state.status === "ASESOR_HUMANO") {
-    await setBotPaused(companyId, conversationId, true);
+    // Garantía: el cliente NUNCA queda sin respuesta al derivar. Si el modelo no
+    // escribió nada en este turno (ni texto final ni outbox), enviamos una
+    // despedida por el mismo canal (web o WhatsApp) antes de pausar.
+    const sentAnyToClient = Boolean(finalText?.trim()) || ctx.outbox.length > 0;
+    if (!sentAnyToClient && sender) {
+      try {
+        await deliver(
+          sender,
+          customerPhone,
+          { kind: "text", text: "Un asesor humano continuará esta conversación en breve 🙌. Cuéntanos tu consulta y te respondemos apenas estemos disponibles." },
+          ctx,
+        );
+      } catch {
+        /* best-effort */
+      }
+    }
+    // El motivo viaja en el socket para que el panel muestre el aviso (clave en
+    // chat web, donde no hay notificación por WhatsApp al dueño).
+    await setBotPaused(companyId, conversationId, true, {
+      reason: humanReasonOf(ctx.state, true),
+    });
     if (waSender) await notifyAdmin(waSender, config, customerPhone, ctx.state.pendingAction);
   }
 }
