@@ -136,17 +136,54 @@ export async function addToCart(
   return summarizeCart(companyId, customerId);
 }
 
+/**
+ * Quita un producto del carrito. Con `quantity` DECREMENTA esa cantidad
+ * (empezando por la línea más reciente del producto; elimina la línea si queda
+ * en 0). Sin `quantity`, elimina todas las líneas del producto.
+ */
 export async function removeFromCart(
   companyId: string,
   customerId: string,
   productId: string,
+  quantity?: number,
 ): Promise<CartSummary> {
   const cart = await prisma.cart.findFirst({
     where: { companyId, customerId, status: "OPEN" },
     select: { id: true },
   });
   if (cart) {
-    await prisma.cartItem.deleteMany({ where: { cartId: cart.id, productId } });
+    const qty = Math.floor(Number(quantity ?? 0));
+    if (qty > 0) {
+      let remaining = qty;
+      const lines = await prisma.cartItem.findMany({
+        where: { cartId: cart.id, productId },
+        orderBy: { createdAt: "desc" },
+      });
+      for (const line of lines) {
+        if (remaining <= 0) break;
+        if (line.quantity > remaining) {
+          await prisma.cartItem.update({ where: { id: line.id }, data: { quantity: { decrement: remaining } } });
+          remaining = 0;
+        } else {
+          await prisma.cartItem.delete({ where: { id: line.id } });
+          remaining -= line.quantity;
+        }
+      }
+    } else {
+      await prisma.cartItem.deleteMany({ where: { cartId: cart.id, productId } });
+    }
+  }
+  return summarizeCart(companyId, customerId);
+}
+
+/** Vacía TODO el carrito abierto del cliente (el cliente quiere empezar de cero). */
+export async function clearCart(companyId: string, customerId: string): Promise<CartSummary> {
+  const cart = await prisma.cart.findFirst({
+    where: { companyId, customerId, status: "OPEN" },
+    select: { id: true },
+  });
+  if (cart) {
+    await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
   }
   return summarizeCart(companyId, customerId);
 }

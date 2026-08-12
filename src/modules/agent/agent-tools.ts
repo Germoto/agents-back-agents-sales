@@ -16,6 +16,7 @@ import { mediaKindFor } from "./outbound";
 import {
   addToCart,
   removeFromCart,
+  clearCart,
   summarizeCart,
   renderCartText,
   checkoutCart,
@@ -1142,13 +1143,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "quitar_carrito",
-      description: "Quita un producto del carrito.",
+      description:
+        "Quita un producto del carrito (o baja su cantidad con quantity). Úsala cuando el cliente cambie de opinión o quiera menos unidades; para REEMPLAZAR un producto: quita el anterior y agrega el nuevo. NUNCA digas que quitaste o cambiaste algo sin llamarla.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["productId"],
-        properties: { productId: { type: "string" } },
+        properties: {
+          productId: { type: "string" },
+          quantity: { type: "integer", minimum: 1, description: "Cuántas unidades quitar. Omite para quitar el producto COMPLETO." },
+        },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "vaciar_carrito",
+      description: "Vacía TODO el carrito. Úsala solo cuando el cliente quiera empezar el pedido de cero.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
     },
   },
   {
@@ -1654,8 +1667,24 @@ export async function executeTool(
     }
 
     case "quitar_carrito": {
-      const summary = await removeFromCart(ctx.companyId, ctx.customerId, String(args.productId ?? ""));
-      return JSON.stringify({ ok: true, items: summary.items, total: summary.totalText });
+      const qty = Number(args.quantity ?? 0) > 0 ? Math.floor(Number(args.quantity)) : undefined;
+      const summary = await removeFromCart(ctx.companyId, ctx.customerId, String(args.productId ?? ""), qty);
+      return JSON.stringify({
+        ok: true,
+        items: summary.items,
+        total: summary.totalText,
+        nota: "Este es el carrito REAL actualizado: usa ESTAS cantidades y ESTE total al responder.",
+      });
+    }
+
+    case "vaciar_carrito": {
+      const summary = await clearCart(ctx.companyId, ctx.customerId);
+      return JSON.stringify({
+        ok: true,
+        items: summary.items,
+        total: summary.totalText,
+        nota: "Carrito vaciado. Confírmalo al cliente y ayúdalo a armar el pedido de nuevo si quiere.",
+      });
     }
 
     case "enviar_metodos_pago": {

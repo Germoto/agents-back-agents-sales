@@ -23,6 +23,8 @@ export interface ConversationState {
   selectedProductId?: string | null;
   /** Pedido pendiente de pago recién registrado (para marcarlo PAGADO al aprobar el pago). */
   pendingOrderId?: string | null;
+  /** Resumen del carrito REAL, refrescado en cada turno (rubros de carrito). */
+  cartText?: string | null;
   lastPaymentPromptAt?: string | null;
   pendingAction?: string | null;
   offerExpiresAt?: string | null;

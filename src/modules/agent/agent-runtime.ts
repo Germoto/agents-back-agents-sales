@@ -8,6 +8,7 @@ import { chatCompletion, type ChatMessage } from "../../lib/openai";
 import { buildSystemPrompt } from "./agent-prompt";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
 import { TOOL_DEFINITIONS, executeTool, type TurnContext } from "./agent-tools";
+import { summarizeCart } from "./cart.service";
 
 const MAX_ITERATIONS = 6;
 const FALLBACK_TEXT =
@@ -22,6 +23,27 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   // En modo FLOW buildBotConfig no exige apiKey; el agente IA sí la necesita.
   const apiKey = ctx.config.openai.apiKey;
   if (!apiKey) throw new Error("Falta openaiApiKey para esta empresa");
+
+  // Rubros de CARRITO: inyectar el estado REAL del carrito en el prompt de CADA
+  // turno. El historial no incluye los tool_calls de turnos anteriores, así que
+  // sin esto el modelo "recuerda" su propia narración (re-agrega ítems, inventa
+  // totales) en vez del carrito verdadero.
+  const vertical = (ctx.config.business as { vertical?: string }).vertical;
+  if (vertical === "RESTAURANT" || vertical === "PHYSICAL_GOODS") {
+    try {
+      const cart = await summarizeCart(ctx.companyId, ctx.customerId);
+      ctx.state.cartText = cart.items.length
+        ? cart.items
+            .map(
+              (it) =>
+                `${it.quantity}x ${it.name}${it.modifiers.length ? ` (${it.modifiers.map((m) => m.option).join(", ")})` : ""} — S/ ${(it.unitPrice * it.quantity).toFixed(2)}`,
+            )
+            .join(" | ") + ` | TOTAL ${cart.totalText}`
+        : "vacío";
+    } catch {
+      ctx.state.cartText = null;
+    }
+  }
 
   const messages: ChatMessage[] = [
     { role: "system", content: buildSystemPrompt(ctx.config, ctx.state) },
