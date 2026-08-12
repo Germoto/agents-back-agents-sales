@@ -65,6 +65,7 @@ export async function scheduleBookingReminders(bookingId: string): Promise<void>
   });
 
   const now = Date.now();
+  let created = 0;
   for (const hours of REMINDER_HOURS) {
     const sendAt = new Date(booking.startsAt.getTime() - hours * 3_600_000);
     if (sendAt.getTime() <= now) continue; // ya pasó ese punto
@@ -81,6 +82,24 @@ export async function scheduleBookingReminders(bookingId: string): Promise<void>
         sendAt,
         body,
         metadata: { bookingId: booking.id, hoursBefore: hours },
+      },
+    });
+    created += 1;
+  }
+
+  // Cita agendada con POCA anticipación (los puntos de 24h/2h ya pasaron):
+  // un único recordatorio 30 min antes, si aún hay margen (≥45 min). Así la
+  // promesa del agente ("te recordaremos antes") siempre se cumple.
+  if (!created && booking.startsAt.getTime() - now >= 45 * 60_000) {
+    await prisma.scheduledMessage.create({
+      data: {
+        companyId: booking.companyId,
+        customerId: booking.customerId,
+        conversationId: conversation?.id ?? null,
+        type: "BOOKING_REMINDER",
+        sendAt: new Date(booking.startsAt.getTime() - 30 * 60_000),
+        body: `⏰ Tu cita de *${booking.product.name}* es hoy a las ${when.split(", ").pop()}. ¡Te esperamos!${locationLine}`,
+        metadata: { bookingId: booking.id, hoursBefore: 0.5 },
       },
     });
   }

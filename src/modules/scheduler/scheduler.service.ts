@@ -122,6 +122,17 @@ export const FOLLOWUP_TYPES: ScheduledMessageType[] = [
   ScheduledMessageType.CUSTOM,
 ];
 
+/**
+ * Tipos que se MUESTRAN en Recordatorios → Programados. Incluye citas y
+ * renovaciones (que NO son follow-ups: las cancelaciones automáticas de
+ * seguimiento usan FOLLOWUP_TYPES y no deben tocarlos).
+ */
+export const LISTABLE_TYPES: ScheduledMessageType[] = [
+  ...FOLLOWUP_TYPES,
+  ScheduledMessageType.BOOKING_REMINDER,
+  ScheduledMessageType.RENEWAL,
+];
+
 /** Cancela un recordatorio PENDING puntual (filtrando por empresa). Devuelve si canceló. */
 export async function cancelReminderById(companyId: string, id: string): Promise<boolean> {
   const res = await prisma.scheduledMessage.updateMany({
@@ -172,7 +183,7 @@ export async function listPendingReminders(
     where: {
       companyId,
       status: ScheduledMessageStatus.PENDING,
-      type: opts?.type ? opts.type : { in: FOLLOWUP_TYPES },
+      type: opts?.type ? opts.type : { in: LISTABLE_TYPES },
       // El productId se guarda en metadata al agendar el recordatorio (scheduleAutoReminders).
       ...(productId ? { metadata: { path: ["productId"], equals: productId } } : {}),
       ...(q
