@@ -52,6 +52,7 @@ export const AI_PROVIDERS: Record<AiProviderId, AiProviderInfo> = {
     models: [
       { id: "claude-haiku-4-5", hint: "Rápido y económico" },
       { id: "claude-sonnet-4-5", hint: "Alta calidad para ventas" },
+      { id: "claude-sonnet-5", hint: "Máxima calidad (última generación)" },
     ],
     caps: { jsonSchema: false, inlineImages: true, maxTemperature: 1 },
   },
