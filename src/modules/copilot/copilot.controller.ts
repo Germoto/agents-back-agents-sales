@@ -37,8 +37,24 @@ import { followupConfigSchema } from "../agent-config/agent-config.schemas";
 const MAX_ITERATIONS = 8;
 const HISTORY_LIMIT = 16;
 
+interface CopilotAttachment {
+  url: string;
+  storagePath: string;
+  originalName: string;
+  extension: string;
+  mimeType: string;
+  size: number;
+  type: "IMAGE" | "PDF" | "VIDEO" | "AUDIO" | "OTHER";
+}
+
 interface CopilotBody {
-  messages: Array<{ role: "user" | "assistant"; content: string; imageUrls?: string[] }>;
+  messages: Array<{
+    role: "user" | "assistant";
+    content: string;
+    attachments?: CopilotAttachment[];
+    /** Legado: solo URLs para visión. */
+    imageUrls?: string[];
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +126,25 @@ const TOOLS: ToolDefinition[] = [
         additionalProperties: false,
         required: ["productId"],
         properties: { productId: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "adjuntar_foto_producto",
+      description:
+        "Deja una imagen ADJUNTADA EN ESTA CONVERSACIÓN como foto del producto. `url` debe ser EXACTAMENTE la de un adjunto del usuario. Con principal=true queda como foto principal (la primera del catálogo/ficha). Llámala tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId", "url"],
+        properties: {
+          productId: { type: "string" },
+          url: { type: "string", description: "URL exacta de la imagen adjuntada por el usuario" },
+          description: { type: "string", description: "Descripción del archivo (ayuda al agente a saber cuándo enviarlo)" },
+          principal: { type: "boolean", description: "true = foto principal del producto" },
+        },
       },
     },
   },
@@ -523,8 +558,56 @@ async function runCopilotTool(
   companyId: string,
   name: string,
   args: LooseData,
+  attachmentsByUrl: Map<string, CopilotAttachment>,
 ): Promise<{ result: string; wrote: boolean }> {
   switch (name) {
+    case "adjuntar_foto_producto": {
+      const url = String(args.url ?? "").trim();
+      const meta = attachmentsByUrl.get(url);
+      if (!meta) {
+        return {
+          result: JSON.stringify({ ok: false, error: "esa URL no corresponde a un adjunto de esta conversación; pide al usuario que envíe la imagen" }),
+          wrote: false,
+        };
+      }
+      const productId = String(args.productId ?? "");
+      const existing = await getProduct(companyId, productId);
+      const principal = args.principal === true;
+      const currentFiles = (existing.files ?? []) as Array<{ sortOrder: number } & Record<string, unknown>>;
+      if (currentFiles.some((f) => f.url === url)) {
+        return { result: JSON.stringify({ ok: false, error: "esa imagen ya está adjunta a este producto" }), wrote: false };
+      }
+      const newFile = {
+        type: meta.type,
+        url: meta.url,
+        storagePath: meta.storagePath,
+        originalName: meta.originalName,
+        extension: meta.extension,
+        mimeType: meta.mimeType,
+        size: meta.size,
+        description: asStr(args.description)?.trim() || `Foto de ${existing.name}`,
+        sortOrder: principal ? 0 : currentFiles.length,
+      };
+      const payload = buildPayload({}, existing);
+      payload.files = (principal
+        ? [newFile, ...currentFiles.map((f) => ({ ...f, sortOrder: (f.sortOrder ?? 0) + 1 }))]
+        : [...currentFiles, newFile]) as never[];
+      const parsed = productBodySchema.safeParse(payload);
+      if (!parsed.success) {
+        return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
+      }
+      await updateProduct(companyId, productId, parsed.data as Parameters<typeof updateProduct>[2]);
+      return {
+        result: JSON.stringify({
+          ok: true,
+          product: existing.name,
+          principal,
+          nota: principal ? "Imagen adjuntada como foto PRINCIPAL del producto." : "Imagen adjuntada al producto.",
+        }),
+        wrote: true,
+      };
+    }
+
     case "listar_productos": {
       const products = await prisma.product.findMany({
         where: { companyId },
@@ -961,6 +1044,7 @@ async function buildSystem(companyId: string): Promise<string> {
     "REGLAS:",
     "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.",
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
+    "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto (usa la URL exacta del adjunto). Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
     "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios) y los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido). Usa ver_configuracion / ver_crm antes de proponer cambios en esas áreas.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
@@ -989,13 +1073,22 @@ export async function copilotChatController(req: Request, res: Response) {
 
   const system = await buildSystem(companyId);
   const history = body.messages.slice(-HISTORY_LIMIT);
+
+  // Adjuntos disponibles en TODA la conversación (para adjuntar_foto_producto,
+  // incluso si la imagen se envió turnos atrás).
+  const attachmentsByUrl = new Map<string, CopilotAttachment>();
+  for (const m of body.messages) {
+    for (const a of m.attachments ?? []) attachmentsByUrl.set(a.url, a);
+  }
+
   const messages: ChatMessage[] = [
     { role: "system", content: system },
     ...history.map((m): ChatMessage => {
-      if (m.role === "user" && m.imageUrls?.length) {
+      const urls = [...(m.attachments?.map((a) => a.url) ?? []), ...(m.imageUrls ?? [])];
+      if (m.role === "user" && urls.length) {
         const parts: ContentPart[] = [
           { type: "text", text: m.content },
-          ...m.imageUrls.map((url): ContentPart => ({ type: "image_url", image_url: { url } })),
+          ...urls.map((url): ContentPart => ({ type: "image_url", image_url: { url } })),
         ];
         return { role: "user", content: parts };
       }
@@ -1029,7 +1122,7 @@ export async function copilotChatController(req: Request, res: Response) {
         continue;
       }
       try {
-        const { result, wrote } = await runCopilotTool(companyId, call.function.name, parsedArgs);
+        const { result, wrote } = await runCopilotTool(companyId, call.function.name, parsedArgs, attachmentsByUrl);
         wroteAny = wroteAny || wrote;
         messages.push({ role: "tool", tool_call_id: call.id, content: result });
       } catch (err) {
