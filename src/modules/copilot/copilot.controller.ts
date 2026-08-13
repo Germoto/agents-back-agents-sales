@@ -16,8 +16,11 @@ import { chatCompletion, type ChatMessage, type ContentPart, type ToolDefinition
 import { productBodySchema } from "../products/products.schemas";
 import { createProduct, updateProduct, deleteProduct, getProduct } from "../products/products.service";
 import { updateBusinessProfile, type DeliveryConfigInput } from "../business/business.service";
-import { upsertAgentConfig } from "../agent-config/agent-config.service";
+import { upsertAgentConfig, updateAgentReminders } from "../agent-config/agent-config.service";
 import { upsertPaymentConfig } from "../payment-config/payment-config.service";
+import { createCrm, createColumn, createTag, applyCrmAndTagActions } from "../crm/crm.service";
+import { updateWebchatConfig } from "../webchat/webchat.service";
+import { followupConfigSchema } from "../agent-config/agent-config.schemas";
 
 const MAX_ITERATIONS = 8;
 const HISTORY_LIMIT = 16;
@@ -127,6 +130,107 @@ const TOOLS: ToolDefinition[] = [
       name: "configurar_agente",
       description:
         "Actualiza el AGENTE IA. `data` es PARCIAL: {basePrompt?, salesStyle? (cercano|profesional|directo|entusiasta|consultivo), rules?: string[], negotiationHandoff?, catalogMode? (preguntar|resumen_humano|primeros_n), keywordMode? (detalle_y_preguntar|agregar_directo|auto), trackStock?, catalogMediaMode? (text|media|both)}. NUNCA gestiona la API key ni el modelo. Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["data"],
+        properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_crm",
+      description: "Devuelve los tableros CRM actuales (con sus columnas) y las etiquetas del negocio.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "crear_crm",
+      description:
+        "Crea un tablero CRM con sus columnas (embudo). Llámala SOLO tras la confirmación del usuario. Ej: nombre 'Ventas' con columnas ['Nuevos','Interesados','Pagados'].",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "columns"],
+        properties: {
+          name: { type: "string" },
+          description: { type: "string" },
+          color: { type: "string", description: "Hex, ej. #6366f1 (opcional)" },
+          columns: { type: "array", items: { type: "string" }, description: "Nombres de las columnas en orden" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "crear_columna",
+      description: "Agrega una columna a un tablero CRM existente (usa ver_crm para el crmId).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["crmId", "name"],
+        properties: { crmId: { type: "string" }, name: { type: "string" }, color: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "crear_etiqueta",
+      description: "Crea una etiqueta de clientes (ej. 'VIP', 'Mayorista').",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name"],
+        properties: { name: { type: "string" }, color: { type: "string", description: "Hex, default #6366f1" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "gestionar_cliente_crm",
+      description:
+        "Mueve un CLIENTE a una columna del CRM y/o le asigna/quita etiquetas. Identifica al cliente por su teléfono. Usa ver_crm para los ids de tablero/columna y los NOMBRES exactos de etiquetas.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phone"],
+        properties: {
+          phone: { type: "string", description: "Teléfono del cliente (como aparece en Conversaciones/CRM)" },
+          crmId: { type: "string" },
+          columnId: { type: "string" },
+          addTagNames: { type: "array", items: { type: "string" }, description: "Etiquetas EXISTENTES a asignar (por nombre)" },
+          removeTagNames: { type: "array", items: { type: "string" }, description: "Etiquetas a quitar (por nombre)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_chat_web",
+      description:
+        "Actualiza el CHAT WEB embebible. `data` es PARCIAL: {enabled?, welcomeMessage?, accentColor? (hex), allowedOrigins?: string[] (dominios permitidos, [] = cualquiera)}. El token del widget NO se gestiona por chat. Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["data"],
+        properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_recordatorios",
+      description:
+        "Actualiza los RECORDATORIOS automáticos. `data` es PARCIAL: {abandonedCart? {enabled, steps: [{delaySeconds, message}]}, leftOnRead? {enabled, steps: [...]}, quietHours? {startHour 0-23, endHour 1-24}}. delaySeconds en segundos (ej. 3600 = 1 hora). Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -512,6 +616,128 @@ async function runCopilotTool(
       return { result: JSON.stringify({ ok: true, nota: "Pagos actualizados (lo no enviado se conservó)." }), wrote: true };
     }
 
+    case "ver_crm": {
+      const [crms, tags] = await Promise.all([
+        prisma.crm.findMany({
+          where: { companyId },
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            columns: { select: { id: true, name: true }, orderBy: { sortOrder: "asc" } },
+          },
+          orderBy: { sortOrder: "asc" },
+        }),
+        prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true, color: true } }),
+      ]);
+      return { result: JSON.stringify({ crms, tags }), wrote: false };
+    }
+
+    case "crear_crm": {
+      const cols = asStrList(args.columns) ?? [];
+      if (!asStr(args.name)?.trim()) return { result: JSON.stringify({ ok: false, error: "falta el nombre del tablero" }), wrote: false };
+      const crm = await createCrm(companyId, {
+        name: String(args.name).trim(),
+        description: asStr(args.description) ?? null,
+        color: asStr(args.color) ?? "#6366f1",
+      });
+      for (const colName of cols) {
+        await createColumn(companyId, crm.id, { name: colName });
+      }
+      return { result: JSON.stringify({ ok: true, crmId: crm.id, name: crm.name, columns: cols }), wrote: true };
+    }
+
+    case "crear_columna": {
+      const column = await createColumn(companyId, String(args.crmId ?? ""), {
+        name: String(args.name ?? "").trim(),
+        color: asStr(args.color) ?? null,
+      });
+      return { result: JSON.stringify({ ok: true, columnId: column.id, name: column.name }), wrote: true };
+    }
+
+    case "crear_etiqueta": {
+      const tag = await createTag(companyId, {
+        name: String(args.name ?? "").trim(),
+        color: asStr(args.color) ?? "#6366f1",
+      });
+      return { result: JSON.stringify({ ok: true, tagId: tag.id, name: tag.name }), wrote: true };
+    }
+
+    case "gestionar_cliente_crm": {
+      const phoneDigits = String(args.phone ?? "").replace(/\D/g, "");
+      if (!phoneDigits) return { result: JSON.stringify({ ok: false, error: "falta el teléfono del cliente" }), wrote: false };
+      const customer = await prisma.customer.findFirst({
+        where: { companyId, phone: { contains: phoneDigits } },
+        select: { id: true, name: true, phone: true },
+      });
+      if (!customer) {
+        return { result: JSON.stringify({ ok: false, error: `no encontré un cliente con el teléfono ${phoneDigits}` }), wrote: false };
+      }
+      const addNames = asStrList(args.addTagNames) ?? [];
+      const removeNames = asStrList(args.removeTagNames) ?? [];
+      const tags = addNames.length || removeNames.length
+        ? await prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true } })
+        : [];
+      const idsByName = (names: string[]) =>
+        names
+          .map((n) => tags.find((t) => t.name.toLowerCase() === n.trim().toLowerCase())?.id)
+          .filter((id): id is string => Boolean(id));
+      const tagIds = idsByName(addNames);
+      const removeTagIds = idsByName(removeNames);
+      const missing = [...addNames, ...removeNames].filter(
+        (n) => !tags.some((t) => t.name.toLowerCase() === n.trim().toLowerCase()),
+      );
+      await applyCrmAndTagActions(companyId, customer.id, {
+        tagIds: tagIds.length ? tagIds : null,
+        removeTagIds: removeTagIds.length ? removeTagIds : null,
+        crmId: asStr(args.crmId) ?? null,
+        crmColumnId: asStr(args.columnId) ?? null,
+      });
+      return {
+        result: JSON.stringify({
+          ok: true,
+          customer: customer.name ?? customer.phone,
+          ...(missing.length ? { aviso: `Etiquetas inexistentes ignoradas: ${missing.join(", ")} (créalas con crear_etiqueta si hacen falta)` } : {}),
+        }),
+        wrote: true,
+      };
+    }
+
+    case "configurar_chat_web": {
+      const data = (args.data ?? {}) as LooseData;
+      const updated = await updateWebchatConfig(companyId, {
+        ...(typeof data.enabled === "boolean" ? { enabled: data.enabled } : {}),
+        ...(data.welcomeMessage !== undefined ? { welcomeMessage: String(data.welcomeMessage ?? "") } : {}),
+        ...(data.accentColor !== undefined ? { accentColor: String(data.accentColor ?? "") } : {}),
+        ...(data.allowedOrigins !== undefined ? { allowedOrigins: asStrList(data.allowedOrigins) ?? [] } : {}),
+      });
+      return {
+        result: JSON.stringify({
+          ok: true,
+          chatWeb: { enabled: updated.enabled, welcomeMessage: updated.welcomeMessage, accentColor: updated.accentColor },
+          nota: "Chat web actualizado (el token del widget no cambió).",
+        }),
+        wrote: true,
+      };
+    }
+
+    case "configurar_recordatorios": {
+      const data = (args.data ?? {}) as LooseData;
+      const current = await prisma.agentConfig.findUnique({ where: { companyId }, select: { followupConfig: true } });
+      const merged = {
+        ...((current?.followupConfig ?? {}) as Record<string, unknown>),
+        ...(data.abandonedCart !== undefined ? { abandonedCart: data.abandonedCart } : {}),
+        ...(data.leftOnRead !== undefined ? { leftOnRead: data.leftOnRead } : {}),
+        ...(data.quietHours !== undefined ? { quietHours: data.quietHours } : {}),
+      };
+      const parsed = followupConfigSchema.safeParse(merged);
+      if (!parsed.success) {
+        return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
+      }
+      await updateAgentReminders(companyId, (parsed.data ?? null) as Record<string, unknown> | null);
+      return { result: JSON.stringify({ ok: true, nota: "Recordatorios actualizados (lo no enviado se conservó)." }), wrote: true };
+    }
+
     default:
       return { result: JSON.stringify({ ok: false, error: `herramienta desconocida: ${name}` }), wrote: false };
   }
@@ -538,7 +764,7 @@ async function buildSystem(companyId: string): Promise<string> {
     "REGLAS:",
     "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.",
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
-    "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial) y los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos) — usa ver_configuracion antes de proponer cambios en esas áreas.",
+    "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM (tableros/columnas/etiquetas, mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios) y los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido). Usa ver_configuracion / ver_crm antes de proponer cambios en esas áreas.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES: envía solo los campos a cambiar; el resto se conserva solo.",
     "- eliminar_producto: SOLO si lo pidió explícitamente y confirmó el nombre. Nunca elimines por iniciativa propia.",
