@@ -70,7 +70,9 @@ export async function readReceiptImage(
 ): Promise<ReceiptData | null> {
   try {
     const useJsonSchema = ai.caps?.jsonSchema !== false;
-    const finalUrl = ai.caps?.inlineImages ? await prepareImageUrl(imageUrl, ai.caps) : imageUrl;
+    // Inline SIEMPRE (data-URI): el comprobante es un upload nuestro y dejar que
+    // el proveedor lo descargue por HTTP causa "Timeout while downloading".
+    const finalUrl = await prepareImageUrl(imageUrl, { inlineImages: true });
     const base = (ai.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
     const response = await fetch(`${base}/chat/completions`, {
       method: "POST",

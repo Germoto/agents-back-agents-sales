@@ -1348,16 +1348,17 @@ export async function copilotChatController(req: Request, res: Response) {
     for (const a of m.attachments ?? []) attachmentsByUrl.set(a.url, a);
   }
 
-  // Proveedores que no descargan URLs públicas (Anthropic/Gemini): las imágenes
-  // del historial se inlinean como data-URI. La URL original sigue siendo la
-  // identidad del adjunto (attachmentsByUrl / adjuntar_foto_producto).
+  // Las imágenes del historial se inlinean SIEMPRE como data-URI: evita que el
+  // proveedor tenga que descargarlas de nuestros uploads (OpenAI daba "Timeout
+  // while downloading") y es obligatorio en Anthropic/Gemini. La URL original
+  // sigue siendo la identidad del adjunto (attachmentsByUrl / adjuntar_foto_producto).
   const visionUrl = new Map<string, string>();
-  if (caps.inlineImages) {
+  {
     const allUrls = new Set(
       body.messages.flatMap((m) => [...(m.attachments?.map((a) => a.url) ?? []), ...(m.imageUrls ?? [])]),
     );
     await Promise.all(
-      [...allUrls].map(async (url) => visionUrl.set(url, await prepareImageUrl(url, caps))),
+      [...allUrls].map(async (url) => visionUrl.set(url, await prepareImageUrl(url, { inlineImages: true }))),
     );
   }
 
