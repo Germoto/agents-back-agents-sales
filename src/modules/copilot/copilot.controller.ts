@@ -18,7 +18,19 @@ import { createProduct, updateProduct, deleteProduct, getProduct } from "../prod
 import { updateBusinessProfile, type DeliveryConfigInput } from "../business/business.service";
 import { upsertAgentConfig, updateAgentReminders } from "../agent-config/agent-config.service";
 import { upsertPaymentConfig } from "../payment-config/payment-config.service";
-import { createCrm, createColumn, createTag, applyCrmAndTagActions } from "../crm/crm.service";
+import {
+  createCrm,
+  updateCrm,
+  deleteCrm,
+  createColumn,
+  updateColumn,
+  deleteColumn,
+  reorderColumns,
+  createTag,
+  updateTag,
+  deleteTag,
+  applyCrmAndTagActions,
+} from "../crm/crm.service";
 import { updateWebchatConfig } from "../webchat/webchat.service";
 import { followupConfigSchema } from "../agent-config/agent-config.schemas";
 
@@ -188,6 +200,113 @@ const TOOLS: ToolDefinition[] = [
         additionalProperties: false,
         required: ["name"],
         properties: { name: { type: "string" }, color: { type: "string", description: "Hex, default #6366f1" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_crm",
+      description: "Renombra un tablero CRM o cambia su descripción/color (parcial: solo lo que envíes).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["crmId"],
+        properties: {
+          crmId: { type: "string" },
+          name: { type: "string" },
+          description: { type: "string" },
+          color: { type: "string", description: "Hex" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "eliminar_crm",
+      description:
+        "ELIMINA un tablero CRM completo (los clientes no se borran, pero pierden su posición en ese embudo). SOLO tras confirmación explícita del nombre del tablero.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["crmId"],
+        properties: { crmId: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_columna",
+      description: "Renombra una columna del CRM o cambia su color (parcial).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["crmId", "columnId"],
+        properties: {
+          crmId: { type: "string" },
+          columnId: { type: "string" },
+          name: { type: "string" },
+          color: { type: "string", description: "Hex" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "eliminar_columna",
+      description:
+        "ELIMINA una columna del CRM. Los clientes que estaban en ella VUELVEN al Inbox (avísalo al proponer). SOLO tras confirmación explícita.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["crmId", "columnId"],
+        properties: { crmId: { type: "string" }, columnId: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "reordenar_columnas",
+      description: "Reordena las columnas de un tablero. Pasa TODOS los columnIds en el orden final deseado.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["crmId", "columnIds"],
+        properties: {
+          crmId: { type: "string" },
+          columnIds: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_etiqueta",
+      description: "Renombra una etiqueta o cambia su color (parcial).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["tagId"],
+        properties: { tagId: { type: "string" }, name: { type: "string" }, color: { type: "string", description: "Hex" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "eliminar_etiqueta",
+      description:
+        "ELIMINA una etiqueta (se desasigna de todos los clientes que la tenían — avísalo). SOLO tras confirmación explícita.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["tagId"],
+        properties: { tagId: { type: "string" } },
       },
     },
   },
@@ -663,6 +782,80 @@ async function runCopilotTool(
       return { result: JSON.stringify({ ok: true, tagId: tag.id, name: tag.name }), wrote: true };
     }
 
+    case "actualizar_crm": {
+      const crmId = String(args.crmId ?? "");
+      const current = await prisma.crm.findFirst({ where: { id: crmId, companyId } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "tablero no encontrado" }), wrote: false };
+      const crm = await updateCrm(companyId, crmId, {
+        name: asStr(args.name) ?? current.name,
+        description: args.description !== undefined ? asStr(args.description) ?? null : current.description,
+        color: asStr(args.color) ?? current.color,
+      });
+      return { result: JSON.stringify({ ok: true, crm: { id: crm.id, name: crm.name } }), wrote: true };
+    }
+
+    case "eliminar_crm": {
+      const crmId = String(args.crmId ?? "");
+      const current = await prisma.crm.findFirst({ where: { id: crmId, companyId }, select: { name: true } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "tablero no encontrado" }), wrote: false };
+      await deleteCrm(companyId, crmId);
+      return { result: JSON.stringify({ ok: true, deleted: current.name }), wrote: true };
+    }
+
+    case "actualizar_columna": {
+      const crmId = String(args.crmId ?? "");
+      const columnId = String(args.columnId ?? "");
+      const current = await prisma.crmColumn.findFirst({ where: { id: columnId, crmId, companyId } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "columna no encontrada" }), wrote: false };
+      const column = await updateColumn(companyId, crmId, columnId, {
+        name: asStr(args.name) ?? current.name,
+        color: args.color !== undefined ? asStr(args.color) ?? null : current.color,
+      });
+      return { result: JSON.stringify({ ok: true, column: { id: column.id, name: column.name } }), wrote: true };
+    }
+
+    case "eliminar_columna": {
+      const crmId = String(args.crmId ?? "");
+      const columnId = String(args.columnId ?? "");
+      const current = await prisma.crmColumn.findFirst({ where: { id: columnId, crmId, companyId }, select: { name: true } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "columna no encontrada" }), wrote: false };
+      await deleteColumn(companyId, crmId, columnId);
+      return {
+        result: JSON.stringify({ ok: true, deleted: current.name, nota: "Los clientes de esa columna volvieron al Inbox." }),
+        wrote: true,
+      };
+    }
+
+    case "reordenar_columnas": {
+      const crmId = String(args.crmId ?? "");
+      const columnIds = asStrList(args.columnIds) ?? [];
+      if (!columnIds.length) return { result: JSON.stringify({ ok: false, error: "faltan los columnIds en orden" }), wrote: false };
+      await reorderColumns(companyId, crmId, columnIds);
+      return { result: JSON.stringify({ ok: true, orden: columnIds }), wrote: true };
+    }
+
+    case "actualizar_etiqueta": {
+      const tagId = String(args.tagId ?? "");
+      const current = await prisma.customerTag.findFirst({ where: { id: tagId, companyId } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "etiqueta no encontrada" }), wrote: false };
+      const tag = await updateTag(companyId, tagId, {
+        name: asStr(args.name) ?? current.name,
+        color: asStr(args.color) ?? current.color,
+      });
+      return { result: JSON.stringify({ ok: true, tag: { id: tag.id, name: tag.name, color: tag.color } }), wrote: true };
+    }
+
+    case "eliminar_etiqueta": {
+      const tagId = String(args.tagId ?? "");
+      const current = await prisma.customerTag.findFirst({ where: { id: tagId, companyId }, select: { name: true } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "etiqueta no encontrada" }), wrote: false };
+      await deleteTag(companyId, tagId);
+      return {
+        result: JSON.stringify({ ok: true, deleted: current.name, nota: "La etiqueta se quitó de todos los clientes que la tenían." }),
+        wrote: true,
+      };
+    }
+
     case "gestionar_cliente_crm": {
       const phoneDigits = String(args.phone ?? "").replace(/\D/g, "");
       if (!phoneDigits) return { result: JSON.stringify({ ok: false, error: "falta el teléfono del cliente" }), wrote: false };
@@ -764,7 +957,8 @@ async function buildSystem(companyId: string): Promise<string> {
     "REGLAS:",
     "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.",
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
-    "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM (tableros/columnas/etiquetas, mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios) y los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido). Usa ver_configuracion / ver_crm antes de proponer cambios en esas áreas.",
+    "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios) y los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido). Usa ver_configuracion / ver_crm antes de proponer cambios en esas áreas.",
+    "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES: envía solo los campos a cambiar; el resto se conserva solo.",
     "- eliminar_producto: SOLO si lo pidió explícitamente y confirmó el nombre. Nunca elimines por iniciativa propia.",
