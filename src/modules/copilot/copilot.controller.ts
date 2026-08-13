@@ -15,6 +15,9 @@ import { decryptCredential } from "../../lib/credentials-crypto";
 import { chatCompletion, type ChatMessage, type ContentPart, type ToolDefinition } from "../../lib/openai";
 import { productBodySchema } from "../products/products.schemas";
 import { createProduct, updateProduct, deleteProduct, getProduct } from "../products/products.service";
+import { updateBusinessProfile, type DeliveryConfigInput } from "../business/business.service";
+import { upsertAgentConfig } from "../agent-config/agent-config.service";
+import { upsertPaymentConfig } from "../payment-config/payment-config.service";
 
 const MAX_ITERATIONS = 8;
 const HISTORY_LIMIT = 16;
@@ -92,6 +95,57 @@ const TOOLS: ToolDefinition[] = [
         additionalProperties: false,
         required: ["productId"],
         properties: { productId: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_configuracion",
+      description:
+        "Devuelve la configuración ACTUAL del negocio: empresa (nombre, rubro, zona horaria, delivery, horario de atención), agente IA (prompt/estilo/reglas, sin credenciales) y pagos (métodos y modo). Úsala antes de proponer cambios.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_empresa",
+      description:
+        "Actualiza la EMPRESA. `data` es PARCIAL (solo lo que cambia): {name?, timezone?, vertical? (SOLO si aún no hay productos), botMode? ('AI'|'FLOW'), deliveryConfig? {cost?, time?, areas?: string[], pickupAvailable?, requiresAddress?}, businessHours? [{day (0=domingo..6=sábado), from 'HH:MM', to 'HH:MM'}], firmaEnabled?, firmaText?}. Llámala SOLO tras la confirmación del usuario.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["data"],
+        properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_agente",
+      description:
+        "Actualiza el AGENTE IA. `data` es PARCIAL: {basePrompt?, salesStyle? (cercano|profesional|directo|entusiasta|consultivo), rules?: string[], negotiationHandoff?, catalogMode? (preguntar|resumen_humano|primeros_n), keywordMode? (detalle_y_preguntar|agregar_directo|auto), trackStock?, catalogMediaMode? (text|media|both)}. NUNCA gestiona la API key ni el modelo. Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["data"],
+        properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_pagos",
+      description:
+        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (REEMPLAZA la lista completa si viene), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE)}. Tokens de Mercado Pago NO (dirige a Pagos). Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["data"],
+        properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
       },
     },
   },
@@ -308,6 +362,156 @@ async function runCopilotTool(
       return { result: JSON.stringify({ ok: true, deleted: existing.name }), wrote: true };
     }
 
+    case "ver_configuracion": {
+      const [company, agent, payment] = await Promise.all([
+        prisma.company.findUnique({
+          where: { id: companyId },
+          select: {
+            name: true,
+            vertical: true,
+            timezone: true,
+            botMode: true,
+            deliveryConfig: true,
+            businessHours: true,
+            firmaEnabled: true,
+            firmaText: true,
+            _count: { select: { products: true } },
+          },
+        }),
+        prisma.agentConfig.findUnique({
+          where: { companyId },
+          select: {
+            basePrompt: true,
+            salesStyle: true,
+            rules: true,
+            negotiationHandoff: true,
+            catalogMode: true,
+            keywordMode: true,
+            trackStock: true,
+            catalogMediaMode: true,
+          },
+        }),
+        prisma.paymentConfig.findUnique({
+          where: { companyId },
+          include: { methods: { orderBy: { sortOrder: "asc" } } },
+        }),
+      ]);
+      return {
+        result: JSON.stringify({
+          empresa: company ? { ...company, productCount: company._count.products, _count: undefined } : null,
+          agente: agent,
+          pagos: payment
+            ? {
+                enabled: payment.enabled,
+                paymentMode: payment.paymentMode,
+                notificationPhone: payment.notificationPhone,
+                methods: payment.methods.map((m) => ({ method: m.method, number: m.number, holder: m.holder })),
+              }
+            : null,
+        }),
+        wrote: false,
+      };
+    }
+
+    case "configurar_empresa": {
+      const data = (args.data ?? {}) as LooseData;
+      const current = await prisma.company.findUnique({ where: { id: companyId } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "empresa no encontrada" }), wrote: false };
+      const updated = await updateBusinessProfile(companyId, {
+        name: asStr(data.name) ?? current.name,
+        slug: current.slug,
+        adminPhone: asStr(data.adminPhone) ?? current.adminPhone,
+        vertical: (asStr(data.vertical) as typeof current.vertical | undefined) ?? current.vertical,
+        timezone: asStr(data.timezone) ?? current.timezone,
+        botMode: (asStr(data.botMode) as "AI" | "FLOW" | undefined) ?? (current.botMode as "AI" | "FLOW"),
+        isActive: current.isActive,
+        // undefined = no tocar (el service ya respeta esa semántica).
+        deliveryConfig: data.deliveryConfig !== undefined ? (data.deliveryConfig as DeliveryConfigInput | null) : undefined,
+        businessHours:
+          data.businessHours !== undefined
+            ? (data.businessHours as Array<{ day: number; from: string; to: string }> | null)
+            : undefined,
+        firmaEnabled: typeof data.firmaEnabled === "boolean" ? data.firmaEnabled : current.firmaEnabled,
+        firmaText: data.firmaText !== undefined ? asStr(data.firmaText) ?? null : current.firmaText,
+        messageGapEnabled: current.messageGapEnabled,
+        messageGapSeconds: current.messageGapSeconds,
+      });
+      return {
+        result: JSON.stringify({ ok: true, empresa: { name: updated.name, vertical: updated.vertical, timezone: updated.timezone }, nota: "Empresa actualizada (lo no enviado se conservó)." }),
+        wrote: true,
+      };
+    }
+
+    case "configurar_agente": {
+      const data = (args.data ?? {}) as LooseData;
+      const current = await prisma.agentConfig.findUnique({ where: { companyId } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "config del agente no encontrada" }), wrote: false };
+      const rules = Array.isArray(data.rules) ? (data.rules as unknown[]).map(String).filter((r) => r.trim()) : undefined;
+      await upsertAgentConfig(companyId, {
+        openaiModel: current.openaiModel,
+        // Sin openaiApiKey: la key guardada se conserva (nunca se gestiona por chat).
+        temperature: Number(current.temperature),
+        basePrompt: asStr(data.basePrompt) ?? current.basePrompt,
+        salesStyle: asStr(data.salesStyle) ?? current.salesStyle,
+        rules: rules ?? ((current.rules as string[]) ?? []),
+        negotiationHandoff:
+          typeof data.negotiationHandoff === "boolean" ? data.negotiationHandoff : (current.negotiationHandoff ?? false),
+        catalogMode: asStr(data.catalogMode) ?? (current.catalogMode as string),
+        keywordMode: asStr(data.keywordMode) ?? (current.keywordMode as string),
+        trackStock: typeof data.trackStock === "boolean" ? data.trackStock : (current.trackStock ?? true),
+        catalogMediaMode: asStr(data.catalogMediaMode) ?? (current.catalogMediaMode as string),
+      });
+      return {
+        result: JSON.stringify({ ok: true, nota: "Agente IA actualizado (la API key y el modelo no se tocaron)." }),
+        wrote: true,
+      };
+    }
+
+    case "configurar_pagos": {
+      const data = (args.data ?? {}) as LooseData;
+      const current = await prisma.paymentConfig.findUnique({
+        where: { companyId },
+        include: { methods: { orderBy: { sortOrder: "asc" } } },
+      });
+      const mode = asStr(data.paymentMode);
+      if (mode && !["BEFORE_DELIVERY", "CASH_ON_DELIVERY", "MANUAL", "CUSTOMER_CHOICE"].includes(mode)) {
+        return { result: JSON.stringify({ ok: false, error: "paymentMode inválido" }), wrote: false };
+      }
+      const methods = Array.isArray(data.methods)
+        ? (data.methods as Array<{ method?: unknown; number?: unknown; holder?: unknown }>)
+            .map((m, i) => ({
+              method: String(m?.method ?? "").trim(),
+              number: String(m?.number ?? "").trim(),
+              holder: String(m?.holder ?? "").trim(),
+              sortOrder: i,
+            }))
+            .filter((m) => m.method && m.number && m.holder)
+        : undefined;
+      const notificationPhone = asStr(data.notificationPhone) ?? current?.notificationPhone ?? "";
+      const finalMethods =
+        methods ?? (current?.methods ?? []).map((m) => ({ method: m.method, number: m.number, holder: m.holder, sortOrder: m.sortOrder }));
+      if (!finalMethods.length) {
+        return {
+          result: JSON.stringify({ ok: false, error: "se necesita al menos un método de pago (method/number/holder) para guardar" }),
+          wrote: false,
+        };
+      }
+      if (!notificationPhone) {
+        return {
+          result: JSON.stringify({ ok: false, error: "falta notificationPhone (WhatsApp donde avisar los pagos) — pídeselo al usuario" }),
+          wrote: false,
+        };
+      }
+      await upsertPaymentConfig(companyId, {
+        enabled: typeof data.enabled === "boolean" ? data.enabled : (current?.enabled ?? true),
+        notificationPhone,
+        methods: finalMethods,
+        paymentMode: (mode as "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL" | "CUSTOMER_CHOICE" | undefined) ??
+          (current?.paymentMode ?? "BEFORE_DELIVERY"),
+      });
+      return { result: JSON.stringify({ ok: true, nota: "Pagos actualizados (lo no enviado se conservó)." }), wrote: true };
+    }
+
     default:
       return { result: JSON.stringify({ ok: false, error: `herramienta desconocida: ${name}` }), wrote: false };
   }
@@ -332,13 +536,15 @@ async function buildSystem(companyId: string): Promise<string> {
     rubroGuide(vertical),
     "",
     "REGLAS:",
-    "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro (lista de productos con nombre/precio/detalles) y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama crear_producto/actualizar_producto (una llamada por producto). NUNCA escribas sin confirmación previa en esta conversación.",
+    "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.",
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
-    "- actualizar_producto es PARCIAL: envía solo los campos a cambiar; el resto se conserva solo.",
+    "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial) y los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos) — usa ver_configuracion antes de proponer cambios en esas áreas.",
+    "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
+    "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES: envía solo los campos a cambiar; el resto se conserva solo.",
     "- eliminar_producto: SOLO si lo pidió explícitamente y confirmó el nombre. Nunca elimines por iniciativa propia.",
-    "- No gestionas datos sensibles (API keys, tokens de pago, WhatsApp): para eso indícale la página del panel correspondiente.",
-    "- Tras crear/modificar, resume QUÉ quedó hecho y sugiere el siguiente paso (revisar en Productos, probar en el simulador, configurar pagos...).",
-    "- Respuestas cortas y claras. Una pregunta a la vez. Los precios/datos que devuelven las herramientas son la fuente de verdad.",
+    "- No gestionas datos sensibles (API keys de OpenAI, tokens de Mercado Pago/Meta, credenciales de WhatsApp): para eso indícale la página del panel correspondiente (Agente IA, Pagos, WhatsApp API).",
+    "- Tras crear/modificar, resume QUÉ quedó hecho y sugiere el siguiente paso (revisar en el panel, probar en el simulador...).",
+    "- Respuestas cortas y claras. Una pregunta a la vez. Los datos que devuelven las herramientas son la fuente de verdad.",
   ].join("\n");
 }
 
