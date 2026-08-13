@@ -17,6 +17,7 @@ import {
   addToCart,
   removeFromCart,
   clearCart,
+  setCartQuantity,
   summarizeCart,
   renderCartText,
   checkoutCart,
@@ -1167,6 +1168,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "fijar_cantidad",
+      description:
+        "Deja la cantidad EXACTA de un producto en el carrito (idempotente: repetirla no duplica). Úsala para CORREGIR el carrito cuando el cliente diga cuántas unidades quiere EN TOTAL, o para ajustar un error de cantidades. quantity 0 elimina el producto.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId", "quantity"],
+        properties: {
+          productId: { type: "string" },
+          quantity: { type: "integer", minimum: 0, description: "Cantidad TOTAL que debe quedar (0 = eliminar)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "enviar_metodos_pago",
       description:
         "Envía al cliente los métodos de pago y el monto a pagar (del carrito o del producto seleccionado). Úsalo SOLO cuando exprese intención clara de pagar/comprar/activar.",
@@ -1645,10 +1663,17 @@ export async function executeTool(
           }
         }
       }
+      // ¿El producto YA estaba en el carrito antes de esta llamada? (para avisar
+      // al modelo y que se auto-corrija si no era una unidad adicional pedida).
+      const before = await summarizeCart(ctx.companyId, ctx.customerId);
+      const alreadyInCart = before.items.some((it) => it.productId === product.id);
       const summary = await addToCart(ctx.companyId, ctx.customerId, product.id, qty, modifiers);
       ctx.state.selectedProductId = product.id;
       // Re-enganche tras una venta cerrada: agregar un producto nuevo reabre el embudo.
       reopenFunnelIfClosed(ctx, product.id);
+      const nowQty = summary.items
+        .filter((it) => it.productId === product.id)
+        .reduce((acc, it) => acc + it.quantity, 0);
       return JSON.stringify({
         ok: true,
         cart: summary.items.map((it) => ({
@@ -1658,6 +1683,24 @@ export async function executeTool(
           lineTotal: (it.unitPrice * it.quantity).toFixed(2),
         })),
         total: summary.totalText,
+        ...(alreadyInCart
+          ? {
+              aviso: `OJO: "${product.name}" YA estaba en el carrito; ahora hay ${nowQty} unidad(es) en total. Si el cliente NO pidió unidades adicionales, corrige AHORA con fijar_cantidad.`,
+            }
+          : {}),
+      });
+    }
+
+    case "fijar_cantidad": {
+      const product = findProductById(ctx, String(args.productId ?? ""));
+      if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
+      const qty = Math.max(0, Math.floor(Number(args.quantity ?? 0)));
+      const summary = await setCartQuantity(ctx.companyId, ctx.customerId, product.id, qty);
+      return JSON.stringify({
+        ok: true,
+        items: summary.items,
+        total: summary.totalText,
+        nota: `Cantidad de "${product.name}" fijada en ${qty}. Este es el carrito REAL: usa estas cantidades y este total al responder.`,
       });
     }
 

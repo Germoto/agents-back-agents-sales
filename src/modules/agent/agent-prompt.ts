@@ -236,7 +236,7 @@ function verticalGuidance(
   switch (vertical) {
     case "RESTAURANT":
       return "Rubro RESTAURANTE: el catálogo son platos/combos agrupados por sección del menú (categoría). " +
-        "CARRITO: por CADA plato o bebida que el cliente pida o confirme, LLAMA a agregar_carrito (una llamada por ítem, con el productId del catálogo y su cantidad). NUNCA digas 'agregué', 'anoté' o 'tu pedido queda…' sin haber llamado agregar_carrito en este turno: si no llamaste la herramienta, el ítem NO existe. Si el cliente CAMBIA o QUITA algo: usa quitar_carrito (con quantity para bajar unidades) y agregar_carrito para el reemplazo; para empezar de cero, vaciar_carrito. Tras armar el pedido usa ver_carrito para confirmar el resumen y el TOTAL real antes de cobrar. " +
+        "CARRITO: por CADA plato o bebida que el cliente pida o confirme, LLAMA a agregar_carrito (una llamada por ítem, con el productId del catálogo y su cantidad). NUNCA digas 'agregué', 'anoté' o 'tu pedido queda…' sin haber llamado agregar_carrito en este turno: si no llamaste la herramienta, el ítem NO existe. Si el cliente CAMBIA o QUITA algo: quitar_carrito elimina (con quantity baja unidades), fijar_cantidad deja la cantidad EXACTA (úsala para corregir errores), vaciar_carrito empieza de cero; agregar_carrito es SOLO para pedidos nuevos. Tras armar el pedido usa ver_carrito para confirmar el resumen y el TOTAL real antes de cobrar. " +
         "Cuando un plato tenga opciones/extras, pregúntalas y pásalas como `modifiers` en agregar_carrito (el precio de la línea se ajusta solo con sus deltas). Sugiere acompañamientos/bebidas (upsell). Ten en cuenta el tiempo de preparación y la zona de entrega. " +
         "Cuando el cliente confirme, toma nombre y dirección (o indica recojo en local) y usa registrar_pedido_carrito para registrar TODO el carrito como un pedido. Sé rápido y apetitoso.";
     case "STREAMER":
@@ -284,7 +284,7 @@ function verticalGuidance(
         catalogo + " " + keyword + " " +
         "VARIANTES: si un producto tiene variantes (talla, color, etc.), pregúntalas y pásalas al agregar_carrito como `modifiers` {group:'Talla', option:'M'}; así queda registrado qué eligió el cliente. " +
         (stock ? stock + " " : "") +
-        "CARRITO Y PEDIDO: arma el pedido en el carrito (agregar_carrito, ver_carrito) sumando varios productos; si el cliente cambia o quita algo, usa quitar_carrito (con quantity para bajar unidades) y agregar_carrito para el reemplazo (vaciar_carrito para empezar de cero). Cuando el cliente confirme, toma su nombre y dirección de entrega (o recojo en local si aplica), valida la zona de envío, y usa registrar_pedido_carrito para registrar TODO el carrito como UN pedido. Para un solo producto puedes usar registrar_pedido. " +
+        "CARRITO Y PEDIDO: arma el pedido en el carrito (agregar_carrito, ver_carrito) sumando varios productos; si el cliente cambia o quita algo: quitar_carrito elimina (con quantity baja unidades), fijar_cantidad deja la cantidad EXACTA (para corregir errores), vaciar_carrito empieza de cero; agregar_carrito es SOLO para pedidos nuevos. Cuando el cliente confirme, toma su nombre y dirección de entrega (o recojo en local si aplica), valida la zona de envío, y usa registrar_pedido_carrito para registrar TODO el carrito como UN pedido. Para un solo producto puedes usar registrar_pedido. " +
         "COBRO: respeta el modo de cobro configurado. Adelantado: envía los métodos de pago (enviar_metodos_pago) y valida el pago (validar_pago) ANTES de confirmar. Contra entrega: registra el pedido y coordina la entrega (se paga al recibir). Manual: registra el pedido y un asesor coordina el cobro. Si el negocio deja ELEGIR al cliente, pregúntale primero '¿prefieres pagar por adelantado o contra entrega?' y actúa según su respuesta."
       );
     }
@@ -402,7 +402,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     // Rubros de carrito: estado REAL del carrito al inicio de este turno.
     ...(state.cartText
       ? [
-          `CARRITO ACTUAL (estado REAL al inicio de este turno — fuente de verdad): ${state.cartText}. Las cantidades y el TOTAL son ESTOS (más lo que agregues/quites con las herramientas en este turno). Si difieren de lo conversado antes, manda el carrito real: corrígelo con quitar_carrito/agregar_carrito según lo que el cliente quiera, y NUNCA vuelvas a agregar algo que ya está aquí.`,
+          `CARRITO ACTUAL (estado REAL al inicio de este turno — fuente de verdad): ${state.cartText}. Este carrito YA está guardado: NO lo re-construyas ni re-agregues NADA de esta lista. Llama agregar_carrito SOLO si el cliente pide un producto o unidades ADICIONALES en su ÚLTIMO mensaje. Para corregir una cantidad usa fijar_cantidad (deja la cantidad EXACTA, es idempotente). Para responder '¿qué llevo?' o '¿cuánto es?' usa ESTOS datos tal cual, SIN llamar ninguna herramienta de carrito.`,
           "",
         ]
       : []),

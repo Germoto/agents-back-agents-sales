@@ -176,6 +176,48 @@ export async function removeFromCart(
   return summarizeCart(companyId, customerId);
 }
 
+/**
+ * Deja la cantidad EXACTA de un producto en el carrito (IDEMPOTENTE — repetir la
+ * llamada no cambia nada). quantity 0 elimina el producto; >0 deja la línea más
+ * reciente con esa cantidad (conserva sus modificadores) y elimina las demás
+ * líneas del mismo producto.
+ */
+export async function setCartQuantity(
+  companyId: string,
+  customerId: string,
+  productId: string,
+  quantity: number,
+): Promise<CartSummary> {
+  const cart = await prisma.cart.findFirst({
+    where: { companyId, customerId, status: "OPEN" },
+    select: { id: true },
+  });
+  const qty = Math.max(0, Math.floor(Number(quantity) || 0));
+  if (cart) {
+    if (qty === 0) {
+      await prisma.cartItem.deleteMany({ where: { cartId: cart.id, productId } });
+    } else {
+      const lines = await prisma.cartItem.findMany({
+        where: { cartId: cart.id, productId },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      if (lines.length) {
+        await prisma.cartItem.update({ where: { id: lines[0].id }, data: { quantity: qty } });
+        if (lines.length > 1) {
+          await prisma.cartItem.deleteMany({ where: { id: { in: lines.slice(1).map((l) => l.id) } } });
+        }
+      } else {
+        // El producto no estaba: fijar cantidad equivale a agregarlo.
+        return addToCart(companyId, customerId, productId, qty);
+      }
+    }
+  } else if (qty > 0) {
+    return addToCart(companyId, customerId, productId, qty);
+  }
+  return summarizeCart(companyId, customerId);
+}
+
 /** Vacía TODO el carrito abierto del cliente (el cliente quiere empezar de cero). */
 export async function clearCart(companyId: string, customerId: string): Promise<CartSummary> {
   const cart = await prisma.cart.findFirst({
