@@ -486,6 +486,33 @@ const TOOLS: ToolDefinition[] = [
   },
 ];
 
+/** Resuelve la URL que pasa el modelo a un adjunto REAL de la conversación.
+ * Tolerante: con proveedores que inlinean imágenes (data-URI, Claude/Gemini)
+ * el modelo no ve la URL original en el image_url, así que además del match
+ * exacto se intenta por nombre de archivo y, como último recurso, el ÚNICO
+ * adjunto de imagen de la conversación. Nunca inventa: sin adjunto real → null. */
+function resolveAttachment(
+  rawUrl: string,
+  attachmentsByUrl: Map<string, CopilotAttachment>,
+): CopilotAttachment | null {
+  const url = rawUrl.trim();
+  const exact = attachmentsByUrl.get(url);
+  if (exact) return exact;
+  const all = [...attachmentsByUrl.values()];
+  if (url && !url.startsWith("data:")) {
+    const base = url.split("?")[0].split("/").pop() ?? "";
+    const byName = all.filter(
+      (a) =>
+        (base && (a.url.split("?")[0].endsWith(`/${base}`) || a.storagePath.endsWith(base) || a.originalName === base)) ||
+        a.url.endsWith(url),
+    );
+    if (byName.length === 1) return byName[0];
+  }
+  const images = all.filter((a) => a.type === "IMAGE");
+  if (images.length === 1) return images[0];
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Guía de campos por rubro (espejo compacto de los blueprints del panel)
 // ---------------------------------------------------------------------------
@@ -651,10 +678,16 @@ async function runCopilotTool(
   switch (name) {
     case "adjuntar_foto_producto": {
       const url = String(args.url ?? "").trim();
-      const meta = attachmentsByUrl.get(url);
+      const meta = resolveAttachment(url, attachmentsByUrl);
       if (!meta) {
+        const disponibles = [...attachmentsByUrl.keys()];
         return {
-          result: JSON.stringify({ ok: false, error: "esa URL no corresponde a un adjunto de esta conversación; pide al usuario que envíe la imagen" }),
+          result: JSON.stringify({
+            ok: false,
+            error: disponibles.length
+              ? `URL no reconocida. Adjuntos disponibles en esta conversación: ${disponibles.join(" | ")}. Reintenta con una de esas URLs EXACTAS (no pidas re-adjuntar).`
+              : "no hay adjuntos en esta conversación; pide al usuario que envíe la imagen",
+          }),
           wrote: false,
         };
       }
@@ -662,7 +695,7 @@ async function runCopilotTool(
       const existing = await getProduct(companyId, productId);
       const principal = args.principal === true;
       const currentFiles = (existing.files ?? []) as Array<{ sortOrder: number } & Record<string, unknown>>;
-      if (currentFiles.some((f) => f.url === url)) {
+      if (currentFiles.some((f) => f.url === meta.url)) {
         return { result: JSON.stringify({ ok: false, error: "esa imagen ya está adjunta a este producto" }), wrote: false };
       }
       const newFile = {
@@ -1278,7 +1311,7 @@ async function buildSystem(companyId: string): Promise<string> {
     "REGLAS:",
     "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.",
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
-    "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto (usa la URL exacta del adjunto). Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
+    "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto: usa la URL EXACTA que aparece en la línea [Adjuntos de este mensaje: …] del mensaje del usuario (NUNCA un data:URI ni una URL inventada). Si el usuario ya adjuntó la imagen, NO le pidas re-adjuntarla. Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
     "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
@@ -1334,7 +1367,10 @@ export async function copilotChatController(req: Request, res: Response) {
       const urls = [...(m.attachments?.map((a) => a.url) ?? []), ...(m.imageUrls ?? [])];
       if (m.role === "user" && urls.length) {
         const parts: ContentPart[] = [
-          { type: "text", text: m.content },
+          // Las URLs canónicas van como TEXTO: con proveedores que inlinean las
+          // imágenes (data-URI) el modelo no puede leerlas del image_url, y
+          // adjuntar_foto_producto necesita la URL real del adjunto.
+          { type: "text", text: `${m.content}\n[Adjuntos de este mensaje: ${urls.join(" | ")}]` },
           ...urls.map((url): ContentPart => ({ type: "image_url", image_url: { url: visionUrl.get(url) ?? url } })),
         ];
         return { role: "user", content: parts };
