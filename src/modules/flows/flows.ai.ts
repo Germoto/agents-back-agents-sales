@@ -8,7 +8,7 @@ import type { Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
-import { decryptCredential } from "../../lib/credentials-crypto";
+import { resolveAiSettings } from "../../lib/ai-providers";
 import { chatCompletion } from "../../lib/openai";
 
 export const flowAiSuggestSchema = z.object({
@@ -38,13 +38,12 @@ export async function flowAiSuggestController(req: Request, res: Response) {
   ]);
   if (!agentConfig?.openaiApiKey) {
     throw new AppError(
-      "Falta la API key de OpenAI. Configúrala en Configuración del Agente para usar sugerencias con IA.",
+      "Falta la API key de IA. Configúrala en Configuración del Agente para usar sugerencias con IA.",
       422,
     );
   }
 
-  const apiKey = decryptCredential(agentConfig.openaiApiKey);
-  const model = agentConfig.openaiModel || "gpt-4o-mini";
+  const { apiKey, model, baseUrl } = resolveAiSettings(agentConfig);
 
   const contextLines: string[] = [`Negocio: ${company?.name ?? "—"} (rubro ${company?.vertical ?? "OTHER"}).`];
   if (typeof body.context.minutes === "number" && body.context.minutes > 0) {
@@ -57,6 +56,7 @@ export async function flowAiSuggestController(req: Request, res: Response) {
   const r = await chatCompletion({
     apiKey,
     model,
+    baseUrl,
     temperature: 0.7,
     maxTokens: 300,
     messages: [

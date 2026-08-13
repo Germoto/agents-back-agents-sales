@@ -12,7 +12,7 @@
 import type { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
-import { decryptCredential } from "../../lib/credentials-crypto";
+import { resolveAiSettings } from "../../lib/ai-providers";
 import { chatCompletion, type ChatMessage, type ToolDefinition } from "../../lib/openai";
 import { flowNodeSchema, flowEdgeSchema, flowTriggerSchema } from "./flows.schemas";
 import { validateFlow } from "./flow-validation";
@@ -299,10 +299,9 @@ export async function copilotFlowController(req: Request, res: Response) {
 
   const agentConfig = await prisma.agentConfig.findUnique({ where: { companyId } });
   if (!agentConfig?.openaiApiKey) {
-    throw new AppError("Falta la API key de OpenAI. Configúrala en Configuración del Agente para usar el Copiloto.", 422);
+    throw new AppError("Falta la API key de IA. Configúrala en Configuración del Agente para usar el Copiloto.", 422);
   }
-  const apiKey = decryptCredential(agentConfig.openaiApiKey);
-  const model = agentConfig.openaiModel || "gpt-4o-mini";
+  const { apiKey, model, baseUrl } = resolveAiSettings(agentConfig);
 
   const businessContext = await buildBusinessContext(companyId);
   const system = buildSystemPrompt(businessContext, body.flow, flow.name);
@@ -317,6 +316,7 @@ export async function copilotFlowController(req: Request, res: Response) {
     const r = await chatCompletion({
       apiKey,
       model,
+      baseUrl,
       temperature: 0.4,
       maxTokens: 4000,
       messages,

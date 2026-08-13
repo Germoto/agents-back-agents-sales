@@ -1,6 +1,6 @@
 import { AppError } from "../../lib/app-error";
 import { prisma } from "../../lib/prisma";
-import { decryptCredential } from "../../lib/credentials-crypto";
+import { resolveAiSettings } from "../../lib/ai-providers";
 import { mapBotProduct, productRelations } from "../../lib/product";
 import { isPlatformSalesCompanyId, getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 
@@ -152,11 +152,10 @@ export async function buildBotConfig(companyId: string, account?: string) {
       messageGapEnabled: whatsappConfig.company.messageGapEnabled,
       messageGapSeconds: whatsappConfig.company.messageGapSeconds,
     },
-    openai: {
-      model: agentConfig.openaiModel,
-      apiKey: decryptCredential(agentConfig.openaiApiKey),
-      temperature: Number(agentConfig.temperature),
-    },
+    // Ajustes del proveedor de IA del tenant (OpenAI/Anthropic/Gemini): incluye
+    // model/apiKey/temperature (shape histórico) + provider/baseUrl/caps/
+    // transcriptionApiKey para los call sites multi-proveedor.
+    openai: resolveAiSettings(agentConfig),
     whatsapp: {
       provider: whatsappConfig.provider,
       apiUrl: whatsappConfig.apiUrl,

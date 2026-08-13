@@ -11,7 +11,6 @@
 import type { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
-import { decryptCredential } from "../../lib/credentials-crypto";
 import { chatCompletion, type ChatMessage, type ContentPart, type ToolDefinition } from "../../lib/openai";
 import { productBodySchema } from "../products/products.schemas";
 import { createProduct, updateProduct, deleteProduct, getProduct } from "../products/products.service";
@@ -44,6 +43,7 @@ import {
 import { upsertQuickReplySchema } from "../quick-replies/quick-replies.schemas";
 import { getBillingMe } from "../billing/billing.service";
 import { getLivePlansPromptSection } from "../admin-console/sales-agent.service";
+import { prepareImageUrl, resolveAiSettings } from "../../lib/ai-providers";
 
 const MAX_ITERATIONS = 8;
 const HISTORY_LIMIT = 16;
@@ -1238,7 +1238,7 @@ const SYSTEM_GUIDE = [
   "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat).",
   "- Empresa (/empresa): nombre, rubro, zona horaria, horario de atención, delivery, firma.",
   "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
-  "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial y la API key de OpenAI (necesaria para el agente y para este copiloto).",
+  "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper): si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI solo para audios — sin ella los audios no se transcriben.",
   "- Flujos de chatbot (/flujos): flujos guiados visuales con su propio copiloto IA (módulo Flujos).",
   "- Recordatorios (/recordatorios): mensajes programados (carrito abandonado, dejado en visto, recordatorios de cita, renovaciones).",
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
@@ -1301,10 +1301,9 @@ export async function copilotChatController(req: Request, res: Response) {
 
   const agentConfig = await prisma.agentConfig.findUnique({ where: { companyId } });
   if (!agentConfig?.openaiApiKey) {
-    throw new AppError("Falta la API key de OpenAI. Configúrala en Configuración del Agente para usar el Copiloto.", 422);
+    throw new AppError("Falta la API key de IA. Configúrala en Configuración del Agente para usar el Copiloto.", 422);
   }
-  const apiKey = decryptCredential(agentConfig.openaiApiKey);
-  const model = agentConfig.openaiModel || "gpt-4o-mini";
+  const { apiKey, model, baseUrl, caps } = resolveAiSettings(agentConfig);
 
   const system = await buildSystem(companyId);
   const history = body.messages.slice(-HISTORY_LIMIT);
@@ -1316,6 +1315,19 @@ export async function copilotChatController(req: Request, res: Response) {
     for (const a of m.attachments ?? []) attachmentsByUrl.set(a.url, a);
   }
 
+  // Proveedores que no descargan URLs públicas (Anthropic/Gemini): las imágenes
+  // del historial se inlinean como data-URI. La URL original sigue siendo la
+  // identidad del adjunto (attachmentsByUrl / adjuntar_foto_producto).
+  const visionUrl = new Map<string, string>();
+  if (caps.inlineImages) {
+    const allUrls = new Set(
+      body.messages.flatMap((m) => [...(m.attachments?.map((a) => a.url) ?? []), ...(m.imageUrls ?? [])]),
+    );
+    await Promise.all(
+      [...allUrls].map(async (url) => visionUrl.set(url, await prepareImageUrl(url, caps))),
+    );
+  }
+
   const messages: ChatMessage[] = [
     { role: "system", content: system },
     ...history.map((m): ChatMessage => {
@@ -1323,7 +1335,7 @@ export async function copilotChatController(req: Request, res: Response) {
       if (m.role === "user" && urls.length) {
         const parts: ContentPart[] = [
           { type: "text", text: m.content },
-          ...urls.map((url): ContentPart => ({ type: "image_url", image_url: { url } })),
+          ...urls.map((url): ContentPart => ({ type: "image_url", image_url: { url: visionUrl.get(url) ?? url } })),
         ];
         return { role: "user", content: parts };
       }
@@ -1336,6 +1348,7 @@ export async function copilotChatController(req: Request, res: Response) {
     const r = await chatCompletion({
       apiKey,
       model,
+      baseUrl,
       temperature: 0.3,
       maxTokens: 2500,
       messages,

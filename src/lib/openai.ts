@@ -65,8 +65,11 @@ export async function chatCompletion(opts: {
   /** "auto" (default) o forzar una herramienta concreta en esta llamada. */
   toolChoice?: "auto" | { type: "function"; function: { name: string } };
   maxTokens?: number;
+  /** Base URL del proveedor (default OpenAI). Anthropic/Gemini exponen este mismo formato. */
+  baseUrl?: string;
 }): Promise<ChatCompletionResult> {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const base = (opts.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  const response = await fetch(`${base}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -92,7 +95,7 @@ export async function chatCompletion(opts: {
       // ignore
     }
     throw new AppError(
-      `Error al consultar OpenAI (${response.status})${detail ? `: ${detail}` : ""}`,
+      `Error al consultar el proveedor de IA (${response.status})${detail ? `: ${detail}` : ""}`,
       response.status === 401 ? 401 : 502,
     );
   }

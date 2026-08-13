@@ -80,6 +80,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     const res = await chatCompletion({
       apiKey,
       model: ctx.config.openai.model,
+      baseUrl: ctx.config.openai.baseUrl,
       temperature: ctx.config.openai.temperature,
       messages,
       tools: TOOL_DEFINITIONS,
@@ -120,6 +121,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   const closing = await chatCompletion({
     apiKey,
     model: ctx.config.openai.model,
+    baseUrl: ctx.config.openai.baseUrl,
     temperature: ctx.config.openai.temperature,
     messages: [
       ...messages,

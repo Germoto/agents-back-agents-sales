@@ -1,8 +1,8 @@
 import { Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
-import { decryptCredential } from "../../lib/credentials-crypto";
 import { AppError } from "../../lib/app-error";
+import { parseJsonLoose, resolveAiSettings } from "../../lib/ai-providers";
 
 export const aiSuggestBodySchema = z.object({
   field: z.enum([
@@ -161,12 +161,17 @@ type OpenAIResponse = {
 async function callOpenAI(opts: {
   apiKey: string;
   model: string;
+  baseUrl?: string;
+  /** false = el proveedor no soporta response_format: se pide "solo JSON" por prompt. */
+  jsonSchema?: boolean;
   systemPrompt: string;
   userPrompt: string;
   schema: object;
   schemaName: string;
 }): Promise<unknown> {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const useJsonSchema = opts.jsonSchema !== false;
+  const base = (opts.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  const response = await fetch(`${base}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -177,17 +182,26 @@ async function callOpenAI(opts: {
       temperature: 0.7,
       max_tokens: 800,
       messages: [
-        { role: "system", content: opts.systemPrompt },
+        {
+          role: "system",
+          content: useJsonSchema
+            ? opts.systemPrompt
+            : `${opts.systemPrompt}\nDevuelve ÚNICAMENTE un JSON válido que cumpla exactamente este esquema (sin markdown ni texto extra): ${JSON.stringify(opts.schema)}`,
+        },
         { role: "user", content: opts.userPrompt },
       ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: opts.schemaName,
-          strict: true,
-          schema: opts.schema,
-        },
-      },
+      ...(useJsonSchema
+        ? {
+            response_format: {
+              type: "json_schema",
+              json_schema: {
+                name: opts.schemaName,
+                strict: true,
+                schema: opts.schema,
+              },
+            },
+          }
+        : {}),
     }),
   });
 
@@ -200,7 +214,7 @@ async function callOpenAI(opts: {
       // ignore
     }
     throw new AppError(
-      `Error al consultar OpenAI (${response.status})${detail ? `: ${detail}` : ""}`,
+      `Error al consultar el proveedor de IA (${response.status})${detail ? `: ${detail}` : ""}`,
       response.status === 401 ? 401 : 502,
     );
   }
@@ -208,13 +222,13 @@ async function callOpenAI(opts: {
   const data = (await response.json()) as OpenAIResponse;
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
-    throw new AppError("Respuesta vacía de OpenAI", 502);
+    throw new AppError("Respuesta vacía del proveedor de IA", 502);
   }
-  try {
-    return JSON.parse(content);
-  } catch {
-    throw new AppError("Respuesta de OpenAI no es JSON válido", 502);
+  const parsed = parseJsonLoose(content);
+  if (parsed === null) {
+    throw new AppError("La respuesta del proveedor de IA no es JSON válido", 502);
   }
+  return parsed;
 }
 
 export async function aiSuggestProductFieldController(req: Request, res: Response) {
@@ -224,12 +238,12 @@ export async function aiSuggestProductFieldController(req: Request, res: Respons
   const agentConfig = await prisma.agentConfig.findUnique({ where: { companyId } });
   if (!agentConfig?.openaiApiKey) {
     throw new AppError(
-      "Falta la API key de OpenAI. Configúrala en Configuración del Agente para usar sugerencias con IA.",
+      "Falta la API key de IA. Configúrala en Configuración del Agente para usar sugerencias con IA.",
       422,
     );
   }
 
-  const model = agentConfig.openaiModel || "gpt-4o-mini";
+  const ai = resolveAiSettings(agentConfig);
   const systemPrompt =
     "Eres un copywriter experto en e-commerce y ventas conversacionales por WhatsApp. " +
     "Generas contenido para fichas de producto que serán usadas por un bot vendedor. " +
@@ -240,8 +254,10 @@ export async function aiSuggestProductFieldController(req: Request, res: Respons
   const schema = buildSchemaForField(body.field);
 
   const parsed = (await callOpenAI({
-    apiKey: decryptCredential(agentConfig.openaiApiKey),
-    model,
+    apiKey: ai.apiKey,
+    model: ai.model,
+    baseUrl: ai.baseUrl,
+    jsonSchema: ai.caps.jsonSchema,
     systemPrompt,
     userPrompt,
     schema,

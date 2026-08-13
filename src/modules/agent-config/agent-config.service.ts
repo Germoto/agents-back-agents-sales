@@ -1,6 +1,8 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { AppError } from "../../lib/app-error";
 import { decryptCredential, encryptCredential } from "../../lib/credentials-crypto";
+import { providerOf } from "../../lib/ai-providers";
 
 /** Máscara para el panel: la key completa NUNCA sale del backend. */
 function maskApiKey(stored: string | null): string | null {
@@ -13,8 +15,10 @@ function maskApiKey(stored: string | null): string | null {
 function mapAgentConfig(config: {
   id: string;
   companyId: string;
+  aiProvider?: string;
   openaiModel: string;
   openaiApiKey: string | null;
+  transcriptionApiKey?: string | null;
   temperature: Prisma.Decimal | number | string;
   basePrompt: string;
   salesStyle: string;
@@ -32,12 +36,14 @@ function mapAgentConfig(config: {
     return null;
   }
 
-  const { openaiApiKey, ...rest } = config;
+  const { openaiApiKey, transcriptionApiKey, ...rest } = config;
   return {
     ...rest,
-    // Seguridad: la key no se expone; el panel solo sabe si existe (+ máscara).
+    aiProvider: config.aiProvider ?? "OPENAI",
+    // Seguridad: las keys no se exponen; el panel solo sabe si existen (+ máscara).
     apiKeySet: !!openaiApiKey,
     openaiApiKeyMasked: maskApiKey(openaiApiKey),
+    transcriptionKeySet: !!transcriptionApiKey,
     temperature: Number(config.temperature),
     rules: Array.isArray(config.rules) ? config.rules.filter((item): item is string => typeof item === "string") : [],
     followupConfig: config.followupConfig ?? null,
@@ -61,8 +67,10 @@ export async function getAgentConfig(companyId: string) {
 // Guarda solo el NÚCLEO (modelo + prompt). NO toca followupConfig/replyMode/
 // testNumbers: esos se manejan en sus propios endpoints (Recordatorios y Pruebas).
 export async function upsertAgentConfig(companyId: string, data: {
+  aiProvider?: string;
   openaiModel: string;
   openaiApiKey?: string;
+  transcriptionApiKey?: string;
   temperature: number;
   basePrompt: string;
   salesStyle: string;
@@ -76,12 +84,29 @@ export async function upsertAgentConfig(companyId: string, data: {
   catalogMediaType?: string | null;
   catalogMediaFileName?: string | null;
 }) {
+  const aiProvider = data.aiProvider ?? "OPENAI";
+  const typedKey = Boolean(data.openaiApiKey && data.openaiApiKey.trim());
+  // La key guardada pertenece al proveedor con el que se guardó: al cambiar de
+  // proveedor hay que ingresar la key nueva (la anterior no sirve).
+  const existing = await prisma.agentConfig.findUnique({
+    where: { companyId },
+    select: { aiProvider: true, openaiApiKey: true },
+  });
+  if (existing?.openaiApiKey && (existing.aiProvider ?? "OPENAI") !== aiProvider && !typedKey) {
+    throw new AppError(
+      `Cambiaste el proveedor de IA a ${providerOf(aiProvider).label}: ingresa la API key de ese proveedor.`,
+      422,
+    );
+  }
+
   const core = {
+    aiProvider,
     openaiModel: data.openaiModel,
     // Solo se escribe si el usuario tipeó una key nueva (guardar sin tocar el
     // campo conserva la actual); se cifra en reposo (AES-256-GCM).
-    ...(data.openaiApiKey && data.openaiApiKey.trim()
-      ? { openaiApiKey: encryptCredential(data.openaiApiKey.trim()) }
+    ...(typedKey ? { openaiApiKey: encryptCredential(data.openaiApiKey!.trim()) } : {}),
+    ...(data.transcriptionApiKey && data.transcriptionApiKey.trim()
+      ? { transcriptionApiKey: encryptCredential(data.transcriptionApiKey.trim()) }
       : {}),
     temperature: data.temperature.toString(),
     basePrompt: data.basePrompt,

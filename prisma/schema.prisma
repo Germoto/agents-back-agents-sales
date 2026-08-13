@@ -250,8 +250,15 @@ model User {
 model AgentConfig {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId      String   @unique @db.Uuid
+  // Proveedor de IA del tenant: OPENAI | ANTHROPIC | GOOGLE (validado por zod).
+  // openaiModel/openaiApiKey guardan el modelo y la key DEL PROVEEDOR ELEGIDO
+  // (nombre legado; sin rename para no migrar datos).
+  aiProvider     String   @default("OPENAI")
   openaiModel    String   @default("gpt-4o-mini")
   openaiApiKey   String?
+  // Key de OpenAI SOLO para transcribir notas de voz (Whisper) cuando
+  // aiProvider != OPENAI. Cifrada como openaiApiKey.
+  transcriptionApiKey String?
   temperature    Decimal  @default(0.25) @db.Decimal(4, 2)
   basePrompt     String
   salesStyle     String

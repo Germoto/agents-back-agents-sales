@@ -274,7 +274,9 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   // quede como el mensaje del cliente (el panel muestra audio + transcripción y
   // el agente responde al contenido real, no a "[imagen]"). Best-effort.
   if (inbound.type === "audio" && inbound.mediaUrl) {
-    const transcript = await transcribeAudio((config as any).openai?.apiKey, inbound.mediaUrl);
+    // Whisper solo existe en OpenAI: si el proveedor es otro, usa la key de
+    // transcripción dedicada (resolveAiSettings ya eligió la correcta).
+    const transcript = await transcribeAudio((config as any).openai?.transcriptionApiKey, inbound.mediaUrl);
     if (transcript) {
       inbound.text = inbound.text?.trim() ? `${inbound.text}\n${transcript}` : transcript;
       console.log(`[agent] audio transcrito (${transcript.length} chars) de ${inbound.fromPhone}`);
@@ -1118,9 +1120,8 @@ async function handleInboundImage(
   if (!imageUrl || !fromPhone) return;
 
   // 1) Visión (best-effort; requiere la API key del tenant).
-  const apiKey = (config as { openai?: { apiKey?: string | null } }).openai?.apiKey ?? null;
-  const model = (config as { openai?: { model?: string } }).openai?.model || "gpt-4o-mini";
-  const receipt = apiKey ? await readReceiptImage(apiKey, model, imageUrl).catch(() => null) : null;
+  const ai = (config as { openai?: import("../../lib/ai-providers").AiSettings }).openai;
+  const receipt = ai?.apiKey ? await readReceiptImage(ai, imageUrl).catch(() => null) : null;
 
   // Datos de pago leídos (llaves de validación). Si hay datos, es comprobante seguro.
   const looksLikeReceipt = !!(receipt && (receipt.amountText || receipt.securityCode || receipt.operationNumber));

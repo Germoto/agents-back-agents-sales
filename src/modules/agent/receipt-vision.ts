@@ -6,6 +6,8 @@
  * (suele aparecer como "código: 123"). No se infiere el nombre del pagador.
  */
 
+import { parseJsonLoose, prepareImageUrl } from "../../lib/ai-providers";
+
 export interface ReceiptData {
   amountText: string | null;
   time: string | null;
@@ -59,35 +61,44 @@ const SCHEMA = {
   },
 };
 
-/** Lee un comprobante. Devuelve null si falla (best-effort, no rompe el turno). */
+/** Lee un comprobante con el proveedor de IA del tenant. Devuelve null si falla
+ *  (best-effort, no rompe el turno). Fuera de OpenAI: imagen como data-URI y
+ *  JSON por prompt (sin response_format). */
 export async function readReceiptImage(
-  apiKey: string,
-  model: string,
+  ai: { apiKey: string; model: string; baseUrl?: string; caps?: { jsonSchema: boolean; inlineImages: boolean } },
   imageUrl: string,
 ): Promise<ReceiptData | null> {
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const useJsonSchema = ai.caps?.jsonSchema !== false;
+    const finalUrl = ai.caps?.inlineImages ? await prepareImageUrl(imageUrl, ai.caps) : imageUrl;
+    const base = (ai.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+    const response = await fetch(`${base}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${ai.apiKey}` },
       body: JSON.stringify({
-        model,
+        model: ai.model,
         temperature: 0,
         max_tokens: 300,
-        response_format: SCHEMA,
+        ...(useJsonSchema ? { response_format: SCHEMA } : {}),
         messages: [
-          { role: "system", content: SYSTEM },
+          {
+            role: "system",
+            content: useJsonSchema
+              ? SYSTEM
+              : `${SYSTEM} Devuelve ÚNICAMENTE un objeto JSON con las claves isReceipt, amountText, time, operationNumber, securityCode y description — sin explicación ni markdown.`,
+          },
           {
             role: "user",
             content: [
               { type: "text", text: "Lee este comprobante y devuelve el JSON pedido." },
-              { type: "image_url", image_url: { url: imageUrl } },
+              { type: "image_url", image_url: { url: finalUrl } },
             ],
           },
         ],
       }),
     });
     if (!response.ok) {
-      console.warn(`[receipt-vision] OpenAI ${response.status}`);
+      console.warn(`[receipt-vision] proveedor IA ${response.status}`);
       return null;
     }
     const data = (await response.json()) as {
@@ -95,7 +106,8 @@ export async function readReceiptImage(
     };
     const raw = data.choices?.[0]?.message?.content;
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as ReceiptData;
+    const parsed = parseJsonLoose(raw) as ReceiptData | null;
+    if (!parsed) return null;
     const digits = (v: unknown) => (v ? String(v).replace(/\D/g, "") || null : null);
     return {
       isReceipt: parsed.isReceipt === true,
