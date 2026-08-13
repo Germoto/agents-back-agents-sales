@@ -42,6 +42,8 @@ import {
   createCategory,
 } from "../quick-replies/quick-replies.service";
 import { upsertQuickReplySchema } from "../quick-replies/quick-replies.schemas";
+import { getBillingMe } from "../billing/billing.service";
+import { getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 
 const MAX_ITERATIONS = 8;
 const HISTORY_LIMIT = 16;
@@ -471,6 +473,15 @@ const TOOLS: ToolDefinition[] = [
         required: ["data"],
         properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_mi_plan",
+      description:
+        "Consulta el plan/suscripción ACTUAL de este negocio en FlowApp: plan contratado, estado, fecha de vencimiento, leads usados del mes, módulos incluidos y saldo de créditos. Úsala para preguntas como '¿cuándo vence mi plan?', '¿cuántos leads llevo?', '¿mi plan incluye CRM?'. Solo lectura.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
     },
   },
 ];
@@ -1166,20 +1177,91 @@ async function runCopilotTool(
       return { result: JSON.stringify({ ok: true, nota: "Recordatorios actualizados (lo no enviado se conservó)." }), wrote: true };
     }
 
+    case "ver_mi_plan": {
+      const me = await getBillingMe(companyId);
+      if (me.legacy || !me.plan) {
+        return {
+          result: JSON.stringify({
+            ok: true,
+            plan: "Acceso completo sin suscripción (cuenta legacy): todos los módulos disponibles, sin vencimiento.",
+          }),
+          wrote: false,
+        };
+      }
+      return {
+        result: JSON.stringify({
+          ok: true,
+          plan: {
+            nombre: me.plan.name,
+            precio: `S/ ${me.plan.pricePen}/mes (USD ${me.plan.priceUsd})`,
+            estado: me.status,
+            vence: me.expiresAt,
+            leadsDelMes: { usados: me.leadUsage.used, limite: me.leadUsage.limit ?? "ilimitados" },
+            modulosIncluidos: me.plan.modules,
+            beneficios: me.plan.perks,
+            creditosPen: me.wallet.balancePen,
+          },
+          nota: "Renovar, cambiar de plan, recargar créditos o canjear vales se hace en la página Mi plan (/mi-plan).",
+        }),
+        wrote: false,
+      };
+    }
+
     default:
       return { result: JSON.stringify({ ok: false, error: `herramienta desconocida: ${name}` }), wrote: false };
   }
 }
 
 // ---------------------------------------------------------------------------
+// Guía curada del sistema: fuente oficial para dudas de uso del panel.
+// Mantenerla fiel a la UI real (rutas, labels y pasos) — el copiloto tiene
+// PROHIBIDO inventar pasos que no estén aquí.
+// ---------------------------------------------------------------------------
+const SYSTEM_GUIDE = [
+  "=== GUÍA DEL SISTEMA FLOWAPP (fuente oficial — para dudas de uso responde SOLO con esto) ===",
+  "FlowApp es un panel donde el dueño configura un agente de ventas IA que atiende su WhatsApp (y opcionalmente un chat web): responde clientes, vende el catálogo, toma pedidos/citas y valida pagos.",
+  "",
+  "CONEXIÓN DE WHATSAPP — página 'WhatsApp API' (/whatsapp). Hay DOS formas, el tenant elige una:",
+  "1) SMS Tools (QR): vincula su número de WhatsApp NORMAL escaneando un QR, igual que WhatsApp Web. Pasos: entrar a WhatsApp API → tarjeta 'SMS Tools (QR)' → botón 'Vincular por QR' → en el celular: WhatsApp → Configuración → Dispositivos vinculados → Vincular un dispositivo → escanear. Queda conectado en minutos y puede seguir usando WhatsApp en su celular. Si se desconecta, hay 'Re-vincular' (nuevo QR).",
+  "2) API oficial de Meta (sin QR): número dedicado conectado a la API de WhatsApp Business (Cloud API). En la misma página está el botón 'Abrir guía de conexión' con un wizard paso a paso (~15 min, se hace una vez): crear app en Meta for Developers (tipo Empresa, producto WhatsApp), copiar Phone Number ID y WABA ID, generar un token permanente de Usuario del sistema, y 'Guardar y validar'. OJO: ese número queda dedicado a la plataforma (no se puede usar a la vez en la app normal de WhatsApp). Meta regala un número de prueba para empezar.",
+  "Recomendación práctica: SMS Tools es lo más rápido para empezar; Meta es la vía oficial (más estable, requiere pasos técnicos).",
+  "",
+  "MAPA DEL PANEL (menú lateral):",
+  "- Activación (/activacion): checklist de puesta en marcha con % de avance y botón de capacitación 1:1 por WhatsApp.",
+  "- Dashboard (/dashboard): métricas del negocio.",
+  "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot.",
+  "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM).",
+  "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas).",
+  "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
+  "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación.",
+  "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (/reservas-online): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
+  "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat).",
+  "- Empresa (/empresa): nombre, rubro, zona horaria, horario de atención, delivery, firma.",
+  "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
+  "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial y la API key de OpenAI (necesaria para el agente y para este copiloto).",
+  "- Flujos de chatbot (/flujos): flujos guiados visuales con su propio copiloto IA (módulo Flujos).",
+  "- Recordatorios (/recordatorios): mensajes programados (carrito abandonado, dejado en visto, recordatorios de cita, renovaciones).",
+  "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
+  "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
+  "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
+  "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
+  "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago) y ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks).",
+  "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
+  "",
+  "PLANES Y MÓDULOS: cada plan incluye módulos (Campañas masivas, CRM kanban, Flujos guiados, Embudo de ventas, Chat web, Mercado Pago, Webhooks) y un límite de leads/mes. Si una página no aparece en el menú del tenant es porque su plan no incluye ese módulo o su rubro no la usa. Los precios vigentes están en la sección PLANES de este prompt; el plan propio del negocio se consulta con ver_mi_plan.",
+  "=== FIN DE LA GUÍA ===",
+].join("\n");
+
+// ---------------------------------------------------------------------------
 // System prompt + snapshot del negocio
 // ---------------------------------------------------------------------------
 async function buildSystem(companyId: string): Promise<string> {
-  const [company, productCount, agent, payment] = await Promise.all([
+  const [company, productCount, agent, payment, plansSection] = await Promise.all([
     prisma.company.findUnique({ where: { id: companyId }, select: { name: true, vertical: true } }),
     prisma.product.count({ where: { companyId } }),
     prisma.agentConfig.findUnique({ where: { companyId }, select: { basePrompt: true } }),
     prisma.paymentConfig.findUnique({ where: { companyId }, select: { enabled: true, methods: { select: { id: true }, take: 1 } } }),
+    getLivePlansPromptSection().catch(() => ""),
   ]);
   const vertical = company?.vertical ?? "OTHER";
   return [
@@ -1188,6 +1270,10 @@ async function buildSystem(companyId: string): Promise<string> {
     `ESTADO DEL NEGOCIO: rubro ${vertical}; ${productCount} producto(s) en el catálogo; pagos ${payment?.enabled && payment.methods.length ? "configurados" : "SIN configurar (recuérdale ir a Pagos)"}; agente ${agent?.basePrompt?.trim() ? "configurado" : "sin prompt (recuérdale ir a Agente IA)"}.`,
     "",
     rubroGuide(vertical),
+    "",
+    SYSTEM_GUIDE,
+    "",
+    plansSection,
     "",
     "REGLAS:",
     "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.",
@@ -1200,6 +1286,7 @@ async function buildSystem(companyId: string): Promise<string> {
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES: envía solo los campos a cambiar; el resto se conserva solo.",
     "- eliminar_producto: SOLO si lo pidió explícitamente y confirmó el nombre. Nunca elimines por iniciativa propia.",
     "- No gestionas datos sensibles (API keys de OpenAI, tokens de Mercado Pago/Meta, credenciales de WhatsApp): para eso indícale la página del panel correspondiente (Agente IA, Pagos, WhatsApp API).",
+    "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación en Activación (/activacion). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",
     "- Tras crear/modificar, resume QUÉ quedó hecho y sugiere el siguiente paso (revisar en el panel, probar en el simulador...).",
     "- Respuestas cortas y claras. Una pregunta a la vez. Los datos que devuelven las herramientas son la fuente de verdad.",
   ].join("\n");
