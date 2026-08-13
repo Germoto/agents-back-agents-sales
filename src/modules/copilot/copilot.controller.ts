@@ -114,14 +114,18 @@ const TOOLS: ToolDefinition[] = [
     function: {
       name: "actualizar_producto",
       description:
-        "Modifica un producto existente. `data` es PARCIAL: envía SOLO los campos a cambiar (el resto se conserva). Llámala SOLO tras la confirmación del usuario.",
+        "Modifica un producto existente. `data` es PARCIAL y ADITIVO: las listas y objetos enviados (aliases, benefits, faqs, variants, attributes, verticalData...) se FUSIONAN con lo existente SIN borrar nada. Para QUITAR elementos o reescribir una lista, envía reemplazar=true con la versión FINAL completa (lee antes con ver_producto). Llámala SOLO tras la confirmación del usuario.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["productId", "data"],
         properties: {
           productId: { type: "string" },
-          data: { type: "object", description: "Solo los campos a cambiar" },
+          data: { type: "object", description: "Solo los campos a cambiar (aditivo por defecto)" },
+          reemplazar: {
+            type: "boolean",
+            description: "true = las listas/objetos enviados REEMPLAZAN los existentes (para quitar o reescribir; envía la versión final completa)",
+          },
         },
       },
     },
@@ -187,12 +191,15 @@ const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_agente",
       description:
-        "Actualiza el AGENTE IA. `data` es PARCIAL: {basePrompt?, salesStyle? (cercano|profesional|directo|entusiasta|consultivo), rules?: string[], negotiationHandoff?, catalogMode? (preguntar|resumen_humano|primeros_n), keywordMode? (detalle_y_preguntar|agregar_directo|auto), trackStock?, catalogMediaMode? (text|media|both)}. NUNCA gestiona la API key ni el modelo. Llámala SOLO tras confirmación.",
+        "Actualiza el AGENTE IA. `data` es PARCIAL: {basePrompt?, salesStyle? (cercano|profesional|directo|entusiasta|consultivo), rules?: string[] (se AGREGAN a las existentes; para quitar una usa reemplazarReglas=true con la lista final), negotiationHandoff?, catalogMode? (preguntar|resumen_humano|primeros_n), keywordMode? (detalle_y_preguntar|agregar_directo|auto), trackStock?, catalogMediaMode? (text|media|both)}. NUNCA gestiona la API key, el proveedor ni el modelo. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["data"],
-        properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
+        properties: {
+          data: { type: "object", description: "Solo los campos a cambiar" },
+          reemplazarReglas: { type: "boolean", description: "true = rules enviadas REEMPLAZAN todas las existentes" },
+        },
       },
     },
   },
@@ -388,7 +395,7 @@ const TOOLS: ToolDefinition[] = [
     function: {
       name: "actualizar_respuesta_rapida",
       description:
-        "Modifica una respuesta rápida. `data` es PARCIAL: {title?, command?, category?, messages?} (messages REEMPLAZA la secuencia completa si viene). Llámala tras confirmación.",
+        "Modifica una respuesta rápida. `data` es PARCIAL: {title?, command?, category?, messages?}. Los messages enviados se AGREGAN al final de la secuencia; para reescribirla o quitar mensajes usa reemplazarMensajes=true con la secuencia final completa. Llámala tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -396,6 +403,7 @@ const TOOLS: ToolDefinition[] = [
         properties: {
           quickReplyId: { type: "string" },
           data: { type: "object", description: "Solo los campos a cambiar" },
+          reemplazarMensajes: { type: "boolean", description: "true = messages enviados REEMPLAZAN la secuencia completa" },
         },
       },
     },
@@ -438,12 +446,15 @@ const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_chat_web",
       description:
-        "Actualiza el CHAT WEB embebible. `data` es PARCIAL: {enabled?, welcomeMessage?, accentColor? (hex), allowedOrigins?: string[] (dominios permitidos, [] = cualquiera)}. El token del widget NO se gestiona por chat. Llámala SOLO tras confirmación.",
+        "Actualiza el CHAT WEB embebible. `data` es PARCIAL: {enabled?, welcomeMessage?, accentColor? (hex), allowedOrigins?: string[] (los dominios enviados se AGREGAN a los existentes; para quitar uno usa reemplazarDominios=true con la lista final)}. El token del widget NO se gestiona por chat. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["data"],
-        properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
+        properties: {
+          data: { type: "object", description: "Solo los campos a cambiar" },
+          reemplazarDominios: { type: "boolean", description: "true = allowedOrigins enviados REEMPLAZAN la lista completa" },
+        },
       },
     },
   },
@@ -466,12 +477,15 @@ const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_pagos",
       description:
-        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (REEMPLAZA la lista completa si viene), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE)}. Tokens de Mercado Pago NO (dirige a Pagos). Llámala SOLO tras confirmación.",
+        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (se FUSIONAN por método+número: agrega nuevos y actualiza titulares; para QUITAR uno usa reemplazarMetodos=true con la lista final completa), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE)}. Tokens de Mercado Pago NO (dirige a Pagos). Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["data"],
-        properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
+        properties: {
+          data: { type: "object", description: "Solo los campos a cambiar" },
+          reemplazarMetodos: { type: "boolean", description: "true = methods enviados REEMPLAZAN la lista completa" },
+        },
       },
     },
   },
@@ -574,15 +588,70 @@ const asQa = (v: unknown): Array<{ question: string; answer: string; sortOrder: 
 
 type AdminProduct = Awaited<ReturnType<typeof getProduct>>;
 
+// --- Merge ADITIVO (default de actualizar_producto): agregar sin borrar ------
+const norm = (s: string) => s.trim().toLowerCase();
+
+/** Unión de listas de strings sin duplicados (case-insensitive), conservando el orden existente. */
+function mergeStrList(existing: string[], incoming: string[]): string[] {
+  const seen = new Set(existing.map(norm));
+  return [...existing, ...incoming.filter((v) => v.trim() && !seen.has(norm(v)))];
+}
+
+/** Merge de arrays de objetos por clave (name/label): mismo nombre reemplaza, el resto se conserva, nuevos al final. */
+function mergeNamed(cur: unknown, inc: unknown, key: string): Record<string, unknown>[] {
+  const curArr = Array.isArray(cur) ? (cur as Record<string, unknown>[]) : [];
+  const incArr = Array.isArray(inc) ? (inc as Record<string, unknown>[]) : [];
+  const nameOf = (x: Record<string, unknown>) => norm(String(x?.[key] ?? ""));
+  const byName = new Map(incArr.map((x) => [nameOf(x), x]));
+  const merged = curArr.map((x) => byName.get(nameOf(x)) ?? x);
+  const curNames = new Set(curArr.map(nameOf));
+  merged.push(...incArr.filter((x) => !curNames.has(nameOf(x))));
+  return merged;
+}
+
 /**
  * Construye el ProductPayload COMPLETO fusionando la data parcial del modelo
  * sobre el producto existente (o defaults si es creación). Solo se reemplazan
  * las claves presentes en `data` — updateProduct reescribe relaciones, así que
  * el merge server-side evita que el modelo borre FAQs/variants por accidente.
+ *
+ * Con `replace=false` (default de actualizar_producto) las LISTAS y OBJETOS
+ * enviados se FUSIONAN con lo existente (el modelo suele mandar solo lo nuevo
+ * cuando el usuario pide "agrégale X") y `null` se ignora. Con `replace=true`
+ * lo enviado es la versión FINAL (así se quitan elementos) y `null` limpia.
  */
-function buildPayload(data: LooseData, existing: AdminProduct | null) {
+function buildPayload(data: LooseData, existing: AdminProduct | null, replace = false) {
   const e = existing;
+  const additive = !replace && !!e;
   const name = asStr(data.name) ?? e?.name ?? "";
+
+  const objField = <T extends Record<string, unknown>>(incoming: unknown, cur: T | null): T | null => {
+    if (incoming === undefined) return cur;
+    if (incoming === null) return additive ? cur : null;
+    return additive && cur ? ({ ...cur, ...(incoming as T) } as T) : (incoming as T);
+  };
+  const orderedField = (incoming: ReturnType<typeof asOrdered>, cur: string[]) => {
+    const curOrdered = cur.map((v, i) => ({ value: v, sortOrder: i }));
+    if (incoming === undefined) return curOrdered;
+    if (!additive) return incoming;
+    const seen = new Set(cur.map(norm));
+    return [...curOrdered, ...incoming.filter((x) => !seen.has(norm(x.value)))].map((x, i) => ({
+      value: x.value,
+      sortOrder: i,
+    }));
+  };
+  const qaField = (
+    incoming: ReturnType<typeof asQa>,
+    cur: Array<{ question: string; answer: string; sortOrder: number }>,
+  ) => {
+    if (incoming === undefined) return cur;
+    if (!additive) return incoming;
+    const merged = cur.map((x) => incoming.find((n) => norm(n.question) === norm(x.question)) ?? x);
+    const curQ = new Set(cur.map((x) => norm(x.question)));
+    merged.push(...incoming.filter((n) => !curQ.has(norm(n.question))));
+    return merged.map((x, i) => ({ question: x.question, answer: x.answer, sortOrder: i }));
+  };
+
   return {
     slug: e?.slug ?? slugify(name),
     active: typeof data.active === "boolean" ? data.active : (e?.active ?? true),
@@ -608,46 +677,61 @@ function buildPayload(data: LooseData, existing: AdminProduct | null) {
     presentationFollowups: (e?.presentationFollowups ?? []) as { message?: string; mediaUrl?: string; mediaType?: string }[],
     deliveryMethod: data.deliveryMethod !== undefined ? asStr(data.deliveryMethod) ?? null : (e?.deliveryMethod ?? null),
     support: data.support !== undefined ? asStr(data.support) ?? null : (e?.support ?? null),
-    attributes:
-      data.attributes !== undefined
-        ? ((data.attributes ?? null) as Record<string, string> | null)
-        : ((e?.attributes ?? null) as Record<string, string> | null),
+    attributes: objField(data.attributes, (e?.attributes ?? null) as Record<string, string> | null),
     category: data.category !== undefined ? asStr(data.category) ?? null : (e?.category ?? null),
-    verticalData:
-      data.verticalData !== undefined
-        ? ((data.verticalData ?? null) as Record<string, unknown> | null)
-        : (e?.verticalData ?? null),
-    reminderConfig:
-      data.reminderConfig !== undefined
-        ? ((data.reminderConfig ?? null) as Record<string, unknown> | null)
-        : ((e?.reminderConfig ?? null) as Record<string, unknown> | null),
+    verticalData: (() => {
+      const cur = (e?.verticalData ?? null) as Record<string, unknown> | null;
+      const merged = objField(data.verticalData, cur);
+      // Dentro del verticalData, los arrays con identidad propia se fusionan por
+      // nombre (modifierGroups del rubro restaurante, plans de streaming).
+      if (additive && merged && cur && data.verticalData && typeof data.verticalData === "object") {
+        const inc = data.verticalData as Record<string, unknown>;
+        if (inc.modifierGroups !== undefined) merged.modifierGroups = mergeNamed(cur.modifierGroups, inc.modifierGroups, "name");
+        if (inc.plans !== undefined) merged.plans = mergeNamed(cur.plans, inc.plans, "label");
+      }
+      return merged;
+    })(),
+    reminderConfig: objField(data.reminderConfig, (e?.reminderConfig ?? null) as Record<string, unknown> | null),
     sortOrder: e?.sortOrder,
-    aliases: asStrList(data.aliases) ?? e?.aliases ?? [],
-    benefits: asOrdered(data.benefits) ?? (e?.benefits ?? []).map((v: string, i: number) => ({ value: v, sortOrder: i })),
-    includes: asOrdered(data.includes) ?? (e?.includes ?? []).map((v: string, i: number) => ({ value: v, sortOrder: i })),
-    bonuses: asOrdered(data.bonuses) ?? (e?.bonuses ?? []).map((v: string, i: number) => ({ value: v, sortOrder: i })),
-    faqs: asQa(data.faqs) ?? (e?.faqs ?? []),
-    objections: asQa(data.objections) ?? (e?.objections ?? []),
+    aliases: (() => {
+      const inc = asStrList(data.aliases);
+      const cur = e?.aliases ?? [];
+      if (inc === undefined) return cur;
+      return additive ? mergeStrList(cur, inc) : inc;
+    })(),
+    benefits: orderedField(asOrdered(data.benefits), e?.benefits ?? []),
+    includes: orderedField(asOrdered(data.includes), e?.includes ?? []),
+    bonuses: orderedField(asOrdered(data.bonuses), e?.bonuses ?? []),
+    faqs: qaField(asQa(data.faqs), e?.faqs ?? []),
+    objections: qaField(asQa(data.objections), e?.objections ?? []),
     files: (e?.files ?? []) as never[],
-    digitalDelivery:
-      data.digitalDelivery !== undefined
-        ? ((data.digitalDelivery ?? null) as never)
-        : ((e?.digitalDelivery ?? null) as never),
-    physicalDelivery:
-      data.physicalDelivery !== undefined
-        ? ((data.physicalDelivery ?? null) as never)
-        : ((e?.physicalDelivery ?? null) as never),
-    variants: Array.isArray(data.variants)
-      ? (data.variants as Array<{ name?: unknown; options?: unknown }>).map((v, i) => ({
-          name: String(v?.name ?? "").trim(),
-          options: asStrList(v?.options) ?? [],
-          sortOrder: i,
-        })).filter((v) => v.name)
-      : (e?.variants ?? []).map((v: { name: string; options: string[]; sortOrder: number }) => ({
-          name: v.name,
-          options: v.options,
-          sortOrder: v.sortOrder,
-        })),
+    digitalDelivery: objField(
+      data.digitalDelivery,
+      (e?.digitalDelivery ?? null) as Record<string, unknown> | null,
+    ) as never,
+    physicalDelivery: objField(
+      data.physicalDelivery,
+      (e?.physicalDelivery ?? null) as Record<string, unknown> | null,
+    ) as never,
+    variants: (() => {
+      const curV = (e?.variants ?? []).map((v: { name: string; options: string[]; sortOrder: number }) => ({
+        name: v.name,
+        options: v.options,
+        sortOrder: v.sortOrder,
+      }));
+      if (!Array.isArray(data.variants)) return curV;
+      const incV = (data.variants as Array<{ name?: unknown; options?: unknown }>)
+        .map((v, i) => ({ name: String(v?.name ?? "").trim(), options: asStrList(v?.options) ?? [], sortOrder: i }))
+        .filter((v) => v.name);
+      if (!additive) return incV;
+      const merged = curV.map((cv) => {
+        const nv = incV.find((x) => norm(x.name) === norm(cv.name));
+        return nv ? { ...cv, options: mergeStrList(cv.options, nv.options) } : cv;
+      });
+      const curNames = new Set(curV.map((v) => norm(v.name)));
+      merged.push(...incV.filter((nv) => !curNames.has(norm(nv.name))));
+      return merged.map((v, i) => ({ ...v, sortOrder: i }));
+    })(),
   };
 }
 
@@ -774,7 +858,7 @@ async function runCopilotTool(
     case "actualizar_producto": {
       const productId = String(args.productId ?? "");
       const existing = await getProduct(companyId, productId);
-      const payload = buildPayload((args.data ?? {}) as LooseData, existing);
+      const payload = buildPayload((args.data ?? {}) as LooseData, existing, args.reemplazar === true);
       const parsed = productBodySchema.safeParse(payload);
       if (!parsed.success) {
         return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
@@ -877,14 +961,23 @@ async function runCopilotTool(
       const data = (args.data ?? {}) as LooseData;
       const current = await prisma.agentConfig.findUnique({ where: { companyId } });
       if (!current) return { result: JSON.stringify({ ok: false, error: "config del agente no encontrada" }), wrote: false };
-      const rules = Array.isArray(data.rules) ? (data.rules as unknown[]).map(String).filter((r) => r.trim()) : undefined;
+      const rulesIncoming = Array.isArray(data.rules) ? (data.rules as unknown[]).map(String).filter((r) => r.trim()) : undefined;
+      const currentRules = (current.rules as string[]) ?? [];
+      const rules =
+        rulesIncoming === undefined
+          ? currentRules
+          : args.reemplazarReglas === true
+            ? rulesIncoming
+            : mergeStrList(currentRules, rulesIncoming);
       await upsertAgentConfig(companyId, {
+        // Proveedor/modelo/key NO se gestionan por chat: se conservan tal cual
+        // (sin aiProvider el upsert lo resetearía a OPENAI y fallaría el guard).
+        aiProvider: current.aiProvider,
         openaiModel: current.openaiModel,
-        // Sin openaiApiKey: la key guardada se conserva (nunca se gestiona por chat).
         temperature: Number(current.temperature),
         basePrompt: asStr(data.basePrompt) ?? current.basePrompt,
         salesStyle: asStr(data.salesStyle) ?? current.salesStyle,
-        rules: rules ?? ((current.rules as string[]) ?? []),
+        rules,
         negotiationHandoff:
           typeof data.negotiationHandoff === "boolean" ? data.negotiationHandoff : (current.negotiationHandoff ?? false),
         catalogMode: asStr(data.catalogMode) ?? (current.catalogMode as string),
@@ -919,8 +1012,20 @@ async function runCopilotTool(
             .filter((m) => m.method && m.number && m.holder)
         : undefined;
       const notificationPhone = asStr(data.notificationPhone) ?? current?.notificationPhone ?? "";
-      const finalMethods =
-        methods ?? (current?.methods ?? []).map((m) => ({ method: m.method, number: m.number, holder: m.holder, sortOrder: m.sortOrder }));
+      const curMethods = (current?.methods ?? []).map((m) => ({ method: m.method, number: m.number, holder: m.holder, sortOrder: m.sortOrder }));
+      // Aditivo por defecto: los métodos enviados se fusionan por método+número
+      // (coincide → actualiza titular; nuevo → se agrega). reemplazarMetodos=true
+      // toma la lista enviada como la FINAL (así se quita un método).
+      const finalMethods = (() => {
+        if (methods === undefined) return curMethods;
+        if (args.reemplazarMetodos === true || !curMethods.length) return methods;
+        const keyOf = (m: { method: string; number: string }) => `${norm(m.method)}|${m.number.replace(/\s/g, "")}`;
+        const byKey = new Map(methods.map((m) => [keyOf(m), m]));
+        const merged = curMethods.map((m) => byKey.get(keyOf(m)) ?? m);
+        const curKeys = new Set(curMethods.map(keyOf));
+        merged.push(...methods.filter((m) => !curKeys.has(keyOf(m))));
+        return merged.map((m, i) => ({ ...m, sortOrder: i }));
+      })();
       if (!finalMethods.length) {
         return {
           result: JSON.stringify({ ok: false, error: "se necesita al menos un método de pago (method/number/holder) para guardar" }),
@@ -1112,7 +1217,13 @@ async function runCopilotTool(
         title: asStr(data.title) ?? current.title,
         command: data.command !== undefined ? asStr(data.command) ?? null : current.command,
         ...(categoryId ? { categoryId } : {}),
-        messages: Array.isArray(data.messages) ? data.messages : (current.messages as unknown[]),
+        // Aditivo por defecto: los mensajes nuevos se AGREGAN al final de la
+        // secuencia; reemplazarMensajes=true la reescribe completa.
+        messages: Array.isArray(data.messages)
+          ? args.reemplazarMensajes === true
+            ? data.messages
+            : [...((current.messages as unknown[]) ?? []), ...data.messages]
+          : (current.messages as unknown[]),
         ...(current.actions ? { actions: current.actions } : {}),
       });
       if (!parsed.success) {
@@ -1177,11 +1288,24 @@ async function runCopilotTool(
 
     case "configurar_chat_web": {
       const data = (args.data ?? {}) as LooseData;
+      // Dominios: unión con los existentes por defecto; reemplazarDominios=true
+      // toma la lista enviada como la final (así se quita un dominio).
+      let allowedOrigins: string[] | undefined;
+      if (data.allowedOrigins !== undefined) {
+        const inc = asStrList(data.allowedOrigins) ?? [];
+        if (args.reemplazarDominios === true) {
+          allowedOrigins = inc;
+        } else {
+          const currentWc = await prisma.webchatConfig.findUnique({ where: { companyId }, select: { allowedOrigins: true } });
+          const cur = Array.isArray(currentWc?.allowedOrigins) ? (currentWc.allowedOrigins as string[]) : [];
+          allowedOrigins = mergeStrList(cur, inc);
+        }
+      }
       const updated = await updateWebchatConfig(companyId, {
         ...(typeof data.enabled === "boolean" ? { enabled: data.enabled } : {}),
         ...(data.welcomeMessage !== undefined ? { welcomeMessage: String(data.welcomeMessage ?? "") } : {}),
         ...(data.accentColor !== undefined ? { accentColor: String(data.accentColor ?? "") } : {}),
-        ...(data.allowedOrigins !== undefined ? { allowedOrigins: asStrList(data.allowedOrigins) ?? [] } : {}),
+        ...(allowedOrigins !== undefined ? { allowedOrigins } : {}),
       });
       return {
         result: JSON.stringify({
@@ -1316,7 +1440,7 @@ async function buildSystem(companyId: string): Promise<string> {
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
-    "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES: envía solo los campos a cambiar; el resto se conserva solo.",
+    "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",
     "- eliminar_producto: SOLO si lo pidió explícitamente y confirmó el nombre. Nunca elimines por iniciativa propia.",
     "- No gestionas datos sensibles (API keys de OpenAI, tokens de Mercado Pago/Meta, credenciales de WhatsApp): para eso indícale la página del panel correspondiente (Agente IA, Pagos, WhatsApp API).",
     "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación en Activación (/activacion). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",
