@@ -33,6 +33,15 @@ import {
 } from "../crm/crm.service";
 import { updateWebchatConfig } from "../webchat/webchat.service";
 import { followupConfigSchema } from "../agent-config/agent-config.schemas";
+import {
+  listQuickReplies,
+  createQuickReply,
+  updateQuickReply,
+  deleteQuickReply,
+  listCategories,
+  createCategory,
+} from "../quick-replies/quick-replies.service";
+import { upsertQuickReplySchema } from "../quick-replies/quick-replies.schemas";
 
 const MAX_ITERATIONS = 8;
 const HISTORY_LIMIT = 16;
@@ -348,6 +357,63 @@ const TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "ver_respuestas_rapidas",
+      description: "Lista las respuestas rápidas del asesor (id, título, /comando, categoría, nº de mensajes) y sus categorías.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "crear_respuesta_rapida",
+      description:
+        "Crea una RESPUESTA RÁPIDA (atajo que el asesor humano envía con un clic o escribiendo /comando en Conversaciones; el bot NO las envía solo). messages es la secuencia (1-10): texto {type:'text', text} o multimedia {type:'image'|'video'|'audio'|'document', mediaUrl (puede ser un adjunto de esta conversación), text? como caption}. Llámala tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "messages"],
+        properties: {
+          title: { type: "string" },
+          command: { type: "string", description: "Atajo, ej. '/gracias' (opcional, único por negocio)" },
+          category: { type: "string", description: "Nombre de la categoría (se crea si no existe)" },
+          messages: { type: "array", items: { type: "object" }, description: "Secuencia de mensajes" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_respuesta_rapida",
+      description:
+        "Modifica una respuesta rápida. `data` es PARCIAL: {title?, command?, category?, messages?} (messages REEMPLAZA la secuencia completa si viene). Llámala tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["quickReplyId", "data"],
+        properties: {
+          quickReplyId: { type: "string" },
+          data: { type: "object", description: "Solo los campos a cambiar" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "eliminar_respuesta_rapida",
+      description: "ELIMINA una respuesta rápida. SOLO tras confirmación explícita del título/comando.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["quickReplyId"],
+        properties: { quickReplyId: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "gestionar_cliente_crm",
       description:
         "Mueve un CLIENTE a una columna del CRM y/o le asigna/quita etiquetas. Identifica al cliente por su teléfono. Usa ver_crm para los ids de tablero/columna y los NOMBRES exactos de etiquetas.",
@@ -554,6 +620,17 @@ function zodErrorsText(err: { issues: Array<{ path: PropertyKey[]; message: stri
 // ---------------------------------------------------------------------------
 // Ejecución de tools
 // ---------------------------------------------------------------------------
+/** Resuelve una categoría de respuestas rápidas por NOMBRE (case-insensitive), creándola si no existe. */
+async function resolveQuickReplyCategory(companyId: string, name?: string): Promise<string | undefined> {
+  const trimmed = name?.trim();
+  if (!trimmed) return undefined;
+  const categories = await listCategories(companyId);
+  const found = categories.find((c) => c.name.toLowerCase() === trimmed.toLowerCase());
+  if (found) return found.id;
+  const created = await createCategory(companyId, trimmed);
+  return created.id;
+}
+
 async function runCopilotTool(
   companyId: string,
   name: string,
@@ -943,6 +1020,77 @@ async function runCopilotTool(
       };
     }
 
+    case "ver_respuestas_rapidas": {
+      const [replies, categories] = await Promise.all([listQuickReplies(companyId), listCategories(companyId)]);
+      return {
+        result: JSON.stringify({
+          respuestas: replies.map((r) => ({
+            id: r.id,
+            title: r.title,
+            command: r.command,
+            categoryId: r.categoryId,
+            mensajes: Array.isArray(r.messages) ? r.messages.length : 0,
+          })),
+          categorias: categories,
+        }),
+        wrote: false,
+      };
+    }
+
+    case "crear_respuesta_rapida": {
+      const categoryId = await resolveQuickReplyCategory(companyId, asStr(args.category));
+      const parsed = upsertQuickReplySchema.safeParse({
+        title: String(args.title ?? "").trim(),
+        command: asStr(args.command) ?? null,
+        ...(categoryId ? { categoryId } : {}),
+        messages: Array.isArray(args.messages) ? args.messages : [],
+      });
+      if (!parsed.success) {
+        return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
+      }
+      try {
+        const created = await createQuickReply(companyId, parsed.data);
+        return { result: JSON.stringify({ ok: true, quickReplyId: created.id, title: created.title, command: created.command }), wrote: true };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "no se pudo crear";
+        return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
+      }
+    }
+
+    case "actualizar_respuesta_rapida": {
+      const quickReplyId = String(args.quickReplyId ?? "");
+      const current = await prisma.quickReply.findFirst({ where: { id: quickReplyId, companyId } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "respuesta rápida no encontrada" }), wrote: false };
+      const data = (args.data ?? {}) as LooseData;
+      const categoryId =
+        data.category !== undefined ? await resolveQuickReplyCategory(companyId, asStr(data.category)) : current.categoryId;
+      const parsed = upsertQuickReplySchema.safeParse({
+        title: asStr(data.title) ?? current.title,
+        command: data.command !== undefined ? asStr(data.command) ?? null : current.command,
+        ...(categoryId ? { categoryId } : {}),
+        messages: Array.isArray(data.messages) ? data.messages : (current.messages as unknown[]),
+        ...(current.actions ? { actions: current.actions } : {}),
+      });
+      if (!parsed.success) {
+        return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
+      }
+      try {
+        const updated = await updateQuickReply(companyId, quickReplyId, parsed.data);
+        return { result: JSON.stringify({ ok: true, title: updated.title, command: updated.command, nota: "Respuesta rápida actualizada (lo no enviado se conservó)." }), wrote: true };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "no se pudo actualizar";
+        return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
+      }
+    }
+
+    case "eliminar_respuesta_rapida": {
+      const quickReplyId = String(args.quickReplyId ?? "");
+      const current = await prisma.quickReply.findFirst({ where: { id: quickReplyId, companyId }, select: { title: true } });
+      if (!current) return { result: JSON.stringify({ ok: false, error: "respuesta rápida no encontrada" }), wrote: false };
+      await deleteQuickReply(companyId, quickReplyId);
+      return { result: JSON.stringify({ ok: true, deleted: current.title }), wrote: true };
+    }
+
     case "gestionar_cliente_crm": {
       const phoneDigits = String(args.phone ?? "").replace(/\D/g, "");
       if (!phoneDigits) return { result: JSON.stringify({ ok: false, error: "falta el teléfono del cliente" }), wrote: false };
@@ -1045,7 +1193,7 @@ async function buildSystem(companyId: string): Promise<string> {
     "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.",
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
     "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto (usa la URL exacta del adjunto). Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
-    "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios) y los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido). Usa ver_configuracion / ver_crm antes de proponer cambios en esas áreas.",
+    "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
