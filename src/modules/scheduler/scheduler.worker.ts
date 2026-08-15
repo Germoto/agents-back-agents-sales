@@ -5,8 +5,9 @@
  */
 
 import cron from "node-cron";
-import { ScheduledMessageStatus, ScheduledMessageType } from "@prisma/client";
+import { Prisma, ScheduledMessageStatus, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { setCartUnitPrice } from "../agent/cart.service";
 import { loadWhatsappSender, sendText, sendMedia, mediaKindFor } from "../agent/outbound";
 import { applyFirma } from "../agent/firma";
 import { recordMessage } from "../agent/conversation.service";
@@ -250,6 +251,43 @@ async function processDue(): Promise<void> {
           message: body,
           mediaUrl: msg.mediaUrl,
         });
+      }
+
+      // Oferta ESCALONADA: al ENVIARSE este paso, el precio ofrecido queda activo
+      // SOLO para este cliente — el agente lo presenta, cobra y valida en su
+      // conversación (state.activeOffer) y el carrito se reprecia si ya tenía
+      // el producto. Best-effort: si falla, el recordatorio igual se envió.
+      const offerMeta = msg.metadata as { offerPrice?: string; productId?: string } | null;
+      if (offerMeta?.offerPrice) {
+        try {
+          const offerNum = Number(String(offerMeta.offerPrice).replace(/[^0-9.]/g, ""));
+          const priceText = offerNum > 0 ? `S/ ${offerNum.toFixed(2)}` : null;
+          if (priceText) {
+            if (msg.conversationId) {
+              const row = await prisma.conversation.findUnique({
+                where: { id: msg.conversationId },
+                select: { state: true },
+              });
+              const state = (row?.state ?? {}) as Record<string, unknown>;
+              state.activeOffer = {
+                productId: offerMeta.productId ?? null,
+                priceText,
+                at: new Date().toISOString(),
+                source: "reminder",
+              };
+              await prisma.conversation.update({
+                where: { id: msg.conversationId },
+                data: { state: state as Prisma.InputJsonValue },
+              });
+            }
+            if (offerMeta.productId) {
+              await setCartUnitPrice(msg.companyId, msg.customerId, offerMeta.productId, priceText);
+            }
+            console.log(`[scheduler] oferta escalonada activada (${priceText}) cliente=${msg.customerId}`);
+          }
+        } catch (err) {
+          console.warn("[scheduler] no se pudo activar la oferta del recordatorio:", err instanceof Error ? err.message : err);
+        }
       }
 
       // Marcar que este cliente ya recibió un recordatorio visible en esta pasada

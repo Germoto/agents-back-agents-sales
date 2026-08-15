@@ -25,6 +25,10 @@ export interface ConversationState {
   pendingOrderId?: string | null;
   /** Resumen del carrito REAL, refrescado en cada turno (rubros de carrito). */
   cartText?: string | null;
+  // Oferta ESCALONADA activada por recordatorio: precio personal de ESTE cliente
+  // (el agente lo ofrece/cobra/valida). La escribe el scheduler.worker al enviar
+  // un step con offerPrice; se limpia al aprobar el pago.
+  activeOffer?: { productId?: string | null; priceText: string; at?: string; source?: string } | null;
   lastPaymentPromptAt?: string | null;
   pendingAction?: string | null;
   offerExpiresAt?: string | null;

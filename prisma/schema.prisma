@@ -415,6 +415,12 @@ model Product {
   name             String
   price            String
   regularPrice     String?
+  // Oferta con vigencia: si offerPrice tiene dígitos y now ∈ [offerStartsAt,
+  // offerEndsAt] (fechas opcionales = sin límite), el agente presenta, cobra y
+  // valida ESTE precio y `price` pasa a mostrarse como "antes" (tachado).
+  offerPrice       String?
+  offerStartsAt    DateTime?
+  offerEndsAt      DateTime?
   stock            Int?
   // --- Agenda (rubro SERVICE): datos tipados que usa el motor de disponibilidad.
   // Los campos de texto de verticalData siguen sirviendo de descripción al prompt.

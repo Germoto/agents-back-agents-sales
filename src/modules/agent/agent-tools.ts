@@ -731,6 +731,7 @@ export async function approveExternalPayment(opts: {
   // Sin entrega digital automática (producto físico/servicio o sin productos):
   // marcar pagado; el dueño recibe el aviso desde el caller.
   state.status = "PAGADO";
+  state.activeOffer = null; // la oferta escalonada ya cumplió su función
   // Rubro Comercial: si hay un pedido pendiente, marcarlo PAGADO (no-op si no existe).
   const paidOrderId =
     (state as { pendingOrderId?: string | null }).pendingOrderId ??
@@ -778,7 +779,10 @@ export async function tryApprovePayment(opts: {
   const cart = await summarizeCart(companyId, customerId);
   const expected =
     opts.expected ??
-    (cart.total > 0 ? cart.total : parseAmountNumber(findProductPrice(config, state.selectedProductId)));
+    (cart.total > 0
+      ? cart.total
+      : activeOfferFor(state, state.selectedProductId)?.num ??
+        parseAmountNumber(findProductPrice(config, state.selectedProductId)));
 
   const candidates = await matchPayments(companyId, {
     payerName: payerName || undefined,
@@ -871,6 +875,7 @@ export async function tryApprovePayment(opts: {
     // Aprobado sin entrega automática (no digital o deliver=false): el flujo del
     // modelo continúa con entregar_producto/registrar_pedido.
     state.status = "PAGADO";
+    state.activeOffer = null; // la oferta escalonada ya cumplió su función
     return { approved: true };
   }
 
@@ -917,6 +922,22 @@ export async function tryApprovePayment(opts: {
     customerMessage: "Estoy validando tu pago automáticamente 🙏 dame un momentito y te confirmo.",
     shouldRecheck: true,
   };
+}
+
+/**
+ * Oferta ESCALONADA activa de la conversación (escrita por el scheduler al
+ * enviar un recordatorio con offerPrice). Aplica si no tiene producto asociado
+ * o si coincide con el producto en foco. Precio personal de ESE cliente.
+ */
+function activeOfferFor(
+  state: ConversationState,
+  productId?: string | null,
+): { priceText: string; num: number } | null {
+  const o = state.activeOffer;
+  if (!o?.priceText) return null;
+  if (o.productId && productId && o.productId !== productId) return null;
+  const num = Number(String(o.priceText).replace(/[^0-9.]/g, ""));
+  return Number.isFinite(num) && num > 0 ? { priceText: o.priceText, num } : null;
 }
 
 function findProductPrice(config: BotConfig, productId: string | null | undefined): string | undefined {
@@ -992,8 +1013,9 @@ function renderProductFicha(p: BotProduct, vertical?: string): string {
   } else {
     const price = (p.priceText ?? p.price ?? "").trim();
     if (price) {
+      const offer = p.offerActive ? (p.offerEndsText ? ` · 🔥 Oferta hasta ${p.offerEndsText}` : " · 🔥 En oferta") : "";
       parts.push(
-        p.regularPriceText ? `💰 *${price}*  ~antes ${p.regularPriceText}~` : `💰 *${price}*`,
+        p.regularPriceText ? `💰 *${price}*  ~antes ${p.regularPriceText}~${offer}` : `💰 *${price}*${offer}`,
       );
     }
   }
@@ -1769,8 +1791,10 @@ export async function executeTool(
       let mpTitle = "Compra";
       if (!cart.items.length && ctx.state.selectedProductId) {
         const p = findProductById(ctx, ctx.state.selectedProductId);
-        amountText = p?.priceText ?? p?.price ?? amountText;
-        amountNum = parsePrice(p?.priceText ?? p?.price);
+        // Oferta escalonada (personal, activada por recordatorio) manda sobre el catálogo.
+        const offer = activeOfferFor(ctx.state, ctx.state.selectedProductId);
+        amountText = offer?.priceText ?? p?.priceText ?? p?.price ?? amountText;
+        amountNum = offer?.num ?? parsePrice(p?.priceText ?? p?.price);
         if (p?.name) mpTitle = p.name;
       } else if (cart.items.length === 1) {
         mpTitle = cart.items[0].name;
@@ -1875,6 +1899,7 @@ export async function executeTool(
           : [];
         if (cartSim.items.length) await checkoutCart(ctx.companyId, ctx.customerId, cartSim.totalText);
         ctx.state.status = "PAGADO";
+        ctx.state.activeOffer = null;
         return JSON.stringify({ ok: true, approved: true, note: "(simulación) Pago aprobado. Ahora entrega el producto con entregar_producto." });
       }
 
@@ -1932,7 +1957,8 @@ export async function executeTool(
       let expectedVp: number | undefined = cartVp.total > 0 ? cartVp.total : undefined;
       if (expectedVp === undefined && ctx.state.selectedProductId) {
         const p = findProductById(ctx, ctx.state.selectedProductId);
-        const n = Number(String(p?.price ?? "").replace(/[^0-9.]/g, ""));
+        const offer = activeOfferFor(ctx.state, ctx.state.selectedProductId);
+        const n = offer?.num ?? Number(String(p?.price ?? "").replace(/[^0-9.]/g, ""));
         if (Number.isFinite(n) && n > 0) expectedVp = n;
       }
 

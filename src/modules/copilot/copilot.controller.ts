@@ -463,7 +463,7 @@ const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_recordatorios",
       description:
-        "Actualiza los RECORDATORIOS automáticos. `data` es PARCIAL: {abandonedCart? {enabled, steps: [{delaySeconds, message}]}, leftOnRead? {enabled, steps: [...]}, quietHours? {startHour 0-23, endHour 1-24}}. delaySeconds en segundos (ej. 3600 = 1 hora). Llámala SOLO tras confirmación.",
+        "Actualiza los RECORDATORIOS automáticos. `data` es PARCIAL: {abandonedCart? {enabled, steps: [{delaySeconds, message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje)}]}, leftOnRead? {enabled, steps: [...]}, quietHours? {startHour 0-23, endHour 1-24}}. delaySeconds en segundos (ej. 3600 = 1 hora). Escalera típica: paso 1 con oferta suave, paso 2 con mejor precio. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -532,7 +532,8 @@ function resolveAttachment(
 // ---------------------------------------------------------------------------
 const COMMON_FIELDS =
   "Campos comunes de `data`: name*, price* (texto, ej. '12' o '12.50'), shortDescription (1 línea vendedora), fullDescription, category, active (default true), aliases (string[] — sinónimos/abreviaturas con las que el cliente lo nombraría), benefits (string[]), includes (string[]), bonuses (string[]), faqs ([{question, answer}]), objections ([{question, answer}]), attributes (objeto clave→valor, ej. {\"Ingredientes\": \"pollo, papas\"}). " +
-  "reminderConfig (recordatorios PROPIOS de este producto — si no se envía, hereda los generales del negocio): {abandonedCart?: {enabled, steps: [{delaySeconds (SEGUNDOS, ej. 3600=1h, 86400=24h), message}]}, leftOnRead?: {enabled, steps: [...]}}; enviar null lo limpia (vuelve a heredar).";
+  "reminderConfig (recordatorios PROPIOS de este producto — si no se envía, hereda los generales del negocio): {abandonedCart?: {enabled, steps: [{delaySeconds (SEGUNDOS, ej. 3600=1h, 86400=24h), message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso, el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje para mostrarlo)}]}, leftOnRead?: {enabled, steps: [...]}}; enviar null lo limpia (vuelve a heredar). " +
+  "OFERTA CON VIGENCIA (global, todos los clientes): offerPrice (texto, ej. '49'), offerStartsAt/offerEndsAt (fecha-hora ISO, opcionales; sin fechas = activa hasta quitarla). Vigente => el agente presenta, cobra y valida ESE precio y el precio normal se muestra tachado como 'antes'. null limpia la oferta.";
 
 function rubroGuide(vertical: string | undefined): string {
   switch (vertical) {
@@ -661,6 +662,20 @@ function buildPayload(data: LooseData, existing: AdminProduct | null, replace = 
     name,
     price: asStr(data.price) ?? e?.price ?? "",
     regularPrice: data.regularPrice !== undefined ? asStr(data.regularPrice) ?? null : (e?.regularPrice ?? null),
+    // Oferta con vigencia (escalares: null limpia la oferta).
+    offerPrice: data.offerPrice !== undefined ? asStr(data.offerPrice) ?? null : (e?.offerPrice ?? null),
+    offerStartsAt:
+      data.offerStartsAt !== undefined
+        ? data.offerStartsAt
+          ? new Date(String(data.offerStartsAt))
+          : null
+        : (e?.offerStartsAt ?? null),
+    offerEndsAt:
+      data.offerEndsAt !== undefined
+        ? data.offerEndsAt
+          ? new Date(String(data.offerEndsAt))
+          : null
+        : (e?.offerEndsAt ?? null),
     stock: data.stock !== undefined ? (Number.isFinite(Number(data.stock)) ? Number(data.stock) : null) : (e?.stock ?? null),
     durationMin: data.durationMin !== undefined ? Number(data.durationMin) || null : (e?.durationMin ?? null),
     slotCapacity: data.slotCapacity !== undefined ? Number(data.slotCapacity) || null : (e?.slotCapacity ?? null),
@@ -1392,7 +1407,7 @@ const SYSTEM_GUIDE = [
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación.",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (/reservas-online): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
-  "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat).",
+  "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat). Cada producto puede tener OFERTA con vigencia (precio de oferta + desde/hasta): vigente, el agente la presenta, cobra y valida ese precio y el normal sale tachado como 'antes'. Además hay OFERTAS ESCALONADAS en los recordatorios: cada paso puede llevar su precio (si el cliente no compra, el recordatorio 1 ofrece un precio y el 2 uno mejor — solo para ese cliente).",
   "- Empresa (/empresa): nombre, rubro, zona horaria, horario de atención, delivery, firma.",
   "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
   "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper): si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI solo para audios — sin ella los audios no se transcriben.",
@@ -1414,7 +1429,7 @@ const SYSTEM_GUIDE = [
 // ---------------------------------------------------------------------------
 async function buildSystem(companyId: string): Promise<string> {
   const [company, productCount, agent, payment, plansSection] = await Promise.all([
-    prisma.company.findUnique({ where: { id: companyId }, select: { name: true, vertical: true } }),
+    prisma.company.findUnique({ where: { id: companyId }, select: { name: true, vertical: true, timezone: true } }),
     prisma.product.count({ where: { companyId } }),
     prisma.agentConfig.findUnique({ where: { companyId }, select: { basePrompt: true } }),
     prisma.paymentConfig.findUnique({ where: { companyId }, select: { enabled: true, methods: { select: { id: true }, take: 1 } } }),
@@ -1425,6 +1440,13 @@ async function buildSystem(companyId: string): Promise<string> {
     `Eres el COPILOTO DE CONFIGURACIÓN de FlowApp para el negocio "${company?.name ?? "—"}". Ayudas al dueño (usuario NO técnico) a configurar su catálogo CONVERSANDO, en español, rápido y sin formularios.`,
     "",
     `ESTADO DEL NEGOCIO: rubro ${vertical}; ${productCount} producto(s) en el catálogo; pagos ${payment?.enabled && payment.methods.length ? "configurados" : "SIN configurar (recuérdale ir a Pagos)"}; agente ${agent?.basePrompt?.trim() ? "configurado" : "sin prompt (recuérdale ir a Agente IA)"}.`,
+    // Fecha/hora actual: necesaria para traducir vigencias relativas ("hasta el
+    // domingo", "esta semana") a fechas ISO correctas en las ofertas.
+    `FECHA Y HORA ACTUAL: ${new Intl.DateTimeFormat("es-PE", {
+      timeZone: company?.timezone || "America/Lima",
+      dateStyle: "full",
+      timeStyle: "short",
+    }).format(new Date())} (zona ${company?.timezone || "America/Lima"}).`,
     "",
     rubroGuide(vertical),
     "",

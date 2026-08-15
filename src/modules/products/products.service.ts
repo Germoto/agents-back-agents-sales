@@ -15,6 +15,9 @@ type ProductPayload = {
   name: string;
   price: string;
   regularPrice?: string | null;
+  offerPrice?: string | null;
+  offerStartsAt?: Date | null;
+  offerEndsAt?: Date | null;
   stock?: number | null;
   durationMin?: number | null;
   slotCapacity?: number | null;
@@ -354,6 +357,9 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         name: payload.name,
         price: payload.price,
         regularPrice: payload.regularPrice ?? null,
+        offerPrice: payload.offerPrice ?? null,
+        offerStartsAt: payload.offerStartsAt ?? null,
+        offerEndsAt: payload.offerEndsAt ?? null,
         stock: payload.stock ?? null,
         durationMin: payload.durationMin ?? null,
         slotCapacity: payload.slotCapacity ?? null,
@@ -402,6 +408,9 @@ export async function updateProduct(companyId: string, productId: string, payloa
         name: payload.name,
         price: payload.price,
         regularPrice: payload.regularPrice ?? null,
+        offerPrice: payload.offerPrice ?? null,
+        offerStartsAt: payload.offerStartsAt ?? null,
+        offerEndsAt: payload.offerEndsAt ?? null,
         stock: payload.stock ?? null,
         durationMin: payload.durationMin ?? null,
         slotCapacity: payload.slotCapacity ?? null,

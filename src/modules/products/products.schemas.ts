@@ -56,6 +56,10 @@ export const productBodySchema = z.object({
   name: z.string().min(1),
   price: z.string().min(1),
   regularPrice: z.string().nullable().optional(),
+  // Oferta con vigencia: vigente => el agente presenta/cobra/valida offerPrice.
+  offerPrice: z.string().nullable().optional(),
+  offerStartsAt: z.coerce.date().nullable().optional(),
+  offerEndsAt: z.coerce.date().nullable().optional(),
   stock: z.coerce.number().int().nullable().optional(),
   // Agenda (rubro SERVICE): datos tipados del motor de disponibilidad.
   durationMin: z.coerce.number().int().min(5).max(600).nullable().optional(),

@@ -210,7 +210,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
       catalogMediaFileName: agentConfig.catalogMediaFileName ?? null,
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
-    products: products.map((p) => withVariantModifiers(mapBotProduct(p))),
+    products: products.map((p) => withVariantModifiers(mapBotProduct(p, { timezone: whatsappConfig.company.timezone }))),
   };
 }
 

@@ -218,6 +218,25 @@ export async function setCartQuantity(
   return summarizeCart(companyId, customerId);
 }
 
+/**
+ * Reprecia las líneas de un producto YA agregado (oferta escalonada por
+ * recordatorio: el precio ofrecido a ESE cliente cambia). summarizeCart y
+ * checkoutCart respetan unitPriceText, así que el total hereda el nuevo precio.
+ */
+export async function setCartUnitPrice(
+  companyId: string,
+  customerId: string,
+  productId: string,
+  unitPriceText: string,
+): Promise<void> {
+  const cart = await prisma.cart.findFirst({
+    where: { companyId, customerId, status: "OPEN" },
+    select: { id: true },
+  });
+  if (!cart) return;
+  await prisma.cartItem.updateMany({ where: { cartId: cart.id, productId }, data: { unitPriceText } });
+}
+
 /** Vacía TODO el carrito abierto del cliente (el cliente quiere empezar de cero). */
 export async function clearCart(companyId: string, customerId: string): Promise<CartSummary> {
   const cart = await prisma.cart.findFirst({

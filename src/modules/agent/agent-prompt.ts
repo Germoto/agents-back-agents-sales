@@ -112,7 +112,7 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
   const parts = [
     `${index + 1}. [${p.id}] ${p.name} — ${p.priceText ?? p.price}${
       p.regularPriceText ? ` (antes ${p.regularPriceText})` : ""
-    } · ${p.productType}${secundario ? " · [SECUNDARIO: NO lo ofrezcas en el catálogo ni cuando pregunten qué vendes; solo preséntalo si el cliente lo nombra o si se ofreció como producto relacionado tras una compra]" : ""}`,
+    }${p.offerActive ? ` · 🔥 OFERTA${p.offerEndsText ? ` hasta ${p.offerEndsText}` : ""} (menciónala)` : ""} · ${p.productType}${secundario ? " · [SECUNDARIO: NO lo ofrezcas en el catálogo ni cuando pregunten qué vendes; solo preséntalo si el cliente lo nombra o si se ofreció como producto relacionado tras una compra]" : ""}`,
     `   ${p.shortDescription}`,
   ];
   // Descripción completa como base de conocimiento (si aporta algo más que la corta).
@@ -403,6 +403,17 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     ...(state.cartText
       ? [
           `CARRITO ACTUAL (estado REAL al inicio de este turno — fuente de verdad): ${state.cartText}. Este carrito YA está guardado: NO lo re-construyas ni re-agregues NADA de esta lista. Llama agregar_carrito SOLO si el cliente pide un producto o unidades ADICIONALES en su ÚLTIMO mensaje. Para corregir una cantidad usa fijar_cantidad (deja la cantidad EXACTA, es idempotente). Para responder '¿qué llevo?' o '¿cuánto es?' usa ESTOS datos tal cual, SIN llamar ninguna herramienta de carrito.`,
+          "",
+        ]
+      : []),
+    // Oferta escalonada activada por recordatorio: precio PERSONAL de este cliente.
+    ...(state.activeOffer?.priceText
+      ? [
+          `OFERTA ACTIVA PARA ESTE CLIENTE (se le ofreció por recordatorio — es PERSONAL, no aplica a otros): ${
+            (state.activeOffer.productId &&
+              config.products.find((p) => p.id === state.activeOffer!.productId)?.name) ||
+            "el producto de su interés"
+          } a ${state.activeOffer.priceText}. Este precio MANDA sobre el del catálogo para este cliente: ofrécelo, cóbralo (enviar_metodos_pago) y valida el pago con ESTE monto. Si pregunta el precio, es este.`,
           "",
         ]
       : []),

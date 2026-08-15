@@ -16,6 +16,9 @@ export interface ReminderStep {
   message: string;
   mediaUrl: string | null;
   mediaType: string;
+  /** Oferta ESCALONADA: al enviarse este paso, el agente ofrece/cobra/valida
+   *  este precio SOLO para ese cliente (se activa en su conversación). */
+  offerPrice?: string | null;
 }
 
 export interface ReminderSequence {
@@ -28,6 +31,8 @@ export interface ReminderVars {
   producto?: string;
   total?: string;
   negocio?: string;
+  /** Precio de oferta del PASO (para {oferta}); se setea por step al resolver. */
+  oferta?: string;
 }
 
 const DEFAULTS: Record<ReminderType, ReminderSequence> = {
@@ -69,6 +74,7 @@ export function substituteVars(text: string, vars: ReminderVars): string {
     .replace(/\{producto\}/gi, vars.producto || "tu pedido")
     .replace(/\{total\}/gi, vars.total || "")
     .replace(/\{negocio\}/gi, vars.negocio || "")
+    .replace(/\{oferta\}/gi, vars.oferta || "")
     // Colapsa solo espacios/tabs horizontales (NO los saltos de línea) y limpia
     // espacios al final de cada línea, para preservar el formato configurado.
     .replace(/[^\S\n]{2,}/g, " ")
@@ -96,8 +102,9 @@ function stepsFrom(cfg: Record<string, unknown>): ReminderStep[] | null {
       const message = typeof s.message === "string" ? s.message : "";
       const mediaUrl = typeof s.mediaUrl === "string" && s.mediaUrl.trim() ? s.mediaUrl : null;
       const mediaType = typeof s.mediaType === "string" ? s.mediaType : "";
+      const offerPrice = typeof s.offerPrice === "string" && s.offerPrice.trim() ? s.offerPrice.trim() : null;
       if (message.trim() || mediaUrl) {
-        steps.push({ delaySeconds: Math.max(1, Math.round(delaySeconds)), message, mediaUrl, mediaType });
+        steps.push({ delaySeconds: Math.max(1, Math.round(delaySeconds)), message, mediaUrl, mediaType, offerPrice });
       }
     }
     return steps.length ? steps : null;
@@ -143,6 +150,10 @@ export function resolveReminderSequence(
 
   return {
     enabled,
-    steps: steps.map((s) => ({ ...s, message: substituteVars(s.message, vars) })),
+    // {oferta} se sustituye con el offerPrice del PROPIO paso (escalera de ofertas).
+    steps: steps.map((s) => ({
+      ...s,
+      message: substituteVars(s.message, { ...vars, oferta: s.offerPrice ?? vars.oferta ?? "" }),
+    })),
   };
 }

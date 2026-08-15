@@ -1238,6 +1238,8 @@ async function scheduleAutoReminders(
       const meta: Record<string, unknown> = {};
       if (step.mediaType) meta.mediaType = step.mediaType;
       if (productId) meta.productId = productId;
+      // Oferta escalonada: viaja en la fila y se ACTIVA al enviarse el step (worker).
+      if (step.offerPrice) meta.offerPrice = step.offerPrice;
       await scheduleReminder({
         companyId,
         customerId,

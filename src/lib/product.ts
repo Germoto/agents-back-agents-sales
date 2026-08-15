@@ -72,6 +72,18 @@ function normalizeFollowups(dd: ProductWithRelations["digitalDelivery"]): Follow
   return out;
 }
 
+/** Oferta con vigencia: activa si offerPrice tiene dígitos y now ∈ [startsAt, endsAt] (fechas opcionales = sin límite). */
+export function offerIsActive(
+  p: { offerPrice?: string | null; offerStartsAt?: Date | null; offerEndsAt?: Date | null },
+  now = new Date(),
+): boolean {
+  const price = p.offerPrice?.trim();
+  if (!price || !/\d/.test(price)) return false;
+  if (p.offerStartsAt && now < p.offerStartsAt) return false;
+  if (p.offerEndsAt && now > p.offerEndsAt) return false;
+  return true;
+}
+
 export function mapAdminProduct(product: ProductWithRelations) {
   return {
     id: product.id,
@@ -84,6 +96,11 @@ export function mapAdminProduct(product: ProductWithRelations) {
     name: product.name,
     price: product.price,
     regularPrice: product.regularPrice,
+    // Oferta con vigencia (campos crudos para el panel/copiloto + flag calculado).
+    offerPrice: product.offerPrice ?? null,
+    offerStartsAt: product.offerStartsAt ?? null,
+    offerEndsAt: product.offerEndsAt ?? null,
+    offerActive: offerIsActive(product),
     stock: product.stock,
     shortDescription: product.shortDescription,
     fullDescription: product.fullDescription,
@@ -153,7 +170,7 @@ export function mapAdminProduct(product: ProductWithRelations) {
 
 export function mapBotProduct(
   product: ProductWithRelations,
-  opts?: { currencySymbol?: string },
+  opts?: { currencySymbol?: string; timezone?: string },
 ) {
   // TODO: leer currencySymbol de Company.currencySymbol cuando se agregue la columna
   const symbol = opts?.currencySymbol ?? "S/";
@@ -163,6 +180,14 @@ export function mapBotProduct(
     if (v === null || v === undefined || v.trim() === "") return null;
     return /^\d/.test(v.trim()) ? `${symbol} ${v}` : v;
   };
+
+  // Oferta VIGENTE: el precio EFECTIVO pasa a ser el de oferta y el precio
+  // normal queda como "antes" (tachado). Todo el runtime (catálogo del prompt,
+  // ficha, carrito, enviar_metodos_pago, validar_pago) lee price/priceText de
+  // aquí, así que hereda la oferta sin lógica adicional.
+  const offerActive = offerIsActive(product);
+  const effectivePrice = offerActive ? (product.offerPrice as string) : product.price;
+  const effectiveRegular = offerActive ? product.price : product.regularPrice;
 
   return {
     id: product.id,               // UUID real (antes era product.slug)
@@ -174,10 +199,24 @@ export function mapBotProduct(
     productType: product.productType.toLowerCase(),
     name: product.name,
     aliases: product.aliases.map((item) => item.value),
-    price: product.price,
-    priceText: fmtPrice(product.price),
-    regularPrice: product.regularPrice,
-    regularPriceText: fmtPrice(product.regularPrice),
+    price: effectivePrice,
+    priceText: fmtPrice(effectivePrice),
+    regularPrice: effectiveRegular,
+    regularPriceText: fmtPrice(effectiveRegular),
+    offerActive,
+    offerEndsAt: offerActive ? product.offerEndsAt ?? null : null,
+    // Fin de la oferta formateado en el timezone del negocio (para urgencia en ficha/catálogo).
+    offerEndsText:
+      offerActive && product.offerEndsAt
+        ? new Intl.DateTimeFormat("es-PE", {
+            timeZone: opts?.timezone || "America/Lima",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          }).format(product.offerEndsAt)
+        : null,
     stock: product.stock,
     shortDescription: product.shortDescription,
     fullDescription: product.fullDescription,
