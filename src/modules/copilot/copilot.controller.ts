@@ -43,6 +43,14 @@ import {
 import { upsertQuickReplySchema } from "../quick-replies/quick-replies.schemas";
 import { getBillingMe } from "../billing/billing.service";
 import { getLivePlansPromptSection } from "../admin-console/sales-agent.service";
+import { getDashboardStats } from "../dashboard/dashboard.service";
+import { listReceipts } from "../receipts/receipts.service";
+import { listOrders } from "../orders/orders.service";
+import { listConversations, listConversationMessages } from "../agent/conversation.service";
+import { listBookings } from "../bookings/bookings.service";
+import { listCampaigns } from "../campaigns/campaigns.service";
+import { listSubscriptions } from "../subscriptions/subscriptions.service";
+import { listPendingReminders } from "../scheduler/scheduler.service";
 import { prepareImageUrl, resolveAiSettings } from "../../lib/ai-providers";
 
 const MAX_ITERATIONS = 8;
@@ -487,6 +495,143 @@ export const TOOLS: ToolDefinition[] = [
           data: { type: "object", description: "Solo los campos a cambiar" },
           reemplazarMetodos: { type: "boolean", description: "true = methods enviados REEMPLAZAN la lista completa" },
         },
+      },
+    },
+  },
+  // ------------------------- ANÁLISIS (solo lectura) -------------------------
+  {
+    type: "function",
+    function: {
+      name: "ver_metricas",
+      description:
+        "MÉTRICAS del negocio en un rango (default: últimos 30 días) COMPARADAS con el periodo anterior: ingresos, ventas, ticket promedio, unidades, contactos nuevos, conversaciones, TASA DE CONVERSIÓN, embudo (contactos→conversaciones→ventas), top productos, métodos de pago y serie temporal. Es la PRIMERA tool para cualquier pregunta de números.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          desde: { type: "string", description: "YYYY-MM-DD (opcional)" },
+          hasta: { type: "string", description: "YYYY-MM-DD (opcional)" },
+          productId: { type: "string", description: "Filtrar por un producto (opcional)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_ventas",
+      description: "Ventas APROBADAS (pagos validados) con fecha, monto, método, producto y cliente. Default: últimos 30 días.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          desde: { type: "string", description: "YYYY-MM-DD" },
+          hasta: { type: "string", description: "YYYY-MM-DD" },
+          limit: { type: "number", description: "máx 100 (default 30)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_comprobantes",
+      description: "Comprobantes de pago por estado (PENDIENTE, EN_REVISION, APROBADO, RECHAZADO, IGNORADO). Default PENDIENTE.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          estado: { type: "string" },
+          desde: { type: "string" },
+          hasta: { type: "string" },
+          limit: { type: "number", description: "máx 100 (default 30)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_pedidos",
+      description: "Pedidos (rubros restaurante/comercial) con código, estado, total, cliente e ítems. Filtro opcional por estado (PEDIDO_REGISTRADO, PENDIENTE_PAGO, PAGADO, DESPACHADO, ENTREGADO...).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { estado: { type: "string" }, limit: { type: "number", description: "máx 100 (default 30)" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_conversaciones",
+      description:
+        "Conversaciones recientes con estado, etapa del embudo (NUEVO/INTERESADO/ESPERANDO_PAGO/PAGADO/ENTREGADO...), si están en atención humana (y por qué) y el último mensaje. Filtro opcional por etapa.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { etapa: { type: "string" }, limit: { type: "number", description: "máx 100 (default 30)" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "leer_conversacion",
+      description:
+        "Lee los MENSAJES REALES de la conversación de un cliente (por teléfono). Úsala para analizar objeciones, puntos de fuga y calidad de respuesta del agente antes de proponer mejoras.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phone"],
+        properties: {
+          phone: { type: "string", description: "Teléfono del cliente" },
+          limit: { type: "number", description: "máx 100 mensajes (default 50)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_citas",
+      description: "Citas/reservas (rubros servicios/inmobiliaria) por rango y estado (SOLICITADA, CONFIRMADA, CANCELADA, COMPLETADA).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { desde: { type: "string" }, hasta: { type: "string" }, estado: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_campanas",
+      description: "Campañas de envío masivo con sus stats (enviados, fallidos, total, estado).",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_suscripciones",
+      description: "Suscripciones de streaming: filtro 'active' (vigentes), 'due' (por vencer en 7 días) o 'expired' (vencidas).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { filtro: { type: "string", description: "active | due | expired" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_recordatorios_programados",
+      description: "Recordatorios PENDIENTES de enviar (seguimientos, citas, renovaciones) con fecha y cliente.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { limit: { type: "number", description: "máx 100 (default 50)" } },
       },
     },
   },
@@ -1350,6 +1495,161 @@ export async function runCopilotTool(
       return { result: JSON.stringify({ ok: true, nota: "Recordatorios actualizados (lo no enviado se conservó)." }), wrote: true };
     }
 
+    // ---------------------- ANÁLISIS (solo lectura) ----------------------
+    case "ver_metricas": {
+      const stats = await getDashboardStats({
+        companyId,
+        from: asStr(args.desde),
+        to: asStr(args.hasta),
+        productId: asStr(args.productId),
+      });
+      return {
+        result: JSON.stringify({
+          rango: stats.range,
+          moneda: stats.currency,
+          kpis: stats.kpis,
+          embudo: stats.funnel,
+          topProductos: stats.topProducts,
+          metodosPago: stats.paymentMethods,
+          serie: stats.series,
+          nota: "Cada KPI trae {value, prev} = periodo actual vs anterior.",
+        }),
+        wrote: false,
+      };
+    }
+
+    case "listar_ventas":
+    case "listar_comprobantes": {
+      const isVentas = name === "listar_ventas";
+      const limit = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
+      const receipts = await listReceipts(companyId, {
+        status: isVentas ? "APROBADO" : (asStr(args.estado) as never) ?? "PENDIENTE",
+        from: asStr(args.desde),
+        to: asStr(args.hasta),
+      });
+      const rows = receipts.slice(0, limit).map((r) => ({
+        fecha: r.occurredAt ?? r.validatedAt ?? r.createdAt,
+        monto: r.amountPaid ?? r.amountExpected,
+        moneda: r.currency,
+        metodo: r.paymentSource,
+        estado: r.status,
+        validacion: r.validationMode,
+        producto: r.product?.name ?? null,
+        cliente: { nombre: r.customer?.name ?? r.payerName ?? null, phone: r.customer?.phone ?? r.payerPhone ?? null },
+      }));
+      return { result: JSON.stringify({ total: receipts.length, mostrados: rows.length, items: rows }), wrote: false };
+    }
+
+    case "listar_pedidos": {
+      const limit = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
+      const estado = asStr(args.estado)?.toUpperCase();
+      const orders = await listOrders(companyId);
+      const filtered = estado ? orders.filter((o) => o.status === estado) : orders;
+      const rows = filtered.slice(0, limit).map((o) => ({
+        codigo: o.orderCode,
+        estado: o.status,
+        total: o.total,
+        pago: o.paymentStatus,
+        fecha: o.createdAt,
+        cliente: { nombre: o.customer?.name ?? null, phone: o.customer?.phone ?? null },
+        items: (o.items ?? []).map((i) => ({ producto: i.productName, cantidad: i.quantity })),
+      }));
+      return { result: JSON.stringify({ total: filtered.length, mostrados: rows.length, items: rows }), wrote: false };
+    }
+
+    case "listar_conversaciones": {
+      const limit = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
+      const etapa = asStr(args.etapa)?.toUpperCase();
+      const convos = await listConversations(companyId, 200);
+      const filtered = etapa
+        ? convos.filter((c) => (c.funnelStatus ?? "").toUpperCase() === etapa || c.status.toUpperCase() === etapa)
+        : convos;
+      const rows = filtered.slice(0, limit).map((c) => ({
+        phone: c.customer.phone,
+        nombre: c.customer.name,
+        estado: c.status,
+        etapa: c.funnelStatus,
+        atencionHumana: c.botPaused ? c.humanReason ?? true : false,
+        ultimoMensaje: c.lastMessage
+          ? { rol: c.lastMessage.role, texto: String(c.lastMessage.message ?? "").slice(0, 200), fecha: c.lastMessage.createdAt }
+          : null,
+      }));
+      return { result: JSON.stringify({ total: filtered.length, mostrados: rows.length, items: rows }), wrote: false };
+    }
+
+    case "leer_conversacion": {
+      const phoneDigits = String(args.phone ?? "").replace(/\D/g, "");
+      if (!phoneDigits) return { result: JSON.stringify({ ok: false, error: "phone requerido" }), wrote: false };
+      const customer = await prisma.customer.findFirst({
+        where: { companyId, phone: { contains: phoneDigits } },
+        select: { id: true, name: true, phone: true },
+      });
+      if (!customer) return { result: JSON.stringify({ ok: false, error: `no encontré un cliente con teléfono ${phoneDigits}` }), wrote: false };
+      const convo = await prisma.conversation.findFirst({
+        where: { companyId, customerId: customer.id },
+        orderBy: { lastMessageAt: "desc" },
+        select: { id: true },
+      });
+      if (!convo) return { result: JSON.stringify({ ok: false, error: "el cliente no tiene conversaciones" }), wrote: false };
+      const limit = Math.min(Math.max(Number(args.limit) || 50, 1), 100);
+      const messages = await listConversationMessages(companyId, convo.id, limit);
+      return {
+        result: JSON.stringify({
+          cliente: { nombre: customer.name, phone: customer.phone },
+          mensajes: messages.map((m) => ({ rol: m.role, texto: String(m.message ?? "").slice(0, 300), fecha: m.createdAt })),
+        }),
+        wrote: false,
+      };
+    }
+
+    case "listar_citas": {
+      const bookings = await listBookings(companyId, {
+        status: asStr(args.estado)?.toUpperCase() as never,
+        from: args.desde ? new Date(String(args.desde)) : undefined,
+        to: args.hasta ? new Date(String(args.hasta)) : undefined,
+      });
+      const rows = bookings.slice(0, 100).map((b) => ({
+        codigo: b.bookingCode,
+        estado: b.status,
+        inicio: b.startsAt,
+        fin: b.endsAt,
+        servicio: b.product?.name ?? null,
+        cliente: { nombre: b.customer?.name ?? null, phone: b.customer?.phone ?? null },
+      }));
+      return { result: JSON.stringify({ total: bookings.length, mostrados: rows.length, items: rows }), wrote: false };
+    }
+
+    case "listar_campanas": {
+      const campaigns = await listCampaigns(companyId);
+      return { result: JSON.stringify({ total: campaigns.length, items: campaigns }), wrote: false };
+    }
+
+    case "listar_suscripciones": {
+      const filtro = asStr(args.filtro) as "active" | "due" | "expired" | undefined;
+      const subs = await listSubscriptions(companyId, { filter: filtro ?? "active" });
+      const rows = subs.slice(0, 100).map((s) => ({
+        cliente: { nombre: s.customer?.name ?? null, phone: s.customer?.phone ?? null },
+        producto: s.productName,
+        plan: s.planLabel,
+        vence: s.expiresAt,
+        estado: s.status,
+        monto: s.amount,
+      }));
+      return { result: JSON.stringify({ total: subs.length, mostrados: rows.length, items: rows }), wrote: false };
+    }
+
+    case "listar_recordatorios_programados": {
+      const limit = Math.min(Math.max(Number(args.limit) || 50, 1), 100);
+      const reminders = await listPendingReminders(companyId);
+      const rows = reminders.slice(0, limit).map((r) => ({
+        tipo: r.type,
+        enviaEl: r.sendAt,
+        cliente: { nombre: r.customer?.name ?? null, phone: r.customer?.phone ?? null },
+        texto: String(r.body ?? "").slice(0, 150),
+      }));
+      return { result: JSON.stringify({ total: reminders.length, mostrados: rows.length, items: rows }), wrote: false };
+    }
+
     case "ver_mi_plan": {
       const me = await getBillingMe(companyId);
       if (me.legacy || !me.plan) {
@@ -1418,7 +1718,7 @@ const SYSTEM_GUIDE = [
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
   "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
-  "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) y el CONECTOR MCP: una URL para configurar FlowApp conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo.",
+  "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) y el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo.",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
   "",
   "PLANES Y MÓDULOS: cada plan incluye módulos (Campañas masivas, CRM kanban, Flujos guiados, Embudo de ventas, Chat web, Mercado Pago, Webhooks) y un límite de leads/mes. Si una página no aparece en el menú del tenant es porque su plan no incluye ese módulo o su rubro no la usa. Los precios vigentes están en la sección PLANES de este prompt; el plan propio del negocio se consulta con ver_mi_plan.",
@@ -1438,7 +1738,7 @@ export async function buildSystem(companyId: string): Promise<string> {
   ]);
   const vertical = company?.vertical ?? "OTHER";
   return [
-    `Eres el COPILOTO DE CONFIGURACIÓN de FlowApp para el negocio "${company?.name ?? "—"}". Ayudas al dueño (usuario NO técnico) a configurar su catálogo CONVERSANDO, en español, rápido y sin formularios.`,
+    `Eres el COPILOTO de FlowApp para el negocio "${company?.name ?? "—"}". Ayudas al dueño (usuario NO técnico) en español, rápido y sin formularios: CONFIGURAS su negocio conversando y ANALIZAS sus datos reales (ventas, conversiones, conversaciones).`,
     "",
     `ESTADO DEL NEGOCIO: rubro ${vertical}; ${productCount} producto(s) en el catálogo; pagos ${payment?.enabled && payment.methods.length ? "configurados" : "SIN configurar (recuérdale ir a Pagos)"}; agente ${agent?.basePrompt?.trim() ? "configurado" : "sin prompt (recuérdale ir a Agente IA)"}.`,
     // Fecha/hora actual: necesaria para traducir vigencias relativas ("hasta el
@@ -1460,6 +1760,7 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
     "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto: usa la URL EXACTA que aparece en la línea [Adjuntos de este mensaje: …] del mensaje del usuario (NUNCA un data:URI ni una URL inventada). Si el usuario ya adjuntó la imagen, NO le pidas re-adjuntarla. Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
     "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
+    "- ANALISTA DEL NEGOCIO: puedes leer métricas, ventas, comprobantes, pedidos, conversaciones (incluidos los MENSAJES reales con leer_conversacion), citas, campañas, suscripciones y recordatorios con ver_metricas/listar_*. Para preguntas de números usa PRIMERO ver_metricas (trae el periodo comparado con el anterior) y detalla después con listar_*. TODO número que cites debe salir de un resultado de tool de ESTE turno — NUNCA estimes ni 'recuerdes' cifras. Con los datos puedes proponer mejoras accionables (FAQs/objeciones a partir de chats reales, ofertas escalonadas para carritos abandonados, ajustes de prompt o recordatorios) y, SOLO si el usuario confirma, aplicarlas con las tools de escritura.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
