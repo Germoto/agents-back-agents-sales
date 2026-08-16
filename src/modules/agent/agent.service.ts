@@ -57,6 +57,7 @@ import { gateNewLead } from "../billing/billing.service";
 import { transcribeAudio } from "./audio-transcribe";
 import { extractInboundUsername } from "./inbound-username";
 import { enrichCustomerFromWhatsapp } from "../customers/lead-enrich.service";
+import { resolveAdCatalog, adCatalogEntryFor } from "../ad-catalog/ad-catalog.service";
 
 interface FollowupConfig {
   abandonedCartHours?: number;
@@ -363,6 +364,19 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
         },
       })
       .catch(() => undefined);
+    // Si el catálogo vincula este anuncio a un PRODUCTO, el lead entra con ese
+    // producto como interés (solo si aún no tiene uno — no pisa elecciones).
+    try {
+      const entry = adCatalogEntryFor(await resolveAdCatalog(companyId), inbound.adSourceId, inbound.adTitle);
+      if (entry?.productId) {
+        await prisma.customer.updateMany({
+          where: { id: convo.customerId, selectedProductId: null },
+          data: { selectedProductId: entry.productId },
+        });
+      }
+    } catch {
+      /* best-effort */
+    }
   }
 
   // Enriquecimiento del lead (API lead de SMS Tools): SOLO en lead nuevo o si

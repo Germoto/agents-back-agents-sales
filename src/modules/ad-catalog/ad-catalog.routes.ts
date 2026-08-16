@@ -16,6 +16,8 @@ import {
 const upsertSchema = z.object({
   description: z.string().trim().min(1).max(160),
   matchers: z.array(z.string().trim().min(1).max(300)).min(1).max(30),
+  // Producto relacionado (opcional): null lo quita.
+  productId: z.string().uuid().nullable().optional(),
 });
 
 const router = Router();

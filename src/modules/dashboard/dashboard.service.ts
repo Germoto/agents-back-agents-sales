@@ -9,7 +9,7 @@
  */
 
 import { prisma } from "../../lib/prisma";
-import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
+import { resolveAdCatalog, adCatalogEntryFor } from "../ad-catalog/ad-catalog.service";
 
 interface SeriesPoint {
   date: string; // "2026-06-12" (día) o "2026-06" (mes)
@@ -287,7 +287,7 @@ export async function getDashboardStats(params: DashboardParams) {
   // ---- Rendimiento por anuncio (atribución CTWA): leads del periodo agrupados
   // por anuncio de origen + ventas/ingresos del periodo atribuidos al anuncio
   // del cliente (aunque el lead sea de antes). Fila "sin anuncio" para comparar. ----
-  const adDescriptions = await resolveAdDescriptions(companyId);
+  const adCatalog = await resolveAdCatalog(companyId);
   type AdAgg = { adSourceId: string | null; adTitle: string | null; leads: number; sales: number; revenue: number; buyers: Set<string> };
   const adAgg = new Map<string, AdAgg>();
   const aggFor = (adSourceId: string | null, adTitle: string | null): AdAgg => {
@@ -321,16 +321,20 @@ export async function getDashboardStats(params: DashboardParams) {
     if (Number.isFinite(amount) && amount > 0) a.revenue += amount;
   }
   const adPerformance = [...adAgg.values()]
-    .map((a) => ({
-      adSourceId: a.adSourceId,
-      adTitle: a.adTitle,
-      description: a.adSourceId ? adInfoFor(adDescriptions, a.adSourceId, a.adTitle)?.description ?? null : null,
-      leads: a.leads,
-      sales: a.sales,
-      revenue: r2(a.revenue),
-      // Conversión: clientes ÚNICOS que compraron / leads llegados por ese anuncio.
-      conversionRate: a.leads > 0 ? pct(a.buyers.size / a.leads) : null,
-    }))
+    .map((a) => {
+      const entry = a.adSourceId ? adCatalogEntryFor(adCatalog, a.adSourceId, a.adTitle) : null;
+      return {
+        adSourceId: a.adSourceId,
+        adTitle: a.adTitle,
+        description: entry?.description ?? null,
+        productName: entry?.productName ?? null,
+        leads: a.leads,
+        sales: a.sales,
+        revenue: r2(a.revenue),
+        // Conversión: clientes ÚNICOS que compraron / leads llegados por ese anuncio.
+        conversionRate: a.leads > 0 ? pct(a.buyers.size / a.leads) : null,
+      };
+    })
     .sort((x, y) => y.revenue - x.revenue || y.leads - x.leads);
 
   return {

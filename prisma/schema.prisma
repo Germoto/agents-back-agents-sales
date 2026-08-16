@@ -493,6 +493,7 @@ model Product {
   serviceBookings  ServiceBooking[]
   streamingCredentials StreamingCredential[]
   subscriptions    Subscription[]
+  adCatalogEntries AdCatalogEntry[]
 
   @@unique([companyId, slug])
   @@index([companyId, active, sortOrder])
@@ -771,10 +772,14 @@ model AdCatalogEntry {
   companyId   String   @db.Uuid
   description String
   matchers    String[] @default([])
+  // Producto relacionado (opcional): el lead que llega por este anuncio entra
+  // con este producto como interés (selectedProductId, solo si estaba vacío).
+  productId   String?  @db.Uuid
   sortOrder   Int      @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  product     Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   @@index([companyId])
 }
