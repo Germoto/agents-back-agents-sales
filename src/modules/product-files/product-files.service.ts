@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import crypto from "crypto";
 import { Request, Response, NextFunction } from "express";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
@@ -65,6 +66,42 @@ async function deletePhysicalFile(storagePathRel: string) {
       console.warn("[product-files] No se pudo eliminar archivo:", absolute, err?.message);
     }
   }
+}
+
+/**
+ * Guarda un buffer YA descargado (p.ej. una imagen por URL externa vía el
+ * conector MCP) como archivo de producto del tenant, con el mismo shape que
+ * devuelve el upload multipart del panel.
+ */
+export async function saveBufferAsProductFile(
+  companyId: string,
+  buffer: Buffer,
+  mimeType: string,
+  originalName: string,
+): Promise<UploadedProductFileResponse> {
+  const cleanMime = mimeType.split(";")[0].trim().toLowerCase();
+  const extByMime: Record<string, string> = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "application/pdf": "pdf",
+  };
+  const extFromName = path.extname(originalName).replace(".", "").toLowerCase();
+  const extension = extByMime[cleanMime] ?? (extFromName || "bin");
+  const rel = `products/${companyId}/${crypto.randomUUID()}.${extension}`;
+  const absolute = path.resolve(process.cwd(), env.UPLOAD_DIR, rel);
+  await fs.mkdir(path.dirname(absolute), { recursive: true });
+  await fs.writeFile(absolute, buffer);
+  return {
+    type: detectType(cleanMime),
+    url: buildPublicUrl(rel),
+    storagePath: rel,
+    originalName: originalName || `imagen.${extension}`,
+    extension,
+    mimeType: cleanMime,
+    size: buffer.length,
+  };
 }
 
 export const uploadProductFileMiddlewareExport = uploadProductFileMiddleware;

@@ -48,7 +48,7 @@ import { prepareImageUrl, resolveAiSettings } from "../../lib/ai-providers";
 const MAX_ITERATIONS = 8;
 const HISTORY_LIMIT = 16;
 
-interface CopilotAttachment {
+export interface CopilotAttachment {
   url: string;
   storagePath: string;
   originalName: string;
@@ -71,7 +71,8 @@ interface CopilotBody {
 // ---------------------------------------------------------------------------
 // Tools (laxas — la validación real es zod/servicios al ejecutar)
 // ---------------------------------------------------------------------------
-const TOOLS: ToolDefinition[] = [
+// Exportadas también para el conector MCP (mismas tools, otra puerta).
+export const TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
@@ -768,7 +769,7 @@ async function resolveQuickReplyCategory(companyId: string, name?: string): Prom
   return created.id;
 }
 
-async function runCopilotTool(
+export async function runCopilotTool(
   companyId: string,
   name: string,
   args: LooseData,
@@ -1417,7 +1418,7 @@ const SYSTEM_GUIDE = [
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
   "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
-  "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago) y ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks).",
+  "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) y el CONECTOR MCP: una URL para configurar FlowApp conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo.",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
   "",
   "PLANES Y MÓDULOS: cada plan incluye módulos (Campañas masivas, CRM kanban, Flujos guiados, Embudo de ventas, Chat web, Mercado Pago, Webhooks) y un límite de leads/mes. Si una página no aparece en el menú del tenant es porque su plan no incluye ese módulo o su rubro no la usa. Los precios vigentes están en la sección PLANES de este prompt; el plan propio del negocio se consulta con ver_mi_plan.",
@@ -1427,7 +1428,7 @@ const SYSTEM_GUIDE = [
 // ---------------------------------------------------------------------------
 // System prompt + snapshot del negocio
 // ---------------------------------------------------------------------------
-async function buildSystem(companyId: string): Promise<string> {
+export async function buildSystem(companyId: string): Promise<string> {
   const [company, productCount, agent, payment, plansSection] = await Promise.all([
     prisma.company.findUnique({ where: { id: companyId }, select: { name: true, vertical: true, timezone: true } }),
     prisma.product.count({ where: { companyId } }),

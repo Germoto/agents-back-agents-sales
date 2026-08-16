@@ -23,6 +23,7 @@ import agentRoutes from "../modules/agent/agent.routes";
 import metaWebhookRoutes from "../modules/meta-webhook/meta-webhook.routes";
 import webchatRoutes from "../modules/webchat/webchat.routes";
 import webchatConfigRoutes from "../modules/webchat/webchat-config.routes";
+import { mcpPublicRoutes, mcpConfigRoutes } from "../modules/mcp/mcp.routes";
 import quickRepliesRoutes from "../modules/quick-replies/quick-replies.routes";
 import crmRoutes from "../modules/crm/crm.routes";
 import campaignsRoutes from "../modules/campaigns/campaigns.routes";
@@ -79,6 +80,10 @@ router.use("/meta", metaWebhookRoutes);
 router.use("/webchat", webchatRoutes);
 // Configuración del Chat Web desde el panel del tenant (módulo de paquete)
 router.use("/webchat-config", billingGuard({ module: "WEBCHAT" }), webchatConfigRoutes);
+// Conector MCP: protocolo público (auth por token en el path — NUNCA billingGuard)
+// y configuración desde el panel (activar/regenerar token).
+router.use("/mcp", mcpPublicRoutes);
+router.use("/mcp-config", billingGuard(), mcpConfigRoutes);
 // Respuestas rápidas del panel de conversaciones
 router.use("/quick-replies", billingGuard({ module: "QUICK_REPLIES" }), quickRepliesRoutes);
 // CRM kanban (tableros, etiquetas internas, valores de negocio). El embudo
