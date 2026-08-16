@@ -9,6 +9,7 @@
  */
 
 import { prisma } from "../../lib/prisma";
+import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
 
 interface SeriesPoint {
   date: string; // "2026-06-12" (día) o "2026-06" (mes)
@@ -237,7 +238,7 @@ export async function getDashboardStats(params: DashboardParams) {
     await Promise.all([
       // Clientes creados en [prevFrom, toDate] (ids para separar actual/anterior y
       // cruzar con quienes cerraron venta).
-      prisma.customer.findMany({ where: { companyId, createdAt: { gte: prevFrom, lte: toDate } }, select: { id: true, createdAt: true } }),
+      prisma.customer.findMany({ where: { companyId, createdAt: { gte: prevFrom, lte: toDate } }, select: { id: true, createdAt: true, adSourceId: true, adTitle: true } }),
       prisma.conversation.count({ where: { companyId, channel: "whatsapp", createdAt: { gte: fromDate, lte: toDate } } }),
       prisma.conversation.count({ where: { companyId, channel: "whatsapp", createdAt: { gte: prevFrom, lte: prevTo } } }),
       prisma.paymentReceipt.count({ where: { companyId, status: { in: ["PENDIENTE", "EN_REVISION"] }, createdAt: { gte: fromDate, lte: toDate }, ...productClause } }),
@@ -283,6 +284,55 @@ export async function getDashboardStats(params: DashboardParams) {
     prev: newIdsPrev.filter((id) => salesCustPrev.has(id)).length,
   };
 
+  // ---- Rendimiento por anuncio (atribución CTWA): leads del periodo agrupados
+  // por anuncio de origen + ventas/ingresos del periodo atribuidos al anuncio
+  // del cliente (aunque el lead sea de antes). Fila "sin anuncio" para comparar. ----
+  const adDescriptions = await resolveAdDescriptions(companyId);
+  type AdAgg = { adSourceId: string | null; adTitle: string | null; leads: number; sales: number; revenue: number; buyers: Set<string> };
+  const adAgg = new Map<string, AdAgg>();
+  const aggFor = (adSourceId: string | null, adTitle: string | null): AdAgg => {
+    const key = adSourceId ?? "__sin_anuncio__";
+    let a = adAgg.get(key);
+    if (!a) {
+      a = { adSourceId, adTitle, leads: 0, sales: 0, revenue: 0, buyers: new Set() };
+      adAgg.set(key, a);
+    }
+    if (!a.adTitle && adTitle) a.adTitle = adTitle;
+    return a;
+  };
+  for (const c of customersWindow) {
+    if (!inRange(c.createdAt, fromDate, toDate)) continue;
+    aggFor(c.adSourceId ?? null, c.adTitle ?? null).leads += 1;
+  }
+  const saleCustomerIds = [...new Set(curAll.map((r) => r.customerId).filter(Boolean) as string[])];
+  const saleCustomers = saleCustomerIds.length
+    ? await prisma.customer.findMany({
+        where: { id: { in: saleCustomerIds } },
+        select: { id: true, adSourceId: true, adTitle: true },
+      })
+    : [];
+  const adByCustomer = new Map(saleCustomers.map((c) => [c.id, c]));
+  for (const r of curAll) {
+    const c = r.customerId ? adByCustomer.get(r.customerId) : undefined;
+    const a = aggFor(c?.adSourceId ?? null, c?.adTitle ?? null);
+    a.sales += 1;
+    if (r.customerId) a.buyers.add(r.customerId);
+    const amount = Number(r.amountPaid ?? r.amountExpected);
+    if (Number.isFinite(amount) && amount > 0) a.revenue += amount;
+  }
+  const adPerformance = [...adAgg.values()]
+    .map((a) => ({
+      adSourceId: a.adSourceId,
+      adTitle: a.adTitle,
+      description: a.adSourceId ? adInfoFor(adDescriptions, a.adSourceId, a.adTitle)?.description ?? null : null,
+      leads: a.leads,
+      sales: a.sales,
+      revenue: r2(a.revenue),
+      // Conversión: clientes ÚNICOS que compraron / leads llegados por ese anuncio.
+      conversionRate: a.leads > 0 ? pct(a.buyers.size / a.leads) : null,
+    }))
+    .sort((x, y) => y.revenue - x.revenue || y.leads - x.leads);
+
   return {
     range: { from: toDayKey(fromDate), to: toDayKey(toDate), granularity },
     currency,
@@ -306,6 +356,7 @@ export async function getDashboardStats(params: DashboardParams) {
     series,
     topProducts,
     paymentMethods,
+    adPerformance,
     funnel: { contacts: newContacts.value, conversations: conversationsCur, sales: globalSalesCur },
     flows: { total: flowsTotal, active: flowsActive },
   };

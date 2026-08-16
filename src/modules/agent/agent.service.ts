@@ -346,6 +346,25 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
       .catch(() => undefined);
   }
 
+  // Atribución de anuncios Meta CTWA: llega SOLO en el primer mensaje del lead
+  // que vino de un anuncio. PRIMERA GANA: se escribe únicamente si el lead aún
+  // no tiene atribución (adSourceId null); los mensajes posteriores llegan con
+  // los campos vacíos y no tocan nada. ctwaClid se guarda ÍNTEGRO (futura
+  // Meta Conversions API).
+  if (inbound.adSourceId) {
+    await prisma.customer
+      .updateMany({
+        where: { id: convo.customerId, adSourceId: null },
+        data: {
+          adSourceId: inbound.adSourceId,
+          adTitle: inbound.adTitle,
+          ctwaClid: inbound.ctwaClid,
+          adSourceUrl: inbound.adSourceUrl,
+        },
+      })
+      .catch(() => undefined);
+  }
+
   // Enriquecimiento del lead (API lead de SMS Tools): SOLO en lead nuevo o si
   // llegó con username y aún no fue enriquecido. Fire-and-forget (no bloquea el
   // turno); el caché interno (TTL 7 días) evita llamadas repetidas.

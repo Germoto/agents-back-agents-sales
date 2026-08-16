@@ -184,6 +184,7 @@ model Company {
   webhookEndpoints  WebhookEndpoint[]
   webchatConfig     WebchatConfig?
   mcpConfig         McpConfig?
+  adCatalogEntries  AdCatalogEntry[]
   bookingWidget     BookingWidgetConfig?
   platformPayments  PlatformPayment[]
   quickReplies         QuickReply[]
@@ -730,6 +731,13 @@ model Customer {
   fechaNacimiento   DateTime?
   idioma            String?
   origenDeLead      String?
+  // Atribución de anuncios Meta CTWA (llega SOLO en el primer mensaje del lead;
+  // primera gana, los vacíos posteriores no sobrescriben). ctwaClid se guarda
+  // ÍNTEGRO (~130 chars): es el token para la futura Meta Conversions API.
+  adSourceId        String?
+  adTitle           String?
+  ctwaClid          String?
+  adSourceUrl       String?
   lastInteractionAt DateTime
   metadata          Json
   createdAt         DateTime              @default(now())
@@ -752,6 +760,23 @@ model Customer {
 
   @@unique([companyId, phone])
   @@index([companyId, lastInteractionAt])
+  @@index([companyId, adSourceId])
+}
+
+// Catálogo de anuncios del tenant: mapea uno o VARIOS identificadores del
+// anuncio (ad_source_id o ad_title, tal como llegan en el webhook) a una
+// descripción amigable que se muestra en vez del ID crudo.
+model AdCatalogEntry {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String   @db.Uuid
+  description String
+  matchers    String[] @default([])
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
 }
 
 model ConversationMessage {

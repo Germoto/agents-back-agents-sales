@@ -15,6 +15,7 @@ import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { deleteCustomer } from "../customers/customers.service";
 import { loadWhatsappSender, sendText, sendMedia, webSender } from "./outbound";
 import { applyFirma } from "./firma";
+import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
 import type { ChatMessage } from "../../lib/openai";
 
 /** Estado conversacional persistido en Conversation.state (equivalente al customer.* de n8n). */
@@ -264,6 +265,8 @@ export async function listConversations(companyId: string, limit = 50) {
           name: true,
           avatarUrl: true,
           waUsername: true,
+          adSourceId: true,
+          adTitle: true,
           tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
         },
       },
@@ -274,6 +277,7 @@ export async function listConversations(companyId: string, limit = 50) {
       },
     },
   });
+  const adMap = await resolveAdDescriptions(companyId);
   return rows.map((c) => ({
     id: c.id,
     status: c.status,
@@ -284,7 +288,7 @@ export async function listConversations(companyId: string, limit = 50) {
     humanReason: humanReasonOf(c.state as ConversationState, c.botPaused),
     lastMessageAt: c.lastMessageAt,
     openedAt: c.openedAt,
-    customer: serializeCustomerWithTags(c.customer),
+    customer: serializeCustomerWithTags(c.customer, adMap),
     lastMessage: c.messages[0] ?? null,
   }));
 }
@@ -301,17 +305,26 @@ export function humanReasonOf(state: ConversationState | null | undefined, botPa
   return reason || null;
 }
 
-/** Aplana tagLinks → tags para el panel (etiquetas del cliente en la lista de chats). */
-function serializeCustomerWithTags(customer: {
-  id: string;
-  phone: string;
-  name: string | null;
-  avatarUrl?: string | null;
-  waUsername?: string | null;
-  tagLinks: Array<{ tag: { id: string; name: string; color: string } }>;
-}) {
-  const { tagLinks, ...rest } = customer;
-  return { ...rest, tags: tagLinks.map((l) => l.tag) };
+/** Aplana tagLinks → tags y resuelve el anuncio de origen (atribución CTWA). */
+function serializeCustomerWithTags(
+  customer: {
+    id: string;
+    phone: string;
+    name: string | null;
+    avatarUrl?: string | null;
+    waUsername?: string | null;
+    adSourceId?: string | null;
+    adTitle?: string | null;
+    tagLinks: Array<{ tag: { id: string; name: string; color: string } }>;
+  },
+  adMap?: Map<string, string>,
+) {
+  const { tagLinks, adSourceId, adTitle, ...rest } = customer;
+  return {
+    ...rest,
+    tags: tagLinks.map((l) => l.tag),
+    ad: adInfoFor(adMap ?? new Map(), adSourceId, adTitle),
+  };
 }
 
 /**
@@ -337,6 +350,8 @@ export async function getConversationSummary(companyId: string, conversationId: 
           name: true,
           avatarUrl: true,
           waUsername: true,
+          adSourceId: true,
+          adTitle: true,
           tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
         },
       },
@@ -357,7 +372,7 @@ export async function getConversationSummary(companyId: string, conversationId: 
     humanReason: humanReasonOf(c.state as ConversationState, c.botPaused),
     lastMessageAt: c.lastMessageAt,
     openedAt: c.openedAt,
-    customer: serializeCustomerWithTags(c.customer),
+    customer: serializeCustomerWithTags(c.customer, await resolveAdDescriptions(companyId)),
     lastMessage: c.messages[0] ?? null,
   };
 }

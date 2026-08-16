@@ -13,6 +13,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
 
 function emitCrmUpdated(companyId: string, crmId?: string) {
   socketService.emitToCompany(companyId, SOCKET_EVENTS.CRM_UPDATED, { crmId: crmId ?? null });
@@ -178,6 +179,8 @@ export interface CrmBoardCard {
     phone: string;
     waUsername?: string | null;
     avatarUrl?: string | null;
+    /** Anuncio de origen (atribución CTWA) con descripción del catálogo resuelta. */
+    ad?: { sourceId: string | null; title: string | null; description: string | null } | null;
   };
   conversationId: string | null;
   /** Inicio de la conversación (para ordenar tarjetas por fecha). */
@@ -222,7 +225,7 @@ export async function getBoard(companyId: string, crmId: string) {
               select: {
                 customerId: true,
                 sortOrder: true,
-                customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true } },
+                customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true, adSourceId: true, adTitle: true } },
               },
             },
           },
@@ -238,7 +241,7 @@ export async function getBoard(companyId: string, crmId: string) {
         botPaused: true,
         lastMessageAt: true,
         openedAt: true,
-        customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true } },
+        customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true, adSourceId: true, adTitle: true } },
       },
     }),
   ]);
@@ -311,15 +314,24 @@ export async function getBoard(companyId: string, crmId: string) {
     dealSums.map((d) => [d.customerId, Number(d._sum.amount ?? 0)]),
   );
 
+  const adMap = await resolveAdDescriptions(companyId);
+
   function buildCard(
-    customer: { id: string; name: string | null; phone: string },
+    customer: {
+      id: string;
+      name: string | null;
+      phone: string;
+      adSourceId?: string | null;
+      adTitle?: string | null;
+    },
     sortOrder: number | null,
   ): CrmBoardCard {
     const convo = convoByCustomer.get(customer.id) ?? null;
     const last = convo ? lastMessageByConvo.get(convo.id) ?? null : null;
+    const { adSourceId, adTitle, ...customerRest } = customer;
     return {
       customerId: customer.id,
-      customer,
+      customer: { ...customerRest, ad: adInfoFor(adMap, adSourceId, adTitle) },
       conversationId: convo?.id ?? null,
       conversationOpenedAt: convo?.openedAt ?? null,
       botPaused: convo?.botPaused ?? false,

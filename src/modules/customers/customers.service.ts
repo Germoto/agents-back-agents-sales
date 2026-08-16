@@ -1,6 +1,7 @@
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
 
 /**
  * Elimina un lead/cliente POR COMPLETO. El cascade de Prisma borra sus CrmCards
@@ -91,8 +92,11 @@ export async function getCustomer(companyId: string, customerId: string) {
   });
   if (!customer) throw new AppError("Cliente no encontrado", 404);
   const { tagLinks, deals, ...rest } = customer;
+  const adMap = await resolveAdDescriptions(companyId);
   return {
     ...rest,
+    // Anuncio de origen (atribución CTWA) con la descripción del catálogo resuelta.
+    ad: adInfoFor(adMap, customer.adSourceId, customer.adTitle),
     tags: tagLinks.map((l) => l.tag),
     deals: deals.map((d) => ({ ...d, amount: Number(d.amount) })),
   };

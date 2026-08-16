@@ -52,6 +52,15 @@ type MetaMessage = {
   };
   button?: { text?: string; payload?: string };
   reaction?: { message_id?: string; emoji?: string };
+  /** Atribución CTWA: presente cuando el chat se originó en un anuncio Meta. */
+  referral?: {
+    source_id?: string;
+    source_url?: string;
+    source_type?: string;
+    headline?: string;
+    body?: string;
+    ctwa_clid?: string;
+  };
 };
 
 type MetaValue = {
@@ -142,6 +151,11 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
     type,
     mediaUrl: null, // Meta entrega media id; el servicio la resuelve con el token
     fromMe: false, // la Cloud API no ecoa salientes en `messages`
+    // Atribución CTWA (paridad con SMS Tools): Meta la entrega en msg.referral.
+    adSourceId: msg.referral?.source_id?.trim() || null,
+    adTitle: msg.referral?.headline?.trim() || null,
+    ctwaClid: msg.referral?.ctwa_clid?.trim() || null,
+    adSourceUrl: msg.referral?.source_url?.trim() || null,
     raw: msg,
   };
 

@@ -499,6 +499,15 @@ export type InboundMessage = {
   mediaUrl: string | null;
   /** true si el mensaje lo emitio el propio negocio (eco/saliente): ignorar */
   fromMe: boolean;
+  // --- Atribución de anuncios Meta CTWA (SOLO en el primer mensaje del lead) ---
+  /** ID del anuncio de Meta que originó el chat (clave de atribución) */
+  adSourceId: string | null;
+  /** Titular del creativo (identificación humana) */
+  adTitle: string | null;
+  /** Click-ID (~130 chars) — guardar ÍNTEGRO: token de Meta Conversions API */
+  ctwaClid: string | null;
+  /** URL del anuncio (fb.me/…) */
+  adSourceUrl: string | null;
   /** payload crudo para auditoria */
   raw: unknown;
 };
@@ -617,6 +626,11 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     type,
     mediaUrl: type === "text" ? null : mediaUrl,
     fromMe,
+    // Atribución CTWA: solo puebla el primer mensaje del lead; vacío = null.
+    adSourceId: field(body, data, ["ad_source_id"]),
+    adTitle: field(body, data, ["ad_title"]),
+    ctwaClid: field(body, data, ["ctwa_clid"]),
+    adSourceUrl: field(body, data, ["ad_source_url"]),
     raw,
   };
 }

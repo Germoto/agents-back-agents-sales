@@ -51,6 +51,12 @@ import { listBookings } from "../bookings/bookings.service";
 import { listCampaigns } from "../campaigns/campaigns.service";
 import { listSubscriptions } from "../subscriptions/subscriptions.service";
 import { listPendingReminders } from "../scheduler/scheduler.service";
+import {
+  listAdCatalog,
+  createAdCatalogEntry,
+  updateAdCatalogEntry,
+  deleteAdCatalogEntry,
+} from "../ad-catalog/ad-catalog.service";
 import { prepareImageUrl, resolveAiSettings } from "../../lib/ai-providers";
 
 const MAX_ITERATIONS = 8;
@@ -600,6 +606,33 @@ export const TOOLS: ToolDefinition[] = [
         type: "object",
         additionalProperties: false,
         properties: { desde: { type: "string" }, hasta: { type: "string" }, estado: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_catalogo_anuncios",
+      description:
+        "CATÁLOGO DE ANUNCIOS (atribución Meta CTWA): las entradas que mapean IDs o títulos de anuncios a una descripción amigable (la que se muestra en los leads y el reporte por anuncio).",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_anuncio",
+      description:
+        "Crea/edita/elimina una entrada del CATÁLOGO DE ANUNCIOS. Crear: {description, matchers: [ids o títulos EXACTOS como llegan del anuncio]}. Editar: {id, description?, matchers?}. Eliminar: {id, eliminar: true}. Varios matchers pueden apuntar a la misma descripción. Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string", description: "id de la entrada (editar/eliminar)" },
+          description: { type: "string" },
+          matchers: { type: "array", items: { type: "string" } },
+          eliminar: { type: "boolean" },
+        },
       },
     },
   },
@@ -1511,8 +1544,9 @@ export async function runCopilotTool(
           embudo: stats.funnel,
           topProductos: stats.topProducts,
           metodosPago: stats.paymentMethods,
+          rendimientoPorAnuncio: stats.adPerformance,
           serie: stats.series,
-          nota: "Cada KPI trae {value, prev} = periodo actual vs anterior.",
+          nota: "Cada KPI trae {value, prev} = periodo actual vs anterior. rendimientoPorAnuncio agrupa leads/ventas/ingresos/conversión por anuncio Meta de origen (adSourceId null = sin anuncio).",
         }),
         wrote: false,
       };
@@ -1619,6 +1653,39 @@ export async function runCopilotTool(
       return { result: JSON.stringify({ total: bookings.length, mostrados: rows.length, items: rows }), wrote: false };
     }
 
+    case "ver_catalogo_anuncios": {
+      const entries = await listAdCatalog(companyId);
+      return {
+        result: JSON.stringify({
+          total: entries.length,
+          items: entries.map((e) => ({ id: e.id, description: e.description, matchers: e.matchers })),
+        }),
+        wrote: false,
+      };
+    }
+
+    case "configurar_anuncio": {
+      const id = asStr(args.id);
+      if (args.eliminar === true) {
+        if (!id) return { result: JSON.stringify({ ok: false, error: "falta id para eliminar" }), wrote: false };
+        await deleteAdCatalogEntry(companyId, id);
+        return { result: JSON.stringify({ ok: true, nota: "Entrada del catálogo eliminada." }), wrote: true };
+      }
+      const matchers = asStrList(args.matchers);
+      if (id) {
+        const updated = await updateAdCatalogEntry(companyId, id, {
+          ...(args.description !== undefined ? { description: String(args.description) } : {}),
+          ...(matchers ? { matchers } : {}),
+        });
+        return { result: JSON.stringify({ ok: true, entry: { id: updated.id, description: updated.description, matchers: updated.matchers } }), wrote: true };
+      }
+      const created = await createAdCatalogEntry(companyId, {
+        description: String(args.description ?? ""),
+        matchers: matchers ?? [],
+      });
+      return { result: JSON.stringify({ ok: true, entry: { id: created.id, description: created.description, matchers: created.matchers } }), wrote: true };
+    }
+
     case "listar_campanas": {
       const campaigns = await listCampaigns(companyId);
       return { result: JSON.stringify({ total: campaigns.length, items: campaigns }), wrote: false };
@@ -1709,7 +1776,7 @@ const SYSTEM_GUIDE = [
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación.",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (/reservas-online): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
   "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat). Cada producto puede tener OFERTA con vigencia (precio de oferta + desde/hasta): vigente, el agente la presenta, cobra y valida ese precio y el normal sale tachado como 'antes'. Además hay OFERTAS ESCALONADAS en los recordatorios: cada paso puede llevar su precio (si el cliente no compra, el recordatorio 1 ofrece un precio y el 2 uno mejor — solo para ese cliente).",
-  "- Empresa (/empresa): nombre, rubro, zona horaria, horario de atención, delivery, firma.",
+  "- Empresa (/empresa): nombre, rubro, zona horaria, horario de atención, delivery, firma. Incluye el tab Anuncios: catálogo de anuncios Meta (mapea IDs/títulos de anuncios a descripciones amigables para los leads y el reporte por anuncio).",
   "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
   "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper): si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI solo para audios — sin ella los audios no se transcriben.",
   "- Flujos de chatbot (/flujos): flujos guiados visuales con su propio copiloto IA (módulo Flujos).",
@@ -1760,6 +1827,7 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
     "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto: usa la URL EXACTA que aparece en la línea [Adjuntos de este mensaje: …] del mensaje del usuario (NUNCA un data:URI ni una URL inventada). Si el usuario ya adjuntó la imagen, NO le pidas re-adjuntarla. Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
     "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
+    "- ATRIBUCIÓN DE ANUNCIOS META: los leads que llegan desde un anuncio (CTWA) quedan marcados con el anuncio de origen; ver_metricas trae rendimientoPorAnuncio (leads, ventas, ingresos y conversión POR ANUNCIO — así se sabe qué anuncio cierra ventas de verdad). El catálogo de anuncios (ver_catalogo_anuncios/configurar_anuncio, o en Empresa → Anuncios) mapea IDs/títulos crudos a descripciones amigables; varios identificadores pueden apuntar a la misma descripción.",
     "- ANALISTA DEL NEGOCIO: puedes leer métricas, ventas, comprobantes, pedidos, conversaciones (incluidos los MENSAJES reales con leer_conversacion), citas, campañas, suscripciones y recordatorios con ver_metricas/listar_*. Para preguntas de números usa PRIMERO ver_metricas (trae el periodo comparado con el anterior) y detalla después con listar_*. TODO número que cites debe salir de un resultado de tool de ESTE turno — NUNCA estimes ni 'recuerdes' cifras. Con los datos puedes proponer mejoras accionables (FAQs/objeciones a partir de chats reales, ofertas escalonadas para carritos abandonados, ajustes de prompt o recordatorios) y, SOLO si el usuario confirma, aplicarlas con las tools de escritura.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
