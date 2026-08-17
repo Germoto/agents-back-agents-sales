@@ -138,6 +138,36 @@ export async function getReceiptProof(companyId: string, receiptId: string): Pro
   return { mediaUrl, mediaType: hit.mediaType ?? "image", source: "chat" };
 }
 
+/**
+ * Vincula el comprobante a su CLIENTE cuando quedó huérfano: los receipts de
+ * webhook nacen sin customerId y solo la validación AUTOMÁTICA lo resolvía —
+ * las aprobaciones manuales del panel lo dejaban null y la venta no podía
+ * atribuirse al anuncio de origen en el dashboard. Prioridad: conversación
+ * desde la que se aprueba (dato exacto) → teléfono del pagador. Solo aplica
+ * hacia adelante (nunca reescribe un customerId ya asignado).
+ */
+async function resolveReceiptCustomerId(
+  companyId: string,
+  receipt: { customerId: string | null; payerPhone: string | null },
+  opts: { conversationId?: string | null; payerPhone?: string | null } = {},
+): Promise<string | null> {
+  if (receipt.customerId) return null; // ya vinculado: no tocar
+  if (opts.conversationId) {
+    const convo = await prisma.conversation.findFirst({
+      where: { id: opts.conversationId, companyId },
+      select: { customerId: true },
+    });
+    if (convo?.customerId) return convo.customerId;
+  }
+  const digits = (opts.payerPhone ?? receipt.payerPhone ?? "").replace(/\D/g, "");
+  if (digits.length < 8) return null;
+  const customer = await prisma.customer.findFirst({
+    where: { companyId, phone: { contains: digits } },
+    select: { id: true },
+  });
+  return customer?.id ?? null;
+}
+
 async function findReceipt(companyId: string, receiptId: string) {
   const receipt = await prisma.paymentReceipt.findFirst({
     where: { id: receiptId, companyId },
@@ -200,14 +230,18 @@ export async function approveReceipt(
   const normalizedPhone =
     payerPhone != null ? payerPhone.replace(/\D/g, "") || null : undefined;
 
+  // Vincular al cliente si el receipt estaba huérfano (atribución por anuncio).
+  const resolvedCustomerId = await resolveReceiptCustomerId(companyId, receipt, { payerPhone });
+
   const updated = await prisma.$transaction(async (tx) => {
     const approved = await applyReceiptApproval(tx, receipt.id, receipt.digitalSaleId);
-    if (productId || normalizedPhone !== undefined) {
+    if (productId || normalizedPhone !== undefined || resolvedCustomerId) {
       return tx.paymentReceipt.update({
         where: { id: receipt.id },
         data: {
           ...(productId ? { productId } : {}),
           ...(normalizedPhone !== undefined ? { payerPhone: normalizedPhone } : {}),
+          ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
         },
       });
     }
@@ -265,6 +299,13 @@ export async function deliverReceiptManually(
   const normalizedPhone =
     params.payerPhone != null ? params.payerPhone.replace(/\D/g, "") || null : undefined;
 
+  // Vincular al cliente si el receipt estaba huérfano (atribución por anuncio):
+  // aquí tenemos la conversación exacta desde la que se entrega.
+  const resolvedCustomerId = await resolveReceiptCustomerId(companyId, receipt, {
+    conversationId: params.conversationId,
+    payerPhone: params.payerPhone,
+  });
+
   const updated = await prisma.$transaction(async (tx) => {
     await applyReceiptApproval(tx, receipt.id, receipt.digitalSaleId);
     const result = await tx.paymentReceipt.update({
@@ -272,6 +313,7 @@ export async function deliverReceiptManually(
       data: {
         productId: params.productId,
         ...(normalizedPhone !== undefined ? { payerPhone: normalizedPhone } : {}),
+        ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
       },
     });
     // Si había venta digital asociada, la marcamos ENTREGADO (sobreescribe el
@@ -345,7 +387,7 @@ export async function associateReceiptProduct(
   productId?: string | null,
   payerPhone?: string | null,
 ) {
-  await findReceipt(companyId, receiptId);
+  const receipt = await findReceipt(companyId, receiptId);
 
   // Solo productos de la empresa (si se asocia uno)
   if (productId) {
@@ -360,11 +402,15 @@ export async function associateReceiptProduct(
   const normalizedPhone =
     payerPhone != null ? payerPhone.replace(/\D/g, "") || null : undefined;
 
+  // Vincular al cliente si el receipt estaba huérfano (atribución por anuncio).
+  const resolvedCustomerId = await resolveReceiptCustomerId(companyId, receipt, { payerPhone });
+
   const updated = await prisma.paymentReceipt.update({
     where: { id: receiptId },
     data: {
       productId: productId ?? null,
       ...(normalizedPhone !== undefined ? { payerPhone: normalizedPhone } : {}),
+      ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
     },
   });
 
