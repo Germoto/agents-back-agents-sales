@@ -184,6 +184,7 @@ model Company {
   webhookEndpoints  WebhookEndpoint[]
   webchatConfig     WebchatConfig?
   mcpConfig         McpConfig?
+  metaCapiConfig    MetaCapiConfig?
   adCatalogEntries  AdCatalogEntry[]
   bookingWidget     BookingWidgetConfig?
   platformPayments  PlatformPayment[]
@@ -318,6 +319,21 @@ model McpConfig {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+// Meta Conversions API por tenant (CTWA): reporta cada venta aprobada (Purchase)
+// con el ctwa_clid del lead para que Meta atribuya la conversión al anuncio y
+// optimice las campañas hacia compradores. accessToken cifrado AES-256-GCM.
+model MetaCapiConfig {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId     String   @unique @db.Uuid
+  enabled       Boolean  @default(false)
+  datasetId     String
+  accessToken   String
+  testEventCode String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
 model WebchatConfig {

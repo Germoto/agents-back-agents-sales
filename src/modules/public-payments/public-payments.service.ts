@@ -4,6 +4,7 @@ import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { validatePaymentInValidPay } from "../../lib/validpay-client";
 import type { MatchBody, UpdateStatusBody, ClaimBody } from "./public-payments.schemas";
+import { reportCtwaConversion } from "../meta-capi/meta-capi.service";
 
 // -------------------------------------------------------------------------
 // Helpers de identificación de company por phone admin (estilo /bot/config)
@@ -573,6 +574,12 @@ export async function updatePaymentStatus(
     notifyValidPayApproval(companyId, updated.externalId).catch((err) => {
       console.error("[ValidPay] No se pudo notificar aprobación desde n8n:", err.message);
     });
+  }
+
+  // Meta Conversions API: reportar la venta al anuncio de origen (ctwa_clid del
+  // lead). Best-effort, no-op si el tenant no configuró CAPI.
+  if (input.status === "APROBADO") {
+    void reportCtwaConversion(companyId, updated.id).catch(() => undefined);
   }
 
   const serialized = serializeReceipt(updated);

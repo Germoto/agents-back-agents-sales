@@ -7,6 +7,7 @@ import { env } from "../../config/env";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { ConversationState, saveState } from "../agent/conversation.service";
 import { resumeFlowOnPaymentOutcome } from "../flows/flow-engine";
+import { reportCtwaConversion } from "../meta-capi/meta-capi.service";
 
 export interface ReceiptFilters {
   status?: string | null;
@@ -256,6 +257,9 @@ export async function approveReceipt(
     });
   }
 
+  // Meta Conversions API: reportar la venta al anuncio de origen (best-effort).
+  void reportCtwaConversion(companyId, receipt.id).catch(() => undefined);
+
   // Emitir evento Socket.IO para que el frontend actualice en tiempo real
   socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
     id: updated.id,
@@ -326,6 +330,9 @@ export async function deliverReceiptManually(
     }
     return result;
   });
+
+  // Meta Conversions API: reportar la venta al anuncio de origen (best-effort).
+  void reportCtwaConversion(companyId, receipt.id).catch(() => undefined);
 
   // Embudo del chat → ENTREGADO (best-effort, no rompe la aprobación).
   try {
