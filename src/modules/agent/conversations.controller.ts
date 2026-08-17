@@ -9,6 +9,7 @@ import {
   setBotPaused,
   sendHumanReply,
   sendHumanMedia,
+  reactToMessage,
   startConversation,
   getConversationCustomerPhone,
   getConversationCustomerId,
@@ -103,8 +104,20 @@ export const replyConversationController = asyncHandler(async (req: Request, res
       fileName: req.body?.fileName ? String(req.body.fileName) : undefined,
     });
   } else {
-    await sendHumanReply(companyId, String(req.params.id), message);
+    await sendHumanReply(companyId, String(req.params.id), message, {
+      quoteMessageId: req.body?.quoteMessageId ? String(req.body.quoteMessageId) : null,
+    });
   }
+  res.json({ success: true });
+});
+
+export const reactConversationController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const messageId = String(req.body?.messageId ?? "").trim();
+  if (!messageId) throw new AppError("Falta el mensaje a reaccionar (messageId)", 400);
+  // emoji "" = quitar la reacción existente.
+  const emoji = String(req.body?.emoji ?? "");
+  await reactToMessage(companyId, String(req.params.id), messageId, emoji);
   res.json({ success: true });
 });
 

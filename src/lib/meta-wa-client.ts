@@ -134,7 +134,12 @@ export function mediaTooLargeReason(kind: "image" | "video" | "audio" | "documen
 
 export const metaWa = {
   /** Mensaje de texto libre (solo dentro de la ventana de 24h). */
-  async sendText(creds: MetaCredentials, to: string, body: string): Promise<{ wamid: string | null }> {
+  async sendText(
+    creds: MetaCredentials,
+    to: string,
+    body: string,
+    opts?: { quoteWamid?: string | null },
+  ): Promise<{ wamid: string | null }> {
     const res = await graphRequest<SendResponse>(`/${creds.phoneNumberId}/messages`, creds.accessToken, {
       method: "POST",
       body: {
@@ -142,9 +147,28 @@ export const metaWa = {
         to: normalizeTo(to),
         type: "text",
         text: { body, preview_url: true },
+        // Responder citando (Cloud API): context.message_id = wamid citado.
+        ...(opts?.quoteWamid ? { context: { message_id: opts.quoteWamid } } : {}),
       },
     });
     return { wamid: wamidOf(res) };
+  },
+
+  /** Reacciona a un mensaje (emoji "" = quitar). messageId = wamid del target. */
+  async sendReaction(
+    creds: MetaCredentials,
+    to: string,
+    opts: { messageId: string; emoji: string },
+  ): Promise<void> {
+    await graphRequest<SendResponse>(`/${creds.phoneNumberId}/messages`, creds.accessToken, {
+      method: "POST",
+      body: {
+        messaging_product: "whatsapp",
+        to: normalizeTo(to),
+        type: "reaction",
+        reaction: { message_id: opts.messageId, emoji: opts.emoji },
+      },
+    });
   },
 
   /**

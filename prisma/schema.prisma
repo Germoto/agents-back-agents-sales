@@ -833,6 +833,8 @@ model ConversationMessage {
   wamid           String?
   // Reacción emoji del cliente SOBRE este mensaje (webhook con target_wamid).
   reaction        String?
+  // Reacción NUESTRA (asesor) sobre este mensaje, enviada vía /api/react.
+  ownReaction     String?
   // Respuesta citando: wamid citado + preview resuelto del texto citado (panel + contexto del agente).
   quotedWamid     String?
   quotedPreview   String?

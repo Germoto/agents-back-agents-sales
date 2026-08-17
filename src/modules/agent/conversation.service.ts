@@ -13,7 +13,7 @@ import { env } from "../../config/env";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { deleteCustomer } from "../customers/customers.service";
-import { loadWhatsappSender, sendText, sendMedia, webSender } from "./outbound";
+import { loadWhatsappSender, sendText, sendMedia, sendReaction, webSender } from "./outbound";
 import { applyFirma } from "./firma";
 import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
 import type { ChatMessage } from "../../lib/openai";
@@ -501,7 +501,22 @@ export async function getConversationCustomerId(
 }
 
 /** Envía un mensaje manual (humano/asesor) al cliente por su canal y lo registra. */
-export async function sendHumanReply(companyId: string, conversationId: string, message: string) {
+/**
+ * wamid utilizable de un mensaje para reaccionar/citar: la columna wamid, o el
+ * gatewayId cuando ya ES un wamid (Meta guarda el wamid ahí; el id numérico de
+ * SMS Tools no sirve — el wamid real se aprende del webhook de estados).
+ */
+function whatsappIdOf(row: { wamid: string | null; gatewayId: string | null }): string | null {
+  if (row.wamid) return row.wamid;
+  return row.gatewayId && !/^\d+$/.test(row.gatewayId) ? row.gatewayId : null;
+}
+
+export async function sendHumanReply(
+  companyId: string,
+  conversationId: string,
+  message: string,
+  opts?: { quoteMessageId?: string | null },
+) {
   const convo = await prisma.conversation.findFirst({
     where: { id: conversationId, companyId },
     select: { id: true, channel: true, customerId: true, customer: { select: { phone: true } } },
@@ -512,15 +527,97 @@ export async function sendHumanReply(companyId: string, conversationId: string, 
   const sender = convo.channel === "web" ? webSender(convo.id) : await loadWhatsappSender(companyId);
   if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
 
+  // Responder CITANDO: resolver el wamid del mensaje citado (misma conversación)
+  // y quién lo escribió ("" = cliente, "me" = propio) + preview para la burbuja.
+  let quote: { wamid: string; from: "" | "me"; preview: string | null } | null = null;
+  if (opts?.quoteMessageId) {
+    const quoted = await prisma.conversationMessage.findFirst({
+      where: { id: opts.quoteMessageId, companyId, conversationId },
+      select: { wamid: true, gatewayId: true, role: true, message: true, mediaType: true },
+    });
+    if (!quoted) throw new AppError("El mensaje a citar no existe en esta conversación", 404);
+    const wamid = whatsappIdOf(quoted);
+    if (!wamid) {
+      throw new AppError(
+        "Aún no tengo el ID de WhatsApp de ese mensaje (llega con el ✓✓). Intenta en unos segundos.",
+        409,
+      );
+    }
+    const previewText = (quoted.message ?? "").replace(/\s+/g, " ").trim();
+    quote = {
+      wamid,
+      from: quoted.role === "USER" ? "" : "me",
+      preview: previewText ? previewText.slice(0, 160) : quoted.mediaType ? `[${quoted.mediaType}]` : null,
+    };
+  }
+
   const to = convo.customer.phone.replace(/\D/g, "");
   const text = (await applyFirma(companyId, message)) ?? message;
-  await sendText(sender, to, text);
+  const sent = await sendText(sender, to, text, quote ? { quoteWamid: quote.wamid, quoteFrom: quote.from } : undefined);
   await recordMessage({
     companyId,
     customerId: convo.customerId,
     conversationId,
     role: "ADMIN",
     message: text,
+    // Los mensajes del asesor también ganan checks y son anclables (wamid se
+    // aprende del webhook de estados vía el gatewayId).
+    gatewayId: sent.gatewayId,
+    deliveryStatus: sent.gatewayId ? "pending" : null,
+    quotedWamid: quote?.wamid ?? null,
+    quotedPreview: quote?.preview ?? null,
+  });
+}
+
+/**
+ * Reacciona (o quita la reacción, emoji "") a un mensaje del chat desde el
+ * panel. El target se ancla por su wamid (USER: llega en el inbound; bot/asesor:
+ * se aprende del webhook de estados — si aún no llegó, error legible).
+ */
+export async function reactToMessage(
+  companyId: string,
+  conversationId: string,
+  messageId: string,
+  emoji: string,
+): Promise<void> {
+  const convo = await prisma.conversation.findFirst({
+    where: { id: conversationId, companyId },
+    select: { id: true, channel: true, customerId: true, customer: { select: { phone: true } } },
+  });
+  if (!convo) throw new AppError("Conversación no encontrada", 404);
+  if (convo.channel === "web") throw new AppError("Las reacciones no están disponibles en el chat web", 422);
+
+  const msg = await prisma.conversationMessage.findFirst({
+    where: { id: messageId, companyId, conversationId },
+    select: { id: true, role: true, wamid: true, gatewayId: true },
+  });
+  if (!msg) throw new AppError("Mensaje no encontrado", 404);
+  const targetWamid = whatsappIdOf(msg);
+  if (!targetWamid) {
+    throw new AppError(
+      "Aún no tengo el ID de WhatsApp de ese mensaje (llega con el ✓✓). Intenta en unos segundos.",
+      409,
+    );
+  }
+
+  const sender = await loadWhatsappSender(companyId);
+  if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
+
+  await sendReaction(sender, convo.customer.phone.replace(/\D/g, ""), {
+    wamid: targetWamid,
+    emoji: emoji.trim(),
+    fromMe: msg.role !== "USER",
+  });
+
+  await prisma.conversationMessage.update({
+    where: { id: msg.id },
+    data: { ownReaction: emoji.trim() || null },
+  });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.MESSAGE_UPDATED, {
+    conversationId,
+    customerId: convo.customerId,
+    id: msg.id,
+    ownReaction: emoji.trim() || null,
   });
 }
 
@@ -762,7 +859,7 @@ export async function listConversationMessages(
   conversationId: string,
   limit = 200,
 ) {
-  return prisma.conversationMessage.findMany({
+  const rows = await prisma.conversationMessage.findMany({
     where: { companyId, conversationId },
     orderBy: { createdAt: "asc" },
     take: limit,
@@ -777,8 +874,14 @@ export async function listConversationMessages(
       deliveryStatus: true,
       reaction: true,
       quotedPreview: true,
+      // wamid (normalizado abajo): el panel decide si un mensaje ya es
+      // reaccionable/citable; ownReaction: la reacción del asesor.
+      wamid: true,
+      gatewayId: true,
+      ownReaction: true,
     },
   });
+  return rows.map(({ gatewayId, ...r }) => ({ ...r, wamid: whatsappIdOf({ wamid: r.wamid, gatewayId }) }));
 }
 
 /**

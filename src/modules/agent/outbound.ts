@@ -90,6 +90,7 @@ export async function sendText(
   sender: WhatsappSender,
   to: string,
   message: string,
+  opts?: { quoteWamid?: string | null; quoteFrom?: "" | "me" },
 ): Promise<SendResult> {
   if (sender.provider === "WEB") {
     socketService.emitToWebchat(sender.conversationId, SOCKET_EVENTS.WEBCHAT_MESSAGE, {
@@ -101,7 +102,7 @@ export async function sendText(
     return { gatewayId: null };
   }
   if (sender.provider === "META") {
-    const res = await metaWa.sendText(sender, to, message);
+    const res = await metaWa.sendText(sender, to, message, { quoteWamid: opts?.quoteWamid });
     return { gatewayId: res.wamid };
   }
   const res = await smsTools.sendMessage(
@@ -109,8 +110,32 @@ export async function sendText(
     sender.account,
     to,
     message,
+    opts?.quoteWamid ? { quoteWamid: opts.quoteWamid, quoteFrom: opts.quoteFrom ?? "" } : undefined,
   );
   return { gatewayId: gatewayIdOf(res) };
+}
+
+/**
+ * Reacciona con un emoji a un mensaje del chat (emoji "" = quitar). El wamid es
+ * el de WhatsApp del mensaje target; fromMe=true si el target es nuestro.
+ */
+export async function sendReaction(
+  sender: WhatsappSender,
+  to: string,
+  opts: { wamid: string; emoji: string; fromMe: boolean },
+): Promise<void> {
+  if (sender.provider === "WEB") {
+    throw new AppError("Las reacciones no están disponibles en el chat web", 422);
+  }
+  if (sender.provider === "META") {
+    await metaWa.sendReaction(sender, to, { messageId: opts.wamid, emoji: opts.emoji });
+    return;
+  }
+  await smsTools.sendReaction(
+    { apiUrl: sender.apiUrl, secret: sender.secret },
+    sender.account,
+    { recipient: to, wamid: opts.wamid, reaction: opts.emoji, fromMe: opts.fromMe },
+  );
 }
 
 export async function sendMedia(

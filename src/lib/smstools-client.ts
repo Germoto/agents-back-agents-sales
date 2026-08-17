@@ -316,6 +316,7 @@ export const smsTools = {
     account: string,
     to: string,
     message: string,
+    opts?: { quoteWamid?: string | null; quoteFrom?: "" | "me" },
   ): Promise<SmsToolsMessage> {
     const base = deriveApiBase(creds.apiUrl);
     const body = new URLSearchParams();
@@ -324,10 +325,37 @@ export const smsTools = {
     body.set("recipient", to);
     body.set("type", "text");
     body.set("message", message);
+    // Responder citando: wamid del mensaje citado + quién lo escribió ("" =
+    // cliente, "me" = mensaje propio del bot/asesor).
+    if (opts?.quoteWamid) {
+      body.set("quote_wamid", opts.quoteWamid);
+      body.set("quote_from", opts.quoteFrom ?? "");
+    }
     return smsToolsRequest<SmsToolsMessage>(base, "/send/whatsapp", {
       method: "POST",
       body,
     });
+  },
+
+  /**
+   * Reacciona con un emoji a un mensaje del chat (reaction "" = quitar la
+   * reacción). fromMe=true cuando el mensaje reaccionado es propio (bot/asesor);
+   * el wamid es el de WhatsApp (data[wamid] del inbound o aprendido del status).
+   */
+  async sendReaction(
+    creds: SmsToolsCredentials,
+    account: string,
+    opts: { recipient: string; wamid: string; reaction: string; fromMe: boolean },
+  ): Promise<unknown> {
+    const base = deriveApiBase(creds.apiUrl);
+    const body = new URLSearchParams();
+    body.set("secret", creds.secret);
+    body.set("unique", account);
+    body.set("recipient", opts.recipient);
+    body.set("wamid", opts.wamid);
+    body.set("reaction", opts.reaction);
+    body.set("from_me", opts.fromMe ? "1" : "0");
+    return smsToolsRequest<unknown>(base, "/react/whatsapp", { method: "POST", body });
   },
 
   /**
