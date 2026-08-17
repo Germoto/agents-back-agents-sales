@@ -194,6 +194,7 @@ export async function recordMessage(opts: {
   rawPayload?: Prisma.InputJsonValue;
   gatewayId?: string | null;
   deliveryStatus?: string | null;
+  wamid?: string | null;
   quotedWamid?: string | null;
   quotedPreview?: string | null;
 }): Promise<string> {
@@ -209,6 +210,7 @@ export async function recordMessage(opts: {
       productId: opts.productId ?? null,
       gatewayId: opts.gatewayId ?? null,
       deliveryStatus: opts.deliveryStatus ?? null,
+      wamid: opts.wamid ?? null,
       quotedWamid: opts.quotedWamid ?? null,
       quotedPreview: opts.quotedPreview ?? null,
       ...(opts.rawPayload !== undefined ? { rawPayload: opts.rawPayload } : {}),
@@ -259,17 +261,30 @@ export async function applyDeliveryStatus(ids: Array<string | null>, rawStatus: 
   const keys = ids.filter((v): v is string => !!v && v.trim().length > 0);
   if (!status || !keys.length) return false;
   const msg = await prisma.conversationMessage.findFirst({
-    where: { gatewayId: { in: keys } },
-    select: { id: true, companyId: true, conversationId: true, customerId: true, deliveryStatus: true },
+    where: { OR: [{ gatewayId: { in: keys } }, { wamid: { in: keys } }] },
+    select: { id: true, companyId: true, conversationId: true, customerId: true, deliveryStatus: true, wamid: true },
   });
   if (!msg) return false;
+  // PUENTE id↔wamid: el evento trae el par (id numérico del gateway + wamid de
+  // WhatsApp). Los envíos SMS Tools van encolados (priority=2, sin wamid en la
+  // respuesta), así que el wamid se APRENDE aquí — con él las reacciones/citas
+  // (target_wamid/quoted_wamid) pueden anclar a los mensajes del bot.
+  // El wamid es la llave NO numérica del par (el id del gateway es numérico).
+  const learnedWamid = !msg.wamid ? keys.find((k) => !/^\d+$/.test(k)) ?? null : null;
   const current = msg.deliveryStatus ?? "pending";
-  if (status === "failed") {
-    if (["delivered", "read", "failed"].includes(current)) return false; // ya llegó o ya avisado
-  } else if ((DELIVERY_RANK[status] ?? 0) <= (DELIVERY_RANK[current] ?? -1)) {
-    return false; // no degradar ni repetir
-  }
-  await prisma.conversationMessage.update({ where: { id: msg.id }, data: { deliveryStatus: status } });
+  const isUpgrade =
+    status === "failed"
+      ? !["delivered", "read", "failed"].includes(current) // ya llegó o ya avisado
+      : (DELIVERY_RANK[status] ?? 0) > (DELIVERY_RANK[current] ?? -1); // no degradar ni repetir
+  if (!isUpgrade && !learnedWamid) return false;
+  await prisma.conversationMessage.update({
+    where: { id: msg.id },
+    data: {
+      ...(isUpgrade ? { deliveryStatus: status } : {}),
+      ...(learnedWamid ? { wamid: learnedWamid } : {}),
+    },
+  });
+  if (!isUpgrade) return false;
   socketService.emitToCompany(msg.companyId, SOCKET_EVENTS.MESSAGE_UPDATED, {
     conversationId: msg.conversationId,
     customerId: msg.customerId,
@@ -282,7 +297,7 @@ export async function applyDeliveryStatus(ids: Array<string | null>, rawStatus: 
 /** Ancla una reacción emoji al mensaje target (por wamid); vacío la quita. */
 export async function applyReaction(companyId: string, targetWamid: string, emoji: string): Promise<boolean> {
   const msg = await prisma.conversationMessage.findFirst({
-    where: { companyId, gatewayId: targetWamid },
+    where: { companyId, OR: [{ wamid: targetWamid }, { gatewayId: targetWamid }] },
     select: { id: true, conversationId: true, customerId: true },
   });
   if (!msg) return false;
@@ -302,7 +317,7 @@ export async function applyReaction(companyId: string, targetWamid: string, emoj
 /** Preview del mensaje citado (por wamid, misma empresa) para burbuja y contexto del agente. */
 export async function resolveQuotedPreview(companyId: string, quotedWamid: string): Promise<string | null> {
   const quoted = await prisma.conversationMessage.findFirst({
-    where: { companyId, gatewayId: quotedWamid },
+    where: { companyId, OR: [{ wamid: quotedWamid }, { gatewayId: quotedWamid }] },
     select: { message: true, mediaType: true },
   });
   if (!quoted) return null;

@@ -469,6 +469,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     mediaUrl: inbound.mediaUrl,
     mediaType: inbound.mediaUrl && inbound.type !== "text" ? inbound.type : null,
     gatewayId: inbound.messageId,
+    wamid: inbound.wamid,
     quotedWamid: inbound.quotedWamid,
     quotedPreview,
     rawPayload: inbound.raw as any,

@@ -804,6 +804,11 @@ model ConversationMessage {
   gatewayId       String?
   deliveryStatus  String?
   deliveryRetries Int             @default(0)
+  // wamid de WhatsApp (3EB0…) del mensaje: en USER llega en data[wamid]; en
+  // ASSISTANT (SMS Tools encola con priority=2 y no lo devuelve) se APRENDE
+  // del webhook whatsapp_status, que trae el par id+wamid (backfill). Es la
+  // llave que usan target_wamid/quoted_wamid de reacciones y citas.
+  wamid           String?
   // Reacción emoji del cliente SOBRE este mensaje (webhook con target_wamid).
   reaction        String?
   // Respuesta citando: wamid citado + preview resuelto del texto citado (panel + contexto del agente).
@@ -819,6 +824,7 @@ model ConversationMessage {
   @@index([conversationId, createdAt])
   @@index([deliveryStatus, createdAt])
   @@index([gatewayId])
+  @@index([wamid])
 }
 
 // Conversación viva del agente con un cliente (reemplaza el staticData de n8n).

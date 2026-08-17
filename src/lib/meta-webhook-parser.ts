@@ -161,6 +161,7 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
     ctwaClid: msg.referral?.ctwa_clid?.trim() || null,
     adSourceUrl: msg.referral?.source_url?.trim() || null,
     // Reacción (target) / respuesta citando (context) — mismos anclajes que SMS Tools.
+    wamid: msg.id ?? null, // en Meta el id del mensaje ES el wamid
     targetWamid: isReaction ? msg.reaction?.message_id ?? null : null,
     quotedWamid: msg.context?.id?.trim() || null,
     raw: msg,

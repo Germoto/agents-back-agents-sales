@@ -508,6 +508,8 @@ export type InboundMessage = {
   ctwaClid: string | null;
   /** URL del anuncio (fb.me/…) */
   adSourceUrl: string | null;
+  /** wamid de WhatsApp del PROPIO mensaje entrante (ancla de reacciones/citas a mensajes del cliente) */
+  wamid: string | null;
   /** Reacción emoji: wamid del mensaje al que reaccionó el cliente */
   targetWamid: string | null;
   /** Respuesta citando: wamid del mensaje citado */
@@ -659,7 +661,8 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     adTitle: field(body, data, ["ad_title"]),
     ctwaClid: field(body, data, ["ctwa_clid"]),
     adSourceUrl: field(body, data, ["ad_source_url"]),
-    // Reacción emoji / respuesta citando (anclan a un mensaje por su wamid).
+    // wamid propio + reacción emoji / respuesta citando (anclan por wamid).
+    wamid: field(body, data, ["wamid"]),
     targetWamid: field(body, data, ["target_wamid"]),
     quotedWamid: field(body, data, ["quoted_wamid"]),
     raw,
