@@ -13,7 +13,7 @@ import { env } from "../../config/env";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { deleteCustomer } from "../customers/customers.service";
-import { loadWhatsappSender, sendText, sendMedia, sendReaction, webSender } from "./outbound";
+import { loadWhatsappSender, sendText, sendMedia, sendReaction, sendTyping, webSender } from "./outbound";
 import { applyFirma } from "./firma";
 import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
 import type { ChatMessage } from "../../lib/openai";
@@ -567,6 +567,30 @@ export async function sendHumanReply(
     quotedWamid: quote?.wamid ?? null,
     quotedPreview: quote?.preview ?? null,
   });
+}
+
+/**
+ * Dispara "escribiendo…" (o lo corta) hacia el WhatsApp del cliente cuando el
+ * ASESOR redacta en el panel. Best-effort: nunca lanza — un fallo del gateway
+ * no debe romper la experiencia de tipeo. Canal web y Meta: no-op.
+ */
+export async function sendTypingState(
+  companyId: string,
+  conversationId: string,
+  state: "composing" | "recording" | "paused",
+): Promise<void> {
+  try {
+    const convo = await prisma.conversation.findFirst({
+      where: { id: conversationId, companyId },
+      select: { channel: true, customer: { select: { phone: true } } },
+    });
+    if (!convo || convo.channel === "web") return;
+    const sender = await loadWhatsappSender(companyId);
+    if (!sender) return;
+    await sendTyping(sender, convo.customer.phone.replace(/\D/g, ""), state);
+  } catch (err) {
+    console.warn("[agent] sendTypingState error:", err instanceof Error ? err.message : err);
+  }
 }
 
 /**

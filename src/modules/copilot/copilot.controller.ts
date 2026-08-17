@@ -1809,7 +1809,7 @@ const SYSTEM_GUIDE = [
   "MAPA DEL PANEL (menú lateral):",
   "- Activación (/activacion): checklist de puesta en marcha con % de avance y botón de capacitación 1:1 por WhatsApp.",
   "- Dashboard (/dashboard): métricas del negocio.",
-  "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja.",
+  "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto).",
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM).",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",

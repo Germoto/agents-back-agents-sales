@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { asyncHandler } from "../../lib/async-handler";
-import { parseInboundWebhook, parseStatusWebhook } from "../../lib/smstools-client";
-import { handleInbound } from "./agent.service";
+import { parseInboundWebhook, parseStatusWebhook, parseTypingWebhook } from "../../lib/smstools-client";
+import { handleInbound, handleTypingEvent } from "./agent.service";
 import { applyDeliveryStatus } from "./conversation.service";
 
 /**
@@ -10,6 +10,17 @@ import { applyDeliveryStatus } from "./conversation.service";
  * y el procesamiento (OpenAI + envíos) puede tomar varios segundos.
  */
 export const inboundController = asyncHandler(async (req: Request, res: Response) => {
+  // Evento efímero "escribiendo/grabando" (type: "whatsapp_typing"): se reenvía
+  // al panel por socket y NO se persiste ni corre el agente.
+  const typing = parseTypingWebhook(req.body);
+  if (typing) {
+    res.json({ success: true });
+    void handleTypingEvent(typing).catch((err) => {
+      console.warn("[agent] handleTypingEvent error:", err instanceof Error ? err.message : err);
+    });
+    return;
+  }
+
   // Evento de ESTADO de entrega (type: "whatsapp_status"): actualiza los checks
   // del mensaje (correlación por messageId del envío o wamid) y no corre el agente.
   const status = parseStatusWebhook(req.body);

@@ -10,6 +10,7 @@ import {
   sendHumanReply,
   sendHumanMedia,
   reactToMessage,
+  sendTypingState,
   startConversation,
   getConversationCustomerPhone,
   getConversationCustomerId,
@@ -108,6 +109,15 @@ export const replyConversationController = asyncHandler(async (req: Request, res
       quoteMessageId: req.body?.quoteMessageId ? String(req.body.quoteMessageId) : null,
     });
   }
+  res.json({ success: true });
+});
+
+export const typingConversationController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const raw = String(req.body?.state ?? "").toLowerCase();
+  const state = raw === "composing" || raw === "recording" ? raw : "paused";
+  // Best-effort: el service nunca lanza; el panel no debe ver errores por typing.
+  await sendTypingState(companyId, String(req.params.id), state);
   res.json({ success: true });
 });
 

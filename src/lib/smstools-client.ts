@@ -359,6 +359,25 @@ export const smsTools = {
   },
 
   /**
+   * Dispara el indicador "escribiendo…" (composing), "grabando audio…"
+   * (recording) o lo corta (paused) en el WhatsApp del cliente. Best-effort:
+   * WhatsApp lo expira solo a los ~10s; el envío de un mensaje también lo corta.
+   */
+  async sendTyping(
+    creds: SmsToolsCredentials,
+    account: string,
+    opts: { recipient: string; state: TypingState },
+  ): Promise<unknown> {
+    const base = deriveApiBase(creds.apiUrl);
+    const body = new URLSearchParams();
+    body.set("secret", creds.secret);
+    body.set("unique", account);
+    body.set("recipient", opts.recipient);
+    body.set("state", opts.state);
+    return smsToolsRequest<unknown>(base, "/typing/whatsapp", { method: "POST", body });
+  },
+
+  /**
    * Envia un mensaje con adjunto (imagen, documento, video o audio) via WhatsApp.
    * Usado por el agente para enviar fichas de producto, multimedia y entrega.
    *
@@ -552,6 +571,35 @@ export type DeliveryStatusEvent = {
   wamid: string | null;
   status: string;
 };
+
+/** Estado del indicador de escritura (webhook whatsapp_typing y POST /typing). */
+export type TypingState = "composing" | "recording" | "paused";
+
+/** Evento efímero "el cliente está escribiendo/grabando" (type: "whatsapp_typing"). */
+export type TypingEvent = {
+  /** Teléfono del cliente (solo dígitos; puede ser pseudo-número LID). */
+  phone: string;
+  /** Cuenta WA que lo recibió (unique/account), si el gateway la incluye. */
+  account: string | null;
+  state: TypingState;
+};
+
+/**
+ * Si el webhook es un evento de TYPING del cliente (type: "whatsapp_typing"),
+ * lo parsea; si no, devuelve null (el caller sigue con status/mensaje). Señal
+ * efímera: NUNCA se persiste — solo se reenvía al panel por socket.
+ */
+export function parseTypingWebhook(raw: unknown): TypingEvent | null {
+  const body = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
+  if (String(body.type ?? "").toLowerCase() !== "whatsapp_typing") return null;
+  const data = (body.data && typeof body.data === "object" ? body.data : {}) as Record<string, any>;
+  const phone = (field(body, data, ["phone", "from", "sender"]) ?? "").replace(/\D/g, "");
+  if (!phone) return null;
+  const rawState = (field(body, data, ["state"]) ?? "").toLowerCase();
+  // Estado desconocido → "paused": ante la duda, ocultar el indicador.
+  const state: TypingState = rawState === "composing" || rawState === "recording" ? rawState : "paused";
+  return { phone, account: field(body, data, ["account", "unique", "device"]), state };
+}
 
 /**
  * Si el webhook es un evento de ESTADO de entrega (type: "whatsapp_status"),

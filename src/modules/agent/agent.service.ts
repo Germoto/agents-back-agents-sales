@@ -10,7 +10,8 @@ import { Prisma, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { env } from "../../config/env";
 import { buildBotConfig } from "../bot/bot.service";
-import type { InboundMessage } from "../../lib/smstools-client";
+import type { InboundMessage, TypingEvent } from "../../lib/smstools-client";
+import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { persistInboundMedia } from "../../lib/inbound-media";
 import {
   loadOrCreateConversation,
@@ -30,7 +31,7 @@ import {
   resolveQuotedPreview,
   type ConversationState,
 } from "./conversation.service";
-import { loadWhatsappSender, sendText, sendMedia, webSender, type WhatsappSender } from "./outbound";
+import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type WhatsappSender } from "./outbound";
 import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
@@ -201,6 +202,52 @@ async function resolveCompany(inbound: InboundMessage): Promise<string | null> {
     }
   }
   return null;
+}
+
+/**
+ * Mantiene vivo el indicador "escribiendo…" hacia el cliente mientras el agente
+ * piensa. Devuelve el stop; no-op total fuera de SMS Tools. Fire-and-forget:
+ * un fallo del gateway jamás afecta el turno.
+ */
+function startTypingKeepalive(sender: WhatsappSender, phone: string): () => void {
+  if (sender.provider !== "SMSTOOLS") return () => undefined;
+  const fire = () => {
+    void sendTyping(sender, phone, "composing").catch(() => undefined);
+  };
+  fire();
+  const timer = setInterval(fire, 8_000);
+  return () => clearInterval(timer);
+}
+
+/**
+ * Evento efímero "el cliente está escribiendo/grabando" (webhook whatsapp_typing).
+ * NO persiste nada ni corre el agente: solo reenvía la señal al panel por socket.
+ * Resuelve el tenant por la cuenta si viene; si no, por el phone del cliente
+ * (puede matchear en más de una empresa — se emite a cada una, señal inocua).
+ */
+export async function handleTypingEvent(event: TypingEvent): Promise<void> {
+  const phone = normalizePhone(event.phone);
+  if (!phone) return;
+  const companyByAccount = await resolveCompanyByAccount(event.account);
+  const customers = await prisma.customer.findMany({
+    where: { phone, ...(companyByAccount ? { companyId: companyByAccount } : {}) },
+    select: {
+      id: true,
+      companyId: true,
+      conversations: { where: { channel: "whatsapp" }, select: { id: true }, take: 1 },
+    },
+    take: 5,
+  });
+  for (const c of customers) {
+    const conversationId = c.conversations[0]?.id;
+    if (!conversationId) continue;
+    socketService.emitToCompany(c.companyId, SOCKET_EVENTS.CONVERSATION_TYPING, {
+      conversationId,
+      customerId: c.id,
+      state: event.state,
+      at: Date.now(),
+    });
+  }
 }
 
 /** Procesa un mensaje entrante. Pensado para correr en background (no bloquea el webhook). */
@@ -688,12 +735,19 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     return;
   }
 
+  // "escribiendo…" mientras el agente piensa: hace la espera natural para el
+  // cliente. Solo SMS Tools (Meta no soporta typing saliente). WhatsApp expira
+  // el indicador a los ~10s → keepalive cada 8s hasta terminar de pensar; el
+  // primer mensaje enviado lo corta solo.
+  const stopTyping = startTypingKeepalive(sender, customerPhone);
   let finalText: string;
   try {
     finalText = await runAgentTurn(ctx, history);
   } catch (err) {
     console.error("[agent] runAgentTurn falló:", err instanceof Error ? err.message : err);
     finalText = "Disculpa, estoy teniendo un inconveniente. En un momento te atiendo.";
+  } finally {
+    stopTyping();
   }
 
   // Dedup de multimedia repetida en el mismo turno: si el modelo reenvía con
@@ -708,6 +762,12 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     seenMedia.add(m.mediaUrl);
     return true;
   });
+
+  // Turno silencioso (sin nada que enviar): cortar el "escribiendo…" a mano
+  // para no dejar al cliente esperando un mensaje que no llegará.
+  if (!ctx.outbox.length && !finalText) {
+    void sendTyping(sender, customerPhone, "paused").catch(() => undefined);
+  }
 
   // Enviar adjuntos/mensajes acumulados por las herramientas, en orden, con la
   // pausa entre mensajes configurada por la empresa (Empresa → Ritmo de mensajes).

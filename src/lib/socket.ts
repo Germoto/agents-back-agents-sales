@@ -22,6 +22,7 @@ export const SOCKET_EVENTS = {
   MESSAGE_NEW:          "message.new",          // nuevo mensaje de conversación (inbound u outbound del agente)
   MESSAGE_UPDATED:      "message.updated",      // mensaje actualizado (check de entrega/lectura o reacción)
   CONVERSATION_UPDATED: "conversation.updated", // estado de conversación cambió (pausa/humano/cierre)
+  CONVERSATION_TYPING:  "conversation.typing",  // el cliente está escribiendo/grabando (efímero, no se persiste)
   ORDER_NEW:            "order.new",            // pedido físico registrado por el agente
   BOOKING_NEW:          "booking.new",          // reserva de servicio registrada por el agente
   CRM_UPDATED:          "crm.updated",          // tablero CRM cambió (move/columnas/CRUD)

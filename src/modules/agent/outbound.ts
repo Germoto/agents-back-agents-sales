@@ -138,6 +138,23 @@ export async function sendReaction(
   );
 }
 
+/**
+ * Dispara el indicador "escribiendo…/grabando…" hacia el cliente (best-effort).
+ * Solo SMS Tools lo soporta; Meta Cloud API y el chat web son no-op silencioso.
+ */
+export async function sendTyping(
+  sender: WhatsappSender,
+  to: string,
+  state: "composing" | "recording" | "paused",
+): Promise<void> {
+  if (sender.provider !== "SMSTOOLS") return;
+  await smsTools.sendTyping(
+    { apiUrl: sender.apiUrl, secret: sender.secret },
+    sender.account,
+    { recipient: to, state },
+  );
+}
+
 export async function sendMedia(
   sender: WhatsappSender,
   to: string,

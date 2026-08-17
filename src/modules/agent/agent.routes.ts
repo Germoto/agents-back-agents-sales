@@ -9,6 +9,7 @@ import {
   pauseConversationController,
   replyConversationController,
   reactConversationController,
+  typingConversationController,
   resetConversationController,
   deleteConversationController,
   deleteConversationsBulkController,
@@ -41,6 +42,7 @@ router.get("/conversations/:id/messages", requireAuth, listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);
 router.post("/conversations/:id/react", requireAuth, reactConversationController);
+router.post("/conversations/:id/typing", requireAuth, typingConversationController);
 router.post("/conversations/:id/reminder", requireAuth, scheduleReminderController);
 router.post("/conversations/:id/reset", requireAuth, resetConversationController);
 // Resumen de una conversación por id (para abrir un chat fuera de los últimos 50).
