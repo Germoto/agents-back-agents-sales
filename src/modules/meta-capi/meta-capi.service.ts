@@ -24,15 +24,25 @@ export async function getMetaCapiConfig(companyId: string) {
   return {
     enabled: config?.enabled ?? false,
     datasetId: config?.datasetId ?? "",
+    pageId: config?.pageId ?? "",
     accessTokenSet: !!config?.accessToken,
     accessTokenMasked: maskToken(config?.accessToken ?? null),
     testEventCode: config?.testEventCode ?? "",
+    // Diagnóstico del último intento (para no depurar a ciegas desde el panel).
+    lastAttemptAt: config?.lastAttemptAt ?? null,
+    lastResult: config?.lastResult ?? null,
   };
 }
 
 export async function updateMetaCapiConfig(
   companyId: string,
-  data: { enabled: boolean; datasetId: string; accessToken?: string; testEventCode?: string | null },
+  data: {
+    enabled: boolean;
+    datasetId: string;
+    accessToken?: string;
+    pageId?: string | null;
+    testEventCode?: string | null;
+  },
 ) {
   const existing = await prisma.metaCapiConfig.findUnique({ where: { companyId }, select: { id: true, accessToken: true } });
   const typedToken = data.accessToken?.trim();
@@ -43,6 +53,7 @@ export async function updateMetaCapiConfig(
   const core = {
     enabled: data.enabled,
     datasetId: data.datasetId.trim(),
+    pageId: data.pageId?.trim() || null,
     testEventCode: data.testEventCode?.trim() || null,
     // Keep-if-empty: la key guardada se conserva salvo que tipeen una nueva.
     ...(typedToken ? { accessToken: encryptCredential(typedToken) } : {}),
@@ -64,6 +75,13 @@ const sha256 = (v: string) => crypto.createHash("sha256").update(v).digest("hex"
  * No-op silencioso si: CAPI no configurado/deshabilitado, el receipt no tiene
  * cliente o el cliente no tiene ctwa_clid, o ya se reportó (metadata.capiSentAt).
  */
+/** Registra el resultado del último intento (visible en la card del panel). */
+async function recordAttempt(companyId: string, result: string): Promise<void> {
+  await prisma.metaCapiConfig
+    .update({ where: { companyId }, data: { lastAttemptAt: new Date(), lastResult: result.slice(0, 500) } })
+    .catch(() => undefined);
+}
+
 export async function reportCtwaConversion(companyId: string, receiptId: string): Promise<void> {
   try {
     const config = await prisma.metaCapiConfig.findUnique({ where: { companyId } });
@@ -85,9 +103,15 @@ export async function reportCtwaConversion(companyId: string, receiptId: string)
     });
     if (!receipt || receipt.status !== "APROBADO") return;
     const ctwaClid = receipt.customer?.ctwaClid?.trim();
-    if (!ctwaClid) return; // lead sin anuncio: nada que reportar
+    if (!ctwaClid) {
+      await recordAttempt(companyId, "Omitido: la venta no es de un lead con click-id de anuncio (no aplica).");
+      return;
+    }
     const meta = (receipt.metadata ?? {}) as Record<string, unknown>;
-    if (meta.capiSentAt) return; // ya reportado
+    if (meta.capiSentAt) {
+      await recordAttempt(companyId, "Omitido: esta venta ya fue reportada antes (no se duplica).");
+      return;
+    }
 
     const value = Number(String(receipt.amountPaid ?? receipt.amountExpected).replace(/[^0-9.]/g, ""));
     const eventTime = Math.floor((receipt.occurredAt ?? receipt.validatedAt ?? new Date()).getTime() / 1000);
@@ -103,6 +127,9 @@ export async function reportCtwaConversion(companyId: string, receiptId: string)
           messaging_channel: "whatsapp",
           user_data: {
             ctwa_clid: ctwaClid,
+            // Meta exige el page_id de la página que corre los anuncios en
+            // eventos business_messaging.
+            ...(config.pageId ? { page_id: config.pageId } : {}),
             ...(phoneDigits ? { ph: [sha256(phoneDigits)] } : {}),
           },
           custom_data: {
@@ -124,14 +151,21 @@ export async function reportCtwaConversion(companyId: string, receiptId: string)
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
       console.warn(`[meta-capi] Meta respondió ${res.status}: ${detail.slice(0, 300)}`);
+      await recordAttempt(companyId, `Error de Meta (${res.status}): ${detail.slice(0, 300)}`);
       return;
     }
     await prisma.paymentReceipt.update({
       where: { id: receipt.id },
       data: { metadata: { ...meta, capiSentAt: new Date().toISOString() } },
     });
+    await recordAttempt(
+      companyId,
+      `OK: Purchase de ${(receipt.currency || "PEN").toUpperCase()} ${value} reportado${config.testEventCode ? ` (modo prueba ${config.testEventCode})` : ""}.`,
+    );
     console.log(`[meta-capi] Purchase reportado (receipt=${receipt.id}, valor=${value}) con ctwa_clid`);
   } catch (err) {
-    console.warn("[meta-capi] no se pudo reportar la conversión:", err instanceof Error ? err.message : err);
+    const message = err instanceof Error ? err.message : "error desconocido";
+    console.warn("[meta-capi] no se pudo reportar la conversión:", message);
+    await recordAttempt(companyId, `Error: ${message}`).catch(() => undefined);
   }
 }

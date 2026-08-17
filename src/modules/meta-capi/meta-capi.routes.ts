@@ -13,6 +13,8 @@ const updateSchema = z.object({
   datasetId: z.string().trim().max(60).default(""),
   // Opcional: vacío conserva el token guardado (nunca se reenvía al panel).
   accessToken: z.string().trim().max(500).optional(),
+  // Página de Facebook que corre los anuncios (requerida por Meta en business_messaging).
+  pageId: z.string().trim().max(60).nullable().optional(),
   testEventCode: z.string().trim().max(60).nullable().optional(),
 });
 

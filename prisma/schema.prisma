@@ -330,7 +330,13 @@ model MetaCapiConfig {
   enabled       Boolean  @default(false)
   datasetId     String
   accessToken   String
+  // ID de la página de Facebook que corre los anuncios: Meta lo exige en
+  // user_data para eventos business_messaging (CTWA).
+  pageId        String?
   testEventCode String?
+  // Diagnóstico del último intento de envío (visible en la card del panel).
+  lastAttemptAt DateTime?
+  lastResult    String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
