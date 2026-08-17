@@ -1,7 +1,8 @@
 import { Request, Response } from "express";
 import { asyncHandler } from "../../lib/async-handler";
-import { parseInboundWebhook } from "../../lib/smstools-client";
+import { parseInboundWebhook, parseStatusWebhook } from "../../lib/smstools-client";
 import { handleInbound } from "./agent.service";
+import { applyDeliveryStatus } from "./conversation.service";
 
 /**
  * Webhook inbound de WhatsApp (SMS Tools). Responde 200 de inmediato y procesa
@@ -9,6 +10,17 @@ import { handleInbound } from "./agent.service";
  * y el procesamiento (OpenAI + envíos) puede tomar varios segundos.
  */
 export const inboundController = asyncHandler(async (req: Request, res: Response) => {
+  // Evento de ESTADO de entrega (type: "whatsapp_status"): actualiza los checks
+  // del mensaje (correlación por messageId del envío o wamid) y no corre el agente.
+  const status = parseStatusWebhook(req.body);
+  if (status) {
+    res.json({ success: true });
+    void applyDeliveryStatus([status.messageId, status.wamid], status.status).catch((err) => {
+      console.warn("[agent] applyDeliveryStatus error:", err instanceof Error ? err.message : err);
+    });
+    return;
+  }
+
   const inbound = parseInboundWebhook(req.body);
 
   res.json({ success: true });

@@ -18,7 +18,7 @@ import { decryptCredential } from "../../lib/credentials-crypto";
 import { persistInboundMedia } from "../../lib/inbound-media";
 import type { ParsedMetaWebhook, MetaInboundItem, MetaStatusUpdate } from "../../lib/meta-webhook-parser";
 import { handleInbound } from "../agent/agent.service";
-import { notifyOwner } from "../agent/conversation.service";
+import { notifyOwner, applyDeliveryStatus } from "../agent/conversation.service";
 
 type MetaTenant = { companyId: string; accessToken: string };
 
@@ -56,30 +56,15 @@ async function processMessage(item: MetaInboundItem): Promise<void> {
   await handleInbound(item.inbound);
 }
 
-const STATUS_MAP: Record<MetaStatusUpdate["status"], string> = {
-  sent: "sent",
-  delivered: "sent",
-  read: "sent",
-  failed: "failed",
-};
-
 async function processStatus(st: MetaStatusUpdate): Promise<void> {
   const tenant = await resolveTenant(st.phoneNumberId);
   if (!tenant) return;
 
-  const mapped = STATUS_MAP[st.status];
-  const updated = await prisma.conversationMessage.updateMany({
-    // Solo "upgrade" desde pending/unknown: un failed posterior a un delivered
-    // no debe pisar el estado bueno, y viceversa los reintentos ya resueltos.
-    where: {
-      companyId: tenant.companyId,
-      gatewayId: st.wamid,
-      deliveryStatus: { in: ["pending", "unknown"] },
-    },
-    data: { deliveryStatus: mapped },
-  });
+  // Escalera compartida sent<delivered<read (checks del panel) con upgrade por
+  // rango y emit de MESSAGE_UPDATED — misma lógica que el webhook de SMS Tools.
+  const updated = await applyDeliveryStatus([st.wamid], st.status);
 
-  if (st.status === "failed" && updated.count > 0) {
+  if (st.status === "failed" && updated) {
     const reason =
       st.errorCode === META_REENGAGEMENT_CODE
         ? META_WINDOW_REASON

@@ -508,9 +508,37 @@ export type InboundMessage = {
   ctwaClid: string | null;
   /** URL del anuncio (fb.me/…) */
   adSourceUrl: string | null;
+  /** Reacción emoji: wamid del mensaje al que reaccionó el cliente */
+  targetWamid: string | null;
+  /** Respuesta citando: wamid del mensaje citado */
+  quotedWamid: string | null;
   /** payload crudo para auditoria */
   raw: unknown;
 };
+
+/** Estado de entrega recibido por webhook (type: "whatsapp_status"). */
+export type DeliveryStatusEvent = {
+  messageId: string | null;
+  wamid: string | null;
+  status: string;
+};
+
+/**
+ * Si el webhook es un evento de ESTADO de entrega (type: "whatsapp_status"),
+ * lo parsea; si no, devuelve null (el caller sigue con el flujo de mensaje).
+ */
+export function parseStatusWebhook(raw: unknown): DeliveryStatusEvent | null {
+  const body = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
+  if (String(body.type ?? "").toLowerCase() !== "whatsapp_status") return null;
+  const data = (body.data && typeof body.data === "object" ? body.data : {}) as Record<string, any>;
+  const status = (field(body, data, ["status"]) ?? "").toLowerCase();
+  if (!status) return null;
+  return {
+    messageId: field(body, data, ["id", "messageId", "message_id"]),
+    wamid: field(body, data, ["wamid"]),
+    status,
+  };
+}
 
 /**
  * Busca un campo probando, para cada nombre base: data.<base>, el campo plano
@@ -631,6 +659,9 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     adTitle: field(body, data, ["ad_title"]),
     ctwaClid: field(body, data, ["ctwa_clid"]),
     adSourceUrl: field(body, data, ["ad_source_url"]),
+    // Reacción emoji / respuesta citando (anclan a un mensaje por su wamid).
+    targetWamid: field(body, data, ["target_wamid"]),
+    quotedWamid: field(body, data, ["quoted_wamid"]),
     raw,
   };
 }

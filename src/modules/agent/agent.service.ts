@@ -26,6 +26,8 @@ import {
   findConversationByCustomerPhone,
   resetConversation,
   getConversationRuntime,
+  applyReaction,
+  resolveQuotedPreview,
   type ConversationState,
 } from "./conversation.service";
 import { loadWhatsappSender, sendText, sendMedia, webSender, type WhatsappSender } from "./outbound";
@@ -393,6 +395,20 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
 
   // Números en atención humana forzada (lista del panel): el bot NUNCA les
   // responde (ni al comando reset). El mensaje se persiste para que se vea en
+  // Reacción emoji (target_wamid): se ANCLA al mensaje reaccionado — sin burbuja
+  // nueva y sin turno del agente (antes corría el agente con "[reacción] 👍").
+  if (inbound.targetWamid) {
+    const emoji = (inbound.text ?? "").replace(/\[reacci[oó]n\]/gi, "").trim();
+    const anchored = await applyReaction(companyId, inbound.targetWamid, emoji);
+    console.log(`[agent] reacción "${emoji}" de ${inbound.fromPhone} → ${anchored ? "anclada" : "target no encontrado"}`);
+    await markInboundProcessed(convo.conversationId, inbound.messageId);
+    return;
+  }
+
+  // Respuesta citando (quoted_wamid): preview del texto citado para la burbuja
+  // del panel y el contexto del agente.
+  const quotedPreview = inbound.quotedWamid ? await resolveQuotedPreview(companyId, inbound.quotedWamid) : null;
+
   // Conversaciones y la conversación pasa a HUMANO automáticamente.
   const muted = ((config as any).agent?.mutedNumbers ?? []) as string[];
   if (muted.length > 0 && isPhoneAllowed(inbound.fromPhone, muted)) {
@@ -404,6 +420,9 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
       message: inbound.text || null,
       mediaUrl: inbound.mediaUrl,
       mediaType: inbound.mediaUrl && inbound.type !== "text" ? inbound.type : null,
+      gatewayId: inbound.messageId,
+      quotedWamid: inbound.quotedWamid,
+      quotedPreview,
       rawPayload: inbound.raw as any,
     });
     await markInboundProcessed(convo.conversationId, inbound.messageId);
@@ -440,7 +459,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     return;
   }
 
-  // Persistir el mensaje del cliente
+  // Persistir el mensaje del cliente (con su wamid: ancla de reacciones/citas)
   const userMessageId = await recordMessage({
     companyId,
     customerId: convo.customerId,
@@ -449,6 +468,9 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     message: inbound.text || null,
     mediaUrl: inbound.mediaUrl,
     mediaType: inbound.mediaUrl && inbound.type !== "text" ? inbound.type : null,
+    gatewayId: inbound.messageId,
+    quotedWamid: inbound.quotedWamid,
+    quotedPreview,
     rawPayload: inbound.raw as any,
   });
   await markInboundProcessed(convo.conversationId, inbound.messageId);

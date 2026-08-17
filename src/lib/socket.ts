@@ -20,6 +20,7 @@ export const SOCKET_EVENTS = {
   RECEIPT_NEW:          "receipt.new",          // nuevo comprobante creado (vía webhook)
   RECEIPT_UPDATED:      "receipt.updated",      // comprobante actualizado (approve/reject/validated)
   MESSAGE_NEW:          "message.new",          // nuevo mensaje de conversación (inbound u outbound del agente)
+  MESSAGE_UPDATED:      "message.updated",      // mensaje actualizado (check de entrega/lectura o reacción)
   CONVERSATION_UPDATED: "conversation.updated", // estado de conversación cambió (pausa/humano/cierre)
   ORDER_NEW:            "order.new",            // pedido físico registrado por el agente
   BOOKING_NEW:          "booking.new",          // reserva de servicio registrada por el agente

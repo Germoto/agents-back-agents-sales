@@ -194,6 +194,8 @@ export async function recordMessage(opts: {
   rawPayload?: Prisma.InputJsonValue;
   gatewayId?: string | null;
   deliveryStatus?: string | null;
+  quotedWamid?: string | null;
+  quotedPreview?: string | null;
 }): Promise<string> {
   const created = await prisma.conversationMessage.create({
     data: {
@@ -207,6 +209,8 @@ export async function recordMessage(opts: {
       productId: opts.productId ?? null,
       gatewayId: opts.gatewayId ?? null,
       deliveryStatus: opts.deliveryStatus ?? null,
+      quotedWamid: opts.quotedWamid ?? null,
+      quotedPreview: opts.quotedPreview ?? null,
       ...(opts.rawPayload !== undefined ? { rawPayload: opts.rawPayload } : {}),
     },
     select: { id: true, role: true, message: true, mediaUrl: true, mediaType: true, createdAt: true },
@@ -228,6 +232,83 @@ export async function recordMessage(opts: {
     createdAt: created.createdAt,
   });
   return created.id;
+}
+
+// ---------------------------------------------------------------------------
+// Checks de entrega (webhook whatsapp_status / statuses de Meta) y reacciones
+// ---------------------------------------------------------------------------
+/** Escalera de estados: solo se hace UPGRADE (nunca read→delivered). */
+const DELIVERY_RANK: Record<string, number> = { pending: 0, unknown: 0, sent: 1, delivered: 2, read: 3 };
+
+/** Normaliza el estado del gateway a la escalera (played cuenta como leído). */
+export function normalizeDeliveryStatus(status: string): string | null {
+  const s = status.toLowerCase();
+  if (s === "played") return "read";
+  if (["sent", "delivered", "read"].includes(s)) return s;
+  if (["failed", "error", "rejected", "undelivered"].includes(s)) return "failed";
+  return null;
+}
+
+/**
+ * Aplica un estado de entrega a un mensaje por su gatewayId (id del gateway o
+ * wamid). Solo upgrade por rango; "failed" siempre gana sobre pending/sent.
+ * Emite MESSAGE_UPDATED para refrescar los checks del panel en vivo.
+ */
+export async function applyDeliveryStatus(ids: Array<string | null>, rawStatus: string): Promise<boolean> {
+  const status = normalizeDeliveryStatus(rawStatus);
+  const keys = ids.filter((v): v is string => !!v && v.trim().length > 0);
+  if (!status || !keys.length) return false;
+  const msg = await prisma.conversationMessage.findFirst({
+    where: { gatewayId: { in: keys } },
+    select: { id: true, companyId: true, conversationId: true, customerId: true, deliveryStatus: true },
+  });
+  if (!msg) return false;
+  const current = msg.deliveryStatus ?? "pending";
+  if (status === "failed") {
+    if (["delivered", "read", "failed"].includes(current)) return false; // ya llegó o ya avisado
+  } else if ((DELIVERY_RANK[status] ?? 0) <= (DELIVERY_RANK[current] ?? -1)) {
+    return false; // no degradar ni repetir
+  }
+  await prisma.conversationMessage.update({ where: { id: msg.id }, data: { deliveryStatus: status } });
+  socketService.emitToCompany(msg.companyId, SOCKET_EVENTS.MESSAGE_UPDATED, {
+    conversationId: msg.conversationId,
+    customerId: msg.customerId,
+    id: msg.id,
+    deliveryStatus: status,
+  });
+  return true;
+}
+
+/** Ancla una reacción emoji al mensaje target (por wamid); vacío la quita. */
+export async function applyReaction(companyId: string, targetWamid: string, emoji: string): Promise<boolean> {
+  const msg = await prisma.conversationMessage.findFirst({
+    where: { companyId, gatewayId: targetWamid },
+    select: { id: true, conversationId: true, customerId: true },
+  });
+  if (!msg) return false;
+  await prisma.conversationMessage.update({
+    where: { id: msg.id },
+    data: { reaction: emoji.trim() || null },
+  });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.MESSAGE_UPDATED, {
+    conversationId: msg.conversationId,
+    customerId: msg.customerId,
+    id: msg.id,
+    reaction: emoji.trim() || null,
+  });
+  return true;
+}
+
+/** Preview del mensaje citado (por wamid, misma empresa) para burbuja y contexto del agente. */
+export async function resolveQuotedPreview(companyId: string, quotedWamid: string): Promise<string | null> {
+  const quoted = await prisma.conversationMessage.findFirst({
+    where: { companyId, gatewayId: quotedWamid },
+    select: { message: true, mediaType: true },
+  });
+  if (!quoted) return null;
+  const text = (quoted.message ?? "").replace(/\s+/g, " ").trim();
+  if (text) return text.slice(0, 160);
+  return quoted.mediaType ? `[${quoted.mediaType}]` : null;
 }
 
 /**
@@ -670,7 +751,18 @@ export async function listConversationMessages(
     where: { companyId, conversationId },
     orderBy: { createdAt: "asc" },
     take: limit,
-    select: { id: true, role: true, message: true, mediaUrl: true, mediaType: true, createdAt: true },
+    select: {
+      id: true,
+      role: true,
+      message: true,
+      mediaUrl: true,
+      mediaType: true,
+      createdAt: true,
+      // Checks de entrega, reacción anclada y preview de la cita (panel).
+      deliveryStatus: true,
+      reaction: true,
+      quotedPreview: true,
+    },
   });
 }
 
@@ -690,7 +782,7 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
     where: { conversationId, role: { in: ["USER", "ASSISTANT", "ADMIN"] } },
     orderBy: { createdAt: "desc" },
     take: limit,
-    select: { role: true, message: true, mediaUrl: true, mediaType: true },
+    select: { role: true, message: true, mediaUrl: true, mediaType: true, quotedPreview: true },
   });
   rows.reverse();
   return rows.map((r) => {
@@ -711,6 +803,9 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
         : "[se envió una imagen/archivo al cliente]";
     }
     if (isHuman) content = `${HUMAN_AGENT_TAG} ${content}`;
+    // Respuesta citando: el agente recibe QUÉ citó el cliente (el panel pinta su
+    // propio bloque de cita — este prefijo es solo para el contexto del modelo).
+    if (isUser && r.quotedPreview) content = `[Responde citando: "${r.quotedPreview}"] ${content}`;
     return { role, content };
   });
 }

@@ -52,6 +52,8 @@ type MetaMessage = {
   };
   button?: { text?: string; payload?: string };
   reaction?: { message_id?: string; emoji?: string };
+  /** Respuesta citando: id (wamid) del mensaje citado. */
+  context?: { id?: string };
   /** Atribución CTWA: presente cuando el chat se originó en un anuncio Meta. */
   referral?: {
     source_id?: string;
@@ -131,14 +133,16 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
       text = msg.button?.text ?? "";
       break;
     case "reaction":
-      // Reacciones no aportan al agente; se descartan.
-      return null;
+      // Reacción emoji: se ancla al mensaje target (no corre el agente).
+      text = msg.reaction?.emoji ?? "";
+      break;
     default:
       // Tipo no soportado (contacts, order, unknown...): sin texto → descartar.
       return null;
   }
 
-  if (!text && !mediaId) return null;
+  const isReaction = msg.type === "reaction" && !!msg.reaction?.message_id;
+  if (!text && !mediaId && !isReaction) return null;
 
   const inbound: InboundMessage = {
     messageId: msg.id ?? null,
@@ -156,6 +160,9 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
     adTitle: msg.referral?.headline?.trim() || null,
     ctwaClid: msg.referral?.ctwa_clid?.trim() || null,
     adSourceUrl: msg.referral?.source_url?.trim() || null,
+    // Reacción (target) / respuesta citando (context) — mismos anclajes que SMS Tools.
+    targetWamid: isReaction ? msg.reaction?.message_id ?? null : null,
+    quotedWamid: msg.context?.id?.trim() || null,
     raw: msg,
   };
 

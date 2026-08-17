@@ -797,11 +797,18 @@ model ConversationMessage {
   // el panel; null en históricos o texto (el frontend infiere por extensión).
   mediaType      String?
   rawPayload     Json?
-  // Tracking de entrega vía gateway WhatsApp (SMS Tools). gatewayId = messageId del
-  // envío; deliveryStatus: null=no rastreado, "pending"|"sent"|"failed".
+  // Tracking de entrega vía gateway WhatsApp. gatewayId = messageId/wamid (del
+  // envío en ASSISTANT; del inbound en USER — ancla reacciones/citas).
+  // deliveryStatus escalera: null=no rastreado, "pending"<"sent"<"delivered"<"read";
+  // "failed"/"unknown" aparte. Solo se hace upgrade de rango (webhook whatsapp_status/Meta).
   gatewayId       String?
   deliveryStatus  String?
   deliveryRetries Int             @default(0)
+  // Reacción emoji del cliente SOBRE este mensaje (webhook con target_wamid).
+  reaction        String?
+  // Respuesta citando: wamid citado + preview resuelto del texto citado (panel + contexto del agente).
+  quotedWamid     String?
+  quotedPreview   String?
   createdAt      DateTime         @default(now())
   company        Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
   customer       Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
@@ -811,6 +818,7 @@ model ConversationMessage {
   @@index([companyId, customerId, createdAt])
   @@index([conversationId, createdAt])
   @@index([deliveryStatus, createdAt])
+  @@index([gatewayId])
 }
 
 // Conversación viva del agente con un cliente (reemplaza el staticData de n8n).
