@@ -422,6 +422,14 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
           where: { id: convo.customerId, selectedProductId: null },
           data: { selectedProductId: entry.productId },
         });
+        // Sembrar también el ESTADO de la conversación: es lo que lee el prompt
+        // (state.selectedProductId = producto EN FOCO) — así el bot presenta el
+        // producto del anuncio aunque el cliente abra con un "Hola" genérico,
+        // igual que hacen las campañas con contextProductId.
+        if (!convo.state.selectedProductId) {
+          convo.state.selectedProductId = entry.productId;
+          await saveState(convo.conversationId, convo.state);
+        }
       }
     } catch {
       /* best-effort */
