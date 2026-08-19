@@ -1022,6 +1022,108 @@ function renderProductFicha(p: BotProduct, vertical?: string): string {
   return parts.join("\n\n");
 }
 
+// ---------------------------------------------------------------------------
+// Preview de la ficha (copiloto/MCP): la MISMA secuencia que enviar_ficha
+// mandaría al cliente, como dato puro (sin ctx/estado, sin enviar nada).
+// Mantener en sincronía con las ramas de enviar_ficha.
+// ---------------------------------------------------------------------------
+export interface FichaPreviewMessage {
+  tipo: "texto" | "media";
+  texto?: string;
+  mediaUrl?: string;
+  mediaTipo?: string;
+  caption?: string;
+  fileName?: string;
+}
+
+export function buildFichaPreview(
+  product: BotProduct,
+  vertical?: string,
+): { modo: string; mensajes: FichaPreviewMessage[]; notas: string[] } {
+  const mensajes: FichaPreviewMessage[] = [];
+  const notas: string[] = [];
+  const p = product as BotProduct & {
+    presentationMessage?: string | null;
+    presentationMessageMediaUrl?: string | null;
+    presentationMessageMediaType?: string | null;
+    presentationFollowups?: { message?: string; mediaUrl?: string; mediaType?: string }[];
+  };
+  const presentationMessage = p.presentationMessage?.trim();
+  const followups = p.presentationFollowups ?? [];
+
+  const presentationFiles = (product.files ?? []).filter((f) => f.showInPresentation).slice(0, 6);
+  const pushPresentationFiles = () => {
+    for (const f of presentationFiles) {
+      mensajes.push({
+        tipo: "media",
+        mediaUrl: f.url,
+        mediaTipo: mediaKindFor(f.type),
+        caption: f.description || undefined,
+        fileName: f.originalName || undefined,
+      });
+    }
+  };
+  const pushFollowups = () => {
+    for (const m of followups) {
+      if (!m?.message && !m?.mediaUrl) continue;
+      if (m.mediaUrl) {
+        mensajes.push({ tipo: "media", mediaUrl: m.mediaUrl, mediaTipo: mediaKindFor(m.mediaType || ""), caption: m.message || undefined });
+      } else {
+        mensajes.push({ tipo: "texto", texto: m.message });
+      }
+    }
+  };
+
+  // STREAMER sin mensaje fijo: el AGENTE redacta la presentación en vivo.
+  if (vertical === "STREAMER" && !presentationMessage) {
+    pushPresentationFiles();
+    pushFollowups();
+    const planes = streamerPlanLines(product);
+    notas.push(
+      "STREAMING sin mensaje de presentación fijo: el agente REDACTA la presentación con sus palabras en cada chat (no hay texto fijo que auditar)." +
+        (planes.length ? ` Incluye estos planes con precios exactos: ${planes.join(" | ")}` : ""),
+    );
+    return { modo: "streamer_redaccion_libre", mensajes, notas };
+  }
+
+  const fichaText = presentationMessage || renderProductFicha(product, vertical);
+  const presMediaUrl = p.presentationMessageMediaUrl?.trim();
+  if (presMediaUrl) {
+    mensajes.push({
+      tipo: "media",
+      mediaUrl: presMediaUrl,
+      mediaTipo: mediaKindFor(p.presentationMessageMediaType?.trim() || ""),
+      caption: fichaText || undefined,
+    });
+    notas.push("La ficha viaja como UN solo mensaje: la multimedia de presentación configurada con el texto como caption.");
+  } else if (fichaText) {
+    mensajes.push({ tipo: "texto", texto: fichaText });
+  }
+  pushPresentationFiles();
+  pushFollowups();
+
+  if (presentationMessage) {
+    notas.push("Mensaje de presentación FIJO configurado por el dueño: se envía tal cual (saltos de línea incluidos).");
+  } else {
+    notas.push("Ficha AUTO-GENERADA con los campos estructurados (nombre, descripción, beneficios, incluye, bonos y precio).");
+    if (product.offerActive) {
+      notas.push(
+        `Oferta vigente aplicada: presenta y valida ${product.priceText ?? product.price}` +
+          (product.regularPriceText ? ` con el precio normal tachado (antes ${product.regularPriceText})` : "") +
+          ".",
+      );
+    }
+  }
+  if (presentationFiles.length) {
+    notas.push(`Adjunta ${presentationFiles.length} archivo(s) marcados "mostrar en presentación" (máx 6).`);
+  }
+  const onDemand = (product.files ?? []).filter((f) => !f.showInPresentation).length;
+  if (onDemand) {
+    notas.push(`${onDemand} archivo(s) on-demand NO van en la presentación: el agente los envía solo si el cliente los pide.`);
+  }
+  return { modo: presentationMessage ? "mensaje_fijo" : "ficha_automatica", mensajes, notas };
+}
+
 /** Productos visibles en el catálogo (excluye los marcados como secundarios). */
 function catalogProducts(products: BotProduct[]): BotProduct[] {
   return products.filter((p) => (p as { showInCatalog?: boolean }).showInCatalog !== false);

@@ -51,6 +51,8 @@ import { listBookings } from "../bookings/bookings.service";
 import { listCampaigns } from "../campaigns/campaigns.service";
 import { listSubscriptions } from "../subscriptions/subscriptions.service";
 import { listPendingReminders } from "../scheduler/scheduler.service";
+import { buildBotConfig } from "../bot/bot.service";
+import { buildFichaPreview } from "../agent/agent-tools";
 import {
   listAdCatalog,
   createAdCatalogEntry,
@@ -100,6 +102,20 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "ver_producto",
       description: "Devuelve la ficha COMPLETA de un producto (para revisarla o antes de modificarla).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId"],
+        properties: { productId: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "previsualizar_ficha",
+      description:
+        "Muestra EXACTAMENTE cómo el agente PRESENTA este producto al cliente en WhatsApp: la secuencia real de mensajes (texto de la ficha o mensaje fijo, multimedia de presentación, seguimientos), el modo de presentación y notas de la lógica aplicada (oferta vigente, archivos on-demand, etc.). Úsala para auditar la presentación y proponer mejoras de copy con fundamento.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1023,6 +1039,31 @@ export async function runCopilotTool(
       return { result: JSON.stringify(product), wrote: false };
     }
 
+    case "previsualizar_ficha": {
+      // El MISMO BotProduct (precio efectivo, archivos, planes) que usa el agente
+      // real: la preview replica las ramas de enviar_ficha sin enviar nada.
+      const cfg = await buildBotConfig(companyId);
+      const productId = String(args.productId ?? "");
+      const botProduct = (cfg.products ?? []).find((p) => p.id === productId);
+      if (!botProduct) {
+        return {
+          result: JSON.stringify({ ok: false, error: "Producto no encontrado o inactivo (la preview usa el catálogo que ve el agente)." }),
+          wrote: false,
+        };
+      }
+      const vertical = (cfg.business as { vertical?: string }).vertical;
+      const preview = buildFichaPreview(botProduct, vertical);
+      return {
+        result: JSON.stringify({
+          ok: true,
+          producto: botProduct.name,
+          ...preview,
+          nota: "Esta es la secuencia EXACTA que el agente envía al presentar el producto (enviar_ficha). Analízala como la vería el cliente.",
+        }),
+        wrote: false,
+      };
+    }
+
     case "crear_producto": {
       const payload = buildPayload((args.data ?? {}) as LooseData, null);
       const parsed = productBodySchema.safeParse(payload);
@@ -1868,7 +1909,7 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto: usa la URL EXACTA que aparece en la línea [Adjuntos de este mensaje: …] del mensaje del usuario (NUNCA un data:URI ni una URL inventada). Si el usuario ya adjuntó la imagen, NO le pidas re-adjuntarla. Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
     "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
     "- ATRIBUCIÓN DE ANUNCIOS META: los leads que llegan desde un anuncio (CTWA) quedan marcados con el anuncio de origen; ver_metricas trae rendimientoPorAnuncio (leads, ventas, ingresos y conversión POR ANUNCIO — así se sabe qué anuncio cierra ventas de verdad). El catálogo de anuncios (ver_catalogo_anuncios/configurar_anuncio, o en Empresa → Anuncios) mapea IDs/títulos crudos a descripciones amigables; varios identificadores pueden apuntar a la misma descripción, y cada anuncio puede VINCULARSE A UN PRODUCTO: el lead que llega por ese anuncio entra con ese producto como PRODUCTO EN FOCO del bot — aunque abra con un 'Hola' genérico, el agente le presenta directamente ese producto (sin preguntarle qué busca).",
-    "- ANALISTA DEL NEGOCIO: puedes leer métricas, ventas, comprobantes, pedidos, conversaciones (incluidos los MENSAJES reales con leer_conversacion), citas, campañas, suscripciones y recordatorios con ver_metricas/listar_*. Para preguntas de números usa PRIMERO ver_metricas (trae el periodo comparado con el anterior) y detalla después con listar_*. TODO número que cites debe salir de un resultado de tool de ESTE turno — NUNCA estimes ni 'recuerdes' cifras. Con los datos puedes proponer mejoras accionables (FAQs/objeciones a partir de chats reales, ofertas escalonadas para carritos abandonados, ajustes de prompt o recordatorios) y, SOLO si el usuario confirma, aplicarlas con las tools de escritura.",
+    "- ANALISTA DEL NEGOCIO: puedes leer métricas, ventas, comprobantes, pedidos, conversaciones (incluidos los MENSAJES reales con leer_conversacion), citas, campañas, suscripciones y recordatorios con ver_metricas/listar_*. Para preguntas de números usa PRIMERO ver_metricas (trae el periodo comparado con el anterior) y detalla después con listar_*. TODO número que cites debe salir de un resultado de tool de ESTE turno — NUNCA estimes ni 'recuerdes' cifras. Con los datos puedes proponer mejoras accionables (FAQs/objeciones a partir de chats reales, ofertas escalonadas para carritos abandonados, ajustes de prompt o recordatorios) y, SOLO si el usuario confirma, aplicarlas con las tools de escritura. Con previsualizar_ficha ves EXACTAMENTE cómo el agente presenta un producto al cliente (secuencia real de mensajes, multimedia y modo de presentación, en cualquier rubro) — úsala antes de proponer mejoras de copy o de estructura de la ficha.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
