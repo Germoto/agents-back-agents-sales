@@ -197,6 +197,26 @@ export const TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "configurar_archivo_producto",
+      description:
+        "Edita la METADATA de un archivo YA SUBIDO de un producto (no sube archivos nuevos): showInPresentation (true = se adjunta al presentar la ficha; false = queda on-demand y el agente lo envía solo si el cliente lo pide), description (ayuda al agente a saber cuándo enviarlo) y principal (true = primero de la ficha/catálogo). Identifica el archivo por su URL exacta o su nombre. Verifica después con previsualizar_ficha. Llámala tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId", "archivo"],
+        properties: {
+          productId: { type: "string" },
+          archivo: { type: "string", description: "URL exacta o nombre (originalName) del archivo a editar" },
+          showInPresentation: { type: "boolean" },
+          description: { type: "string" },
+          principal: { type: "boolean" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "ver_configuracion",
       description:
         "Devuelve la configuración ACTUAL del negocio: empresa (nombre, rubro, zona horaria, delivery, horario de atención), agente IA (prompt/estilo/reglas, sin credenciales) y pagos (métodos y modo). Úsala antes de proponer cambios.",
@@ -729,7 +749,8 @@ function resolveAttachment(
 const COMMON_FIELDS =
   "Campos comunes de `data`: name*, price* (texto, ej. '12' o '12.50'), shortDescription (1 línea vendedora), fullDescription, category, active (default true), aliases (string[] — sinónimos/abreviaturas con las que el cliente lo nombraría), benefits (string[]), includes (string[]), bonuses (string[]), faqs ([{question, answer}]), objections ([{question, answer}]), attributes (objeto clave→valor, ej. {\"Ingredientes\": \"pollo, papas\"}). " +
   "reminderConfig (recordatorios PROPIOS de este producto — si no se envía, hereda los generales del negocio): {abandonedCart?: {enabled, steps: [{delaySeconds (SEGUNDOS, ej. 3600=1h, 86400=24h), message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso, el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje para mostrarlo)}]}, leftOnRead?: {enabled, steps: [...]}}; enviar null lo limpia (vuelve a heredar). " +
-  "OFERTA CON VIGENCIA (global, todos los clientes): offerPrice (texto, ej. '49'), offerStartsAt/offerEndsAt (fecha-hora ISO, opcionales; sin fechas = activa hasta quitarla). Vigente => el agente presenta, cobra y valida ESE precio y el precio normal se muestra tachado como 'antes'. null limpia la oferta.";
+  "OFERTA CON VIGENCIA (global, todos los clientes): offerPrice (texto, ej. '49'), offerStartsAt/offerEndsAt (fecha-hora ISO, opcionales; sin fechas = activa hasta quitarla). Vigente => el agente presenta, cobra y valida ESE precio y el precio normal se muestra tachado como 'antes'. null limpia la oferta. " +
+  "PRESENTACIÓN: presentationMessage (mensaje de presentación FIJO — si existe, la ficha se envía tal cual en vez de auto-generarse); presentationMessageMediaUrl/presentationMessageMediaType (banner adjunto al mensaje: la ficha viaja como media con el texto de caption; usa la URL de un archivo del producto o un adjunto de esta conversación; '' lo quita); presentationFollowups = [{message, mediaUrl?, mediaType?}] (secuencia que se envía DESPUÉS de la ficha — al enviarla REEMPLAZA la lista completa: manda la versión final; [] la limpia). Los archivos ya subidos se gestionan con configurar_archivo_producto (showInPresentation true = va adjunto en la presentación, false = on-demand; description; principal). Tras cambiar la presentación, VERIFICA con previsualizar_ficha.";
 
 function rubroGuide(vertical: string | undefined): string {
   switch (vertical) {
@@ -883,9 +904,33 @@ function buildPayload(data: LooseData, existing: AdminProduct | null, replace = 
     fullDescription: asStr(data.fullDescription) ?? e?.fullDescription ?? "",
     presentationMessage:
       data.presentationMessage !== undefined ? asStr(data.presentationMessage) ?? null : (e?.presentationMessage ?? null),
-    presentationMessageMediaUrl: e?.presentationMessageMediaUrl ?? "",
-    presentationMessageMediaType: e?.presentationMessageMediaType ?? "",
-    presentationFollowups: (e?.presentationFollowups ?? []) as { message?: string; mediaUrl?: string; mediaType?: string }[],
+    // Banner del mensaje de presentación (la ficha viaja como media+caption). "" limpia.
+    presentationMessageMediaUrl:
+      data.presentationMessageMediaUrl !== undefined
+        ? asStr(data.presentationMessageMediaUrl) ?? ""
+        : (e?.presentationMessageMediaUrl ?? ""),
+    presentationMessageMediaType:
+      data.presentationMessageMediaType !== undefined
+        ? asStr(data.presentationMessageMediaType) ?? ""
+        : (e?.presentationMessageMediaType ?? ""),
+    // Seguimientos de presentación (secuencia post-ficha): al venir REEMPLAZA la
+    // lista completa (el modelo envía la versión final); null/[] la limpia.
+    presentationFollowups: (() => {
+      if (data.presentationFollowups === undefined) {
+        return (e?.presentationFollowups ?? []) as { message?: string; mediaUrl?: string; mediaType?: string }[];
+      }
+      const inc = Array.isArray(data.presentationFollowups) ? data.presentationFollowups : [];
+      return inc
+        .map((m) => {
+          const o = (m && typeof m === "object" ? m : {}) as Record<string, unknown>;
+          return {
+            message: asStr(o.message) ?? "",
+            mediaUrl: asStr(o.mediaUrl) ?? "",
+            mediaType: asStr(o.mediaType) ?? "",
+          };
+        })
+        .filter((m) => m.message || m.mediaUrl);
+    })(),
     deliveryMethod: data.deliveryMethod !== undefined ? asStr(data.deliveryMethod) ?? null : (e?.deliveryMethod ?? null),
     support: data.support !== undefined ? asStr(data.support) ?? null : (e?.support ?? null),
     attributes: objField(data.attributes, (e?.attributes ?? null) as Record<string, string> | null),
@@ -1019,6 +1064,72 @@ export async function runCopilotTool(
           product: existing.name,
           principal,
           nota: principal ? "Imagen adjuntada como foto PRINCIPAL del producto." : "Imagen adjuntada al producto.",
+        }),
+        wrote: true,
+      };
+    }
+
+    case "configurar_archivo_producto": {
+      const productId = String(args.productId ?? "");
+      const existing = await getProduct(companyId, productId);
+      const files = (existing.files ?? []) as Array<
+        { url?: string; originalName?: string; sortOrder?: number; description?: string; showInPresentation?: boolean } & Record<string, unknown>
+      >;
+      if (!files.length) {
+        return { result: JSON.stringify({ ok: false, error: "Este producto no tiene archivos subidos (súbelos desde el panel, paso Archivos)." }), wrote: false };
+      }
+      // Match tolerante: URL exacta → nombre exacto → único match parcial (url o nombre).
+      const key = String(args.archivo ?? "").trim();
+      const keyLower = key.toLowerCase();
+      let matches = files.filter((f) => f.url === key);
+      if (!matches.length) matches = files.filter((f) => (f.originalName ?? "").toLowerCase() === keyLower);
+      if (!matches.length) {
+        matches = files.filter(
+          (f) => (f.url ?? "").toLowerCase().includes(keyLower) || (f.originalName ?? "").toLowerCase().includes(keyLower),
+        );
+      }
+      const available = files.map((f) => ({ nombre: f.originalName ?? "", url: f.url ?? "" }));
+      if (!matches.length) {
+        return { result: JSON.stringify({ ok: false, error: "No encontré ese archivo en el producto.", archivosDisponibles: available }), wrote: false };
+      }
+      if (matches.length > 1) {
+        return {
+          result: JSON.stringify({ ok: false, error: "Hay varios archivos que coinciden — usa la URL exacta.", coincidencias: matches.map((f) => f.url) }),
+          wrote: false,
+        };
+      }
+      const target = matches[0];
+      const updated = files.map((f) =>
+        f === target
+          ? {
+              ...f,
+              ...(typeof args.showInPresentation === "boolean" ? { showInPresentation: args.showInPresentation } : {}),
+              ...(args.description !== undefined ? { description: asStr(args.description) ?? "" } : {}),
+            }
+          : f,
+      );
+      // principal=true: el archivo pasa a ser el primero (ficha/catálogo); el resto conserva su orden relativo.
+      const ordered =
+        args.principal === true
+          ? (() => {
+              const rest = updated.filter((f) => f.url !== target.url);
+              const first = updated.find((f) => f.url === target.url)!;
+              return [first, ...rest].map((f, i) => ({ ...f, sortOrder: i }));
+            })()
+          : updated;
+      const payload = buildPayload({}, existing);
+      payload.files = ordered as never[];
+      const parsed = productBodySchema.safeParse(payload);
+      if (!parsed.success) {
+        return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
+      }
+      await updateProduct(companyId, productId, parsed.data as Parameters<typeof updateProduct>[2]);
+      return {
+        result: JSON.stringify({
+          ok: true,
+          product: existing.name,
+          archivo: target.originalName ?? target.url,
+          nota: "Metadata actualizada. Verifica la presentación resultante con previsualizar_ficha.",
         }),
         wrote: true,
       };
