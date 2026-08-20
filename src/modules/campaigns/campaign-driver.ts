@@ -278,9 +278,17 @@ async function tick(companyId: string, campaignId: string): Promise<void> {
 
   const processed = fresh.sentCount + fresh.failedCount;
   const isPausePoint = cfg.pauseEvery > 0 && processed > 0 && processed % cfg.pauseEvery === 0;
-  let delayMs = (isPausePoint ? cfg.pauseSec : cfg.intervalSec) * 1000;
-  // Jitter anti-ban: ±25% para no enviar con tiempos exactos de robot.
-  if (cfg.randomize && delayMs > 0) delayMs = Math.round(delayMs * (0.75 + Math.random() * 0.5));
+  const min = isPausePoint ? cfg.pauseSec : cfg.intervalSec;
+  const max = isPausePoint ? cfg.pauseMaxSec : cfg.intervalMaxSec;
+  let delayMs: number;
+  if (max > min) {
+    // Rango definido por el usuario: uniforme al azar en [min, max].
+    delayMs = Math.round((min + Math.random() * (max - min)) * 1000);
+  } else {
+    delayMs = min * 1000;
+    // LEGACY (campañas sin rango): jitter ±25% para no enviar con tiempos exactos de robot.
+    if (cfg.randomize && delayMs > 0) delayMs = Math.round(delayMs * (0.75 + Math.random() * 0.5));
+  }
 
   const nextAt = new Date(Date.now() + delayMs);
   const pauseReason: PauseReason | null = isPausePoint ? "auto" : null;

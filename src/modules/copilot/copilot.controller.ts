@@ -48,7 +48,8 @@ import { listReceipts } from "../receipts/receipts.service";
 import { listOrders } from "../orders/orders.service";
 import { listConversations, listConversationMessages } from "../agent/conversation.service";
 import { listBookings } from "../bookings/bookings.service";
-import { listCampaigns } from "../campaigns/campaigns.service";
+import { listCampaigns, createCampaign, updateCampaign, startCampaign, testCampaign } from "../campaigns/campaigns.service";
+import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
 import { listSubscriptions } from "../subscriptions/subscriptions.service";
 import { listPendingReminders } from "../scheduler/scheduler.service";
 import { buildBotConfig } from "../bot/bot.service";
@@ -684,6 +685,90 @@ export const TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "crear_campana",
+      description:
+        "Crea una campaña de envío masivo de WhatsApp EN BORRADOR (no envía nada). La audiencia se arma con filtros combinables (tagIds del CRM, funnelStatus NUEVO|INTERESADO|ESPERANDO_PAGO|PAGADO|ENTREGADO, adSourceId del catálogo de anuncios) y/o phones explícitos. sendConfig controla el ritmo anti-ban: intervalSec/intervalMaxSec (RANGO aleatorio en segundos entre contactos, definido por el usuario), pauseEvery + pauseSec/pauseMaxSec (pausa larga cada N), dailyLimit (tope diario; SIN sendFrom el tope reanuda a MEDIANOCHE — recomienda horario), sendFrom/sendUntil (HH:mm), excludeMuted (no molestar a quienes están en atención humana, default true). Devuelve el total de contactos y un resumen interpretado del plan de envío: MUÉSTRASELO al usuario. Flujo seguro: crear borrador → enviar_prueba_campana al número del dueño → confirmación explícita → iniciar_campana. Llámala tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "mensajes", "audiencia"],
+        properties: {
+          name: { type: "string" },
+          mensajes: {
+            type: "array",
+            description: "Secuencia a enviar a cada contacto (1-10). {nombre} se sustituye por el nombre del contacto.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                type: { type: "string", description: "text | image | video | audio | document" },
+                text: { type: "string", description: "Texto del mensaje o caption de la multimedia" },
+                mediaUrl: { type: "string", description: "URL de un adjunto de esta conversación o archivo ya subido" },
+              },
+            },
+          },
+          audiencia: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              tagIds: { type: "array", items: { type: "string" }, description: "IDs de etiquetas del CRM (ver_crm)" },
+              funnelStatus: { type: "string", description: "Etapa del embudo (ej. INTERESADO)" },
+              adSourceId: { type: "string", description: "ID del anuncio de origen (catálogo de anuncios)" },
+              phones: { type: "array", items: { type: "string" }, description: "Teléfonos explícitos a incluir" },
+            },
+          },
+          sendConfig: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              intervalSec: { type: "number" },
+              intervalMaxSec: { type: "number" },
+              pauseEvery: { type: "number" },
+              pauseSec: { type: "number" },
+              pauseMaxSec: { type: "number" },
+              dailyLimit: { type: "number" },
+              sendFrom: { type: "string", description: "HH:mm" },
+              sendUntil: { type: "string", description: "HH:mm" },
+              excludeMuted: { type: "boolean" },
+            },
+          },
+          contextProductId: { type: "string", description: "Producto en foco: el agente sabrá de qué producto hablar cuando respondan" },
+          contextTagIds: { type: "array", items: { type: "string" }, description: "Etiquetas a aplicar a cada contacto alcanzado" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "enviar_prueba_campana",
+      description:
+        "Envía la secuencia de una campaña EN BORRADOR a UN número de prueba (el del dueño), sin tocar la audiencia ni las stats. Recomiéndala SIEMPRE antes de iniciar_campana.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["campaignId", "phone"],
+        properties: { campaignId: { type: "string" }, phone: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "iniciar_campana",
+      description:
+        "LANZA una campaña en borrador: comienza el envío masivo REAL e IRREVERSIBLE a toda la audiencia. Llámala ÚNICAMENTE después de mostrarle al usuario el total de contactos + el resumen del plan de envío Y de que él confirme explícitamente el lanzamiento. Ante la duda, NO la llames.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["campaignId"],
+        properties: { campaignId: { type: "string" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "listar_suscripciones",
       description: "Suscripciones de streaming: filtro 'active' (vigentes), 'due' (por vencer en 7 días) o 'expired' (vencidas).",
       parameters: {
@@ -998,6 +1083,99 @@ function zodErrorsText(err: { issues: Array<{ path: PropertyKey[]; message: stri
 // ---------------------------------------------------------------------------
 // Ejecución de tools
 // ---------------------------------------------------------------------------
+/** Duración humana a partir de segundos (para el resumen del plan de envío). */
+function fmtDurHuman(sec: number): string {
+  const m = Math.max(1, Math.round(sec / 60));
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest ? `${h} h ${rest} min` : `${h} h`;
+}
+
+/** Resumen interpretado del plan de envío (mismo espíritu que el wizard del panel). */
+function describeSendPlan(cfg: CampaignSendConfig, total: number): string {
+  const avgInterval = cfg.intervalMaxSec > cfg.intervalSec ? (cfg.intervalSec + cfg.intervalMaxSec) / 2 : cfg.intervalSec;
+  const avgPause = cfg.pauseMaxSec > cfg.pauseSec ? (cfg.pauseSec + cfg.pauseMaxSec) / 2 : cfg.pauseSec;
+  const durationFor = (count: number) => {
+    if (count <= 1) return 0;
+    const pauses = cfg.pauseEvery > 0 ? Math.floor((count - 1) / cfg.pauseEvery) : 0;
+    return (count - 1 - pauses) * avgInterval + pauses * avgPause;
+  };
+  const parts: string[] = [];
+  parts.push(
+    cfg.intervalMaxSec > cfg.intervalSec
+      ? `Cada contacto sale entre ${cfg.intervalSec} y ${cfg.intervalMaxSec} s después del anterior (aleatorio).`
+      : `Cada contacto sale exactamente cada ${cfg.intervalSec} s${cfg.randomize ? " (±25% aleatorio)" : " ⚠️ tiempos exactos = patrón detectable; recomienda un rango"}.`,
+  );
+  if (cfg.pauseEvery > 0) {
+    parts.push(
+      cfg.pauseMaxSec > cfg.pauseSec
+        ? `Cada ${cfg.pauseEvery} contactos hay una pausa de ${cfg.pauseSec}–${cfg.pauseMaxSec} s.`
+        : `Cada ${cfg.pauseEvery} contactos hay una pausa de ${cfg.pauseSec} s.`,
+    );
+  }
+  const day1 = cfg.dailyLimit > 0 ? Math.min(cfg.dailyLimit, total) : total;
+  parts.push(`Hoy salen ${day1} contacto(s) en ~${fmtDurHuman(durationFor(day1))}.`);
+  const rest = total - day1;
+  if (rest > 0) {
+    const days = Math.ceil(rest / (cfg.dailyLimit || rest));
+    parts.push(
+      cfg.sendFrom
+        ? `Los ${rest} restantes continúan al día siguiente desde las ${cfg.sendFrom} (${days} día(s) más).`
+        : `⚠️ Los ${rest} restantes continúan a la MEDIANOCHE (sin "enviar desde" el tope diario reanuda a las 00:00) — recomienda configurar sendFrom/sendUntil.`,
+    );
+  }
+  if (cfg.sendFrom && cfg.sendUntil) parts.push(`Horario de envío: ${cfg.sendFrom}–${cfg.sendUntil}.`);
+  if (!cfg.excludeMuted) parts.push("⚠️ excludeMuted apagado: también recibirán la campaña los contactos en atención humana.");
+  return parts.join(" ");
+}
+
+/** Audiencia de campaña por filtros combinables (tags/etapa/anuncio) y/o phones explícitos. */
+async function resolveCampaignAudience(
+  companyId: string,
+  a: { tagIds?: unknown; funnelStatus?: unknown; adSourceId?: unknown; phones?: unknown },
+): Promise<Array<{ customerId?: string | null; phone: string; name?: string | null }>> {
+  const out = new Map<string, { customerId?: string | null; phone: string; name?: string | null }>();
+  const tagIds = Array.isArray(a.tagIds) ? a.tagIds.map((t) => String(t)).filter(Boolean) : [];
+  const funnelStatus = asStr(a.funnelStatus)?.trim().toUpperCase() || null;
+  const adSourceId = asStr(a.adSourceId)?.trim() || null;
+  if (tagIds.length || funnelStatus || adSourceId) {
+    const customerWhere = {
+      companyId,
+      NOT: { phone: { startsWith: "web:" } },
+      ...(adSourceId ? { adSourceId } : {}),
+      ...(tagIds.length ? { tagLinks: { some: { tagId: { in: tagIds } } } } : {}),
+    };
+    if (funnelStatus) {
+      // La etapa vive en Conversation.state.status (JSON) → se filtra en memoria.
+      const convos = await prisma.conversation.findMany({
+        where: { companyId, channel: "whatsapp", customer: customerWhere },
+        select: { state: true, customer: { select: { id: true, phone: true, name: true } } },
+        take: 5000,
+      });
+      for (const c of convos) {
+        const status = String((c.state as Record<string, unknown> | null)?.status ?? "").toUpperCase();
+        if (status === funnelStatus) {
+          out.set(c.customer.phone, { customerId: c.customer.id, phone: c.customer.phone, name: c.customer.name });
+        }
+      }
+    } else {
+      const customers = await prisma.customer.findMany({
+        where: customerWhere,
+        select: { id: true, phone: true, name: true },
+        orderBy: { lastInteractionAt: "desc" },
+        take: 5000,
+      });
+      for (const c of customers) out.set(c.phone, { customerId: c.id, phone: c.phone, name: c.name });
+    }
+  }
+  for (const p of Array.isArray(a.phones) ? a.phones : []) {
+    const d = String(p ?? "").replace(/\D/g, "");
+    if (d.length >= 8 && !out.has(d)) out.set(d, { phone: d });
+  }
+  return [...out.values()];
+}
+
 /** Resuelve una categoría de respuestas rápidas por NOMBRE (case-insensitive), creándola si no existe. */
 async function resolveQuickReplyCategory(companyId: string, name?: string): Promise<string | undefined> {
   const trimmed = name?.trim();
@@ -1883,6 +2061,94 @@ export async function runCopilotTool(
       return { result: JSON.stringify({ total: campaigns.length, items: campaigns }), wrote: false };
     }
 
+    case "crear_campana": {
+      const name = String(args.name ?? "").trim();
+      if (!name) return { result: JSON.stringify({ ok: false, error: "falta el nombre de la campaña" }), wrote: false };
+      const rawMsgs = Array.isArray(args.mensajes) ? args.mensajes : [];
+      const VALID_TYPES = new Set(["text", "image", "video", "audio", "document"]);
+      const messages: CampaignMessageItem[] = rawMsgs
+        .map((m) => {
+          const o = (m && typeof m === "object" ? m : {}) as Record<string, unknown>;
+          const type = VALID_TYPES.has(String(o.type ?? "")) ? (String(o.type) as CampaignMessageItem["type"]) : "text";
+          return { type, text: asStr(o.text) ?? undefined, mediaUrl: asStr(o.mediaUrl) ?? undefined };
+        })
+        .filter((m) => m.text || m.mediaUrl)
+        .slice(0, 10);
+      if (!messages.length) {
+        return { result: JSON.stringify({ ok: false, error: "la campaña necesita al menos un mensaje (text o mediaUrl)" }), wrote: false };
+      }
+      const recipients = await resolveCampaignAudience(companyId, (args.audiencia ?? {}) as Record<string, unknown>);
+      if (!recipients.length) {
+        return {
+          result: JSON.stringify({
+            ok: false,
+            error:
+              "La audiencia quedó vacía. Revisa los filtros (tagIds reales de ver_crm, funnelStatus NUEVO|INTERESADO|ESPERANDO_PAGO|PAGADO|ENTREGADO, adSourceId del catálogo de anuncios) o pasa phones explícitos.",
+          }),
+          wrote: false,
+        };
+      }
+      const cfg = parseSendConfig(args.sendConfig ?? {});
+      try {
+        const created = await createCampaign(companyId, { name });
+        await updateCampaign(companyId, created.id, {
+          actions: [{ type: "send-message", messages }],
+          sendConfig: cfg,
+          audience: { recipients },
+          ...(args.contextProductId !== undefined ? { contextProductId: asStr(args.contextProductId) ?? null } : {}),
+          ...(Array.isArray(args.contextTagIds) ? { contextTagIds: args.contextTagIds.map((t) => String(t)).filter(Boolean) } : {}),
+        });
+        return {
+          result: JSON.stringify({
+            ok: true,
+            campaignId: created.id,
+            estado: "BORRADOR",
+            totalContactos: recipients.length,
+            resumenDeEnvio: describeSendPlan(cfg, recipients.length),
+            nota:
+              "Campaña creada EN BORRADOR: aún NO envía nada. Muéstrale al usuario el total de contactos y el resumen; recomiéndale una prueba con enviar_prueba_campana a su propio número, y lanza con iniciar_campana SOLO cuando él confirme explícitamente.",
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "no se pudo crear la campaña";
+        return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
+      }
+    }
+
+    case "enviar_prueba_campana": {
+      const phone = String(args.phone ?? "").replace(/\D/g, "");
+      if (phone.length < 8) return { result: JSON.stringify({ ok: false, error: "teléfono de prueba inválido" }), wrote: false };
+      try {
+        await testCampaign(companyId, String(args.campaignId ?? ""), phone);
+        return {
+          result: JSON.stringify({ ok: true, nota: `Prueba enviada a ${phone}. Pide al usuario verificar cómo llegó antes de lanzar.` }),
+          wrote: true,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "no se pudo enviar la prueba";
+        return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
+      }
+    }
+
+    case "iniciar_campana": {
+      try {
+        const started = await startCampaign(companyId, String(args.campaignId ?? ""));
+        return {
+          result: JSON.stringify({
+            ok: true,
+            estado: started?.status ?? "RUNNING",
+            totalContactos: started?.totalCount ?? undefined,
+            nota: "Campaña LANZADA: el envío masivo está en curso. El progreso en vivo se ve en el panel (Campañas).",
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "no se pudo iniciar la campaña";
+        return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
+      }
+    }
+
     case "listar_suscripciones": {
       const filtro = asStr(args.filtro) as "active" | "due" | "expired" | undefined;
       const subs = await listSubscriptions(companyId, { filter: filtro ?? "active" });
@@ -1963,7 +2229,7 @@ const SYSTEM_GUIDE = [
   "- Dashboard (/dashboard): métricas del negocio.",
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto).",
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM).",
-  "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas).",
+  "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre}; y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 65–90s); en números nuevos recomienda tope diario 30-70. Flujo seguro OBLIGATORIO: crear borrador → mostrar total de contactos + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación.",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (/reservas-online): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",

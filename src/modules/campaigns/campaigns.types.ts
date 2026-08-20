@@ -32,13 +32,17 @@ export interface CampaignMetaTemplate {
 }
 
 export interface CampaignSendConfig {
-  /** Segundos entre cada contacto. */
+  /** Segundos entre cada contacto (mínimo del rango si intervalMaxSec > 0). */
   intervalSec: number;
+  /** Tope del RANGO de intervalo definido por el usuario (0 = sin rango, intervalo fijo). */
+  intervalMaxSec: number;
   /** Pausa automática después de N contactos (0 = sin pausa). */
   pauseEvery: number;
-  /** Duración de la pausa automática en segundos. */
+  /** Duración de la pausa automática en segundos (mínimo del rango si pauseMaxSec > 0). */
   pauseSec: number;
-  /** Variar intervalos y pausas ±25% al azar (anti-ban). */
+  /** Tope del RANGO de pausa definido por el usuario (0 = sin rango, pausa fija). */
+  pauseMaxSec: number;
+  /** LEGACY: variar intervalos y pausas ±25% al azar. Solo aplica si NO hay rango explícito. */
   randomize: boolean;
   /** Máximo de contactos procesados por día (0 = sin límite). Al llegar, pausa hasta el día siguiente. */
   dailyLimit: number;
@@ -68,8 +72,10 @@ export interface CampaignAudience {
 
 export const DEFAULT_SEND_CONFIG: CampaignSendConfig = {
   intervalSec: 10,
+  intervalMaxSec: 0,
   pauseEvery: 10,
   pauseSec: 60,
+  pauseMaxSec: 0,
   randomize: true,
   dailyLimit: 0,
   sendFrom: null,
@@ -107,10 +113,17 @@ export function parseSendConfig(raw: unknown): CampaignSendConfig {
   const from = parseHHmm(o.sendFrom);
   const until = parseHHmm(o.sendUntil);
   const windowOk = from !== null && until !== null && from !== until;
+  const intervalSec = num(o.intervalSec, DEFAULT_SEND_CONFIG.intervalSec, 0);
+  const pauseSec = num(o.pauseSec, DEFAULT_SEND_CONFIG.pauseSec, 0);
+  // Tope del rango solo válido si supera al mínimo; si no, se ignora (fijo).
+  const intervalMaxSec = num(o.intervalMaxSec, 0, 0);
+  const pauseMaxSec = num(o.pauseMaxSec, 0, 0);
   return {
-    intervalSec: num(o.intervalSec, DEFAULT_SEND_CONFIG.intervalSec, 0),
+    intervalSec,
+    intervalMaxSec: intervalMaxSec > intervalSec ? intervalMaxSec : 0,
     pauseEvery: num(o.pauseEvery, DEFAULT_SEND_CONFIG.pauseEvery, 0),
-    pauseSec: num(o.pauseSec, DEFAULT_SEND_CONFIG.pauseSec, 0),
+    pauseSec,
+    pauseMaxSec: pauseMaxSec > pauseSec ? pauseMaxSec : 0,
     randomize: o.randomize === undefined ? DEFAULT_SEND_CONFIG.randomize : Boolean(o.randomize),
     dailyLimit: num(o.dailyLimit, DEFAULT_SEND_CONFIG.dailyLimit, 0),
     sendFrom: windowOk ? from : null,
