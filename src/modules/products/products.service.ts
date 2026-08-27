@@ -354,7 +354,9 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         showInCatalog: payload.showInCatalog ?? true,
         pauseHumanAfterSale: payload.pauseHumanAfterSale ?? false,
         productType,
-        name: payload.name,
+        // trim: nombres con espacios al inicio/final rompen los matchers por nombre
+        // (solo hacia adelante; los existentes no se tocan).
+        name: payload.name.trim(),
         price: payload.price,
         regularPrice: payload.regularPrice ?? null,
         offerPrice: payload.offerPrice ?? null,
@@ -405,7 +407,9 @@ export async function updateProduct(companyId: string, productId: string, payloa
         showInCatalog: payload.showInCatalog ?? true,
         pauseHumanAfterSale: payload.pauseHumanAfterSale ?? false,
         productType,
-        name: payload.name,
+        // trim: nombres con espacios al inicio/final rompen los matchers por nombre
+        // (solo hacia adelante; los existentes no se tocan).
+        name: payload.name.trim(),
         price: payload.price,
         regularPrice: payload.regularPrice ?? null,
         offerPrice: payload.offerPrice ?? null,

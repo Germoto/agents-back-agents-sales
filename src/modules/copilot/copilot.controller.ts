@@ -660,7 +660,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_anuncio",
       description:
-        "Crea/edita/elimina una entrada del CATÁLOGO DE ANUNCIOS. Crear: {description, matchers: [ids o títulos EXACTOS como llegan del anuncio], productName?}. Editar: {id, description?, matchers?, productName?}. Eliminar: {id, eliminar: true}. productName vincula el anuncio a un PRODUCTO del catálogo (el lead que llegue por ese anuncio entra con ese producto como interés; \"\" lo desvincula). Varios matchers pueden apuntar a la misma descripción. Llámala SOLO tras confirmación.",
+        "Crea/edita/elimina una entrada del CATÁLOGO DE ANUNCIOS. Crear: {description, matchers: [ids o títulos EXACTOS como llegan del anuncio], productId?|productName?}. Editar: {id, description?, matchers?, productId?|productName?}. Eliminar: {id, eliminar: true}. El producto vinculado hace que el lead que llegue por ese anuncio entre con ese producto como PRODUCTO EN FOCO. PREFIERE productId (de listar_productos, infalible); productName hace match tolerante (\"\" desvincula). Varios matchers pueden apuntar a la misma descripción. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -668,7 +668,8 @@ export const TOOLS: ToolDefinition[] = [
           id: { type: "string", description: "id de la entrada (editar/eliminar)" },
           description: { type: "string" },
           matchers: { type: "array", items: { type: "string" } },
-          productName: { type: "string", description: "Nombre del producto a vincular (\"\" desvincula)" },
+          productId: { type: "string", description: "ID del producto a vincular (preferido; de listar_productos)" },
+          productName: { type: "string", description: "Alternativa: nombre del producto (match tolerante; \"\" desvincula)" },
           eliminar: { type: "boolean" },
         },
       },
@@ -2007,24 +2008,45 @@ export async function runCopilotTool(
         await deleteAdCatalogEntry(companyId, id);
         return { result: JSON.stringify({ ok: true, nota: "Entrada del catálogo eliminada." }), wrote: true };
       }
-      // productName → productId (por nombre, case-insensitive). "" desvincula.
+      // Vínculo a producto: por productId directo (infalible) o por nombre con
+      // match TOLERANTE — los nombres guardados pueden traer espacios al inicio
+      // o dobles espacios (el equals exacto fallaba sin salida para el modelo).
       let productId: string | null | undefined;
-      if (args.productName !== undefined) {
+      if (asStr(args.productId)?.trim()) {
+        const pid = asStr(args.productId)!.trim();
+        const product = await prisma.product.findFirst({ where: { id: pid, companyId }, select: { id: true } });
+        if (!product) {
+          return { result: JSON.stringify({ ok: false, error: "productId no encontrado; usa un id de listar_productos" }), wrote: false };
+        }
+        productId = product.id;
+      } else if (args.productName !== undefined) {
         const name = String(args.productName ?? "").trim();
         if (!name) {
           productId = null;
         } else {
-          const product = await prisma.product.findFirst({
-            where: { companyId, name: { equals: name, mode: "insensitive" } },
+          const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+          const wanted = norm(name);
+          const products = await prisma.product.findMany({
+            where: { companyId },
             select: { id: true, name: true },
+            take: 300,
           });
-          if (!product) {
+          let matches = products.filter((p) => norm(p.name) === wanted);
+          if (!matches.length) matches = products.filter((p) => norm(p.name).includes(wanted));
+          if (matches.length === 1) {
+            productId = matches[0].id;
+          } else {
             return {
-              result: JSON.stringify({ ok: false, error: `no encontré un producto llamado "${name}"; usa listar_productos y el nombre EXACTO` }),
+              result: JSON.stringify({
+                ok: false,
+                error: matches.length
+                  ? `varios productos coinciden con "${name}" — usa productId de listar_productos`
+                  : `no encontré un producto que coincida con "${name}" — usa productId de listar_productos`,
+                productosDisponibles: products.map((p) => ({ id: p.id, name: p.name })),
+              }),
               wrote: false,
             };
           }
-          productId = product.id;
         }
       }
       const matchers = asStrList(args.matchers);
