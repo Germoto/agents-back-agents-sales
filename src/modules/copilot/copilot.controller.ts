@@ -150,7 +150,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "actualizar_producto",
       description:
-        "Modifica un producto existente. `data` es PARCIAL y ADITIVO: las listas y objetos enviados (aliases, benefits, faqs, variants, attributes, verticalData...) se FUSIONAN con lo existente SIN borrar nada. Para QUITAR elementos o reescribir una lista, envía reemplazar=true con la versión FINAL completa (lee antes con ver_producto). Llámala SOLO tras la confirmación del usuario.",
+        "Modifica un producto existente. `data` es PARCIAL y ADITIVO: las listas y objetos enviados (aliases, benefits, faqs, variants, attributes, verticalData...) se FUSIONAN con lo existente SIN borrar nada. Para QUITAR elementos o reescribir una lista, envía reemplazar=true con la versión FINAL completa (lee antes con ver_producto). PRESENTACIÓN también editable en data: presentationMessage (mensaje fijo de la ficha), presentationMessageMediaUrl/presentationMessageMediaType (el BANNER que viaja con la ficha como media+caption; '' lo quita), presentationFollowups [{message, mediaUrl?, mediaType?}] (mensajes adicionales de la presentación — al enviarlos REEMPLAZAN la lista completa). Verifica con previsualizar_ficha. Llámala SOLO tras la confirmación del usuario.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1302,7 +1302,9 @@ export async function runCopilotTool(
           ok: true,
           product: existing.name,
           principal,
-          nota: principal ? "Imagen adjuntada como foto PRINCIPAL del producto." : "Imagen adjuntada al producto.",
+          nota:
+            (principal ? "Imagen adjuntada como foto PRINCIPAL del producto." : "Imagen adjuntada al producto.") +
+            " OJO: si la intención era ponerla como BANNER del mensaje de presentación (viaja con la ficha como media+caption), eso NO es esto — usa actualizar_producto {data:{presentationMessageMediaUrl: <url>}} y verifica con previsualizar_ficha.",
         }),
         wrote: true,
       };
@@ -1338,7 +1340,7 @@ export async function runCopilotTool(
             url: saved.url,
             formato,
             nota:
-              "Imagen generada y guardada. MUÉSTRALE la URL al usuario para que la vea y la APRUEBE antes de adjuntarla. Luego conéctala donde te pida (banner de presentación, paso de recordatorio, followup, respuesta rápida, campaña o adjuntar_foto_producto) y verifica con previsualizar_ficha si aplica.",
+              "Imagen generada y guardada. MUÉSTRALE la URL al usuario para que la vea y la APRUEBE antes de adjuntarla. Destinos concretos: BANNER del mensaje de presentación → actualizar_producto {data:{presentationMessageMediaUrl}}; paso de recordatorio → actualizar_producto {data:{reminderConfig:{...steps con mediaUrl}}}; mensajes adicionales de presentación → actualizar_producto {data:{presentationFollowups}}; respuesta rápida → crear/actualizar_respuesta_rapida (mediaUrl en messages); campaña → crear_campana (mediaUrl en mensajes); foto de producto → adjuntar_foto_producto. Verifica con previsualizar_ficha cuando toque la presentación.",
           }),
           wrote: true,
         };
@@ -1804,9 +1806,13 @@ export async function runCopilotTool(
             title: r.title,
             command: r.command,
             categoryId: r.categoryId,
-            mensajes: Array.isArray(r.messages) ? r.messages.length : 0,
+            // Contenido COMPLETO (máx 10 por respuesta): sin esto el modelo no
+            // puede auditar/editar sin riesgo de perder lo existente.
+            mensajes: Array.isArray(r.messages) ? r.messages : [],
           })),
           categorias: categories,
+          nota:
+            "Para modificar una usa actualizar_respuesta_rapida {quickReplyId, data, reemplazarMensajes?}: los messages enviados se AGREGAN al final; reemplazarMensajes=true reescribe la secuencia completa (envía la versión final).",
         }),
         wrote: false,
       };
