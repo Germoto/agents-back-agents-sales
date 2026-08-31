@@ -9,7 +9,11 @@
  */
 
 import type { Request, Response } from "express";
+import fs from "fs/promises";
+import path from "path";
+import { env } from "../../config/env";
 import { prisma } from "../../lib/prisma";
+import { generateImage, saveGeneratedImage, type ImageGenSize, type ImageGenQuality } from "../../lib/image-gen";
 import { AppError } from "../../lib/app-error";
 import { chatCompletion, type ChatMessage, type ContentPart, type ToolDefinition } from "../../lib/openai";
 import { productBodySchema } from "../products/products.schemas";
@@ -191,6 +195,24 @@ export const TOOLS: ToolDefinition[] = [
           url: { type: "string", description: "URL exacta de la imagen adjuntada por el usuario" },
           description: { type: "string", description: "Descripción del archivo (ayuda al agente a saber cuándo enviarlo)" },
           principal: { type: "boolean", description: "true = foto principal del producto" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "generar_imagen",
+      description:
+        "GENERA una imagen con IA (banners de oferta, fotos de producto, creativos) y la guarda en el servidor; devuelve su URL lista para adjuntar donde el usuario pida (banner de presentación, paso de recordatorio, followup, respuesta rápida, campaña o foto de producto con adjuntar_foto_producto). CUESTA DINERO al negocio (~$0.03–0.20 por imagen, con su key de OpenAI) → llámala SOLO tras confirmación. El prompt debe ser DETALLADO (estilo, colores, composición) y todo texto que deba aparecer en la imagen va LITERAL entre comillas y en el idioma correcto (ej.: el banner dice \"SOLO POR HOY S/10\"). Tras generar, muéstrale la URL al usuario para que la APRUEBE antes de adjuntarla; si algo salió mal (tildes, montos), regenera con el prompt corregido.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["prompt"],
+        properties: {
+          prompt: { type: "string", description: "Descripción detallada de la imagen; textos a renderizar entre comillas, literales" },
+          formato: { type: "string", description: "cuadrado (default) | horizontal | vertical" },
+          calidad: { type: "string", description: "normal (default) | alta (más cara y lenta)" },
         },
       },
     },
@@ -1084,6 +1106,42 @@ function zodErrorsText(err: { issues: Array<{ path: PropertyKey[]; message: stri
 // ---------------------------------------------------------------------------
 // Ejecución de tools
 // ---------------------------------------------------------------------------
+/**
+ * Resuelve una URL de NUESTROS uploads (ej. imagen creada con generar_imagen) a
+ * un adjunto utilizable como foto de producto. Anti path-traversal: el path
+ * resuelto debe quedar DENTRO del UPLOAD_DIR. Devuelve null si no es nuestra o
+ * no existe en disco.
+ */
+async function resolveOwnUploadImage(url: string): Promise<CopilotAttachment | null> {
+  const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
+  const prefix = `${base}/uploads/`;
+  if (!url.startsWith(prefix)) return null;
+  const rel = decodeURIComponent(url.slice(prefix.length).split("?")[0]);
+  const uploadRoot = path.resolve(process.cwd(), env.UPLOAD_DIR);
+  const filePath = path.resolve(uploadRoot, rel);
+  if (!filePath.startsWith(uploadRoot + path.sep)) return null;
+  let size = 0;
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) return null;
+    size = stat.size;
+  } catch {
+    return null;
+  }
+  const extension = (path.extname(filePath).slice(1) || "png").toLowerCase();
+  const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
+  if (!IMAGE_EXTS.has(extension)) return null;
+  return {
+    url,
+    storagePath: rel,
+    originalName: path.basename(filePath),
+    extension,
+    mimeType: extension === "jpg" ? "image/jpeg" : `image/${extension}`,
+    size,
+    type: "IMAGE",
+  };
+}
+
 /** Duración humana a partir de segundos (para el resumen del plan de envío). */
 function fmtDurHuman(sec: number): string {
   const m = Math.max(1, Math.round(sec / 60));
@@ -1197,7 +1255,9 @@ export async function runCopilotTool(
   switch (name) {
     case "adjuntar_foto_producto": {
       const url = String(args.url ?? "").trim();
-      const meta = resolveAttachment(url, attachmentsByUrl);
+      // Adjunto de la conversación, o un archivo de NUESTROS uploads (p. ej.
+      // una imagen recién creada con generar_imagen).
+      const meta = resolveAttachment(url, attachmentsByUrl) ?? (await resolveOwnUploadImage(url));
       if (!meta) {
         const disponibles = [...attachmentsByUrl.keys()];
         return {
@@ -1246,6 +1306,46 @@ export async function runCopilotTool(
         }),
         wrote: true,
       };
+    }
+
+    case "generar_imagen": {
+      const prompt = String(args.prompt ?? "").trim();
+      if (!prompt) return { result: JSON.stringify({ ok: false, error: "falta el prompt de la imagen" }), wrote: false };
+      const cfgRow = await prisma.agentConfig.findUnique({
+        where: { companyId },
+        select: { aiProvider: true, openaiModel: true, openaiApiKey: true, transcriptionApiKey: true, temperature: true },
+      });
+      const apiKey = cfgRow ? resolveAiSettings(cfgRow).transcriptionApiKey : "";
+      if (!apiKey) {
+        return {
+          result: JSON.stringify({
+            ok: false,
+            error:
+              "El negocio no tiene una key de OpenAI configurada para generar imágenes. Deriva al panel: Agente IA → key de OpenAI (si su proveedor es Anthropic/Gemini, el campo de key para audios e imágenes). NUNCA pidas la key por chat.",
+          }),
+          wrote: false,
+        };
+      }
+      const formato = String(args.formato ?? "cuadrado").toLowerCase();
+      const size: ImageGenSize = formato === "horizontal" ? "1536x1024" : formato === "vertical" ? "1024x1536" : "1024x1024";
+      const quality: ImageGenQuality = String(args.calidad ?? "").toLowerCase() === "alta" ? "high" : "medium";
+      try {
+        const buffer = await generateImage({ apiKey, prompt, size, quality });
+        const saved = await saveGeneratedImage(companyId, buffer);
+        return {
+          result: JSON.stringify({
+            ok: true,
+            url: saved.url,
+            formato,
+            nota:
+              "Imagen generada y guardada. MUÉSTRALE la URL al usuario para que la vea y la APRUEBE antes de adjuntarla. Luego conéctala donde te pida (banner de presentación, paso de recordatorio, followup, respuesta rápida, campaña o adjuntar_foto_producto) y verifica con previsualizar_ficha si aplica.",
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "no se pudo generar la imagen";
+        return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
+      }
     }
 
     case "configurar_archivo_producto": {
@@ -2309,6 +2409,7 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
     "- ATRIBUCIÓN DE ANUNCIOS META: los leads que llegan desde un anuncio (CTWA) quedan marcados con el anuncio de origen; ver_metricas trae rendimientoPorAnuncio (leads, ventas, ingresos y conversión POR ANUNCIO — así se sabe qué anuncio cierra ventas de verdad). El catálogo de anuncios (ver_catalogo_anuncios/configurar_anuncio, o en Empresa → Anuncios) mapea IDs/títulos crudos a descripciones amigables; varios identificadores pueden apuntar a la misma descripción, y cada anuncio puede VINCULARSE A UN PRODUCTO: el lead que llega por ese anuncio entra con ese producto como PRODUCTO EN FOCO del bot — aunque abra con un 'Hola' genérico, el agente le presenta directamente ese producto (sin preguntarle qué busca).",
     "- ANALISTA DEL NEGOCIO: puedes leer métricas, ventas, comprobantes, pedidos, conversaciones (incluidos los MENSAJES reales con leer_conversacion), citas, campañas, suscripciones y recordatorios con ver_metricas/listar_*. Para preguntas de números usa PRIMERO ver_metricas (trae el periodo comparado con el anterior) y detalla después con listar_*. TODO número que cites debe salir de un resultado de tool de ESTE turno — NUNCA estimes ni 'recuerdes' cifras. Con los datos puedes proponer mejoras accionables (FAQs/objeciones a partir de chats reales, ofertas escalonadas para carritos abandonados, ajustes de prompt o recordatorios) y, SOLO si el usuario confirma, aplicarlas con las tools de escritura. Con previsualizar_ficha ves EXACTAMENTE cómo el agente presenta un producto al cliente (secuencia real de mensajes, multimedia y modo de presentación, en cualquier rubro) — úsala antes de proponer mejoras de copy o de estructura de la ficha.",
+    "- DISEÑADOR: con generar_imagen creas banners de oferta, fotos de producto y creativos con IA (se guardan en el servidor y su URL sirve en cualquier configuración: banner de presentación, pasos de recordatorio, followups, respuestas rápidas, campañas, o como foto de producto vía adjuntar_foto_producto). Cuesta dinero al negocio (usa su key de OpenAI) → SOLO tras confirmación. Flujo OBLIGATORIO: generar → mostrar la URL al usuario → su aprobación → adjuntar → verificar (previsualizar_ficha). Textos del banner van LITERALES entre comillas en el prompt. Si el negocio no tiene key de OpenAI, deriva al panel (Agente IA); JAMÁS pidas ni recibas keys por chat.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",

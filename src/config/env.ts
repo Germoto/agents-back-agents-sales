@@ -20,6 +20,8 @@ const envSchema = z.object({
   AGENT_DEBOUNCE_MS: z.coerce.number().int().nonnegative().default(6000),
   UPLOAD_DIR: z.string().default("uploads"),
   PUBLIC_BASE_URL: z.string().default("http://localhost:3000"),
+  // Modelo de generación de imágenes del copiloto (override sin tocar código).
+  IMAGE_GEN_MODEL: z.string().default("gpt-image-2"),
   MAX_UPLOAD_MB: z.coerce.number().int().positive().default(50),
   // Límite propio para recursos de capacitación del superadmin (PDF/videos).
   MAX_TRAINING_UPLOAD_MB: z.coerce.number().int().positive().default(500),
