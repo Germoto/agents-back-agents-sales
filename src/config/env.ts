@@ -22,6 +22,10 @@ const envSchema = z.object({
   PUBLIC_BASE_URL: z.string().default("http://localhost:3000"),
   // Modelo de generación de imágenes del copiloto (override sin tocar código).
   IMAGE_GEN_MODEL: z.string().default("gpt-image-2"),
+  // Prioridad de la MULTIMEDIA en SMS Tools: "1" = síncrona (el gateway emite el
+  // mensaje antes de responder → orden garantizado en secuencias, igual que el
+  // texto); "2" = cola del gateway (comportamiento viejo, kill-switch).
+  SMSTOOLS_MEDIA_PRIORITY: z.enum(["1", "2"]).default("1"),
   MAX_UPLOAD_MB: z.coerce.number().int().positive().default(50),
   // Límite propio para recursos de capacitación del superadmin (PDF/videos).
   MAX_TRAINING_UPLOAD_MB: z.coerce.number().int().positive().default(500),

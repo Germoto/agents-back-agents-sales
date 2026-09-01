@@ -179,7 +179,10 @@ export interface SendQuickReplyResult {
   failedAtIndex?: number;
 }
 
-const SEND_GAP_MS = 500; // pausa entre mensajes para preservar el orden en el gateway
+const SEND_GAP_MS = 500; // pausa entre mensajes de texto
+// Tras una MEDIA, respiro mayor: el orden lo garantiza el envío síncrono
+// (priority=1), esto solo espacia las burbujas para el cliente.
+const SEND_GAP_AFTER_MEDIA_MS = 1500;
 
 /**
  * Envía la secuencia completa de una respuesta rápida al cliente de la
@@ -244,7 +247,7 @@ export async function sendQuickReply(
       break;
     }
     if (i < messages.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, SEND_GAP_MS));
+      await new Promise((resolve) => setTimeout(resolve, msg.type === "text" ? SEND_GAP_MS : SEND_GAP_AFTER_MEDIA_MS));
     }
   }
 

@@ -1,4 +1,5 @@
 import { AppError } from "./app-error";
+import { env } from "../config/env";
 
 /**
  * Minimal HTTP client for the SMS TOOLS WhatsApp API.
@@ -413,7 +414,10 @@ export const smsTools = {
       recipient: to.replace(/\D/g, ""),
       type: kind === "document" ? "document" : "media",
       message: (caption && caption.trim()) || " ",
-      priority: "2",
+      // "1" (default) = síncrono: el gateway descarga/emite la media ANTES de
+      // responder → el orden de las secuencias queda garantizado (el texto iba
+      // inmediato y con "2" en cola lo adelantaba). Kill-switch por env.
+      priority: env.SMSTOOLS_MEDIA_PRIORITY,
     };
 
     if (kind === "document") {
