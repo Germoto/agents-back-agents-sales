@@ -35,6 +35,7 @@ import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type Wh
 import { readReceiptImage } from "./receipt-vision";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
+import { alertAiProviderFailure, notifyAiProviderRecovered } from "./ai-alerts";
 import { markOrderPaid, findPendingOrderForCustomer } from "../orders/orders.service";
 import {
   runFlowTurn,
@@ -751,9 +752,15 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
   let finalText: string;
   try {
     finalText = await runAgentTurn(ctx, history);
+    // Si veníamos de una falla accionable (sin créditos/key), avisar al dueño
+    // que el agente ya se recuperó (una sola vez).
+    void notifyAiProviderRecovered(companyId).catch(() => undefined);
   } catch (err) {
     console.error("[agent] runAgentTurn falló:", err instanceof Error ? err.message : err);
     finalText = "Disculpa, estoy teniendo un inconveniente. En un momento te atiendo.";
+    // Falla accionable del proveedor (sin créditos, key inválida): alertar al
+    // dueño por WhatsApp al PRIMER fallo (anti-spam 6h). Fire-and-forget.
+    void alertAiProviderFailure(companyId, err).catch(() => undefined);
   } finally {
     stopTyping();
   }
