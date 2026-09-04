@@ -76,6 +76,18 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     );
   }
 
+  // Presentación determinista: lead que llega por un anuncio vinculado a un
+  // producto (state.selectedProductId sembrado) y abre el chat por primera vez.
+  // No puede depender del modelo (pasó en prod: producto en foco perfecto y el
+  // modelo saludó genérico sin presentar). Solo primer contacto real: campañas
+  // y recordatorios ya tienen mensajes del negocio en el historial y se excluyen.
+  const forcePresentation = !forceValidation && shouldForcePresentation(ctx, history);
+  if (forcePresentation) {
+    console.log(
+      `[agent] forzando enviar_ficha (producto en foco ${ctx.state.selectedProductId} sin presentar, primer contacto) convo=${ctx.conversationId}`,
+    );
+  }
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await chatCompletion({
       apiKey,
@@ -87,7 +99,9 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       toolChoice:
         i === 0 && forceValidation
           ? { type: "function", function: { name: "validar_pago" } }
-          : "auto",
+          : i === 0 && forcePresentation
+            ? { type: "function", function: { name: "enviar_ficha" } }
+            : "auto",
     });
 
     if (res.toolCalls.length) {
@@ -139,6 +153,23 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
  * comprobante fresco (<10 min), aún no forzado para ESTE comprobante
  * (receiptAutoHandledAt marca el `at` ya gestionado) y venta no cerrada/derivada.
  */
+/**
+ * ¿Forzar la presentación del producto en foco? Solo el caso "lead de anuncio
+ * recién llegado": hay selectedProductId sembrado (catálogo de anuncios), ese
+ * producto NUNCA se presentó, y es el primer contacto real del chat (sin
+ * mensajes previos del negocio — campañas/recordatorios quedan fuera).
+ */
+function shouldForcePresentation(ctx: TurnContext, history: ChatMessage[]): boolean {
+  const productId = ctx.state.selectedProductId;
+  if (!productId) return false;
+  if ((ctx.state.presentedProductIds ?? []).includes(productId)) return false;
+  if (history.some((m) => m.role === "assistant")) return false;
+  // El producto debe existir en el catálogo activo del bot (si fue desactivado,
+  // dejar que el modelo maneje el turno con normalidad).
+  if (!ctx.config.products.some((p) => p.id === productId)) return false;
+  return true;
+}
+
 function shouldForceValidation(ctx: TurnContext): boolean {
   const r = ctx.state.lastReceipt;
   if (!r?.securityCode || !r.at) return false;
