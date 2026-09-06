@@ -8,6 +8,7 @@
  */
 
 import { prisma } from "../../lib/prisma";
+import { symbolFor } from "../../lib/currency";
 
 export interface ChosenModifier {
   group: string;
@@ -36,9 +37,17 @@ export interface CartSummary {
   total: number;
   totalText: string;
   productIds: string[];
+  /** Símbolo de la moneda del negocio ("S/" | "$") para renderizar líneas. */
+  symbol: string;
 }
 
 const CURRENCY = "S/";
+
+/** Símbolo de la moneda del negocio (Company.currency; default S/). */
+async function companySymbol(companyId: string): Promise<string> {
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { currency: true } });
+  return symbolFor(company?.currency);
+}
 
 export function parsePrice(value: string | null | undefined): number {
   if (!value) return 0;
@@ -46,8 +55,8 @@ export function parsePrice(value: string | null | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function formatMoney(n: number): string {
-  return `${CURRENCY} ${n.toFixed(2)}`;
+function formatMoney(n: number, symbol: string = CURRENCY): string {
+  return `${symbol} ${n.toFixed(2)}`;
 }
 
 function norm(s: string): string {
@@ -109,7 +118,7 @@ export async function addToCart(
   const cartId = await getOpenCart(companyId, customerId);
   const { chosen, delta } = resolveModifiers(product.verticalData, modifiers);
   const unit = parsePrice(product.price) + delta;
-  const unitPriceText = formatMoney(unit);
+  const unitPriceText = formatMoney(unit, await companySymbol(companyId));
   const qty = Math.max(1, quantity || 1);
 
   // Buscar una línea existente del mismo producto con los MISMOS modificadores
@@ -253,6 +262,7 @@ export async function summarizeCart(
   companyId: string,
   customerId: string,
 ): Promise<CartSummary> {
+  const symbol = await companySymbol(companyId);
   const cart = await prisma.cart.findFirst({
     where: { companyId, customerId, status: "OPEN" },
     select: {
@@ -272,7 +282,7 @@ export async function summarizeCart(
   });
 
   if (!cart) {
-    return { cartId: "", items: [], total: 0, totalText: formatMoney(0), productIds: [] };
+    return { cartId: "", items: [], total: 0, totalText: formatMoney(0, symbol), productIds: [], symbol };
   }
 
   const items: CartLine[] = cart.items.map((it) => {
@@ -294,8 +304,9 @@ export async function summarizeCart(
     cartId: cart.id,
     items,
     total,
-    totalText: formatMoney(total),
+    totalText: formatMoney(total, symbol),
     productIds: Array.from(new Set(items.map((it) => it.productId))),
+    symbol,
   };
 }
 
@@ -322,7 +333,7 @@ function lineLabel(it: CartLine): string {
 export function renderCartText(summary: CartSummary): string {
   if (!summary.items.length) return "Tu carrito está vacío.";
   const lines = summary.items.map(
-    (it) => `• ${lineLabel(it)} — ${formatMoney(it.unitPrice * it.quantity)}`,
+    (it) => `• ${lineLabel(it)} — ${formatMoney(it.unitPrice * it.quantity, summary.symbol)}`,
   );
   lines.push(`\n*Total: ${summary.totalText}*`);
   return lines.join("\n");
@@ -330,7 +341,7 @@ export function renderCartText(summary: CartSummary): string {
 
 /** Itemizado para el pedido (notas del Order). */
 export function renderCartForOrder(summary: CartSummary): string {
-  const lines = summary.items.map((it) => `- ${lineLabel(it)} (${formatMoney(it.unitPrice * it.quantity)})`);
+  const lines = summary.items.map((it) => `- ${lineLabel(it)} (${formatMoney(it.unitPrice * it.quantity, summary.symbol)})`);
   lines.push(`Total: ${summary.totalText}`);
   return lines.join("\n");
 }

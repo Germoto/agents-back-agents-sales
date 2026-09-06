@@ -51,6 +51,7 @@ import { composePaymentMethodsMessage } from "../agent/payment-methods";
 import { schedulePaymentRecheck } from "../scheduler/scheduler.service";
 import { getAvailableSlots, isSlotAvailable, formatSlotLabel } from "../bookings/availability.service";
 import { createBooking, reasonMessage } from "../bookings/bookings.service";
+import { symbolFor } from "../../lib/currency";
 
 // ---------------------------------------------------------------------------
 // Estado de sesión (namespace `flow` dentro de Conversation.state)
@@ -1037,6 +1038,7 @@ async function preparePaymentCharge(
   };
   if (!payment?.enabled || (!payment.methods.length && !payment.mp?.enabled)) return null;
 
+  const flowSymbol = symbolFor((config as { business?: { currency?: string } }).business?.currency);
   let amountNum = 0;
   let amountText = "";
   let title = "Pago";
@@ -1046,14 +1048,14 @@ async function preparePaymentCharge(
     const p = products.find((x) => x.id === data.productId);
     const raw = p?.priceText ?? p?.price ?? "";
     amountNum = Number(String(raw).replace(/[^\d.]/g, "")) || 0;
-    amountText = raw || `S/ ${amountNum.toFixed(2)}`;
+    amountText = raw || `${flowSymbol} ${amountNum.toFixed(2)}`;
     title = p?.name ?? title;
     productIds = [data.productId];
     // Para que el matching/entrega resuelvan el producto igual que el agente.
     io.state.selectedProductId = data.productId;
   } else {
     amountNum = Number(data.amount) || 0;
-    amountText = `S/ ${amountNum.toFixed(2)}`;
+    amountText = `${flowSymbol} ${amountNum.toFixed(2)}`;
   }
   if (!(amountNum > 0)) return null;
 
@@ -1064,6 +1066,7 @@ async function preparePaymentCharge(
     state: io.state,
     amountNum,
     amountText,
+    currency: (config as { business?: { currency?: string } }).business?.currency,
     title,
     productIds,
     simulate: io.simulate,

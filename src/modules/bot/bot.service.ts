@@ -2,6 +2,7 @@ import { AppError } from "../../lib/app-error";
 import { prisma } from "../../lib/prisma";
 import { resolveAiSettings } from "../../lib/ai-providers";
 import { mapBotProduct, productRelations } from "../../lib/product";
+import { symbolFor } from "../../lib/currency";
 import { isPlatformSalesCompanyId, getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 
 function normalizePhone(value: string) {
@@ -147,6 +148,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
       vertical: whatsappConfig.company.vertical,
       deliveryConfig: (whatsappConfig.company.deliveryConfig ?? null) as Record<string, unknown> | null,
       timezone: whatsappConfig.company.timezone,
+      // Moneda del negocio: todo texto de dinero del agente deriva su símbolo de aquí.
+      currency: whatsappConfig.company.currency ?? "PEN",
       botMode,
       // Pausa configurable entre mensajes consecutivos del bot (ver delivery.gapMsFor).
       messageGapEnabled: whatsappConfig.company.messageGapEnabled,
@@ -210,7 +213,14 @@ export async function buildBotConfig(companyId: string, account?: string) {
       catalogMediaFileName: agentConfig.catalogMediaFileName ?? null,
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
-    products: products.map((p) => withVariantModifiers(mapBotProduct(p, { timezone: whatsappConfig.company.timezone }))),
+    products: products.map((p) =>
+      withVariantModifiers(
+        mapBotProduct(p, {
+          timezone: whatsappConfig.company.timezone,
+          currencySymbol: symbolFor(whatsappConfig.company.currency),
+        }),
+      ),
+    ),
   };
 }
 

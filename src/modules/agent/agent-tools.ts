@@ -9,6 +9,7 @@ import { ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import type { ToolDefinition } from "../../lib/openai";
 import type { getBotConfig } from "../bot/bot.service";
+import { symbolFor } from "../../lib/currency";
 import type { ConversationState } from "./conversation.service";
 import { setBotPaused } from "./conversation.service";
 import { applyCrmAndTagActions } from "../crm/crm.service";
@@ -907,11 +908,12 @@ export async function tryApprovePayment(opts: {
 
   // (c) Monto distinto al esperado (lo leído no cuadra): avisar.
   const readAmount = parseAmountNumber(state.lastReceipt?.amountText);
+  const sym = symbolFor(config.business.currency);
   if (expected && readAmount && Math.abs(readAmount - expected) >= 0.5) {
     return {
       approved: false,
       kind: "amount_mismatch",
-      customerMessage: `Veo un comprobante por S/ ${readAmount}, pero el monto a pagar es S/ ${expected}. ¿Me reenvías el comprobante correcto? 🙏`,
+      customerMessage: `Veo un comprobante por ${sym} ${readAmount}, pero el monto a pagar es ${sym} ${expected}. ¿Me reenvías el comprobante correcto? 🙏`,
     };
   }
 
@@ -984,7 +986,7 @@ function parseFichaPrice(value: unknown): number {
 }
 
 /** Planes/modalidades (verticalData.modifierGroups) con precio ABSOLUTO = base + delta. Solo STREAMER. */
-function streamerPlanLines(p: BotProduct): string[] {
+function streamerPlanLines(p: BotProduct, symbol: string = "S/"): string[] {
   const v = (p.verticalData ?? null) as Record<string, unknown> | null;
   const groups = v && Array.isArray(v.modifierGroups) ? (v.modifierGroups as any[]) : [];
   if (!groups.length) return [];
@@ -993,13 +995,13 @@ function streamerPlanLines(p: BotProduct): string[] {
   for (const grp of groups) {
     for (const o of grp.options ?? []) {
       if (!o?.label) continue;
-      lines.push(`• ${o.label} — S/ ${(base + (Number(o.priceDelta) || 0)).toFixed(2)}`);
+      lines.push(`• ${o.label} — ${symbol} ${(base + (Number(o.priceDelta) || 0)).toFixed(2)}`);
     }
   }
   return lines;
 }
 
-function renderProductFicha(p: BotProduct, vertical?: string): string {
+function renderProductFicha(p: BotProduct, vertical?: string, symbol: string = "S/"): string {
   const parts: string[] = [`*${p.name}*`];
   const desc = (p.fullDescription || p.shortDescription || "").trim();
   if (desc) parts.push(desc);
@@ -1007,7 +1009,7 @@ function renderProductFicha(p: BotProduct, vertical?: string): string {
   if (p.includes?.length) parts.push(`*Incluye:*\n${p.includes.join("\n")}`);
   if (p.bonuses?.length) parts.push(`*Bonos:*\n${p.bonuses.join("\n")}`);
   // STREAMER con varios planes: listar cada plan con su precio (en vez de un precio fijo).
-  const planLines = vertical === "STREAMER" ? streamerPlanLines(p) : [];
+  const planLines = vertical === "STREAMER" ? streamerPlanLines(p, symbol) : [];
   if (planLines.length) {
     parts.push(`📋 *Planes y precios:*\n${planLines.join("\n")}`);
   } else {
@@ -1039,6 +1041,7 @@ export interface FichaPreviewMessage {
 export function buildFichaPreview(
   product: BotProduct,
   vertical?: string,
+  symbol: string = "S/",
 ): { modo: string; mensajes: FichaPreviewMessage[]; notas: string[] } {
   const mensajes: FichaPreviewMessage[] = [];
   const notas: string[] = [];
@@ -1078,7 +1081,7 @@ export function buildFichaPreview(
   if (vertical === "STREAMER" && !presentationMessage) {
     pushPresentationFiles();
     pushFollowups();
-    const planes = streamerPlanLines(product);
+    const planes = streamerPlanLines(product, symbol);
     notas.push(
       "STREAMING sin mensaje de presentación fijo: el agente REDACTA la presentación con sus palabras en cada chat (no hay texto fijo que auditar)." +
         (planes.length ? ` Incluye estos planes con precios exactos: ${planes.join(" | ")}` : ""),
@@ -1086,7 +1089,7 @@ export function buildFichaPreview(
     return { modo: "streamer_redaccion_libre", mensajes, notas };
   }
 
-  const fichaText = presentationMessage || renderProductFicha(product, vertical);
+  const fichaText = presentationMessage || renderProductFicha(product, vertical, symbol);
   const presMediaUrl = p.presentationMessageMediaUrl?.trim();
   if (presMediaUrl) {
     mensajes.push({
@@ -1130,12 +1133,12 @@ function catalogProducts(products: BotProduct[]): BotProduct[] {
 }
 
 /** Catálogo customer-facing (sin ids/alias), agrupado por categoría si existe. */
-function renderCustomerCatalog(products: BotProduct[], vertical?: string): string {
+function renderCustomerCatalog(products: BotProduct[], vertical?: string, symbol: string = "S/"): string {
   const line = (p: BotProduct) => {
     let price = p.priceText ?? p.price;
     // STREAMER con varios planes: mostrar "desde S/{mínimo}" en vez de un precio fijo.
     if (vertical === "STREAMER") {
-      const lines = streamerPlanLines(p);
+      const lines = streamerPlanLines(p, symbol);
       if (lines.length) {
         const base = parseFichaPrice(p.priceText ?? p.price);
         const v = (p.verticalData ?? null) as Record<string, unknown> | null;
@@ -1143,7 +1146,7 @@ function renderCustomerCatalog(products: BotProduct[], vertical?: string): strin
         const prices = groups.flatMap((g) =>
           (g.options ?? []).map((o: any) => base + (Number(o.priceDelta) || 0)),
         );
-        if (prices.length) price = `desde S/ ${Math.min(...prices).toFixed(2)}`;
+        if (prices.length) price = `desde ${symbol} ${Math.min(...prices).toFixed(2)}`;
       }
     }
     // Trim del nombre: los espacios dentro de *...* rompen el negrita de WhatsApp
@@ -1601,7 +1604,7 @@ export async function executeTool(
       if (fichaVertical === "STREAMER" && !presentationMessage) {
         const mediaSent = pushPresentationMedia(ctx, product);
         pushFollowupList(ctx.outbox, presentationFollowups);
-        const planes = streamerPlanLines(product); // ["Mensual por perfil — S/ 16.00", ...] o []
+        const planes = streamerPlanLines(product, symbolFor(ctx.config.business.currency));
         return JSON.stringify({
           ok: true,
           present: true,
@@ -1617,7 +1620,7 @@ export async function executeTool(
 
       // Si el dueño configuró un mensaje de presentación, se envía TAL CUAL (respeta
       // saltos de línea); si no, el bot arma la ficha con los campos estructurados.
-      const fichaText = presentationMessage || renderProductFicha(product, fichaVertical);
+      const fichaText = presentationMessage || renderProductFicha(product, fichaVertical, symbolFor(ctx.config.business.currency));
       // Si la info completa tiene multimedia adjunta, se envía como UN solo mensaje
       // (media con el texto como caption); si no, como texto plano (como antes).
       const presMediaUrl = (product as { presentationMessageMediaUrl?: string | null }).presentationMessageMediaUrl?.trim();
@@ -1668,7 +1671,7 @@ export async function executeTool(
         });
       }
       if (mediaMode !== "media") {
-        const body = renderCustomerCatalog(products, (ctx.config.business as { vertical?: string }).vertical);
+        const body = renderCustomerCatalog(products, (ctx.config.business as { vertical?: string }).vertical, symbolFor(ctx.config.business.currency));
         const saludo =
           mediaMode === "both"
             ? `Y aquí un resumen rápido:\n\n${body}\n\n¿Cuál te llama la atención? Con gusto te cuento más 😊`
@@ -1912,6 +1915,7 @@ export async function executeTool(
         state: ctx.state,
         amountNum,
         amountText,
+        currency: ctx.config.business.currency,
         title: mpTitle,
         productIds: newIds.length ? newIds : chargeIds,
         simulate: ctx.simulate,

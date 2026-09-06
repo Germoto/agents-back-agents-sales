@@ -5,6 +5,7 @@
  */
 
 import { env } from "../../config/env";
+import { symbolFor } from "../../lib/currency";
 import { decryptCredential } from "../../lib/credentials-crypto";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
@@ -42,6 +43,8 @@ export async function composePaymentMethodsMessage(opts: {
   state: ConversationState;
   amountNum: number;
   amountText: string;
+  /** Moneda del negocio ("PEN" default): símbolo del texto y currency_id del link MP. */
+  currency?: string;
   title: string;
   productIds: string[];
   simulate?: boolean;
@@ -65,6 +68,7 @@ export async function composePaymentMethodsMessage(opts: {
       const pref = await mpCreatePreference(token, {
         title: opts.title,
         amount: linkAmount,
+        currency: (opts.currency ?? "PEN").toUpperCase(),
         externalReference: JSON.stringify({
           conversationId: opts.conversationId,
           productIds: opts.productIds,
@@ -73,7 +77,7 @@ export async function composePaymentMethodsMessage(opts: {
       });
       mpLine =
         mpCfg.feeMode === "CUSTOMER" && linkAmount > opts.amountNum
-          ? `\n\n💳 O paga con tarjeta u otros medios por Mercado Pago (total S/ ${linkAmount.toFixed(2)}, incluye la comisión de la pasarela):\n${pref.init_point}`
+          ? `\n\n💳 O paga con tarjeta u otros medios por Mercado Pago (total ${symbolFor(opts.currency)} ${linkAmount.toFixed(2)}, incluye la comisión de la pasarela):\n${pref.init_point}`
           : `\n\n💳 También puedes pagar con tarjeta u otros medios aquí:\n${pref.init_point}`;
       opts.state.mpPreferenceId = pref.id;
       opts.state.mpAmount = linkAmount;

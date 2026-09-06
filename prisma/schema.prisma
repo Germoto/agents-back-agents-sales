@@ -152,6 +152,9 @@ model Company {
   // Horario de atención para la AGENDA de citas: [{ day: 0-6, from: "09:00", to: "18:00" }]
   businessHours     Json?
   timezone          String                @default("America/Lima")
+  // Moneda del negocio: TODO el embudo la usa (fichas, carrito, validación,
+  // reportes, CAPI). "PEN" (S/) default; "USD" ($) opcional.
+  currency          String                @default("PEN")
   // Modo de operación del bot: "AI" (agente IA abierto) | "FLOW" (chatbot de
   // flujos guiados). Excluyentes: en modo FLOW el agente IA no responde.
   botMode           String                @default("AI")

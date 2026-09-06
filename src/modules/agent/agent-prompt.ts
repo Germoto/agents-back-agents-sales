@@ -10,6 +10,7 @@
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
+import { symbolFor } from "../../lib/currency";
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
@@ -22,14 +23,14 @@ function parsePriceNum(value: unknown): number {
 
 // Renderiza las modalidades (grupo de modificadores) con su PRECIO ABSOLUTO
 // (precio base del producto + delta), para que el agente las ofrezca con claridad.
-function renderModalities(v: Record<string, unknown>, basePrice: string | undefined): string {
+function renderModalities(v: Record<string, unknown>, basePrice: string | undefined, symbol: string = "S/"): string {
   const groups = Array.isArray(v.modifierGroups) ? (v.modifierGroups as any[]) : [];
   if (!groups.length) return "";
   const base = parsePriceNum(basePrice);
   return groups
     .map((grp) => {
       const opts = (grp.options ?? [])
-        .map((o: any) => `${o.label}: S/ ${(base + (Number(o.priceDelta) || 0)).toFixed(2)}`)
+        .map((o: any) => `${o.label}: ${symbol} ${(base + (Number(o.priceDelta) || 0)).toFixed(2)}`)
         .join(" / ");
       return `${grp.name}${grp.required ? "*" : ""}: ${opts}`;
     })
@@ -37,13 +38,13 @@ function renderModalities(v: Record<string, unknown>, basePrice: string | undefi
 }
 
 // Renderiza los datos estructurados del rubro (vertical pack) de un producto.
-function renderVerticalData(vertical: string | undefined, vData: unknown, basePrice?: string): string {
+function renderVerticalData(vertical: string | undefined, vData: unknown, basePrice?: string, symbol: string = "S/"): string {
   if (!vData || typeof vData !== "object") return "";
   const v = vData as Record<string, unknown>;
   const show = (label: string, key: string) =>
     v[key] != null && String(v[key]).trim() ? `${label}: ${v[key]}` : "";
   if (vertical === "STREAMER") {
-    const modalities = renderModalities(v, basePrice);
+    const modalities = renderModalities(v, basePrice, symbol);
     return [
       show("periodo", "billingPeriod"),
       show("duración (días)", "durationDays"),
@@ -107,7 +108,7 @@ function renderVerticalData(vertical: string | undefined, vData: unknown, basePr
  * catálogos grandes; el sufijo "+N más" le enseña al modelo a completar con
  * buscar_producto.
  */
-function renderProduct(p: BotProduct, index: number, vertical: string | undefined, full: boolean): string {
+function renderProduct(p: BotProduct, index: number, vertical: string | undefined, full: boolean, symbol: string = "S/"): string {
   const secundario = (p as { showInCatalog?: boolean }).showInCatalog === false;
   const parts = [
     `${index + 1}. [${p.id}] ${p.name} — ${p.priceText ?? p.price}${
@@ -121,7 +122,7 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
     parts.push(`   detalle: ${fullDesc.slice(0, 600)}`);
   }
   if (p.aliases?.length) parts.push(`   alias: ${p.aliases.join(", ")}`);
-  const vd = renderVerticalData(vertical, p.verticalData, p.priceText ?? p.price);
+  const vd = renderVerticalData(vertical, p.verticalData, p.priceText ?? p.price, symbol);
   if (vd) parts.push(`   ${vertical === "STREAMER" ? "plan" : "detalle"}: ${vd}`);
   if (p.benefits?.length) parts.push(`   beneficios: ${p.benefits.slice(0, full ? 20 : 5).join("; ")}`);
   if (p.includes?.length) parts.push(`   incluye: ${p.includes.slice(0, full ? 20 : 5).join("; ")}`);
@@ -193,6 +194,7 @@ function renderCatalog(
   products: BotConfig["products"],
   vertical: string | undefined,
   selectedProductId?: string | null,
+  symbol: string = "S/",
 ): string {
   if (!products.length) return "(sin productos activos)";
   // Base de conocimiento completa para catálogos chicos o para el producto en
@@ -200,7 +202,7 @@ function renderCatalog(
   const isFull = (p: BotProduct) => products.length <= 3 || p.id === selectedProductId;
   const hasCategories = products.some((p) => p.category && p.category.trim());
   if (!hasCategories) {
-    return products.map((p, i) => renderProduct(p, i, vertical, isFull(p))).join("\n\n");
+    return products.map((p, i) => renderProduct(p, i, vertical, isFull(p), symbol)).join("\n\n");
   }
   // Agrupado por categoría (menú por secciones / planes por servicio).
   const groups = new Map<string, BotProduct[]>();
@@ -212,7 +214,7 @@ function renderCatalog(
   let idx = 0;
   const sections: string[] = [];
   for (const [cat, items] of groups) {
-    const lines = items.map((p) => renderProduct(p, idx++, vertical, isFull(p)));
+    const lines = items.map((p) => renderProduct(p, idx++, vertical, isFull(p), symbol));
     sections.push(`== ${cat} ==\n${lines.join("\n\n")}`);
   }
   return sections.join("\n\n");
@@ -394,7 +396,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
         ]),
     "",
     "Catálogo disponible:",
-    renderCatalog(config.products, vertical, state.selectedProductId),
+    renderCatalog(config.products, vertical, state.selectedProductId, symbolFor(config.business.currency)),
     "",
     "Métodos de pago configurados:",
     renderPaymentMethods(config.payment),

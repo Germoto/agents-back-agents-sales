@@ -30,7 +30,7 @@ const SYSTEM =
   "(Yape, Plin, transferencia bancaria: muestra monto pagado, 'Nro de operación', 'pago exitoso', etc.). " +
   "Si es cualquier otra cosa (una foto de un producto, un álbum, una pantalla, un meme, un documento que " +
   "no es de pago), isReceipt = false. " +
-  "Si isReceipt, extrae: el monto pagado (amountText, ej. 'S/ 5.00'); la hora/fecha que aparezca " +
+  "Si isReceipt, extrae: el monto pagado (amountText, tal cual con su moneda — ej. 'S/ 5.00' o '$ 5.00'); la hora/fecha que aparezca " +
   "(time, texto tal cual); el CÓDIGO DE SEGURIDAD (securityCode), que aparece SOLO en transferencias " +
   "Yape→Yape, rotulado 'CÓDIGO DE SEGURIDAD' o 'cód'. Suele ser de 3 dígitos y puede mostrarse en casillas " +
   "separadas (ej. '0 7 3' → devuelve '073'; conserva el cero inicial). Si NO aparece un código de seguridad, " +

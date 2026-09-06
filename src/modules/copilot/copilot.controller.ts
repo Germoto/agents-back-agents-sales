@@ -14,6 +14,7 @@ import path from "path";
 import { env } from "../../config/env";
 import { prisma } from "../../lib/prisma";
 import { generateImage, saveGeneratedImage, type ImageGenSize, type ImageGenQuality } from "../../lib/image-gen";
+import { symbolFor } from "../../lib/currency";
 import { AppError } from "../../lib/app-error";
 import { chatCompletion, type ChatMessage, type ContentPart, type ToolDefinition } from "../../lib/openai";
 import { productBodySchema } from "../products/products.schemas";
@@ -251,7 +252,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_empresa",
       description:
-        "Actualiza la EMPRESA. `data` es PARCIAL (solo lo que cambia): {name?, timezone?, vertical? (SOLO si aún no hay productos), botMode? ('AI'|'FLOW'), deliveryConfig? {cost?, time?, areas?: string[], pickupAvailable?, requiresAddress?}, businessHours? [{day (0=domingo..6=sábado), from 'HH:MM', to 'HH:MM'}], firmaEnabled?, firmaText?}. Llámala SOLO tras la confirmación del usuario.",
+        "Actualiza la EMPRESA. `data` es PARCIAL (solo lo que cambia): {name?, timezone?, vertical? (SOLO si aún no hay productos), botMode? ('AI'|'FLOW'), currency? ('PEN' soles S/ | 'USD' dólares $ — la MONEDA del negocio: TODO el embudo la usa: fichas, carrito, cobro, validación, reportes), deliveryConfig? {cost?, time?, areas?: string[], pickupAvailable?, requiresAddress?}, businessHours? [{day (0=domingo..6=sábado), from 'HH:MM', to 'HH:MM'}], firmaEnabled?, firmaText?}. Llámala SOLO tras la confirmación del usuario.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -855,7 +856,7 @@ function resolveAttachment(
 // Guía de campos por rubro (espejo compacto de los blueprints del panel)
 // ---------------------------------------------------------------------------
 const COMMON_FIELDS =
-  "Campos comunes de `data`: name*, price* (texto, ej. '12' o '12.50'), shortDescription (1 línea vendedora), fullDescription, category, active (default true), aliases (string[] — sinónimos/abreviaturas con las que el cliente lo nombraría), benefits (string[]), includes (string[]), bonuses (string[]), faqs ([{question, answer}]), objections ([{question, answer}]), attributes (objeto clave→valor, ej. {\"Ingredientes\": \"pollo, papas\"}). " +
+  "Campos comunes de `data`: name*, price* (texto, ej. '12' o '12.50', SIN símbolo — está en la MONEDA del negocio, ver_configuracion la muestra), shortDescription (1 línea vendedora), fullDescription, category, active (default true), aliases (string[] — sinónimos/abreviaturas con las que el cliente lo nombraría), benefits (string[]), includes (string[]), bonuses (string[]), faqs ([{question, answer}]), objections ([{question, answer}]), attributes (objeto clave→valor, ej. {\"Ingredientes\": \"pollo, papas\"}). " +
   "reminderConfig (recordatorios PROPIOS de este producto — si no se envía, hereda los generales del negocio): {abandonedCart?: {enabled, steps: [{delaySeconds (SEGUNDOS, ej. 3600=1h, 86400=24h), message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso, el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje para mostrarlo)}]}, leftOnRead?: {enabled, steps: [...]}}; enviar null lo limpia (vuelve a heredar). " +
   "OFERTA CON VIGENCIA (global, todos los clientes): offerPrice (texto, ej. '49'), offerStartsAt/offerEndsAt (fecha-hora ISO, opcionales; sin fechas = activa hasta quitarla). Vigente => el agente presenta, cobra y valida ESE precio y el precio normal se muestra tachado como 'antes'. null limpia la oferta. " +
   "PRESENTACIÓN: presentationMessage (mensaje de presentación FIJO — si existe, la ficha se envía tal cual en vez de auto-generarse); presentationMessageMediaUrl/presentationMessageMediaType (banner adjunto al mensaje: la ficha viaja como media con el texto de caption; usa la URL de un archivo del producto o un adjunto de esta conversación; '' lo quita); presentationFollowups = [{message, mediaUrl?, mediaType?}] (secuencia que se envía DESPUÉS de la ficha — al enviarla REEMPLAZA la lista completa: manda la versión final; [] la limpia). Los archivos ya subidos se gestionan con configurar_archivo_producto (showInPresentation true = va adjunto en la presentación, false = on-demand; description; principal). Tras cambiar la presentación, VERIFICA con previsualizar_ficha.";
@@ -1444,7 +1445,7 @@ export async function runCopilotTool(
         };
       }
       const vertical = (cfg.business as { vertical?: string }).vertical;
-      const preview = buildFichaPreview(botProduct, vertical);
+      const preview = buildFichaPreview(botProduct, vertical, symbolFor((cfg.business as { currency?: string }).currency));
       return {
         result: JSON.stringify({
           ok: true,
@@ -1566,6 +1567,7 @@ export async function runCopilotTool(
         adminPhone: asStr(data.adminPhone) ?? current.adminPhone,
         vertical: (asStr(data.vertical) as typeof current.vertical | undefined) ?? current.vertical,
         timezone: asStr(data.timezone) ?? current.timezone,
+        currency: ((asStr(data.currency)?.toUpperCase() === "USD" ? "USD" : asStr(data.currency)?.toUpperCase() === "PEN" ? "PEN" : undefined) as "PEN" | "USD" | undefined) ?? (current.currency as "PEN" | "USD"),
         botMode: (asStr(data.botMode) as "AI" | "FLOW" | undefined) ?? (current.botMode as "AI" | "FLOW"),
         isActive: current.isActive,
         // undefined = no tocar (el service ya respeta esa semántica).
@@ -1580,7 +1582,7 @@ export async function runCopilotTool(
         messageGapSeconds: current.messageGapSeconds,
       });
       return {
-        result: JSON.stringify({ ok: true, empresa: { name: updated.name, vertical: updated.vertical, timezone: updated.timezone }, nota: "Empresa actualizada (lo no enviado se conservó)." }),
+        result: JSON.stringify({ ok: true, empresa: { name: updated.name, vertical: updated.vertical, timezone: updated.timezone, currency: (updated as { currency?: string }).currency }, nota: "Empresa actualizada (lo no enviado se conservó)." }),
         wrote: true,
       };
     }
@@ -2362,7 +2364,7 @@ const SYSTEM_GUIDE = [
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación.",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (/reservas-online): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
   "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat). Cada producto puede tener OFERTA con vigencia (precio de oferta + desde/hasta): vigente, el agente la presenta, cobra y valida ese precio y el normal sale tachado como 'antes'. Además hay OFERTAS ESCALONADAS en los recordatorios: cada paso puede llevar su precio (si el cliente no compra, el recordatorio 1 ofrece un precio y el 2 uno mejor — solo para ese cliente).",
-  "- Empresa (/empresa): nombre, rubro, zona horaria, horario de atención, delivery, firma. Incluye el tab Anuncios: catálogo de anuncios Meta (mapea IDs/títulos de anuncios a descripciones amigables para los leads y el reporte por anuncio).",
+  "- Empresa (/empresa): nombre, rubro, zona horaria, MONEDA del negocio (soles S/ por defecto o dólares $ — todo el embudo la usa: fichas, carrito, cobro, validación, reportes), horario de atención, delivery, firma. Incluye el tab Anuncios: catálogo de anuncios Meta (mapea IDs/títulos de anuncios a descripciones amigables para los leads y el reporte por anuncio).",
   "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
   "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper): si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI solo para audios — sin ella los audios no se transcriben.",
   "- Flujos de chatbot (/flujos): flujos guiados visuales con su propio copiloto IA (módulo Flujos).",

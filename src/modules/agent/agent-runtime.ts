@@ -36,7 +36,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
         ? cart.items
             .map(
               (it) =>
-                `${it.quantity}x ${it.name}${it.modifiers.length ? ` (${it.modifiers.map((m) => m.option).join(", ")})` : ""} — S/ ${(it.unitPrice * it.quantity).toFixed(2)}`,
+                `${it.quantity}x ${it.name}${it.modifiers.length ? ` (${it.modifiers.map((m) => m.option).join(", ")})` : ""} — ${cart.symbol} ${(it.unitPrice * it.quantity).toFixed(2)}`,
             )
             .join(" | ") + ` | TOTAL ${cart.totalText}`
         : "vacío";

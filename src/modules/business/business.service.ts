@@ -40,6 +40,7 @@ export async function updateBusinessProfile(companyId: string, data: {
   adminPhone: string;
   vertical: BusinessVertical;
   timezone: string;
+  currency?: "PEN" | "USD";
   botMode?: "AI" | "FLOW";
   isActive: boolean;
   deliveryConfig?: DeliveryConfigInput | null;

@@ -22,6 +22,7 @@ import {
   substituteTemplateParams,
   type MetaTemplateConfig,
 } from "../agent/session-window";
+import { symbolFor } from "../../lib/currency";
 
 const BATCH = 50;
 // Separación mínima entre recordatorios VISIBLES al mismo cliente en una misma pasada
@@ -261,7 +262,8 @@ async function processDue(): Promise<void> {
       if (offerMeta?.offerPrice) {
         try {
           const offerNum = Number(String(offerMeta.offerPrice).replace(/[^0-9.]/g, ""));
-          const priceText = offerNum > 0 ? `S/ ${offerNum.toFixed(2)}` : null;
+          const offerCompany = await prisma.company.findUnique({ where: { id: msg.companyId }, select: { currency: true } });
+          const priceText = offerNum > 0 ? `${symbolFor(offerCompany?.currency)} ${offerNum.toFixed(2)}` : null;
           if (priceText) {
             if (msg.conversationId) {
               const row = await prisma.conversation.findUnique({

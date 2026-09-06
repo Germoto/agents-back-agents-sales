@@ -6,6 +6,7 @@
  */
 
 import { prisma } from "../../lib/prisma";
+import { symbolFor } from "../../lib/currency";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { renderCartForOrder, variantLabelFor, type CartSummary } from "./cart.service";
@@ -84,7 +85,8 @@ export async function createAgentOrder(input: CreateOrderInput) {
 
   const qty = Math.max(1, input.quantity || 1);
   const unit = product.price ?? "0";
-  const lineTotal = `S/ ${(parseNum(unit) * qty).toFixed(2)}`;
+  const company = await prisma.company.findUnique({ where: { id: input.companyId }, select: { currency: true } });
+  const lineTotal = `${symbolFor(company?.currency)} ${(parseNum(unit) * qty).toFixed(2)}`;
   const init = initialStatusFor(input.paymentMode);
 
   const order = await prisma.order.create({
@@ -165,9 +167,9 @@ export async function createOrderFromCart(input: {
           productId: it.productId,
           productName: it.name,
           quantity: it.quantity,
-          unitPrice: it.unitPriceText ?? `S/ ${it.unitPrice.toFixed(2)}`,
+          unitPrice: it.unitPriceText ?? `${input.cart.symbol} ${it.unitPrice.toFixed(2)}`,
           variantLabel: variantLabelFor(it) || null,
-          lineTotal: `S/ ${(it.unitPrice * it.quantity).toFixed(2)}`,
+          lineTotal: `${input.cart.symbol} ${(it.unitPrice * it.quantity).toFixed(2)}`,
         })),
       },
       statusHistory: { create: [{ toStatus: init.status, changedBy: "agente", note: "Pedido registrado" }] },

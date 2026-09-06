@@ -27,6 +27,8 @@ export const updateBusinessSchema = z.object({
   adminPhone: z.string().min(6),
   vertical: businessVerticalSchema.default("INFOPRODUCT"),
   timezone: z.string().min(1).default("America/Lima"),
+  // Moneda del negocio: todo el embudo la usa. Opcional (no enviada = no cambia).
+  currency: z.enum(["PEN", "USD"]).optional(),
   // Modo de operación del bot: agente IA abierto o chatbot de flujos guiados.
   botMode: z.enum(["AI", "FLOW"]).default("AI"),
   isActive: z.boolean().default(true),
