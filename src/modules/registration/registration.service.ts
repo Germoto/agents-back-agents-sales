@@ -4,7 +4,10 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { mailerEnabled, sendMail } from "../../lib/mailer";
 import { normalizePhoneDigits, normalizeUsername } from "../../lib/identifier";
-import { verificationCodeEmail } from "./registration.emails";
+import { verificationCodeEmail, newPreRegistrationAdminEmail } from "./registration.emails";
+import { notifyPlatformAdmin } from "../platform-config/platform-notify.service";
+import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { env } from "../../config/env";
 
 // ---------------------------------------------------------------------------
 // Pre-registro público: el cliente se registra desde el landing, verifica su
@@ -155,7 +158,69 @@ export async function verifyEmailCode(id: string, code: string) {
     },
   });
 
+  // Avisar al dueño de la plataforma que hay un cliente LISTO para aprobar
+  // (email + WhatsApp si está configurado + badge en vivo del Control Room).
+  // Fire-and-forget: un aviso fallido jamás rompe la verificación del cliente.
+  void notifyAdminPreRegistrationReady(id).catch((err) =>
+    console.warn("[registration] aviso al admin falló:", err instanceof Error ? err.message : err),
+  );
+
   return { verified: true };
+}
+
+/** Caché del companyId del superadmin (para el socket del Control Room). */
+let superadminCompanyCache: { id: string | null; at: number } = { id: null, at: 0 };
+
+async function superadminCompanyId(): Promise<string | null> {
+  if (Date.now() - superadminCompanyCache.at < 10 * 60 * 1000 && superadminCompanyCache.id) {
+    return superadminCompanyCache.id;
+  }
+  const admin = await prisma.user.findFirst({ where: { role: "SUPERADMIN" }, select: { companyId: true } });
+  superadminCompanyCache = { id: admin?.companyId ?? null, at: Date.now() };
+  return superadminCompanyCache.id;
+}
+
+async function notifyAdminPreRegistrationReady(id: string): Promise<void> {
+  const row = await prisma.preRegistration.findUnique({
+    where: { id },
+    select: {
+      companyName: true,
+      fullName: true,
+      email: true,
+      phone: true,
+      vertical: true,
+      plan: { select: { name: true } },
+    },
+  });
+  if (!row) return;
+
+  // Badge en vivo del Control Room (el socket del superadmin ya está en su room).
+  const adminCompanyId = await superadminCompanyId().catch(() => null);
+  if (adminCompanyId) {
+    socketService.emitToCompany(adminCompanyId, SOCKET_EVENTS.PREREG_NEW, {
+      companyName: row.companyName,
+      planName: row.plan?.name ?? null,
+    });
+  }
+
+  const consoleUrl = env.FRONTEND_URL ? `${env.FRONTEND_URL.replace(/\/$/, "")}/control-room-7m4x` : undefined;
+  const mail = newPreRegistrationAdminEmail({
+    companyName: row.companyName,
+    fullName: row.fullName,
+    email: row.email,
+    phone: row.phone,
+    planName: row.plan?.name ?? "—",
+    vertical: row.vertical ?? "—",
+    consoleUrl,
+  });
+  await notifyPlatformAdmin({
+    subject: mail.subject,
+    html: mail.html,
+    text:
+      `🔔 *Nuevo pre-registro listo para aprobar*\n\n` +
+      `Empresa: ${row.companyName}\nContacto: ${row.fullName}\nTel: +${row.phone}\nPlan: ${row.plan?.name ?? "—"}\n\n` +
+      `Actívalo en el Control Room${consoleUrl ? `: ${consoleUrl}` : "."}`,
+  });
 }
 
 export async function resendEmailCode(id: string) {

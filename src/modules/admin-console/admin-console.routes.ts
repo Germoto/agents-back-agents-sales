@@ -7,6 +7,8 @@ import {
   createClientController,
   deleteClientController,
   getLandingSceneController,
+  getNotifyConfigController,
+  updateNotifyConfigController,
   getVerticalsController,
   impersonateClientController,
   listClientsController,
@@ -118,6 +120,8 @@ router.put(
 );
 
 // Config global de plataforma: animación 3D del landing público.
+router.get("/config/notifications", requireAuth, requireRole("SUPERADMIN"), asyncHandler(getNotifyConfigController));
+router.put("/config/notifications", requireAuth, requireRole("SUPERADMIN"), asyncHandler(updateNotifyConfigController));
 router.get("/config/landing", requireAuth, requireRole("SUPERADMIN"), asyncHandler(getLandingSceneController));
 router.put(
   "/config/landing",

@@ -28,6 +28,7 @@ export const SOCKET_EVENTS = {
   CRM_UPDATED:          "crm.updated",          // tablero CRM cambió (move/columnas/CRUD)
   CAMPAIGN_PROGRESS:    "campaign.progress",    // avance de una campaña masiva (enviados/fallos/estado)
   WEBCHAT_MESSAGE:      "webchat.message",      // mensaje saliente hacia un visitante del chat web
+  PREREG_NEW:           "prereg.new",           // pre-registro verificado, listo para aprobar (Control Room)
 } as const;
 
 class SocketService {

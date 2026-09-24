@@ -1,5 +1,42 @@
 // Plantillas de correo del pre-registro (HTML inline simple, card oscura).
 
+/** Aviso AL DUEÑO DE LA PLATAFORMA: pre-registro con correo verificado, listo para aprobar. */
+export function newPreRegistrationAdminEmail(params: {
+  companyName: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  planName: string;
+  vertical: string;
+  consoleUrl?: string;
+}) {
+  const row = (label: string, value: string) =>
+    `<tr><td style="padding:4px 12px 4px 0;color:#8a93ab;font-size:13px;">${label}</td><td style="padding:4px 0;color:#e7eaf3;font-size:13px;font-weight:bold;">${value}</td></tr>`;
+  return {
+    subject: `🔔 Nuevo pre-registro listo para aprobar: ${params.companyName}`,
+    html: `
+<div style="background:#0d1220;padding:32px 16px;font-family:Arial,Helvetica,sans-serif;">
+  <div style="max-width:480px;margin:0 auto;background:#151b2e;border-radius:16px;padding:32px 28px;color:#e7eaf3;">
+    <h2 style="margin:0 0 6px;font-size:18px;">🔔 Nuevo pre-registro verificado</h2>
+    <p style="margin:0 0 16px;color:#8a93ab;font-size:13px;">Un cliente completó su registro en el landing y verificó su correo. Está listo para que lo actives.</p>
+    <table style="border-collapse:collapse;">
+      ${row("Empresa", params.companyName)}
+      ${row("Contacto", params.fullName)}
+      ${row("Email", params.email)}
+      ${row("Teléfono", `+${params.phone}`)}
+      ${row("Plan", params.planName)}
+      ${row("Rubro", params.vertical)}
+    </table>
+    ${
+      params.consoleUrl
+        ? `<a href="${params.consoleUrl}" style="display:inline-block;margin-top:20px;background:#7c5cff;color:#fff;text-decoration:none;border-radius:10px;padding:10px 18px;font-size:14px;font-weight:bold;">Revisar en el Control Room</a>`
+        : ""
+    }
+  </div>
+</div>`,
+  };
+}
+
 const wrap = (inner: string) => `
 <div style="background:#0d1220;padding:32px 16px;font-family:Arial,Helvetica,sans-serif;">
   <div style="max-width:480px;margin:0 auto;background:#151b2e;border-radius:16px;padding:32px 28px;color:#e7eaf3;">

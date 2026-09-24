@@ -224,6 +224,10 @@ model PlatformConfig {
   // solos desde Mi plan). Token cifrado con credentials-crypto.
   mpBillingEnabled     Boolean          @default(false)
   mpBillingAccessToken String?
+  // Avisos al dueño de la PLATAFORMA (nuevos pre-registros, etc.):
+  // email destino y teléfono WhatsApp (requiere el tenant de ventas con WA activo).
+  alertEmail           String?
+  alertPhone           String?
   updatedAt        DateTime           @updatedAt
 }
 

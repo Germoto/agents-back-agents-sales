@@ -58,6 +58,8 @@ const envSchema = z.object({
   // "1" = TLS implícito (puerto 465); "0" = STARTTLS (587).
   SMTP_SECURE: z.string().default("0"),
   SMTP_USER: z.string().optional().default(""),
+  // Email de avisos al dueño de la plataforma (fallback de PlatformConfig.alertEmail).
+  PLATFORM_ALERT_EMAIL: z.string().optional(),
   SMTP_PASS: z.string().optional().default(""),
   // Remitente, ej. 'Reportes <no-reply@tudominio.com>'. Default: SMTP_USER.
   MAIL_FROM: z.string().optional().default(""),

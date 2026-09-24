@@ -214,3 +214,41 @@ export async function setEnabledVerticals(
   });
   return config.enabledVerticals;
 }
+
+// ---------------------------------------------------------------------------
+// Avisos al dueño de la PLATAFORMA (nuevos pre-registros, etc.)
+// ---------------------------------------------------------------------------
+
+export async function getNotifyConfig(): Promise<{ alertEmail: string | null; alertPhone: string | null }> {
+  const config = await prisma.platformConfig.findUnique({
+    where: { id: PLATFORM_CONFIG_ID },
+    select: { alertEmail: true, alertPhone: true },
+  });
+  return { alertEmail: config?.alertEmail ?? null, alertPhone: config?.alertPhone ?? null };
+}
+
+export async function updateNotifyConfig(input: {
+  alertEmail?: string | null;
+  alertPhone?: string | null;
+}): Promise<{ alertEmail: string | null; alertPhone: string | null }> {
+  const alertEmail = input.alertEmail !== undefined ? input.alertEmail?.trim() || null : undefined;
+  const alertPhone = input.alertPhone !== undefined ? input.alertPhone?.replace(/\D/g, "") || null : undefined;
+  if (alertEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(alertEmail)) {
+    throw new AppError("Email de avisos no válido", 400);
+  }
+  const config = await prisma.platformConfig.upsert({
+    where: { id: PLATFORM_CONFIG_ID },
+    update: {
+      ...(alertEmail !== undefined ? { alertEmail } : {}),
+      ...(alertPhone !== undefined ? { alertPhone } : {}),
+    },
+    create: {
+      id: PLATFORM_CONFIG_ID,
+      enabledVerticals: ALL_VERTICALS,
+      ...(alertEmail !== undefined ? { alertEmail } : {}),
+      ...(alertPhone !== undefined ? { alertPhone } : {}),
+    },
+    select: { alertEmail: true, alertPhone: true },
+  });
+  return { alertEmail: config.alertEmail ?? null, alertPhone: config.alertPhone ?? null };
+}

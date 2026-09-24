@@ -18,6 +18,8 @@ import {
   setLandingScene,
   getPlatformMpBillingAdmin,
   setPlatformMpBilling,
+  getNotifyConfig,
+  updateNotifyConfig,
 } from "../platform-config/platform-config.service";
 import {
   ensureSalesAgentTenant,
@@ -84,6 +86,14 @@ export async function getVerticalsController(_req: Request, res: Response) {
 export async function updateVerticalsController(req: Request, res: Response) {
   const enabled = await setEnabledVerticals(req.body.enabledVerticals);
   return res.json({ all: VERTICALS, enabled });
+}
+
+export async function getNotifyConfigController(_req: Request, res: Response) {
+  return res.json(await getNotifyConfig());
+}
+
+export async function updateNotifyConfigController(req: Request, res: Response) {
+  return res.json(await updateNotifyConfig(req.body ?? {}));
 }
 
 export async function getLandingSceneController(_req: Request, res: Response) {
