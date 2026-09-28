@@ -62,6 +62,8 @@ export interface ConversationState {
   /** Mercado Pago: preference del último link de pago enviado y su monto (para el webhook). */
   mpPreferenceId?: string | null;
   mpAmount?: number | null;
+  /** Última entrega del acceso por correo (entregar_por_correo). */
+  lastEmailDeliveryAt?: string | null;
   [key: string]: unknown;
 }
 

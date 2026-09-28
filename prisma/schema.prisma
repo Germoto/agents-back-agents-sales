@@ -593,6 +593,9 @@ model ProductFile {
   // (envío bulk). Si false, queda disponible solo on-demand (el bot lo manda por
   // fileIds cuando el cliente lo pide o la consulta se relaciona con él).
   showInPresentation Boolean    @default(true)
+  // Si true, el archivo va ADJUNTO en el correo de entrega del producto (entrega por
+  // correo a pedido del cliente). Si el total de adjuntos excede el tope, van como links.
+  sendByEmail  Boolean         @default(false)
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
   product      Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -623,6 +626,12 @@ model DigitalDelivery {
   // Multimedia opcional del mensaje de enganche (se envía con el pitch como caption).
   crossSellPitchMediaUrl  String @default("")
   crossSellPitchMediaType String @default("")
+  // Entrega por CORREO a pedido del cliente (solo modo STATIC): si está activa, el agente
+  // puede enviar el acceso por email cuando el cliente lo pide y el pago está APROBADO.
+  // emailSubject/emailBody vacíos => se derivan del nombre del producto / instructions.
+  emailEnabled Boolean @default(false)
+  emailSubject String?
+  emailBody    String?
   // Acciones al cerrar la venta (entrega del producto): mover al cliente a una pestaña
   // del CRM y/o asignarle etiquetas. Sin FK formal: si el CRM/columna/tag se borra, se ignora.
   onSaleCrmId        String?  @db.Uuid

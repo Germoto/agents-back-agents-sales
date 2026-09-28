@@ -152,6 +152,7 @@ export function mapAdminProduct(product: ProductWithRelations) {
       description: file.description,
       sortOrder: file.sortOrder,
       showInPresentation: file.showInPresentation,
+      sendByEmail: file.sendByEmail,
     })),
     digitalDelivery: product.digitalDelivery,
     physicalDelivery: product.physicalDelivery
@@ -256,6 +257,7 @@ export function mapBotProduct(
       description: file.description,
       sortOrder: file.sortOrder,
       showInPresentation: file.showInPresentation,
+      sendByEmail: file.sendByEmail,
     })),
     digitalDelivery:
       product.productType === "DIGITAL"
@@ -263,6 +265,12 @@ export function mapBotProduct(
             link: product.digitalDelivery?.link ?? null,
             instructions: product.digitalDelivery?.instructions ?? null,
             assignmentMode: product.digitalDelivery?.assignmentMode ?? "STATIC",
+            // Entrega por correo a pedido del cliente (solo STATIC).
+            emailEnabled:
+              (product.digitalDelivery?.assignmentMode ?? "STATIC") === "STATIC" &&
+              Boolean(product.digitalDelivery?.emailEnabled),
+            emailSubject: product.digitalDelivery?.emailSubject ?? null,
+            emailBody: product.digitalDelivery?.emailBody ?? null,
             followupMessages: normalizeFollowups(product.digitalDelivery),
             crossSellProductId: product.digitalDelivery?.crossSellProductId ?? null,
             crossSellPitch: product.digitalDelivery?.crossSellPitch ?? null,

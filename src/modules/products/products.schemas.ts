@@ -43,6 +43,8 @@ const productFileSchema = z.object({
   sortOrder: z.coerce.number().int().min(0).default(0),
   // Incluir en la presentación/info inicial del producto (envío bulk). Default true.
   showInPresentation: z.boolean().default(true),
+  // Adjuntar en el correo de entrega (entrega por correo a pedido del cliente). Default false.
+  sendByEmail: z.boolean().default(false),
 });
 
 export const productBodySchema = z.object({
@@ -112,6 +114,10 @@ export const productBodySchema = z.object({
     crossSellPitch: z.string().optional().default(""),
     crossSellPitchMediaUrl: z.string().optional().default(""),
     crossSellPitchMediaType: z.string().optional().default(""),
+    // Entrega por correo a pedido del cliente (solo STATIC). Asunto/cuerpo opcionales.
+    emailEnabled: z.boolean().optional().default(false),
+    emailSubject: z.string().trim().max(200).nullable().optional(),
+    emailBody: z.string().trim().max(8000).nullable().optional(),
     // Acciones al cerrar la venta: mover al cliente a una pestaña del CRM y/o etiquetar.
     onSaleCrmId: z.string().uuid().nullable().optional(),
     onSaleCrmColumnId: z.string().uuid().nullable().optional(),

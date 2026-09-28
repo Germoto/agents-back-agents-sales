@@ -25,6 +25,11 @@ export const deliverReceiptSchema = z.object({
   conversationId: z.string().uuid().nullable().optional(),
 });
 
+export const emailDeliverySchema = z.object({
+  // Correo destino (se guarda en la ficha del cliente).
+  email: z.string().trim().min(3).max(160),
+});
+
 export const associateReceiptSchema = z.object({
   // Asociar/cambiar el producto de un comprobante ya APROBADO (sin tocar el estado)
   productId: z.string().uuid().nullable().optional(),

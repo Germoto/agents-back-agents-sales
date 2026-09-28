@@ -54,11 +54,15 @@ type ProductPayload = {
     description: string;
     sortOrder: number;
     showInPresentation?: boolean;
+    sendByEmail?: boolean;
   }>;
   digitalDelivery?: {
     link?: string;
     instructions?: string;
     assignmentMode?: "STATIC" | "POOL_AUTO" | "MANUAL";
+    emailEnabled?: boolean;
+    emailSubject?: string | null;
+    emailBody?: string | null;
     followupMessages?: { message?: string; mediaUrl?: string; mediaType?: string }[];
     followupMessage?: string;
     followupMediaUrl?: string;
@@ -181,6 +185,7 @@ async function syncProductFiles(
       description: file.description ?? "",
       sortOrder: file.sortOrder ?? 0,
       showInPresentation: file.showInPresentation ?? true,
+      sendByEmail: file.sendByEmail ?? false,
     } satisfies Prisma.ProductFileUncheckedUpdateInput;
 
     if (file.id && existingById.has(file.id)) {
@@ -276,6 +281,9 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
       crossSellPitch: payload.digitalDelivery.crossSellPitch ?? "",
       crossSellPitchMediaUrl: payload.digitalDelivery.crossSellPitchMediaUrl ?? "",
       crossSellPitchMediaType: payload.digitalDelivery.crossSellPitchMediaType ?? "",
+      emailEnabled: payload.digitalDelivery.emailEnabled ?? false,
+      emailSubject: payload.digitalDelivery.emailSubject?.trim() || null,
+      emailBody: payload.digitalDelivery.emailBody?.trim() || null,
       onSaleCrmId: payload.digitalDelivery.onSaleCrmId ?? null,
       onSaleCrmColumnId: payload.digitalDelivery.onSaleCrmColumnId ?? null,
       onSaleTagIds: payload.digitalDelivery.onSaleTagIds ?? [],

@@ -9,12 +9,11 @@
  */
 
 import type { Request, Response } from "express";
-import fs from "fs/promises";
-import path from "path";
 import { env } from "../../config/env";
 import { prisma } from "../../lib/prisma";
 import { generateImage, saveGeneratedImage, type ImageGenSize, type ImageGenQuality } from "../../lib/image-gen";
 import { symbolFor } from "../../lib/currency";
+import { storagePathFromUrl, resolveOwnUpload } from "../../lib/uploads";
 import { AppError } from "../../lib/app-error";
 import { chatCompletion, type ChatMessage, type ContentPart, type ToolDefinition } from "../../lib/openai";
 import { productBodySchema } from "../products/products.schemas";
@@ -223,7 +222,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_archivo_producto",
       description:
-        "Edita la METADATA de un archivo YA SUBIDO de un producto (no sube archivos nuevos): showInPresentation (true = se adjunta al presentar la ficha; false = queda on-demand y el agente lo envía solo si el cliente lo pide), description (ayuda al agente a saber cuándo enviarlo) y principal (true = primero de la ficha/catálogo). Identifica el archivo por su URL exacta o su nombre. Verifica después con previsualizar_ficha. Llámala tras confirmación.",
+        "Edita la METADATA de un archivo YA SUBIDO de un producto (no sube archivos nuevos): showInPresentation (true = se adjunta al presentar la ficha; false = queda on-demand y el agente lo envía solo si el cliente lo pide), description (ayuda al agente a saber cuándo enviarlo), principal (true = primero de la ficha/catálogo) y adjuntarEnCorreo (true = el archivo va ADJUNTO en el correo de entrega cuando el cliente pide recibir el acceso por email; requiere digitalDelivery.emailEnabled en el producto; si los adjuntos superan 15 MB van como links). Identifica el archivo por su URL exacta o su nombre. Verifica después con previsualizar_ficha. Llámala tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -234,6 +233,7 @@ export const TOOLS: ToolDefinition[] = [
           showInPresentation: { type: "boolean" },
           description: { type: "string" },
           principal: { type: "boolean" },
+          adjuntarEnCorreo: { type: "boolean", description: "true = adjuntar en el correo de entrega del producto" },
         },
       },
     },
@@ -855,10 +855,14 @@ function resolveAttachment(
 // ---------------------------------------------------------------------------
 // Guía de campos por rubro (espejo compacto de los blueprints del panel)
 // ---------------------------------------------------------------------------
+const EMAIL_DELIVERY_FIELDS =
+  "emailEnabled (true = entrega por CORREO a pedido del cliente: cuando un cliente que ya pagó pide el acceso por email, el agente se lo envía), emailSubject? y emailBody? (opcionales; por defecto 'Tu acceso a {producto} — {negocio}' y el mismo mensaje de entrega)";
+
 const COMMON_FIELDS =
   "Campos comunes de `data`: name*, price* (texto, ej. '12' o '12.50', SIN símbolo — está en la MONEDA del negocio, ver_configuracion la muestra), shortDescription (1 línea vendedora), fullDescription, category, active (default true), aliases (string[] — sinónimos/abreviaturas con las que el cliente lo nombraría), benefits (string[]), includes (string[]), bonuses (string[]), faqs ([{question, answer}]), objections ([{question, answer}]), attributes (objeto clave→valor, ej. {\"Ingredientes\": \"pollo, papas\"}). " +
   "reminderConfig (recordatorios PROPIOS de este producto — si no se envía, hereda los generales del negocio): {abandonedCart?: {enabled, steps: [{delaySeconds (SEGUNDOS, ej. 3600=1h, 86400=24h), message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso, el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje para mostrarlo)}]}, leftOnRead?: {enabled, steps: [...]}}; enviar null lo limpia (vuelve a heredar). " +
   "OFERTA CON VIGENCIA (global, todos los clientes): offerPrice (texto, ej. '49'), offerStartsAt/offerEndsAt (fecha-hora ISO, opcionales; sin fechas = activa hasta quitarla). Vigente => el agente presenta, cobra y valida ESE precio y el precio normal se muestra tachado como 'antes'. null limpia la oferta. " +
+  "ENTREGA POR CORREO (a pedido del cliente): se activa POR PRODUCTO con digitalDelivery.emailEnabled=true. Con eso, cuando un cliente que YA PAGÓ pide recibir el acceso por email, el agente le pide el correo, se lo envía (el correo sale desde la dirección de FlowApp con el nombre del negocio como remitente) y guarda el correo en su ficha; la entrega por WhatsApp sigue igual. emailSubject/emailBody son opcionales (por defecto el asunto es 'Tu acceso a {producto} — {negocio}' y el cuerpo es el mismo mensaje de entrega). Los archivos del producto se adjuntan con configurar_archivo_producto adjuntarEnCorreo=true (tope 15 MB; si se excede van como links). El servidor de correo es de la plataforma: NO se configura desde el panel ni desde aquí. Si el dueño pide activarlo 'en todos los productos', hazlo producto por producto con actualizar_producto tras UNA confirmación. " +
   "PRESENTACIÓN: presentationMessage (mensaje de presentación FIJO — si existe, la ficha se envía tal cual en vez de auto-generarse); presentationMessageMediaUrl/presentationMessageMediaType (banner adjunto al mensaje: la ficha viaja como media con el texto de caption; usa la URL de un archivo del producto o un adjunto de esta conversación; '' lo quita); presentationFollowups = [{message, mediaUrl?, mediaType?}] (secuencia que se envía DESPUÉS de la ficha — al enviarla REEMPLAZA la lista completa: manda la versión final; [] la limpia). Los archivos ya subidos se gestionan con configurar_archivo_producto (showInPresentation true = va adjunto en la presentación, false = on-demand; description; principal). Tras cambiar la presentación, VERIFICA con previsualizar_ficha.";
 
 function rubroGuide(vertical: string | undefined): string {
@@ -872,11 +876,11 @@ function rubroGuide(vertical: string | undefined): string {
     case "REAL_ESTATE":
       return `Rubro INMOBILIARIA (cada producto = un inmueble). ${COMMON_FIELDS} Además: verticalData con la ficha: {operation ('venta'|'alquiler'), propertyType, areaM2, bedrooms, bathrooms, parking, location, maintenance, antiquity}; durationMin para la duración de la visita (agenda).`;
     case "STREAMER":
-      return `Rubro STREAMING (cada producto = una plataforma/cuenta). ${COMMON_FIELDS} Además: category = plataforma (Netflix, Disney...); verticalData.plans = [{label, price}] para modalidades (mensual/anual, pantallas) y verticalData.durationDays (duración de la suscripción en días); digitalDelivery = {instructions (mensaje de entrega con el acceso), assignmentMode, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar)}; RENOVACIÓN: reminderConfig.renewal = {enabled, daysBefore, message} (aviso al cliente N días antes del vencimiento).`;
+      return `Rubro STREAMING (cada producto = una plataforma/cuenta). ${COMMON_FIELDS} Además: category = plataforma (Netflix, Disney...); verticalData.plans = [{label, price}] para modalidades (mensual/anual, pantallas) y verticalData.durationDays (duración de la suscripción en días); digitalDelivery = {instructions (mensaje de entrega con el acceso), assignmentMode, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar), ${EMAIL_DELIVERY_FIELDS} (solo aplica en assignmentMode STATIC)}; RENOVACIÓN: reminderConfig.renewal = {enabled, daysBefore, message} (aviso al cliente N días antes del vencimiento).`;
     case "INFOPRODUCT":
-      return `Rubro INFOPRODUCTOS (cursos, ebooks, accesos). ${COMMON_FIELDS} Además: digitalDelivery = {instructions* (mensaje de entrega que incluye el link de acceso), link, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar: agradecimiento, bonus, instrucciones extra)}; benefits/faqs/objections completos son CLAVE para que el agente venda bien.`;
+      return `Rubro INFOPRODUCTOS (cursos, ebooks, accesos). ${COMMON_FIELDS} Además: digitalDelivery = {instructions* (mensaje de entrega que incluye el link de acceso), link, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar: agradecimiento, bonus, instrucciones extra), ${EMAIL_DELIVERY_FIELDS}}; benefits/faqs/objections completos son CLAVE para que el agente venda bien.`;
     default:
-      return `Rubro OTRO/general. ${COMMON_FIELDS} productType puede ser 'DIGITAL' o 'PHYSICAL'; si es físico agrega physicalDelivery.`;
+      return `Rubro OTRO/general. ${COMMON_FIELDS} productType puede ser 'DIGITAL' o 'PHYSICAL'; si es físico agrega physicalDelivery; si es digital, digitalDelivery = {instructions* (mensaje de entrega con el link), followupMessages, ${EMAIL_DELIVERY_FIELDS}}.`;
   }
 }
 
@@ -1114,31 +1118,20 @@ function zodErrorsText(err: { issues: Array<{ path: PropertyKey[]; message: stri
  * no existe en disco.
  */
 async function resolveOwnUploadImage(url: string): Promise<CopilotAttachment | null> {
-  const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
-  const prefix = `${base}/uploads/`;
-  if (!url.startsWith(prefix)) return null;
-  const rel = decodeURIComponent(url.slice(prefix.length).split("?")[0]);
-  const uploadRoot = path.resolve(process.cwd(), env.UPLOAD_DIR);
-  const filePath = path.resolve(uploadRoot, rel);
-  if (!filePath.startsWith(uploadRoot + path.sep)) return null;
-  let size = 0;
-  try {
-    const stat = await fs.stat(filePath);
-    if (!stat.isFile()) return null;
-    size = stat.size;
-  } catch {
-    return null;
-  }
-  const extension = (path.extname(filePath).slice(1) || "png").toLowerCase();
+  const rel = storagePathFromUrl(url);
+  if (!rel) return null;
+  const resolved = await resolveOwnUpload(rel);
+  if (!resolved) return null;
+  const extension = resolved.extension || "png";
   const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
   if (!IMAGE_EXTS.has(extension)) return null;
   return {
     url,
-    storagePath: rel,
-    originalName: path.basename(filePath),
+    storagePath: resolved.storagePath,
+    originalName: resolved.fileName,
     extension,
     mimeType: extension === "jpg" ? "image/jpeg" : `image/${extension}`,
-    size,
+    size: resolved.size,
     type: "IMAGE",
   };
 }
@@ -1355,7 +1348,7 @@ export async function runCopilotTool(
       const productId = String(args.productId ?? "");
       const existing = await getProduct(companyId, productId);
       const files = (existing.files ?? []) as Array<
-        { url?: string; originalName?: string; sortOrder?: number; description?: string; showInPresentation?: boolean } & Record<string, unknown>
+        { url?: string; originalName?: string; sortOrder?: number; description?: string; showInPresentation?: boolean; sendByEmail?: boolean } & Record<string, unknown>
       >;
       if (!files.length) {
         return { result: JSON.stringify({ ok: false, error: "Este producto no tiene archivos subidos (súbelos desde el panel, paso Archivos)." }), wrote: false };
@@ -1386,6 +1379,7 @@ export async function runCopilotTool(
           ? {
               ...f,
               ...(typeof args.showInPresentation === "boolean" ? { showInPresentation: args.showInPresentation } : {}),
+              ...(typeof args.adjuntarEnCorreo === "boolean" ? { sendByEmail: args.adjuntarEnCorreo } : {}),
               ...(args.description !== undefined ? { description: asStr(args.description) ?? "" } : {}),
             }
           : f,
@@ -2361,9 +2355,9 @@ const SYSTEM_GUIDE = [
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM).",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre}; y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 65–90s); en números nuevos recomienda tope diario 30-70. Flujo seguro OBLIGATORIO: crear borrador → mostrar total de contactos + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
-  "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación.",
+  "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación. Desde la ficha del cliente (Conversaciones → pestaña Contacto) el asesor también puede reenviar el acceso de una compra aprobada POR CORREO (si el producto tiene entrega por correo activa).",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (/reservas-online): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
-  "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat). Cada producto puede tener OFERTA con vigencia (precio de oferta + desde/hasta): vigente, el agente la presenta, cobra y valida ese precio y el normal sale tachado como 'antes'. Además hay OFERTAS ESCALONADAS en los recordatorios: cada paso puede llevar su precio (si el cliente no compra, el recordatorio 1 ofrece un precio y el 2 uno mejor — solo para ese cliente).",
+  "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat). Los productos digitales pueden tener ENTREGA POR CORREO a pedido del cliente (pestaña Entrega del producto, o digitalDelivery.emailEnabled por chat): si el cliente que ya pagó pide el acceso por email, el agente se lo envía y guarda su correo. Cada producto puede tener OFERTA con vigencia (precio de oferta + desde/hasta): vigente, el agente la presenta, cobra y valida ese precio y el normal sale tachado como 'antes'. Además hay OFERTAS ESCALONADAS en los recordatorios: cada paso puede llevar su precio (si el cliente no compra, el recordatorio 1 ofrece un precio y el 2 uno mejor — solo para ese cliente).",
   "- Empresa (/empresa): nombre, rubro, zona horaria, MONEDA del negocio (soles S/ por defecto o dólares $ — todo el embudo la usa: fichas, carrito, cobro, validación, reportes), horario de atención, delivery, firma. Incluye el tab Anuncios: catálogo de anuncios Meta (mapea IDs/títulos de anuncios a descripciones amigables para los leads y el reporte por anuncio).",
   "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
   "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper): si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI solo para audios — sin ella los audios no se transcriben.",

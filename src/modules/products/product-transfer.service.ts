@@ -378,6 +378,7 @@ export async function confirmImport(companyId: string, token: string) {
               description: String(f.description ?? ""),
               sortOrder: index,
               showInPresentation: f.showInPresentation !== false,
+              sendByEmail: f.sendByEmail === true,
             };
           });
 
@@ -398,6 +399,9 @@ export async function confirmImport(companyId: string, token: string) {
               crossSellPitch: String(dd.crossSellPitch ?? ""),
               crossSellPitchMediaUrl: String(dd.crossSellPitchMediaUrl ?? ""),
               crossSellPitchMediaType: String(dd.crossSellPitchMediaType ?? ""),
+              emailEnabled: dd.emailEnabled === true,
+              emailSubject: dd.emailSubject ? String(dd.emailSubject) : null,
+              emailBody: dd.emailBody ? String(dd.emailBody) : null,
               // Referencias de OTRA empresa: crossSell se remapea después por slug;
               // ids de CRM/columnas/tags se limpian SIEMPRE.
               crossSellProductId: null,

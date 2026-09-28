@@ -47,6 +47,8 @@ import { getAvailableSlots, formatSlotLabel, isSlotAvailable } from "../bookings
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
 import { claimAvailableCredential, countAvailable, peekAvailableCredential } from "../streaming-inventory/streaming-inventory.service";
 import { createSubscriptionForSale, type RenewalReminderConfig } from "../subscriptions/subscriptions.service";
+import { mailerEnabled } from "../../lib/mailer";
+import { sendDigitalDeliveryEmail, EmailDeliveryError } from "./email-delivery";
 
 /** Comparación laxa de nombres (acentos/orden) para detectar confusión de titular. */
 function looseNameNorm(s: string): string {
@@ -87,6 +89,25 @@ const PAYMENT_FILLER_WORDS = new Set([
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
+
+/**
+ * Entrega por correo disponible para este negocio: SMTP de la plataforma
+ * configurado y al menos un producto digital con emailEnabled. Se usa para
+ * exponer la tool y el bloque del prompt SOLO a esos tenants.
+ */
+export function emailDeliveryAvailable(config: BotConfig): boolean {
+  if (!mailerEnabled()) return false;
+  return config.products.some(
+    (p) => p.productType === "digital" && Boolean((p.digitalDelivery as { emailEnabled?: boolean } | null)?.emailEnabled),
+  );
+}
+
+/** Nombres de las tools que se ocultan al modelo cuando no aplican al negocio. */
+export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
+  const hidden = new Set<string>();
+  if (!emailDeliveryAvailable(config)) hidden.add("entregar_por_correo");
+  return hidden.size ? TOOL_DEFINITIONS.filter((t) => !hidden.has(t.function.name)) : TOOL_DEFINITIONS;
+}
 
 export interface OutboxMessage {
   kind: "text" | "media";
@@ -1348,6 +1369,24 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "entregar_por_correo",
+      description:
+        "Envía POR CORREO el acceso del producto digital YA PAGADO (pago APROBADO) cuando el cliente pide recibirlo por email. Complementa a entregar_producto (la entrega por WhatsApp sigue igual). Pasa `email` si el cliente lo escribió en el chat; si lo omites se usa el correo guardado en su ficha y, si no hay ninguno, responde needsEmail (pídeselo). Solo funciona para productos con entrega por correo habilitada; NUNCA antes de que el pago esté aprobado.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          email: {
+            type: "string",
+            description: "Correo que escribió el cliente (tal cual). Omítelo si no lo dio en el chat.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "registrar_pedido",
       description:
         "Registra un pedido de un producto FÍSICO una vez que tienes los datos de entrega. Úsalo cuando el cliente confirme la compra de un físico y te haya dado nombre y dirección (y, si aplica, la variante elegida). Para físicos con pago anticipado, valida el pago ANTES de registrar.",
@@ -2266,6 +2305,74 @@ export async function executeTool(
         offeredCatalog,
         nota: notaEntrega,
       });
+    }
+
+    case "entregar_por_correo": {
+      if (!emailDeliveryAvailable(ctx.config)) {
+        return JSON.stringify({
+          ok: false,
+          error: "noDisponible",
+          nota: "Este negocio NO entrega por correo. Dile al cliente con naturalidad que el acceso se entrega por WhatsApp (aquí mismo) y NO prometas ningún correo.",
+        });
+      }
+      const rawEmail = typeof args.email === "string" ? args.email.trim() : "";
+      let email = rawEmail;
+      if (!email) {
+        const customer = await prisma.customer.findFirst({
+          where: { id: ctx.customerId, companyId: ctx.companyId },
+          select: { email: true },
+        });
+        email = customer?.email ?? "";
+      }
+      if (!email) {
+        return JSON.stringify({
+          ok: false,
+          error: "needsEmail",
+          nota: "No tengo el correo del cliente. Pídele su correo electrónico en UNA línea y vuelve a llamar esta herramienta cuando lo escriba.",
+        });
+      }
+      if (ctx.simulate) {
+        return JSON.stringify({
+          ok: true,
+          simulated: true,
+          email,
+          nota: "(Simulación) Aquí se enviaría el acceso por correo. Confírmale al cliente que se lo enviaste a ese correo y que revise spam.",
+        });
+      }
+      try {
+        const r = await sendDigitalDeliveryEmail({
+          companyId: ctx.companyId,
+          customerId: ctx.customerId,
+          email,
+          trigger: "agent",
+        });
+        ctx.state.lastEmailDeliveryAt = new Date().toISOString();
+        return JSON.stringify({
+          ok: true,
+          email: r.email,
+          productos: r.products,
+          adjuntos: r.attachments,
+          ...(r.skippedProducts.length ? { sinEntregaPorCorreo: r.skippedProducts } : {}),
+          nota:
+            `Correo enviado a ${r.email}. Confírmaselo al cliente en UNA línea (menciona el correo exacto y que revise spam/promociones si no lo ve).` +
+            (r.skippedProducts.length ? ` Aclara que ${r.skippedProducts.join(", ")} se entrega solo por WhatsApp.` : ""),
+        });
+      } catch (err) {
+        if (err instanceof EmailDeliveryError) {
+          const notes: Record<string, string> = {
+            INVALID_EMAIL: "El correo no es válido. Pídele al cliente que lo escriba de nuevo completo (ej. nombre@gmail.com). NO digas que lo enviaste.",
+            NO_RECEIPT: "No hay un pago APROBADO para este cliente: NO envíes nada por correo. Dile que apenas confirmes su pago se lo envías también al correo.",
+            NOT_APPROVED: "El pago aún no está aprobado: dile que apenas se confirme se lo envías también al correo.",
+            NO_ELIGIBLE: "El producto pagado no tiene entrega por correo: explica con naturalidad que el acceso se entrega por WhatsApp (ya lo tiene aquí o lo recibirá aquí).",
+            MAIL_DISABLED: "El envío por correo no está disponible: dile que la entrega es por WhatsApp. NO prometas correo.",
+            LIMIT: "Se alcanzó el límite de envíos por correo para esta compra: dile que ya se lo enviamos varias veces, que revise spam, y que igual tiene el acceso aquí en WhatsApp.",
+            ALREADY_SENT: "Ese correo ya se envió hace un momento: dile que revise la bandeja y spam; NO lo reenvíes.",
+            SEND_FAILED: "Falló el envío del correo: dile que hubo un inconveniente con el correo y que su acceso está disponible aquí en WhatsApp (ya avisé al equipo).",
+          };
+          return JSON.stringify({ ok: false, error: err.code, ...err.extra, nota: notes[err.code] });
+        }
+        throw err;
+      }
     }
 
     case "registrar_pedido": {

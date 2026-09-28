@@ -7,7 +7,7 @@
 import { chatCompletion, type ChatMessage } from "../../lib/openai";
 import { buildSystemPrompt } from "./agent-prompt";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
-import { TOOL_DEFINITIONS, executeTool, type TurnContext } from "./agent-tools";
+import { toolDefinitionsFor, executeTool, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 
 const MAX_ITERATIONS = 6;
@@ -95,7 +95,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       baseUrl: ctx.config.openai.baseUrl,
       temperature: ctx.config.openai.temperature,
       messages,
-      tools: TOOL_DEFINITIONS,
+      tools: toolDefinitionsFor(ctx.config),
       toolChoice:
         i === 0 && forceValidation
           ? { type: "function", function: { name: "validar_pago" } }

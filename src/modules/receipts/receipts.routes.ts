@@ -2,8 +2,8 @@ import { Router } from "express";
 import { asyncHandler } from "../../lib/async-handler";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { validate } from "../../middlewares/validate";
-import { approveReceiptController, associateReceiptController, deleteReceiptController, deliverReceiptController, getReceiptProofController, ignoreReceiptController, listReceiptsController, rejectReceiptController } from "./receipts.controller";
-import { approveReceiptSchema, associateReceiptSchema, deliverReceiptSchema, receiptIdParamsSchema, rejectReceiptSchema } from "./receipts.schemas";
+import { approveReceiptController, associateReceiptController, deleteReceiptController, deliverReceiptController, emailDeliveryController, getReceiptProofController, ignoreReceiptController, listReceiptsController, rejectReceiptController } from "./receipts.controller";
+import { approveReceiptSchema, associateReceiptSchema, deliverReceiptSchema, emailDeliverySchema, receiptIdParamsSchema, rejectReceiptSchema } from "./receipts.schemas";
 
 const router = Router();
 
@@ -13,6 +13,7 @@ router.get("/:id/proof", validate({ params: receiptIdParamsSchema }), asyncHandl
 router.post("/:id/approve", validate({ params: receiptIdParamsSchema, body: approveReceiptSchema }), asyncHandler(approveReceiptController));
 router.post("/:id/associate", validate({ params: receiptIdParamsSchema, body: associateReceiptSchema }), asyncHandler(associateReceiptController));
 router.post("/:id/deliver", validate({ params: receiptIdParamsSchema, body: deliverReceiptSchema }), asyncHandler(deliverReceiptController));
+router.post("/:id/email-delivery", validate({ params: receiptIdParamsSchema, body: emailDeliverySchema }), asyncHandler(emailDeliveryController));
 router.post("/:id/ignore", validate({ params: receiptIdParamsSchema }), asyncHandler(ignoreReceiptController));
 router.post("/:id/reject", validate({ params: receiptIdParamsSchema, body: rejectReceiptSchema }), asyncHandler(rejectReceiptController));
 router.delete("/:id", validate({ params: receiptIdParamsSchema }), asyncHandler(deleteReceiptController));

@@ -10,6 +10,7 @@
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
+import { emailDeliveryAvailable } from "./agent-tools";
 import { symbolFor } from "../../lib/currency";
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
@@ -379,6 +380,16 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
     "- LINK DE MERCADO PAGO: si el mensaje de métodos de pago incluyó un link de Mercado Pago y el cliente dice que pagó (o quiere pagar) por ese link/tarjeta, NO le pidas comprobante ni llames a validar_pago: la confirmación llega AUTOMÁTICA del sistema y la entrega también. Dile con seguridad que en cuanto Mercado Pago confirme el pago (suele ser al instante) le llega su acceso solito. El comprobante/validar_pago aplican SOLO a pagos manuales (Yape/Plin a la cuenta).",
     "- OJO con el nombre del titular: la CAPTURA muestra el nombre de NUESTRA cuenta (el destino), NO el del cliente. Si el cliente te escribe nuestro propio nombre de titular, NO es su dato (pásalo igual a validar_pago: el sistema lo detecta).",
     "- Productos DIGITALES: informa, cobra, valida el pago y entrega el acceso. Nunca pidas dirección ni datos de envío. La herramienta entregar_producto ya envía el mensaje de entrega configurado (con el link de acceso dentro) y, si el dueño los configuró, uno o varios mensajes adicionales (multimedia + texto) y la oferta de otro producto relacionado. NO escribas tú el link ni inventes una oferta. Tras entregar, NO agregues un cierre de 'gracias por tu compra' (los mensajes configurados ya saludan/agradecen): por defecto deja tu texto final VACÍO. Si entregar_producto ofreció otro producto, NO cierres: deja la conversación abierta en esa oferta. Y SIEMPRE mantente abierto y disponible para seguir conversando (no des por terminada la conversación).",
+    // Entrega por correo: SOLO se menciona a los negocios que la tienen activa (SMTP +
+    // algún producto con emailEnabled). Los demás no ven ni una línea distinta.
+    ...(emailDeliveryAvailable(config)
+      ? [
+          `- ENTREGA POR CORREO (disponible en: ${config.products
+            .filter((p) => (p.digitalDelivery as { emailEnabled?: boolean } | null)?.emailEnabled)
+            .map((p) => p.name)
+            .join(", ")}): si el cliente pide recibir el acceso por correo/email y su pago YA está APROBADO, usa entregar_por_correo. Si el cliente escribió su correo en el chat, pásalo en 'email' tal cual; si no lo escribió, llama igual (usa el guardado en su ficha) y, si responde needsEmail, pídele su correo en UNA línea y vuelve a llamarla cuando lo mande. NUNCA digas que enviaste o enviarás un correo sin que la herramienta responda ok. Si aún no pagó, dile que apenas confirmes su pago se lo envías también al correo (y sigue el flujo de pago normal). Esto NO reemplaza la entrega por WhatsApp: entregar_producto sigue igual. Para productos que no están en esta lista, la entrega es solo por WhatsApp.`,
+        ]
+      : []),
     "- 'yaCompro' (en el estado) son los productos que el cliente YA compró y recibió (memoria durable, no depende del historial reciente). Si el cliente pregunta por un producto de 'yaCompro', es SOPORTE post-venta: responde sus dudas, NO le envíes métodos de pago, NO le ofrezcas activarlo/comprarlo y NO lo agregues al carrito (ya es suyo, sería re-venderle lo mismo). Si dice que no le llegó el acceso o hay un problema con su compra, usa derivar_humano para que un asesor lo resuelva.",
     "- Tras una entrega (status ENTREGADO), si el cliente se interesa en OTRO producto, trátalo como una VENTA NUEVA: preséntalo con enviar_ficha y sigue el flujo normal (resuelve dudas → agregar_carrito si aplica → enviar_metodos_pago → validar_pago → entregar_producto). El 'selectedProductId' y el status ENTREGADO se refieren a la compra ANTERIOR; NO dejes que bloqueen una compra nueva.",
     "- Productos FÍSICOS: informa, ayuda a cerrar y pide los datos de entrega (nombre de quien recibe, dirección completa, referencia, cantidad y variante si el producto tiene variantes). Valida la dirección contra las zonas de envío configuradas; si está fuera de zona, dilo y ofrece alternativas (recojo si está disponible). Luego registra el pedido con registrar_pedido. Nunca envíes enlaces digitales para un físico.",
