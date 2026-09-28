@@ -16,7 +16,8 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { mailerEnabled, sendMail } from "../../lib/mailer";
 import { normalizeEmail, maskEmail } from "../../lib/email";
-import { resolveOwnUpload, readUpload } from "../../lib/uploads";
+import { resolveOwnUpload, readUpload, storagePathFromUrl } from "../../lib/uploads";
+import { normalizeFollowups } from "../../lib/product";
 import { digitalDeliveryEmail, type DeliveryEmailSection } from "./delivery.emails";
 import { notifyOwner } from "./conversation.service";
 
@@ -47,6 +48,8 @@ export interface EmailDeliveryRecord {
   trigger: "agent" | "panel";
   attachments: number;
   byLinks: boolean;
+  /** Mensajes adicionales incluidos en el correo. */
+  followups?: number;
 }
 
 export interface SendDigitalDeliveryEmailInput {
@@ -135,26 +138,44 @@ export async function sendDigitalDeliveryEmail(input: SendDigitalDeliveryEmailIn
   ]);
   const companyName = company?.name ?? "Tu negocio";
 
-  // Adjuntos: solo archivos marcados, de la carpeta de ESTA empresa, hasta el tope total.
+  // Adjuntos: multimedia de los mensajes adicionales + archivos marcados, siempre de la
+  // carpeta de ESTA empresa y hasta el tope total; lo que no cabe (o es externo) va como link.
   const attachments: Array<{ filename: string; content: Buffer; contentType?: string }> = [];
+  const attachedUrls = new Set<string>();
   let attachedBytes = 0;
   let byLinks = false;
+  let followupCount = 0;
   const sections: DeliveryEmailSection[] = [];
   for (const p of eligible) {
     const dd = p.digitalDelivery!;
     const links: DeliveryEmailSection["links"] = [];
-    for (const f of p.files.filter((x) => x.sendByEmail)) {
-      const resolved = f.storagePath ? await resolveOwnUpload(f.storagePath, { companyId: input.companyId }) : null;
-      const name = f.originalName || resolved?.fileName || "archivo";
+    const attachOrLink = async (url: string, storagePath: string | null, name: string, mimeType?: string) => {
+      if (attachedUrls.has(url)) return;
+      const resolved = storagePath ? await resolveOwnUpload(storagePath, { companyId: input.companyId }) : null;
       if (resolved && attachedBytes + resolved.size <= MAX_ATTACHMENTS_BYTES) {
-        attachments.push({ filename: name, content: await readUpload(resolved), contentType: f.mimeType || undefined });
+        attachments.push({ filename: name || resolved.fileName, content: await readUpload(resolved), contentType: mimeType || undefined });
         attachedBytes += resolved.size;
+        attachedUrls.add(url);
       } else {
         byLinks = true;
-        links.push({ name, url: f.url });
+        links.push({ name: name || resolved?.fileName || url.split("/").pop() || "archivo", url });
+      }
+    };
+    // Mensajes adicionales: mismo orden que en WhatsApp (texto → párrafo; media → adjunto/link).
+    const extras: string[] = [];
+    for (const f of normalizeFollowups(dd)) {
+      followupCount += 1;
+      if (f.message?.trim()) extras.push(f.message.trim());
+      const url = f.mediaUrl?.trim();
+      if (url) {
+        const known = p.files.find((x) => x.url === url);
+        await attachOrLink(url, known?.storagePath || storagePathFromUrl(url), known?.originalName || "", known?.mimeType);
       }
     }
-    sections.push({ productName: p.name, bodyText: (dd.emailBody?.trim() || dd.instructions).trim(), links });
+    for (const f of p.files.filter((x) => x.sendByEmail)) {
+      await attachOrLink(f.url, f.storagePath || null, f.originalName, f.mimeType);
+    }
+    sections.push({ productName: p.name, bodyText: (dd.emailBody?.trim() || dd.instructions).trim(), extras, links });
   }
 
   const subject =
@@ -183,6 +204,7 @@ export async function sendDigitalDeliveryEmail(input: SendDigitalDeliveryEmailIn
     trigger: input.trigger,
     attachments: attachments.length,
     byLinks,
+    followups: followupCount,
   };
   const baseMeta = receipt.metadata && typeof receipt.metadata === "object" && !Array.isArray(receipt.metadata) ? (receipt.metadata as Record<string, unknown>) : {};
   await Promise.all([
@@ -193,7 +215,7 @@ export async function sendDigitalDeliveryEmail(input: SendDigitalDeliveryEmailIn
     prisma.customer.updateMany({ where: { id: input.customerId, companyId: input.companyId }, data: { email } }),
   ]);
   console.log(
-    `[email-delivery] enviado company=${input.companyId} receipt=${receipt.id} to=${maskEmail(email)} products=${eligible.length} attachments=${attachments.length} byLinks=${byLinks} trigger=${input.trigger}`,
+    `[email-delivery] enviado company=${input.companyId} receipt=${receipt.id} to=${maskEmail(email)} products=${eligible.length} followups=${followupCount} attachments=${attachments.length} byLinks=${byLinks} trigger=${input.trigger}`,
   );
 
   return {

@@ -60,7 +60,7 @@ export function normalizeFollowupList(raw: Prisma.JsonValue | null | undefined):
  * Lee el JSON `followupMessages`; si está vacío pero hay un single legacy (fila no
  * migrada), sintetiza un elemento.
  */
-function normalizeFollowups(dd: ProductWithRelations["digitalDelivery"]): FollowupMessage[] {
+export function normalizeFollowups(dd: ProductWithRelations["digitalDelivery"]): FollowupMessage[] {
   const out = normalizeFollowupList(dd?.followupMessages);
   if (!out.length && dd && (dd.followupMessage?.trim() || dd.followupMediaUrl?.trim())) {
     out.push({

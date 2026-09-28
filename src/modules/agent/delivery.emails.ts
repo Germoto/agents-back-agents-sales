@@ -20,7 +20,9 @@ export function plainTextToHtml(text: string): string {
 export interface DeliveryEmailSection {
   productName: string;
   bodyText: string;
-  /** Archivos que NO pudieron ir adjuntos (exceso de tamaño): se listan como links. */
+  /** Mensajes adicionales de la entrega (los que WhatsApp manda tras el acceso), en orden. */
+  extras: string[];
+  /** Archivos que NO pudieron ir adjuntos (exceso de tamaño / URL externa): se listan como links. */
   links: Array<{ name: string; url: string }>;
 }
 
@@ -38,10 +40,18 @@ export function digitalDeliveryEmail(params: {
             .map((l) => `<li><a href="${l.url}" style="color:#8b7bff;">${escapeHtml(l.name)}</a></li>`)
             .join("")}</ul>`
         : "";
+      const extras = s.extras
+        .filter((t) => t.trim())
+        .map(
+          (t) =>
+            `<div style="margin-top:14px;padding-top:12px;border-top:1px solid #232a44;font-size:14px;line-height:1.55;color:#d7dcea;">${plainTextToHtml(t)}</div>`,
+        )
+        .join("");
       return `
       <div style="margin:0 0 22px;padding:16px 18px;background:#0f1424;border-radius:12px;">
         <h3 style="margin:0 0 10px;font-size:15px;color:#ffffff;">${escapeHtml(s.productName)}</h3>
         <div style="font-size:14px;line-height:1.55;color:#d7dcea;">${plainTextToHtml(s.bodyText)}</div>
+        ${extras}
         ${links}
       </div>`;
     })
@@ -51,7 +61,12 @@ export function digitalDeliveryEmail(params: {
       ? `<p style="margin:0 0 16px;font-size:13px;color:#8a93ab;">📎 Este correo incluye ${params.attachmentCount} archivo(s) adjunto(s).</p>`
       : "";
   const text = params.sections
-    .map((s) => `${s.productName}\n\n${s.bodyText}${s.links.length ? `\n\nArchivos:\n${s.links.map((l) => `- ${l.name}: ${l.url}`).join("\n")}` : ""}`)
+    .map(
+      (s) =>
+        `${s.productName}\n\n${[s.bodyText, ...s.extras.filter((t) => t.trim())].join("\n\n")}${
+          s.links.length ? `\n\nArchivos:\n${s.links.map((l) => `- ${l.name}: ${l.url}`).join("\n")}` : ""
+        }`,
+    )
     .join("\n\n----------------\n\n");
   return {
     html: `
