@@ -13,7 +13,16 @@ import { applyFirma } from "../agent/firma";
 import { recordMessage } from "../agent/conversation.service";
 import { recheckPayment } from "../agent/agent.service";
 import { resumeFlowOnTimeout } from "../flows/flow-engine";
-import { clampToBusinessHours, normalizeQuietHours, type QuietHours } from "./quiet-hours";
+import {
+  clampToBusinessHours,
+  normalizeQuietHours,
+  normalizePacing,
+  pacingDelayMs,
+  type QuietHours,
+  type ReminderPacing,
+} from "./quiet-hours";
+import { applySpintax } from "../agent/reminder-templates";
+import { env } from "../../config/env";
 import type { WhatsappSender } from "../agent/outbound";
 import { metaWa, META_WINDOW_REASON } from "../../lib/meta-wa-client";
 import {
@@ -24,14 +33,26 @@ import {
 } from "../agent/session-window";
 import { symbolFor } from "../../lib/currency";
 
-const BATCH = 50;
+// La mayoría de filas vencidas de una pasada solo se REPROGRAMAN (pacing), así
+// que el lote puede ser amplio sin que una empresa con muchos vencidos deje sin
+// atender a las demás.
+const BATCH = 200;
 // Separación mínima entre recordatorios VISIBLES al mismo cliente en una misma pasada
 // del worker: evita que dos seguimientos lleguen pegados (parece spam). Configurable.
 const MIN_GAP_MS = Number(process.env.REMINDER_MIN_GAP_MS) || 120_000;
+// Si la empresa tiene una campaña enviando ahora mismo, el ritmo de los
+// recordatorios se duplica para no sumar volumen a la campaña.
+const CAMPAIGN_ACTIVE_WINDOW_MS = 10 * 60_000;
+const CAMPAIGN_PACING_FACTOR = 2;
 
-type QuietConfig = { tz: string | null; quiet: QuietHours; metaTemplate: MetaTemplateConfig | null };
+type QuietConfig = {
+  tz: string | null;
+  quiet: QuietHours;
+  pacing: ReminderPacing;
+  metaTemplate: MetaTemplateConfig | null;
+};
 
-/** Carga (y cachea por batch) la zona horaria + ventana de horario del tenant. */
+/** Carga (y cachea por batch) la zona horaria + ventana de horario + ritmo del tenant. */
 async function getQuietConfig(companyId: string, cache: Map<string, QuietConfig>): Promise<QuietConfig> {
   const hit = cache.get(companyId);
   if (hit) return hit;
@@ -39,17 +60,52 @@ async function getQuietConfig(companyId: string, cache: Map<string, QuietConfig>
     prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } }),
     prisma.agentConfig.findUnique({ where: { companyId }, select: { followupConfig: true } }),
   ]);
-  const followup = agentCfg?.followupConfig as { quietHours?: unknown; metaTemplate?: unknown } | null;
+  const followup = agentCfg?.followupConfig as { quietHours?: unknown; pacing?: unknown; metaTemplate?: unknown } | null;
   const quiet = normalizeQuietHours(followup?.quietHours);
   const cfg: QuietConfig = {
     tz: company?.timezone ?? null,
     quiet,
+    pacing: normalizePacing(followup?.pacing, {
+      minSec: env.REMINDER_PACING_MIN_SEC,
+      maxSec: env.REMINDER_PACING_MAX_SEC,
+      maxPerHour: env.REMINDER_MAX_PER_HOUR,
+    }),
     // Plantilla de respaldo (tenants META) para recordatorios fuera de la
     // ventana de 24h. Sin plantilla, esos recordatorios se marcan FAILED.
     metaTemplate: parseMetaTemplate(followup?.metaTemplate),
   };
   cache.set(companyId, cfg);
   return cfg;
+}
+
+/**
+ * Estado anti-ráfaga de una empresa dentro de una pasada: próximo instante en
+ * que puede salir un recordatorio visible, cuántos salieron en la última hora
+ * y si hay una campaña enviando ahora (ritmo ×2).
+ */
+type CompanyPace = { nextSlotMs: number; sentLastHour: number; campaignActive: boolean };
+
+async function getCompanyPace(companyId: string, now: Date, cache: Map<string, CompanyPace>): Promise<CompanyPace> {
+  const hit = cache.get(companyId);
+  if (hit) return hit;
+  const hourAgo = new Date(now.getTime() - 60 * 60_000);
+  const [sentLastHour, campaign] = await Promise.all([
+    prisma.scheduledMessage.count({
+      where: {
+        companyId,
+        status: ScheduledMessageStatus.SENT,
+        sentAt: { gte: hourAgo },
+        type: { notIn: [ScheduledMessageType.FLOW_TIMEOUT, ScheduledMessageType.PAYMENT_RECHECK] },
+      },
+    }),
+    prisma.campaign.findFirst({
+      where: { companyId, status: "RUNNING", nextSendAt: { gte: new Date(now.getTime() - CAMPAIGN_ACTIVE_WINDOW_MS) } },
+      select: { id: true },
+    }),
+  ]);
+  const pace: CompanyPace = { nextSlotMs: 0, sentLastHour, campaignActive: Boolean(campaign) };
+  cache.set(companyId, pace);
+  return pace;
 }
 let started = false;
 
@@ -76,9 +132,11 @@ async function processDue(): Promise<void> {
 
   const senderCache = new Map<string, WhatsappSender | null>();
   const quietCache = new Map<string, QuietConfig>();
+  const paceCache = new Map<string, CompanyPace>();
   // Clientes que ya recibieron un recordatorio VISIBLE en esta pasada: el resto de
   // sus recordatorios se reprograma para no encimarse.
   const sentToCustomer = new Set<string>();
+  const stats = { sent: 0, paced: 0, capped: 0, spread: 0, cancelled: 0, failed: 0 };
 
   for (const msg of due) {
     const isInternal =
@@ -143,6 +201,7 @@ async function processDue(): Promise<void> {
           },
         });
         console.log(`[scheduler] recordatorio ${msg.type} cancelado (${closed ? status : "pausado"}) cliente=${msg.customerId}`);
+        stats.cancelled += 1;
         continue;
       }
     }
@@ -160,6 +219,7 @@ async function processDue(): Promise<void> {
             where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
             data: { sendAt: next },
           });
+          stats.spread += 1;
           continue;
         }
       }
@@ -174,7 +234,36 @@ async function processDue(): Promise<void> {
         where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
         data: { sendAt: new Date(now.getTime() + MIN_GAP_MS) },
       });
+      stats.paced += 1;
       continue;
+    }
+
+    // ANTI-RÁFAGA por empresa: los recordatorios visibles de una misma empresa
+    // salen con separación al azar [minSec, maxSec] (×2 si tiene una campaña
+    // enviando) y con tope por hora. Lo que no entra se REPROGRAMA al siguiente
+    // slot (sin reclamarlo): la ráfaga de la apertura se vuelve goteo.
+    let pace: CompanyPace | null = null;
+    if (!keepExactTime) {
+      const qc = await getQuietConfig(msg.companyId, quietCache);
+      pace = await getCompanyPace(msg.companyId, now, paceCache);
+      if (pace.sentLastHour >= qc.pacing.maxPerHour) {
+        await prisma.scheduledMessage.updateMany({
+          where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
+          data: { sendAt: new Date(now.getTime() + (5 + Math.random() * 10) * 60_000) },
+        });
+        stats.capped += 1;
+        continue;
+      }
+      if (pace.nextSlotMs > now.getTime()) {
+        await prisma.scheduledMessage.updateMany({
+          where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
+          data: { sendAt: new Date(pace.nextSlotMs) },
+        });
+        // El siguiente de esta empresa va aún más tarde (goteo acumulativo).
+        pace.nextSlotMs += pacingDelayMs(qc.pacing, pace.campaignActive ? CAMPAIGN_PACING_FACTOR : 1);
+        stats.paced += 1;
+        continue;
+      }
     }
 
     // Claim optimista: solo procede quien logra pasarlo de PENDING a SENT
@@ -230,10 +319,12 @@ async function processDue(): Promise<void> {
           });
         }
         sentToCustomer.add(custKey);
+        markSent(pace, qc.pacing);
         continue;
       }
 
-      const body = (await applyFirma(msg.companyId, msg.body)) ?? msg.body;
+      // Spintax {a|b} resuelto AL ENVIAR: dos clientes no reciben el mismo texto.
+      const body = (await applyFirma(msg.companyId, applySpintax(msg.body))) ?? applySpintax(msg.body);
       if (msg.mediaUrl) {
         // El tipo de media va en metadata (image|video|audio|pdf); default image.
         const mediaType = (msg.metadata as { mediaType?: string } | null)?.mediaType || "image";
@@ -295,7 +386,9 @@ async function processDue(): Promise<void> {
       // Marcar que este cliente ya recibió un recordatorio visible en esta pasada
       // (los siguientes se reprograman para no encimarse).
       sentToCustomer.add(custKey);
+      if (pace) markSent(pace, (await getQuietConfig(msg.companyId, quietCache)).pacing);
     } catch (err) {
+      stats.failed += 1;
       await prisma.scheduledMessage.update({
         where: { id: msg.id },
         data: {
@@ -304,5 +397,19 @@ async function processDue(): Promise<void> {
         },
       });
     }
+  }
+
+  if (stats.sent || stats.paced || stats.capped || stats.spread || stats.failed) {
+    console.log(
+      `[scheduler] pasada due=${due.length} enviados=${stats.sent} pacing=${stats.paced} tope=${stats.capped} dispersados=${stats.spread} cancelados=${stats.cancelled} fallidos=${stats.failed}`,
+    );
+  }
+
+  /** Tras un envío visible: avanza el slot de la empresa y cuenta para el tope. */
+  function markSent(p: CompanyPace | null, pacing: ReminderPacing): void {
+    stats.sent += 1;
+    if (!p) return;
+    p.sentLastHour += 1;
+    p.nextSlotMs = Date.now() + pacingDelayMs(pacing, p.campaignActive ? CAMPAIGN_PACING_FACTOR : 1);
   }
 }

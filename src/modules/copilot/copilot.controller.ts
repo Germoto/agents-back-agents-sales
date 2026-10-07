@@ -538,7 +538,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_recordatorios",
       description:
-        "Actualiza los RECORDATORIOS automáticos. `data` es PARCIAL: {abandonedCart? {enabled, steps: [{delaySeconds, message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje)}]}, leftOnRead? {enabled, steps: [...]}, quietHours? {startHour 0-23, endHour 1-24}}. delaySeconds en segundos (ej. 3600 = 1 hora). Escalera típica: paso 1 con oferta suave, paso 2 con mejor precio. Llámala SOLO tras confirmación.",
+        "Actualiza los RECORDATORIOS automáticos. `data` es PARCIAL: {abandonedCart? {enabled, steps: [{delaySeconds, message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje)}]}, leftOnRead? {enabled, steps: [...]}, quietHours? {startHour 0-23, endHour 1-24, spreadMinutes 0-180 (DISPERSIÓN AL ABRIR: lo acumulado fuera de horario se reparte al azar en los primeros N minutos en vez de salir todo a la hora exacta; default 90)}, pacing? {minSec, maxSec, maxPerHour} (RITMO ANTI-BLOQUEO: separación al azar entre recordatorios de la empresa, default 25-70 s, y tope por hora, default 60)}. delaySeconds en segundos (ej. 3600 = 1 hora). En los mensajes se puede usar SPINTAX {Hola|Buenas|Qué tal} para que cada cliente reciba un texto distinto (anti-bloqueo). Tras un BLOQUEO de WhatsApp, recomienda calentar el número: pacing 60-120 s y maxPerHour 20-30 la primera semana. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1952,7 +1952,16 @@ export async function runCopilotTool(
         ...((current?.followupConfig ?? {}) as Record<string, unknown>),
         ...(data.abandonedCart !== undefined ? { abandonedCart: data.abandonedCart } : {}),
         ...(data.leftOnRead !== undefined ? { leftOnRead: data.leftOnRead } : {}),
-        ...(data.quietHours !== undefined ? { quietHours: data.quietHours } : {}),
+        ...(data.quietHours !== undefined
+          ? {
+              // Fusión parcial: permite cambiar solo spreadMinutes sin repetir start/end.
+              quietHours: {
+                ...(((current?.followupConfig as { quietHours?: Record<string, unknown> } | null)?.quietHours) ?? {}),
+                ...(data.quietHours as Record<string, unknown>),
+              },
+            }
+          : {}),
+        ...(data.pacing !== undefined ? { pacing: data.pacing } : {}),
       };
       const parsed = followupConfigSchema.safeParse(merged);
       if (!parsed.success) {
@@ -2353,7 +2362,7 @@ const SYSTEM_GUIDE = [
   "- Dashboard (/dashboard): métricas del negocio.",
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto).",
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM).",
-  "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre}; y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 65–90s); en números nuevos recomienda tope diario 30-70. Flujo seguro OBLIGATORIO: crear borrador → mostrar total de contactos + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible).",
+  "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 65–90s); en números nuevos recomienda tope diario 30-70. Flujo seguro OBLIGATORIO: crear borrador → mostrar total de contactos + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación. Desde la ficha del cliente (Conversaciones → pestaña Contacto) el asesor también puede reenviar el acceso de una compra aprobada POR CORREO (si el producto tiene entrega por correo activa).",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (/reservas-online): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
@@ -2362,7 +2371,7 @@ const SYSTEM_GUIDE = [
   "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
   "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper): si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI solo para audios — sin ella los audios no se transcriben.",
   "- Flujos de chatbot (/flujos): flujos guiados visuales con su propio copiloto IA (módulo Flujos).",
-  "- Recordatorios (/recordatorios): mensajes programados (carrito abandonado, dejado en visto, recordatorios de cita, renovaciones).",
+  "- Recordatorios (/recordatorios): mensajes programados (carrito abandonado, dejado en visto, recordatorios de cita, renovaciones). ANTI-BLOQUEO (pestaña Horario): lo que cae fuera de horario NO sale todo a la hora de apertura — se dispersa al azar en los primeros minutos (spreadMinutes, default 90) y los recordatorios de la empresa salen espaciados (pacing 25-70 s al azar, tope 60/hora; si hay una campaña enviando, el ritmo se duplica). Los mensajes admiten SPINTAX {Hola|Buenas|Qué tal} para variar el texto entre clientes. Si el usuario sufrió un bloqueo de WhatsApp: recomienda ritmo 60-120 s, tope 20-30/h y dispersión 120 min la primera semana, textos con spintax y {nombre}, y no programar campañas en la misma franja que los recordatorios.",
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",

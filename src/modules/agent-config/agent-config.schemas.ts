@@ -29,7 +29,22 @@ const quietHoursSchema = z
   .object({
     startHour: z.coerce.number().int().min(0).max(23),
     endHour: z.coerce.number().int().min(1).max(24),
+    // Dispersión al abrir: lo acumulado fuera de horario se reparte al azar en los
+    // primeros N minutos de la ventana (0 = todo a la hora exacta). Default 90.
+    spreadMinutes: z.coerce.number().int().min(0).max(180).optional(),
   })
+  .optional();
+
+// Ritmo anti-ráfaga de recordatorios por empresa: separación al azar entre envíos
+// consecutivos [minSec, maxSec] y tope de recordatorios visibles por hora.
+const pacingSchema = z
+  .object({
+    minSec: z.coerce.number().int().min(5).max(600),
+    maxSec: z.coerce.number().int().min(5).max(900),
+    maxPerHour: z.coerce.number().int().min(5).max(500),
+  })
+  .refine((p) => p.maxSec >= p.minSec, { message: "maxSec debe ser ≥ minSec" })
+  .nullable()
   .optional();
 
 // Plantilla de Meta de respaldo para recordatorios fuera de la ventana de 24h
@@ -49,6 +64,7 @@ export const followupConfigSchema = z
     abandonedCart: reminderSequenceSchema,
     leftOnRead: reminderSequenceSchema,
     quietHours: quietHoursSchema,
+    pacing: pacingSchema,
     metaTemplate: metaTemplateSchema,
   })
   .nullable()

@@ -18,6 +18,12 @@ const envSchema = z.object({
   // ráfaga de mensajes del cliente y responder UNA sola vez. El temporizador se
   // reinicia con cada mensaje nuevo; el turno corre tras `sendAt = ultimo + ventana`.
   AGENT_DEBOUNCE_MS: z.coerce.number().int().nonnegative().default(6000),
+  // Ritmo anti-ráfaga de recordatorios (defaults por empresa; cada tenant puede
+  // ajustarlo en Recordatorios → Horario): separación al azar entre envíos
+  // consecutivos de la misma empresa y tope de recordatorios visibles por hora.
+  REMINDER_PACING_MIN_SEC: z.coerce.number().int().min(5).default(25),
+  REMINDER_PACING_MAX_SEC: z.coerce.number().int().min(5).default(70),
+  REMINDER_MAX_PER_HOUR: z.coerce.number().int().min(5).default(60),
   UPLOAD_DIR: z.string().default("uploads"),
   PUBLIC_BASE_URL: z.string().default("http://localhost:3000"),
   // Modelo de generación de imágenes del copiloto (override sin tocar código).

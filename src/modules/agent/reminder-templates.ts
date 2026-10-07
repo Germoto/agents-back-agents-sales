@@ -68,6 +68,26 @@ function boolOf(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+/**
+ * SPINTAX: `{Hola|Buenas|Qué tal}` → una de las opciones al azar. Se resuelve al
+ * ENVIAR (no al programar) para que dos clientes no reciban el mismo texto —
+ * anti-ban. Anidado simple (de adentro hacia afuera). Las variables `{nombre}`,
+ * `{producto}`, etc. (sin `|`) no se tocan; una llave sin cerrar se deja tal cual.
+ */
+export function applySpintax(text: string): string {
+  if (!text || !text.includes("|")) return text;
+  let out = text;
+  for (let i = 0; i < 20; i++) {
+    const next = out.replace(/\{([^{}]*\|[^{}]*)\}/g, (_m, inner: string) => {
+      const options = inner.split("|");
+      return options[Math.floor(Math.random() * options.length)] ?? "";
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 export function substituteVars(text: string, vars: ReminderVars): string {
   return text
     .replace(/\{nombre\}/gi, vars.nombre || "")

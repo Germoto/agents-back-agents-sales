@@ -14,6 +14,7 @@
 
 import { prisma } from "../../lib/prisma";
 import { loadWhatsappSender, mediaKindFor } from "../agent/outbound";
+import { applySpintax } from "../agent/reminder-templates";
 import { flushOutbox, sleep, type DeliveryIds } from "../agent/delivery";
 import type { OutboxMessage } from "../agent/agent-tools";
 import { muteCustomerToHuman } from "../agent/agent-tools";
@@ -51,6 +52,8 @@ export interface RunnerCampaign {
 
 /** Reemplaza placeholders simples del mensaje ({nombre}) con datos del destinatario. */
 function substituteVars(text: string, recipient: RunnerRecipient): string {
+  // Spintax {a|b|c} → variación por destinatario (anti-ban), antes de {nombre}.
+  text = applySpintax(text);
   const name = (recipient.name ?? "").trim();
   return text.replace(/\{nombre\}/gi, name);
 }
