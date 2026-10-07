@@ -219,6 +219,51 @@ export async function listPendingReminders(
   });
 }
 
+/**
+ * Historial de recordatorios (cualquier estado) para ANÁLISIS: cómo salieron los
+ * de una franja (p. ej. la apertura de las 7am), cancelados y fallidos con motivo.
+ * Ordena por el instante relevante (sentAt para enviados, sendAt para el resto).
+ */
+export async function listReminderHistory(
+  companyId: string,
+  opts: { status?: ScheduledMessageStatus; from?: Date; to?: Date; limit?: number },
+): Promise<
+  Array<{
+    id: string;
+    type: ScheduledMessageType;
+    status: ScheduledMessageStatus;
+    sendAt: Date;
+    sentAt: Date | null;
+    failureReason: string | null;
+    body: string;
+    customer: { name: string | null; phone: string };
+  }>
+> {
+  const status = opts.status ?? ScheduledMessageStatus.SENT;
+  const timeField = status === ScheduledMessageStatus.SENT ? "sentAt" : "sendAt";
+  const range = opts.from || opts.to ? { gte: opts.from, lte: opts.to } : undefined;
+  return prisma.scheduledMessage.findMany({
+    where: {
+      companyId,
+      status,
+      type: { in: LISTABLE_TYPES },
+      ...(range ? { [timeField]: range } : {}),
+    },
+    orderBy: { [timeField]: "desc" },
+    take: Math.min(Math.max(opts.limit ?? 200, 1), 500),
+    select: {
+      id: true,
+      type: true,
+      status: true,
+      sendAt: true,
+      sentAt: true,
+      failureReason: true,
+      body: true,
+      customer: { select: { name: true, phone: true } },
+    },
+  });
+}
+
 export function minutesFromNow(minutes: number): Date {
   return new Date(Date.now() + minutes * 60 * 1000);
 }

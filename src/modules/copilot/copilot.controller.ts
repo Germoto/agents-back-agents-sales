@@ -55,7 +55,9 @@ import { listBookings } from "../bookings/bookings.service";
 import { listCampaigns, createCampaign, updateCampaign, startCampaign, testCampaign } from "../campaigns/campaigns.service";
 import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
 import { listSubscriptions } from "../subscriptions/subscriptions.service";
-import { listPendingReminders } from "../scheduler/scheduler.service";
+import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
+import { normalizeQuietHours, normalizePacing } from "../scheduler/quiet-hours";
+import { ScheduledMessageStatus } from "@prisma/client";
 import { buildBotConfig } from "../bot/bot.service";
 import { buildFichaPreview } from "../agent/agent-tools";
 import {
@@ -243,7 +245,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "ver_configuracion",
       description:
-        "Devuelve la configuración ACTUAL del negocio: empresa (nombre, rubro, zona horaria, delivery, horario de atención), agente IA (prompt/estilo/reglas, sin credenciales) y pagos (métodos y modo). Úsala antes de proponer cambios.",
+        "Devuelve la configuración ACTUAL del negocio: empresa (nombre, rubro, zona horaria, delivery, horario de atención), agente IA (prompt/estilo/reglas, sin credenciales), pagos (métodos y modo) y recordatorios (secuencias activas, horario de envío con dispersión al abrir, ritmo anti-bloqueo y tope por hora — valores EFECTIVOS, con defaults aplicados). Úsala antes de proponer cambios.",
       parameters: { type: "object", additionalProperties: false, properties: {} },
     },
   },
@@ -806,11 +808,17 @@ export const TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "listar_recordatorios_programados",
-      description: "Recordatorios PENDIENTES de enviar (seguimientos, citas, renovaciones) con fecha y cliente.",
+      description:
+        "Recordatorios (seguimientos, citas, renovaciones) con fecha y cliente. Por defecto los PENDIENTES. Con estado=SENT devuelve los ENVIADOS en un rango (desde/hasta ISO) más un RESUMEN para analizar ráfagas: envíos por hora, separación mínima/promedio entre envíos consecutivos y por tipo — úsalo para verificar que los recordatorios de la apertura (p. ej. 7am) salieron dispersos y espaciados. estado=FAILED o CANCELLED muestra el motivo.",
       parameters: {
         type: "object",
         additionalProperties: false,
-        properties: { limit: { type: "number", description: "máx 100 (default 50)" } },
+        properties: {
+          limit: { type: "number", description: "máx 100 (default 50)" },
+          estado: { type: "string", enum: ["PENDING", "SENT", "FAILED", "CANCELLED"], description: "default PENDING" },
+          desde: { type: "string", description: "ISO (solo con estado≠PENDING); default: últimas 24 h" },
+          hasta: { type: "string", description: "ISO (solo con estado≠PENDING)" },
+        },
       },
     },
   },
@@ -1527,6 +1535,7 @@ export async function runCopilotTool(
             keywordMode: true,
             trackStock: true,
             catalogMediaMode: true,
+            followupConfig: true,
           },
         }),
         prisma.paymentConfig.findUnique({
@@ -1534,10 +1543,46 @@ export async function runCopilotTool(
           include: { methods: { orderBy: { sortOrder: "asc" } } },
         }),
       ]);
+      // Recordatorios: valores EFECTIVOS (con defaults) para que el copiloto pueda
+      // analizar/ajustar la protección anti-bloqueo sin adivinar.
+      const fu = (agent?.followupConfig ?? null) as {
+        abandonedCart?: { enabled?: boolean; steps?: unknown[] };
+        leftOnRead?: { enabled?: boolean; steps?: unknown[] };
+        quietHours?: unknown;
+        pacing?: unknown;
+        metaTemplate?: unknown;
+      } | null;
+      const quiet = normalizeQuietHours(fu?.quietHours);
+      const pacing = normalizePacing(fu?.pacing, {
+        minSec: env.REMINDER_PACING_MIN_SEC,
+        maxSec: env.REMINDER_PACING_MAX_SEC,
+        maxPerHour: env.REMINDER_MAX_PER_HOUR,
+      });
+      const seqInfo = (s?: { enabled?: boolean; steps?: unknown[] }) => ({
+        enabled: Boolean(s?.enabled),
+        pasos: Array.isArray(s?.steps) ? s.steps.length : 0,
+      });
+      const { followupConfig: _fu, ...agentRest } = agent ?? { followupConfig: null };
+      void _fu;
       return {
         result: JSON.stringify({
           empresa: company ? { ...company, productCount: company._count.products, _count: undefined } : null,
-          agente: agent,
+          agente: agent ? agentRest : null,
+          recordatorios: {
+            abandonedCart: seqInfo(fu?.abandonedCart),
+            leftOnRead: seqInfo(fu?.leftOnRead),
+            horario: {
+              enviarDesde: `${String(quiet.startHour).padStart(2, "0")}:00`,
+              enviarHasta: `${String(quiet.endHour).padStart(2, "0")}:00`,
+              dispersionAlAbrirMin: quiet.spreadMinutes,
+            },
+            ritmoAntiBloqueo: {
+              pausaEntreEnviosSeg: { min: pacing.minSec, max: pacing.maxSec },
+              maximoPorHora: pacing.maxPerHour,
+              nota: "Con campaña enviando, la pausa se duplica. Configurable con configurar_recordatorios {quietHours.spreadMinutes, pacing}.",
+            },
+            plantillaMeta: fu?.metaTemplate ?? null,
+          },
           pagos: payment
             ? {
                 enabled: payment.enabled,
@@ -2298,6 +2343,48 @@ export async function runCopilotTool(
 
     case "listar_recordatorios_programados": {
       const limit = Math.min(Math.max(Number(args.limit) || 50, 1), 100);
+      const estado = String(args.estado ?? "PENDING").toUpperCase();
+      if (estado !== "PENDING") {
+        const status =
+          estado === "SENT" ? ScheduledMessageStatus.SENT : estado === "FAILED" ? ScheduledMessageStatus.FAILED : ScheduledMessageStatus.CANCELLED;
+        const from = args.desde ? new Date(String(args.desde)) : new Date(Date.now() - 24 * 60 * 60_000);
+        const to = args.hasta ? new Date(String(args.hasta)) : undefined;
+        const history = await listReminderHistory(companyId, { status, from, to, limit: 500 });
+        const company = await prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } });
+        const tz = company?.timezone || "America/Lima";
+        const hourOf = (d: Date) => new Intl.DateTimeFormat("es-PE", { timeZone: tz, hour: "2-digit", hour12: false }).format(d);
+        const timeOf = (r: { sentAt: Date | null; sendAt: Date }) => r.sentAt ?? r.sendAt;
+        // Resumen anti-ráfaga: envíos por hora, separación entre consecutivos y por tipo.
+        const porHora: Record<string, number> = {};
+        const porTipo: Record<string, number> = {};
+        for (const r of history) {
+          porHora[`${hourOf(timeOf(r))}:00`] = (porHora[`${hourOf(timeOf(r))}:00`] ?? 0) + 1;
+          porTipo[r.type] = (porTipo[r.type] ?? 0) + 1;
+        }
+        const times = history.map((r) => timeOf(r).getTime()).sort((a, b) => a - b);
+        const gaps = times.slice(1).map((t, i) => (t - times[i]) / 1000);
+        const resumen = {
+          total: history.length,
+          porHora,
+          porTipo,
+          separacionSeg: gaps.length
+            ? { minima: Math.round(Math.min(...gaps)), promedio: Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length), maxima: Math.round(Math.max(...gaps)) }
+            : null,
+          nota:
+            status === ScheduledMessageStatus.SENT
+              ? "Separación mínima < 20 s o decenas en la misma hora = ráfaga (riesgo de bloqueo). Ajusta con configurar_recordatorios {quietHours.spreadMinutes, pacing}."
+              : "failureReason explica cada caso (cliente pagó/cerró, atención humana, fuera de ventana Meta, etc.).",
+        };
+        const rows = history.slice(0, limit).map((r) => ({
+          tipo: r.type,
+          estado: r.status,
+          fecha: timeOf(r),
+          cliente: { nombre: r.customer?.name ?? null, phone: r.customer?.phone ?? null },
+          ...(r.failureReason ? { motivo: r.failureReason } : {}),
+          texto: String(r.body ?? "").slice(0, 120),
+        }));
+        return { result: JSON.stringify({ resumen, mostrados: rows.length, items: rows }), wrote: false };
+      }
       const reminders = await listPendingReminders(companyId);
       const rows = reminders.slice(0, limit).map((r) => ({
         tipo: r.type,
@@ -2419,7 +2506,7 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto: usa la URL EXACTA que aparece en la línea [Adjuntos de este mensaje: …] del mensaje del usuario (NUNCA un data:URI ni una URL inventada). Si el usuario ya adjuntó la imagen, NO le pidas re-adjuntarla. Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
     "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
     "- ATRIBUCIÓN DE ANUNCIOS META: los leads que llegan desde un anuncio (CTWA) quedan marcados con el anuncio de origen; ver_metricas trae rendimientoPorAnuncio (leads, ventas, ingresos y conversión POR ANUNCIO — así se sabe qué anuncio cierra ventas de verdad). El catálogo de anuncios (ver_catalogo_anuncios/configurar_anuncio, o en Empresa → Anuncios) mapea IDs/títulos crudos a descripciones amigables; varios identificadores pueden apuntar a la misma descripción, y cada anuncio puede VINCULARSE A UN PRODUCTO: el lead que llega por ese anuncio entra con ese producto como PRODUCTO EN FOCO y el agente lo PRESENTA DE INMEDIATO en su primer mensaje (presentación forzada de forma determinista: aunque el lead solo diga 'Hola', recibe la ficha completa sin que se le pregunte qué busca).",
-    "- ANALISTA DEL NEGOCIO: puedes leer métricas, ventas, comprobantes, pedidos, conversaciones (incluidos los MENSAJES reales con leer_conversacion), citas, campañas, suscripciones y recordatorios con ver_metricas/listar_*. Para preguntas de números usa PRIMERO ver_metricas (trae el periodo comparado con el anterior) y detalla después con listar_*. TODO número que cites debe salir de un resultado de tool de ESTE turno — NUNCA estimes ni 'recuerdes' cifras. Con los datos puedes proponer mejoras accionables (FAQs/objeciones a partir de chats reales, ofertas escalonadas para carritos abandonados, ajustes de prompt o recordatorios) y, SOLO si el usuario confirma, aplicarlas con las tools de escritura. Con previsualizar_ficha ves EXACTAMENTE cómo el agente presenta un producto al cliente (secuencia real de mensajes, multimedia y modo de presentación, en cualquier rubro) — úsala antes de proponer mejoras de copy o de estructura de la ficha.",
+    "- ANALISTA DEL NEGOCIO: puedes leer métricas, ventas, comprobantes, pedidos, conversaciones (incluidos los MENSAJES reales con leer_conversacion), citas, campañas, suscripciones y recordatorios con ver_metricas/listar_*. Para preguntas de números usa PRIMERO ver_metricas (trae el periodo comparado con el anterior) y detalla después con listar_*. TODO número que cites debe salir de un resultado de tool de ESTE turno — NUNCA estimes ni 'recuerdes' cifras. Con los datos puedes proponer mejoras accionables (FAQs/objeciones a partir de chats reales, ofertas escalonadas para carritos abandonados, ajustes de prompt o recordatorios) y, SOLO si el usuario confirma, aplicarlas con las tools de escritura. Con previsualizar_ficha ves EXACTAMENTE cómo el agente presenta un producto al cliente (secuencia real de mensajes, multimedia y modo de presentación, en cualquier rubro) — úsala antes de proponer mejoras de copy o de estructura de la ficha. BLOQUEOS DE WHATSAPP: si el usuario reporta un bloqueo o te pide revisar el riesgo, (1) lee ver_configuracion.recordatorios (dispersión, ritmo, tope efectivos), (2) analiza los envíos reales con listar_recordatorios_programados estado=SENT (resumen: envíos por hora y separación mínima entre consecutivos — < 20 s o decenas en la misma hora = ráfaga) y las campañas recientes con listar_campanas, y (3) propón valores concretos (tras un bloqueo: dispersión 120, pausa 60-120 s, tope 20-30/h; sin bloqueo: 90 · 25-70 · 60) y mensajes con spintax; aplícalos con configurar_recordatorios SOLO tras confirmación.",
     "- DIAGNÓSTICO: si el dueño reporta que el bot responde a todos 'Disculpa, estoy teniendo un inconveniente', casi siempre es el PROVEEDOR DE IA fallando: sin créditos/saldo (recargar en la cuenta del proveedor, ej. OpenAI → Billing) o API key inválida — se revisa/corrige en el panel (Agente IA). El sistema avisa al dueño por WhatsApp al primer fallo accionable y de nuevo al recuperarse; el agente revive solo al corregir la causa, sin reiniciar nada.",
     "- DISEÑADOR: con generar_imagen creas banners de oferta, fotos de producto y creativos con IA (se guardan en el servidor y su URL sirve en cualquier configuración: banner de presentación, pasos de recordatorio, followups, respuestas rápidas, campañas, o como foto de producto vía adjuntar_foto_producto). Cuesta dinero al negocio (usa su key de OpenAI) → SOLO tras confirmación. Flujo OBLIGATORIO: generar → mostrar la URL al usuario → su aprobación → adjuntar → verificar (previsualizar_ficha). Textos del banner van LITERALES entre comillas en el prompt. Si el negocio no tiene key de OpenAI, deriva al panel (Agente IA); JAMÁS pidas ni recibas keys por chat.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
