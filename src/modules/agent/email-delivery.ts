@@ -18,6 +18,7 @@ import { mailerEnabled, sendMail } from "../../lib/mailer";
 import { normalizeEmail, maskEmail } from "../../lib/email";
 import { resolveOwnUpload, readUpload, storagePathFromUrl } from "../../lib/uploads";
 import { normalizeFollowups } from "../../lib/product";
+import { applySpintax } from "./reminder-templates";
 import { digitalDeliveryEmail, type DeliveryEmailSection } from "./delivery.emails";
 import { notifyOwner } from "./conversation.service";
 
@@ -175,7 +176,12 @@ export async function sendDigitalDeliveryEmail(input: SendDigitalDeliveryEmailIn
     for (const f of p.files.filter((x) => x.sendByEmail)) {
       await attachOrLink(f.url, f.storagePath || null, f.originalName, f.mimeType);
     }
-    sections.push({ productName: p.name, bodyText: (dd.emailBody?.trim() || dd.instructions).trim(), extras, links });
+    sections.push({
+      productName: p.name,
+      bodyText: applySpintax((dd.emailBody?.trim() || dd.instructions).trim()),
+      extras: extras.map(applySpintax),
+      links,
+    });
   }
 
   const subject =

@@ -49,6 +49,7 @@ import { claimAvailableCredential, countAvailable, peekAvailableCredential } fro
 import { createSubscriptionForSale, type RenewalReminderConfig } from "../subscriptions/subscriptions.service";
 import { mailerEnabled } from "../../lib/mailer";
 import { sendDigitalDeliveryEmail, EmailDeliveryError } from "./email-delivery";
+import { applySpintax } from "./reminder-templates";
 
 /** Comparación laxa de nombres (acentos/orden) para detectar confusión de titular. */
 function looseNameNorm(s: string): string {
@@ -1144,6 +1145,15 @@ export function buildFichaPreview(
   const onDemand = (product.files ?? []).filter((f) => !f.showInPresentation).length;
   if (onDemand) {
     notas.push(`${onDemand} archivo(s) on-demand NO van en la presentación: el agente los envía solo si el cliente los pide.`);
+  }
+  // Spintax {a|b|c}: igual que al enviar (deliver), la preview muestra UNA variante.
+  const hasSpintax = mensajes.some((m) => /\{[^{}]*\|[^{}]*\}/.test(`${m.texto ?? ""}${m.caption ?? ""}`));
+  for (const m of mensajes) {
+    if (m.texto) m.texto = applySpintax(m.texto);
+    if (m.caption) m.caption = applySpintax(m.caption);
+  }
+  if (hasSpintax) {
+    notas.push("Los textos con variantes {a|b|c} cambian en cada envío (cada cliente recibe una combinación distinta); esta preview muestra UNA versión.");
   }
   return { modo: presentationMessage ? "mensaje_fijo" : "ficha_automatica", mensajes, notas };
 }
