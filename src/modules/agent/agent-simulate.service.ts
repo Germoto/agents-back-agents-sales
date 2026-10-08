@@ -13,7 +13,7 @@ import { buildHistory, saveState, resetConversation, type ConversationState } fr
 import { runFlowTurn, trailingUserText, type FlowIO, type FlowTraceEntry } from "../flows/flow-engine";
 import type { TurnContext, OutboxMessage } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
-import { resolveReminderSequence, type ReminderType } from "./reminder-templates";
+import { resolveReminderSequence, applySpintax, type ReminderType } from "./reminder-templates";
 
 const SIM_PHONE = "SIMULADOR"; // identidad del "cliente" de simulación (no es un número real)
 
@@ -106,8 +106,10 @@ async function loadSimConversation(companyId: string, mode: SimMode) {
   return { customerId: customer.id, conversationId: convo.id, state: (convo.state as ConversationState) ?? {} };
 }
 
+// Igual que deliver(): las variantes {a|b|c} se muestran resueltas (una combinación
+// al azar), tal como las vería el cliente — el simulador no pasa por deliver().
 function outboxText(m: OutboxMessage): string {
-  return m.kind === "media" ? (m.caption ?? "") : (m.text ?? "");
+  return applySpintax(m.kind === "media" ? (m.caption ?? "") : (m.text ?? ""));
 }
 
 /**
@@ -204,6 +206,7 @@ export async function simulateTurn(
     finalText = "Disculpa, tuve un inconveniente. (simulación)";
     console.error("[simulate] runAgentTurn falló:", err instanceof Error ? err.message : err);
   }
+  finalText = applySpintax(finalText);
 
   const replies: SimMessage[] = [];
   for (const m of ctx.outbox) {
