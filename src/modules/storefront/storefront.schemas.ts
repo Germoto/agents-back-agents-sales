@@ -14,6 +14,10 @@ export const storeCheckoutSchema = z.object({
   phone: z.string().trim().max(30).optional().nullable(),
   // MERCADOPAGO (default) o MANUAL (Yape/Plin con comprobante).
   method: z.enum(["MERCADOPAGO", "MANUAL"]).optional(),
+  // Atribución Meta (píxel): cookies _fbp/_fbc y URL de la página (opcionales).
+  fbp: z.string().trim().max(120).optional().nullable(),
+  fbc: z.string().trim().max(300).optional().nullable(),
+  pageUrl: z.string().trim().max(500).optional().nullable(),
 }).refine((b) => Boolean(b.productId || b.productIds?.length), { message: "Elige al menos un producto", path: ["productId"] });
 
 // POST /order/:id/receipt (multipart: file + payerName)

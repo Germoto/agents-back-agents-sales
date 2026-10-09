@@ -35,6 +35,7 @@ import { buildBotConfig } from "../bot/bot.service";
 import { readReceiptImage } from "../agent/receipt-vision";
 import { claimPayment, matchPayments, updatePaymentStatus } from "../public-payments/public-payments.service";
 import type { AiSettings } from "../../lib/ai-providers";
+import { reportStorePurchase, storePixelId, type StoreWebClient } from "../meta-capi/meta-capi.service";
 
 // ---------------------------------------------------------------------------
 // URL y resolución
@@ -145,10 +146,11 @@ export async function getPublicStore(slug: string) {
   const { company, cfg, ent } = await resolveStore(slug);
   const symbol = symbolFor(company.currency);
   const products = await eligibleProducts(company.id, cfg.productIds);
-  const pay = await storePaymentOptions(company.id, cfg, ent);
+  const [pay, metaPixelId] = await Promise.all([storePaymentOptions(company.id, cfg, ent), storePixelId(company.id)]);
   return {
     pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual },
     negocio: {
+      metaPixelId,
       slug: company.slug,
       name: company.name,
       title: cfg.title || company.name,
@@ -287,6 +289,7 @@ export function orderProductIds(order: { productId: string; productIds: string[]
 export async function createStoreCheckout(
   slug: string,
   input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod },
+  client?: StoreWebClient | null,
 ) {
   const { company, cfg, ent } = await resolveStore(slug);
   const companyId = company.id;
@@ -378,7 +381,7 @@ export async function createStoreCheckout(
       currency: company.currency,
       paymentMethod: method,
       accessToken,
-      metadata: { listPrice: priceNum, feeMode: pc?.mpFeeMode ?? null },
+      metadata: { listPrice: priceNum, feeMode: pc?.mpFeeMode ?? null, ...(client ? { web: client } : {}) },
     },
   });
 
@@ -482,6 +485,9 @@ export async function getPublicOrder(id: string, token: string) {
     paymentMethod: order.paymentMethod,
     productName: order.productName,
     productos: items.length ? items.map((it) => it.name) : [order.productName],
+    productIds: orderProductIds(order),
+    amount: Number(order.amount),
+    currency: order.currency,
     email: order.email,
     deliveredAt: order.deliveredAt,
     mensaje: mensaje[order.status],
@@ -514,6 +520,18 @@ export async function fulfillStoreOrder(
   });
 
   const amountText = `${symbolFor(order.currency)} ${opts.paid.toFixed(2)}`;
+
+  // Meta CAPI (Purchase de la tienda web). Best-effort, dedupe con el píxel por event_id.
+  void reportStorePurchase({
+    companyId,
+    receiptId,
+    orderId: order.id,
+    email: order.email,
+    phone: order.phone && !order.phone.startsWith("web:") ? order.phone : null,
+    customerId: order.customerId,
+    productIds: orderProductIds(order),
+    client: ((order.metadata ?? {}) as { web?: StoreWebClient }).web ?? null,
+  }).catch(() => undefined);
 
   // Entrega por correo (requisito del MVP) + WhatsApp si dejó número real.
   let emailOk = false;

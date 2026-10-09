@@ -39,7 +39,15 @@ export async function getPublicStoreController(req: Request, res: Response) {
 }
 
 export async function storeCheckoutController(req: Request, res: Response) {
-  return res.status(201).json(await createStoreCheckout(String(req.params.slug), req.body));
+  const b = req.body as { fbp?: string | null; fbc?: string | null; pageUrl?: string | null };
+  const client = {
+    ip: req.ip ?? null,
+    ua: typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"].slice(0, 300) : null,
+    fbp: b.fbp ?? null,
+    fbc: b.fbc ?? null,
+    url: b.pageUrl ?? null,
+  };
+  return res.status(201).json(await createStoreCheckout(String(req.params.slug), req.body, client));
 }
 
 export async function getPublicOrderController(req: Request, res: Response) {

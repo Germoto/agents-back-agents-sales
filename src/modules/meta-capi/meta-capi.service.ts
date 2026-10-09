@@ -28,6 +28,7 @@ export async function getMetaCapiConfig(companyId: string) {
     accessTokenSet: !!config?.accessToken,
     accessTokenMasked: maskToken(config?.accessToken ?? null),
     testEventCode: config?.testEventCode ?? "",
+    pixelEnabled: config?.pixelEnabled ?? false,
     // Diagnóstico del último intento (para no depurar a ciegas desde el panel).
     lastAttemptAt: config?.lastAttemptAt ?? null,
     lastResult: config?.lastResult ?? null,
@@ -42,6 +43,7 @@ export async function updateMetaCapiConfig(
     accessToken?: string;
     pageId?: string | null;
     testEventCode?: string | null;
+    pixelEnabled?: boolean;
   },
 ) {
   const existing = await prisma.metaCapiConfig.findUnique({ where: { companyId }, select: { id: true, accessToken: true } });
@@ -55,6 +57,7 @@ export async function updateMetaCapiConfig(
     datasetId: data.datasetId.trim(),
     pageId: data.pageId?.trim() || null,
     testEventCode: data.testEventCode?.trim() || null,
+    ...(data.pixelEnabled !== undefined ? { pixelEnabled: data.pixelEnabled } : {}),
     // Keep-if-empty: la key guardada se conserva salvo que tipeen una nueva.
     ...(typedToken ? { accessToken: encryptCredential(typedToken) } : {}),
   };
@@ -167,5 +170,91 @@ export async function reportCtwaConversion(companyId: string, receiptId: string)
     const message = err instanceof Error ? err.message : "error desconocido";
     console.warn("[meta-capi] no se pudo reportar la conversión:", message);
     await recordAttempt(companyId, `Error: ${message}`).catch(() => undefined);
+  }
+}
+
+/** Pixel id para la tienda web (solo si CAPI está activo y el píxel habilitado). */
+export async function storePixelId(companyId: string): Promise<string | null> {
+  const config = await prisma.metaCapiConfig.findUnique({ where: { companyId }, select: { enabled: true, pixelEnabled: true, datasetId: true } });
+  return config?.enabled && config.pixelEnabled && config.datasetId ? config.datasetId : null;
+}
+
+export type StoreWebClient = { ip?: string | null; ua?: string | null; fbp?: string | null; fbc?: string | null; url?: string | null };
+
+/**
+ * Purchase de la TIENDA WEB por CAPI (action_source website). event_id = id del
+ * pedido, el mismo que usa el píxel en la página de gracias → Meta dedupea.
+ * Best-effort, idempotente por receipt.metadata.capiSentAt. Nunca lanza.
+ */
+export async function reportStorePurchase(input: {
+  companyId: string;
+  receiptId: string;
+  orderId: string;
+  email: string;
+  phone?: string | null;
+  customerId?: string | null;
+  productIds: string[];
+  client?: StoreWebClient | null;
+}): Promise<void> {
+  const { companyId } = input;
+  try {
+    const config = await prisma.metaCapiConfig.findUnique({ where: { companyId } });
+    if (!config?.enabled || !config.datasetId || !config.accessToken) return;
+    const receipt = await prisma.paymentReceipt.findFirst({
+      where: { id: input.receiptId, companyId },
+      select: { id: true, status: true, amountPaid: true, amountExpected: true, currency: true, occurredAt: true, validatedAt: true, metadata: true },
+    });
+    if (!receipt || receipt.status !== "APROBADO") return;
+    const meta = (receipt.metadata ?? {}) as Record<string, unknown>;
+    if (meta.capiSentAt) return;
+
+    const value = Number(String(receipt.amountPaid ?? receipt.amountExpected).replace(/[^0-9.]/g, ""));
+    const eventTime = Math.floor((receipt.occurredAt ?? receipt.validatedAt ?? new Date()).getTime() / 1000);
+    const phoneDigits = (input.phone ?? "").replace(/\D/g, "");
+    const email = input.email.trim().toLowerCase();
+    const c = input.client ?? {};
+    const body: Record<string, unknown> = {
+      data: [
+        {
+          event_name: "Purchase",
+          event_time: eventTime,
+          event_id: input.orderId,
+          action_source: "website",
+          ...(c.url ? { event_source_url: c.url } : {}),
+          user_data: {
+            em: [sha256(email)],
+            ...(phoneDigits ? { ph: [sha256(phoneDigits)] } : {}),
+            ...(input.customerId ? { external_id: [sha256(input.customerId)] } : {}),
+            ...(c.ip ? { client_ip_address: c.ip } : {}),
+            ...(c.ua ? { client_user_agent: c.ua } : {}),
+            ...(c.fbp ? { fbp: c.fbp } : {}),
+            ...(c.fbc ? { fbc: c.fbc } : {}),
+          },
+          custom_data: {
+            currency: (receipt.currency || "PEN").toUpperCase(),
+            value: Number.isFinite(value) && value > 0 ? value : 0,
+            content_type: "product",
+            content_ids: input.productIds,
+            num_items: input.productIds.length,
+          },
+        },
+      ],
+      ...(config.testEventCode ? { test_event_code: config.testEventCode } : {}),
+    };
+    const token = decryptCredential(config.accessToken);
+    const url = `https://graph.facebook.com/${env.META_GRAPH_VERSION}/${config.datasetId}/events?access_token=${encodeURIComponent(token)}`;
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`[meta-capi] tienda: Meta respondió ${res.status}: ${detail.slice(0, 300)}`);
+      await recordAttempt(companyId, `Error de Meta en venta de la tienda web (${res.status}): ${detail.slice(0, 300)}`);
+      return;
+    }
+    await prisma.paymentReceipt.update({ where: { id: receipt.id }, data: { metadata: { ...meta, capiSentAt: new Date().toISOString() } } });
+    await recordAttempt(companyId, `OK: Purchase de la tienda web (${(receipt.currency || "PEN").toUpperCase()} ${value}) reportado${config.testEventCode ? ` (modo prueba ${config.testEventCode})` : ""}.`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "error desconocido";
+    console.warn("[meta-capi] tienda: no se pudo reportar la compra:", message);
+    await recordAttempt(companyId, `Error (tienda web): ${message}`).catch(() => undefined);
   }
 }

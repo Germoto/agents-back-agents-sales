@@ -343,6 +343,9 @@ model MetaCapiConfig {
   // user_data para eventos business_messaging (CTWA).
   pageId        String?
   testEventCode String?
+  // Píxel de Meta en la tienda web (usa datasetId como pixel id): PageView, ViewContent,
+  // InitiateCheckout y Purchase en el navegador + Purchase por CAPI (dedupe por event_id).
+  pixelEnabled  Boolean   @default(false)
   // Diagnóstico del último intento de envío (visible en la card del panel).
   lastAttemptAt DateTime?
   lastResult    String?

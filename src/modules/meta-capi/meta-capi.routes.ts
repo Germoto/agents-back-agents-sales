@@ -16,6 +16,8 @@ const updateSchema = z.object({
   // Página de Facebook que corre los anuncios (requerida por Meta en business_messaging).
   pageId: z.string().trim().max(60).nullable().optional(),
   testEventCode: z.string().trim().max(60).nullable().optional(),
+  // Insertar el píxel (datasetId) en la tienda web.
+  pixelEnabled: z.boolean().optional(),
 });
 
 const router = Router();

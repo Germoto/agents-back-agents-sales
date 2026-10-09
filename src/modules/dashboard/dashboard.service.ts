@@ -107,6 +107,7 @@ export async function getDashboardStats(params: DashboardParams) {
       occurredAt: true,
       validatedAt: true,
       createdAt: true,
+      metadata: true,
     },
   });
 
@@ -314,7 +315,9 @@ export async function getDashboardStats(params: DashboardParams) {
   const adByCustomer = new Map(saleCustomers.map((c) => [c.id, c]));
   for (const r of curAll) {
     const c = r.customerId ? adByCustomer.get(r.customerId) : undefined;
-    const a = aggFor(c?.adSourceId ?? null, c?.adTitle ?? null);
+    // Ventas de la tienda web: fila propia "Tienda web" (no son del chat ni de un anuncio CTWA).
+    const isStore = ((r.metadata ?? {}) as { channel?: string }).channel === "storefront";
+    const a = isStore ? aggFor("storefront", "Tienda web") : aggFor(c?.adSourceId ?? null, c?.adTitle ?? null);
     a.sales += 1;
     if (r.customerId) a.buyers.add(r.customerId);
     const amount = Number(r.amountPaid ?? r.amountExpected);
