@@ -10,7 +10,18 @@ export const storeCheckoutSchema = z.object({
   email: z.string().trim().min(5).max(160),
   // WhatsApp opcional: si viene, la entrega también sale por WhatsApp.
   phone: z.string().trim().max(30).optional().nullable(),
+  // MERCADOPAGO (default) o MANUAL (Yape/Plin con comprobante).
+  method: z.enum(["MERCADOPAGO", "MANUAL"]).optional(),
 });
+
+// POST /order/:id/receipt (multipart: file + payerName)
+export const storeReceiptBodySchema = z.object({
+  payerName: z.string().trim().max(120).optional().nullable(),
+});
+
+// Panel: aprobar / rechazar pedidos Yape/Plin
+export const approveStoreOrderSchema = z.object({ note: z.string().trim().max(300).optional().nullable() });
+export const rejectStoreOrderSchema = z.object({ reason: z.string().trim().max(300).optional().nullable() });
 
 export const storeOrderParamsSchema = z.object({ id: z.string().uuid() });
 export const storeOrderQuerySchema = z.object({ t: z.string().min(8).max(200) });
@@ -28,9 +39,11 @@ export const updateStorefrontConfigSchema = z.object({
   logoUrl: z.string().trim().max(500).nullable().optional(),
   whatsappNumber: z.string().trim().max(30).nullable().optional(),
   productIds: z.array(z.string().uuid()).max(200).optional(),
+  manualPaymentsEnabled: z.boolean().optional(),
 });
 
 export const storeOrdersQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(25),
+  status: z.enum(["PENDIENTE", "EN_REVISION", "PAGADO", "ENTREGADO", "FALLIDO"]).optional(),
 });

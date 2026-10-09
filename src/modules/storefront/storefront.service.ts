@@ -2,9 +2,12 @@
  * Tienda web pública por tenant (<slug>.<STORE_DOMAIN> o /tienda/<slug>).
  *
  * MVP infoproductos: catálogo del tenant (solo digitales con entrega por correo),
- * checkout de UN producto con Mercado Pago y entrega automática por correo
- * (+ WhatsApp si el comprador dejó su número). Reutiliza: mpCreatePreference,
- * webhook MP (rama storeOrderId), sendDigitalDeliveryEmail,
+ * checkout de UN producto con Mercado Pago o con Yape/Plin (el comprador sube el
+ * comprobante: visión + matching contra los comprobantes PENDIENTES, igual que el
+ * chat; sin match queda EN_REVISION y el dueño lo aprueba desde el panel) y
+ * entrega automática por correo (+ WhatsApp si dejó su número). Reutiliza:
+ * mpCreatePreference, webhook MP (rama storeOrderId), readReceiptImage,
+ * matchPayments/claimPayment/updatePaymentStatus, sendDigitalDeliveryEmail,
  * handleExternalPaymentApproved, gateNewLead/getEntitlements.
  *
  * Nada de esto toca el flujo del agente: módulo aparte, tablas nuevas.
@@ -27,7 +30,11 @@ import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { normalizePhone, loadOrCreateConversation, notifyOwner } from "../agent/conversation.service";
 import { sendDigitalDeliveryEmail, EmailDeliveryError } from "../agent/email-delivery";
 import { handleExternalPaymentApproved } from "../agent/agent.service";
-import { loadWhatsappSender } from "../agent/outbound";
+import { loadWhatsappSender, sendMedia } from "../agent/outbound";
+import { buildBotConfig } from "../bot/bot.service";
+import { readReceiptImage } from "../agent/receipt-vision";
+import { claimPayment, matchPayments, updatePaymentStatus } from "../public-payments/public-payments.service";
+import type { AiSettings } from "../../lib/ai-providers";
 
 // ---------------------------------------------------------------------------
 // URL y resolución
@@ -119,11 +126,28 @@ async function eligibleProducts(companyId: string, productIds: string[]) {
   return rows;
 }
 
+/** Métodos de pago disponibles en la tienda (MP y/o Yape-Plin manual). */
+async function storePaymentOptions(companyId: string, cfg: { manualPaymentsEnabled: boolean }, ent: { legacy: boolean; modules: string[] }) {
+  const pc = await prisma.paymentConfig.findUnique({
+    where: { companyId },
+    include: { methods: { orderBy: { sortOrder: "asc" } } },
+  });
+  const mpModule = ent.legacy || ent.modules.includes("MERCADOPAGO");
+  const mercadoPago = Boolean(mpModule && pc?.mpEnabled && pc.mpAccessToken && pc.mpStoreEnabled);
+  const manual =
+    pc?.enabled && cfg.manualPaymentsEnabled
+      ? pc.methods.map((m) => ({ method: m.method, number: m.number, holder: m.holder }))
+      : [];
+  return { mercadoPago, manual, pc };
+}
+
 export async function getPublicStore(slug: string) {
-  const { company, cfg } = await resolveStore(slug);
+  const { company, cfg, ent } = await resolveStore(slug);
   const symbol = symbolFor(company.currency);
   const products = await eligibleProducts(company.id, cfg.productIds);
+  const pay = await storePaymentOptions(company.id, cfg, ent);
   return {
+    pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual },
     negocio: {
       slug: company.slug,
       name: company.name,
@@ -175,12 +199,15 @@ function syntheticPhone(email: string): string {
   return `web:${crypto.createHash("sha256").update(email).digest("hex").slice(0, 12)}`;
 }
 
+export type StoreCheckoutMethod = "MERCADOPAGO" | "MANUAL";
+
 export async function createStoreCheckout(
   slug: string,
-  input: { productId: string; name: string; email: string; phone?: string | null },
+  input: { productId: string; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod },
 ) {
   const { company, cfg, ent } = await resolveStore(slug);
   const companyId = company.id;
+  const method: StoreCheckoutMethod = input.method === "MANUAL" ? "MANUAL" : "MERCADOPAGO";
 
   const email = normalizeEmail(input.email);
   if (!email) throw new AppError("El correo no es válido", 400);
@@ -188,12 +215,13 @@ export async function createStoreCheckout(
   const digits = (input.phone ?? "").replace(/\D/g, "");
   if (digits && digits.length < 8) throw new AppError("El número de WhatsApp no es válido", 400);
 
-  if (!(ent.legacy || ent.modules.includes("MERCADOPAGO"))) {
-    throw new AppError("Esta tienda aún no tiene pagos habilitados", 409);
+  const pay = await storePaymentOptions(companyId, cfg, ent);
+  const pc = pay.pc;
+  if (method === "MERCADOPAGO" && (!pay.mercadoPago || !pc?.mpAccessToken)) {
+    throw new AppError("Esta tienda aún no tiene pagos con Mercado Pago habilitados", 409);
   }
-  const pc = await prisma.paymentConfig.findUnique({ where: { companyId } });
-  if (!pc?.mpEnabled || !pc.mpAccessToken || !pc.mpStoreEnabled) {
-    throw new AppError("Esta tienda aún no tiene pagos habilitados", 409);
+  if (method === "MANUAL" && !pay.manual.length) {
+    throw new AppError("Esta tienda no acepta pago con Yape/Plin por el momento", 409);
   }
 
   const [product] = await eligibleProducts(companyId, cfg.productIds).then((rows) =>
@@ -203,12 +231,16 @@ export async function createStoreCheckout(
   const bot = mapBotProduct(product, { currencySymbol: symbolFor(company.currency), timezone: company.timezone });
   const priceNum = parsePrice(bot.price);
   if (priceNum <= 0) throw new AppError("Este producto no tiene un precio válido para compra online", 409);
-  const linkAmount = mpLinkAmount(priceNum, {
-    feeMode: pc.mpFeeMode,
-    feePercent: Number(pc.mpFeePercent),
-    feeFixed: Number(pc.mpFeeFixed),
-    feeIgv: pc.mpFeeIgv,
-  });
+  // Yape/Plin: precio de lista exacto (sin recargo). MP: link con la comisión según config.
+  const linkAmount =
+    method === "MANUAL" || !pc
+      ? priceNum
+      : mpLinkAmount(priceNum, {
+          feeMode: pc.mpFeeMode,
+          feePercent: Number(pc.mpFeePercent),
+          feeFixed: Number(pc.mpFeeFixed),
+          feeIgv: pc.mpFeeIgv,
+        });
 
   // Cliente: WhatsApp real si lo dio; si no, teléfono sintético estable por email.
   const phone = digits ? normalizePhone(digits) : syntheticPhone(email);
@@ -251,17 +283,33 @@ export async function createStoreCheckout(
       phone: digits ? phone : null,
       amount: new Prisma.Decimal(linkAmount.toFixed(2)),
       currency: company.currency,
+      paymentMethod: method,
       accessToken,
-      metadata: { listPrice: priceNum, feeMode: pc.mpFeeMode },
+      metadata: { listPrice: priceNum, feeMode: pc?.mpFeeMode ?? null },
     },
   });
 
   const base = storeUrl(company.slug);
   const thanks = `${base}/gracias?o=${order.id}&t=${accessToken}`;
+  const amountText = `${symbolFor(company.currency)} ${linkAmount.toFixed(2)}`;
+
+  if (method === "MANUAL") {
+    return {
+      orderId: order.id,
+      token: accessToken,
+      method,
+      initPoint: null,
+      amount: linkAmount,
+      amountText,
+      feeIncluded: false,
+      metodos: pay.manual,
+    };
+  }
+
   const https = base.startsWith("https://");
   let pref;
   try {
-    pref = await mpCreatePreference(decryptCredential(pc.mpAccessToken), {
+    pref = await mpCreatePreference(decryptCredential(pc!.mpAccessToken!), {
       title: product.name,
       amount: linkAmount,
       currency: company.currency.toUpperCase(),
@@ -283,10 +331,12 @@ export async function createStoreCheckout(
   return {
     orderId: order.id,
     token: accessToken,
+    method,
     initPoint: pref.init_point,
     amount: linkAmount,
-    amountText: `${symbolFor(company.currency)} ${linkAmount.toFixed(2)}`,
+    amountText,
     feeIncluded: linkAmount > priceNum,
+    metodos: [] as { method: string; number: string; holder: string }[],
   };
 }
 
@@ -297,20 +347,120 @@ export async function createStoreCheckout(
 export async function getPublicOrder(id: string, token: string) {
   const order = await prisma.storeOrder.findUnique({ where: { id } });
   if (!order || order.accessToken !== token) throw new AppError("Pedido no encontrado", 404);
+  const manual = order.paymentMethod === "MANUAL";
   const mensaje: Record<StoreOrderStatus, string> = {
-    PENDIENTE: "Esperando la confirmación del pago…",
+    PENDIENTE: manual
+      ? order.receiptMediaUrl
+        ? "Estamos validando tu pago…"
+        : "Realiza el pago y sube la captura del comprobante para validarlo."
+      : "Esperando la confirmación del pago…",
+    EN_REVISION: "Recibimos tu comprobante. Un asesor lo revisa en breve y te enviamos el acceso a tu correo.",
     PAGADO: "Pago confirmado. Preparando tu acceso…",
     ENTREGADO: `Listo: te enviamos el acceso a ${order.email}. Si no lo ves, revisa spam o promociones.`,
     FALLIDO: "Hubo un inconveniente con tu pedido. Escríbenos y lo resolvemos.",
   };
+  let pagoManual: { amountText: string; metodos: { method: string; number: string; holder: string }[]; comprobanteSubido: boolean } | null = null;
+  if (manual) {
+    const [cfg, ent] = await Promise.all([
+      prisma.storefrontConfig.findUnique({ where: { companyId: order.companyId }, select: { manualPaymentsEnabled: true } }),
+      getEntitlements(order.companyId),
+    ]);
+    const pay = await storePaymentOptions(order.companyId, { manualPaymentsEnabled: cfg?.manualPaymentsEnabled ?? true }, ent);
+    pagoManual = {
+      amountText: `${symbolFor(order.currency)} ${Number(order.amount).toFixed(2)}`,
+      metodos: pay.manual,
+      comprobanteSubido: Boolean(order.receiptMediaUrl),
+    };
+  }
   return {
     id: order.id,
     status: order.status,
+    paymentMethod: order.paymentMethod,
     productName: order.productName,
     email: order.email,
     deliveredAt: order.deliveredAt,
     mensaje: mensaje[order.status],
+    pagoManual,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Entrega de un pedido pagado (común a Mercado Pago, Yape/Plin y aprobación manual)
+// ---------------------------------------------------------------------------
+
+type StoreOrderRow = Prisma.StoreOrderGetPayload<Record<string, never>>;
+
+/**
+ * Marca el pedido PAGADO con su comprobante, entrega por correo (+ WhatsApp si
+ * dejó número real), deja ENTREGADO/FALLIDO y avisa al dueño. Idempotente por
+ * estado: si ya está PAGADO/ENTREGADO no vuelve a entregar.
+ */
+export async function fulfillStoreOrder(
+  order: StoreOrderRow,
+  receiptId: string,
+  opts: { paid: number; payerName: string; providerLabel: string; extraData?: Prisma.StoreOrderUpdateInput },
+) {
+  const companyId = order.companyId;
+  if (order.status === "PAGADO" || order.status === "ENTREGADO") return { ok: true, duplicate: true as const, receiptId };
+
+  await prisma.storeOrder.update({
+    where: { id: order.id },
+    data: { status: "PAGADO", receiptId, ...(opts.extraData ?? {}) },
+  });
+
+  const amountText = `${symbolFor(order.currency)} ${opts.paid.toFixed(2)}`;
+
+  // Entrega por correo (requisito del MVP) + WhatsApp si dejó número real.
+  let emailOk = false;
+  let failure: string | null = null;
+  try {
+    await sendDigitalDeliveryEmail({ companyId, customerId: order.customerId, receiptId, email: order.email, trigger: "web" });
+    emailOk = true;
+  } catch (err) {
+    failure = err instanceof EmailDeliveryError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : "error";
+    console.error(`[storefront] entrega por correo falló order=${order.id}: ${failure}`);
+  }
+
+  let waDelivered = false;
+  if (order.phone && !order.phone.startsWith("web:")) {
+    try {
+      const sender = await loadWhatsappSender(companyId);
+      if (sender) {
+        const convo = await loadOrCreateConversation(companyId, order.phone, null);
+        await handleExternalPaymentApproved({
+          companyId,
+          conversationId: convo.conversationId,
+          productIds: [order.productId],
+          amountText,
+          payerName: opts.payerName,
+          provider: opts.providerLabel,
+        });
+        waDelivered = true;
+      }
+    } catch (err) {
+      console.warn(`[storefront] entrega por WhatsApp falló order=${order.id}:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  const delivered = emailOk || waDelivered;
+  await prisma.storeOrder.update({
+    where: { id: order.id },
+    data: delivered
+      ? { status: "ENTREGADO", deliveredAt: new Date(), failureReason: failure, metadata: { ...((order.metadata as object) ?? {}), emailOk, waDelivered } }
+      : { status: "FALLIDO", failureReason: failure ?? "sin canal de entrega" },
+  });
+
+  // Aviso al dueño (handleExternalPaymentApproved ya avisa cuando hubo WhatsApp).
+  if (!waDelivered) {
+    void notifyOwner(
+      companyId,
+      delivered
+        ? `🛒 Venta en tu tienda web (${opts.providerLabel}): *${order.productName}* · ${amountText} · ${order.email}. Acceso enviado por correo ✅`
+        : `⚠️ Venta en tu tienda web (${order.productName} · ${amountText} · ${order.email}) PAGADA pero no se pudo entregar: ${failure}. Reenvía el acceso desde la ficha del cliente.`,
+    ).catch(() => undefined);
+  }
+  console.log(`[storefront] pedido ${order.id} ${delivered ? "ENTREGADO" : "FALLIDO"} email=${emailOk} wa=${waDelivered}`);
+  return { ok: true, receiptId };
 }
 
 // ---------------------------------------------------------------------------
@@ -372,66 +522,251 @@ export async function fulfillStoreOrderFromMp(companyId: string, storeOrderId: s
     if ((err as { code?: string })?.code === "P2002") return { ok: true, duplicate: true as const };
     throw err;
   }
-
-  await prisma.storeOrder.update({
-    where: { id: order.id },
-    data: { status: "PAGADO", receiptId, mpPaymentId: externalId },
-  });
   socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_NEW, { receiptId, source: "mercadopago" });
 
-  const amountText = `${symbolFor(order.currency)} ${paid.toFixed(2)}`;
+  return fulfillStoreOrder(order, receiptId, {
+    paid,
+    payerName,
+    providerLabel: "Mercado Pago (tienda web)",
+    extraData: { mpPaymentId: externalId },
+  });
+}
 
-  // Entrega por correo (requisito del MVP) + WhatsApp si dejó número real.
-  let emailOk = false;
-  let failure: string | null = null;
+// ---------------------------------------------------------------------------
+// Pago con Yape/Plin: comprobante subido → visión → matching → entrega
+// ---------------------------------------------------------------------------
+
+/** Reintentos del matching (worker, 1/min) antes de avisar al dueño: ValidPay puede llegar tarde. */
+export const STORE_RECHECK_MAX = 10;
+
+type StoreReceiptMeta = {
+  amountText: string | null;
+  operationNumber: string | null;
+  securityCode: string | null;
+  isReceipt: boolean | null;
+  description: string | null;
+};
+
+function receiptMetaOf(order: StoreOrderRow): StoreReceiptMeta | null {
+  const md = (order.metadata ?? {}) as Record<string, unknown>;
+  const r = md.receipt as StoreReceiptMeta | undefined;
+  return r && typeof r === "object" ? r : null;
+}
+
+/**
+ * Intenta aprobar el pedido manual con las señales disponibles (misma regla
+ * estricta que el chat: el mejor candidato debe coincidir por código exacto o
+ * por nombre del pagador). Devuelve true si entregó. No lanza.
+ */
+export async function tryMatchStoreOrder(orderId: string): Promise<boolean> {
+  const order = await prisma.storeOrder.findUnique({ where: { id: orderId } });
+  if (!order || order.paymentMethod !== "MANUAL") return false;
+  if (order.status !== "PENDIENTE" && order.status !== "EN_REVISION") return false;
+  const companyId = order.companyId;
+  const meta = receiptMetaOf(order);
+  const codes = [meta?.securityCode, meta?.operationNumber]
+    .map((c) => String(c ?? "").replace(/\D/g, ""))
+    .filter((c) => c.length >= 3);
+  const payerName = (order.payerName ?? "").trim();
+
+  let top: { id: string; matchScore: number; matchReasons: string[] } | undefined;
   try {
-    await sendDigitalDeliveryEmail({ companyId, customerId: order.customerId, receiptId, email: order.email, trigger: "web" });
-    emailOk = true;
+    const candidates = (await matchPayments(companyId, {
+      payerName: payerName || undefined,
+      amountPaid: Number(order.amount),
+      operationCodes: codes,
+      limit: 5,
+    } as Parameters<typeof matchPayments>[1])) as unknown as { id: string; matchScore: number; matchReasons: string[] }[];
+    top = candidates[0];
   } catch (err) {
-    failure = err instanceof EmailDeliveryError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : "error";
-    console.error(`[storefront] entrega por correo falló order=${order.id}: ${failure}`);
+    console.warn(`[storefront] matching falló order=${order.id}:`, err instanceof Error ? err.message : err);
+    return false;
+  }
+  const reasons = top?.matchReasons ?? [];
+  const codeMatched = reasons.includes("operation_code_exact");
+  const nameMatched = reasons.includes("payer_name_exact") || reasons.includes("payer_name_similar");
+  if (!top || !(codeMatched || nameMatched)) return false;
+
+  try {
+    await claimPayment(companyId, top.id, { claimedBy: "storefront", claimTtlSeconds: 120 });
+    // Sin customerPhone: el comprador web tiene teléfono sintético `web:` y el
+    // normalizador crearía otro cliente. El vínculo se fija abajo.
+    await updatePaymentStatus(companyId, top.id, {
+      status: "APROBADO",
+      validationMode: "AUTO",
+      matchScore: Math.min(100, Math.max(0, Math.round(top.matchScore))),
+      matchStrategy: reasons.join("+") || "storefront_auto",
+      matchedPayerNameInput: payerName || codes[0] || "",
+      productIds: [order.productId],
+      note: "Pago Yape/Plin validado automáticamente desde la tienda web",
+      metadata: { channel: "storefront", storeOrderId: order.id, email: order.email },
+    });
+    await prisma.paymentReceipt.update({
+      where: { id: top.id },
+      data: { customerId: order.customerId, ...(order.receiptMediaUrl ? { mediaUrl: order.receiptMediaUrl } : {}) },
+    });
+  } catch (err) {
+    // Otro proceso (el agente del chat, el dueño) lo tomó o aprobó: no es nuestro.
+    console.warn(`[storefront] no se pudo aprobar receipt=${top.id} order=${order.id}:`, err instanceof Error ? err.message : err);
+    return false;
   }
 
-  let waDelivered = false;
-  if (order.phone && !order.phone.startsWith("web:")) {
-    try {
-      const sender = await loadWhatsappSender(companyId);
-      if (sender) {
-        const convo = await loadOrCreateConversation(companyId, order.phone, null);
-        await handleExternalPaymentApproved({
-          companyId,
-          conversationId: convo.conversationId,
-          productIds: [order.productId],
-          amountText,
-          payerName,
-          provider: "Mercado Pago (tienda web)",
-        });
-        waDelivered = true;
-      }
-    } catch (err) {
-      console.warn(`[storefront] entrega por WhatsApp falló order=${order.id}:`, err instanceof Error ? err.message : err);
+  await fulfillStoreOrder(order, top.id, {
+    paid: Number(order.amount),
+    payerName: payerName || order.name,
+    providerLabel: "Yape/Plin (tienda web)",
+  });
+  return true;
+}
+
+/**
+ * Comprobante subido por el comprador: lo lee con visión (si el tenant tiene IA),
+ * intenta el matching y, si no aprueba, deja el pedido EN_REVISION (el worker
+ * reintenta y luego avisa al dueño).
+ */
+export async function submitStoreReceipt(
+  orderId: string,
+  input: { mediaUrl: string; payerName?: string | null },
+) {
+  const order = await prisma.storeOrder.findUnique({ where: { id: orderId } });
+  if (!order) throw new AppError("Pedido no encontrado", 404);
+  if (order.paymentMethod !== "MANUAL") throw new AppError("Este pedido se paga con Mercado Pago", 409);
+  if (order.status === "PAGADO" || order.status === "ENTREGADO") {
+    return { status: order.status, mensaje: "Tu pago ya está confirmado ✅" };
+  }
+  if (order.status === "FALLIDO") throw new AppError("Este pedido ya fue cerrado. Escríbenos por WhatsApp.", 409);
+  const companyId = order.companyId;
+
+  // 1) Visión (best-effort; requiere la key de IA del tenant).
+  let meta: StoreReceiptMeta = { amountText: null, operationNumber: null, securityCode: null, isReceipt: null, description: null };
+  try {
+    const config = (await buildBotConfig(companyId)) as { openai?: AiSettings };
+    const ai = config.openai;
+    if (ai?.apiKey) {
+      const r = await readReceiptImage(ai, input.mediaUrl);
+      if (r) meta = { amountText: r.amountText, operationNumber: r.operationNumber, securityCode: r.securityCode, isReceipt: r.isReceipt, description: r.description };
     }
+  } catch (err) {
+    console.warn(`[storefront] visión falló order=${order.id}:`, err instanceof Error ? err.message : err);
+  }
+  if (meta.isReceipt === false && !meta.amountText && !meta.securityCode && !meta.operationNumber) {
+    throw new AppError("La imagen no parece un comprobante de pago. Sube la captura de la constancia de Yape/Plin.", 400);
   }
 
-  const delivered = emailOk || waDelivered;
+  const payerName = (input.payerName ?? "").trim().slice(0, 120) || order.payerName || null;
   await prisma.storeOrder.update({
     where: { id: order.id },
-    data: delivered
-      ? { status: "ENTREGADO", deliveredAt: new Date(), failureReason: failure, metadata: { ...(order.metadata as object ?? {}), emailOk, waDelivered } }
-      : { status: "FALLIDO", failureReason: failure ?? "sin canal de entrega" },
+    data: {
+      receiptMediaUrl: input.mediaUrl,
+      payerName,
+      recheckAttempts: 0,
+      status: "PENDIENTE",
+      metadata: { ...((order.metadata as object) ?? {}), receipt: meta, receiptUploadedAt: new Date().toISOString() },
+    },
   });
 
-  // Aviso al dueño (handleExternalPaymentApproved ya avisa cuando hubo WhatsApp).
-  if (!waDelivered) {
-    void notifyOwner(
-      companyId,
-      delivered
-        ? `🛒 Venta en tu tienda web: *${order.productName}* · ${amountText} · ${order.email}. Acceso enviado por correo ✅`
-        : `⚠️ Venta en tu tienda web (${order.productName} · ${amountText} · ${order.email}) PAGADA pero no se pudo entregar: ${failure}. Reenvía el acceso desde la ficha del cliente.`,
-    ).catch(() => undefined);
+  // 2) Matching inmediato.
+  const approved = await tryMatchStoreOrder(order.id);
+  if (approved) {
+    const fresh = await prisma.storeOrder.findUnique({ where: { id: order.id }, select: { status: true } });
+    return { status: fresh?.status ?? "PAGADO", mensaje: "¡Pago confirmado! ✅ Te enviamos el acceso a tu correo." };
   }
-  console.log(`[storefront] pedido ${order.id} ${delivered ? "ENTREGADO" : "FALLIDO"} email=${emailOk} wa=${waDelivered}`);
-  return { ok: true, receiptId };
+
+  // 3) Sin match: EN_REVISION; el worker reintenta y luego avisa al dueño.
+  await prisma.storeOrder.update({ where: { id: order.id }, data: { status: "EN_REVISION" } });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_NEW, { storeOrderId: order.id, source: "storefront" });
+  return {
+    status: "EN_REVISION" as StoreOrderStatus,
+    mensaje: "Recibimos tu comprobante. Lo validamos en unos minutos y te enviamos el acceso a tu correo.",
+  };
+}
+
+/** Worker: reintenta el matching de pedidos EN_REVISION y avisa al dueño al agotar los intentos. */
+export async function recheckStoreOrdersInReview(): Promise<void> {
+  const cutoff = new Date(Date.now() - 55_000);
+  const rows = await prisma.storeOrder.findMany({
+    where: { status: "EN_REVISION", paymentMethod: "MANUAL", recheckAttempts: { lt: STORE_RECHECK_MAX }, updatedAt: { lte: cutoff } },
+    select: { id: true, companyId: true },
+    orderBy: { updatedAt: "asc" },
+    take: 50,
+  });
+  for (const row of rows) {
+    const approved = await tryMatchStoreOrder(row.id).catch(() => false);
+    if (approved) continue;
+    const updated = await prisma.storeOrder.update({
+      where: { id: row.id },
+      data: { recheckAttempts: { increment: 1 } },
+    });
+    if (updated.recheckAttempts >= STORE_RECHECK_MAX) await notifyOwnerOrderInReview(updated).catch(() => undefined);
+  }
+}
+
+async function notifyOwnerOrderInReview(order: StoreOrderRow) {
+  const companyId = order.companyId;
+  const amountText = `${symbolFor(order.currency)} ${Number(order.amount).toFixed(2)}`;
+  const panel = `${(env.FRONTEND_URL || "").replace(/\/$/, "")}/tienda-web`;
+  const text =
+    `🧾 Pedido de tu tienda web pendiente de revisión: *${order.productName}* · ${amountText} · ${order.name} (${order.email})` +
+    (order.payerName ? ` · pagó: ${order.payerName}` : "") +
+    `. No encontré el pago automáticamente. Revisa el comprobante y apruébalo en el panel: ${panel}`;
+  await notifyOwner(companyId, text);
+  if (order.receiptMediaUrl) {
+    const pay = await prisma.paymentConfig.findUnique({ where: { companyId }, select: { notificationPhone: true } });
+    const to = (pay?.notificationPhone ?? "").replace(/\D/g, "");
+    const sender = to ? await loadWhatsappSender(companyId) : null;
+    if (sender && to) await sendMedia(sender, to, "image", order.receiptMediaUrl, "Comprobante subido por el comprador").catch(() => undefined);
+  }
+  await prisma.storeOrder.update({
+    where: { id: order.id },
+    data: { metadata: { ...((order.metadata as object) ?? {}), ownerNotifiedAt: new Date().toISOString() } },
+  });
+}
+
+/** Panel: el dueño aprueba un pedido Yape/Plin (crea el comprobante APROBADO manual y entrega). */
+export async function approveStoreOrder(companyId: string, orderId: string, input: { note?: string | null }) {
+  const order = await prisma.storeOrder.findFirst({ where: { id: orderId, companyId } });
+  if (!order) throw new AppError("Pedido no encontrado", 404);
+  if (order.paymentMethod !== "MANUAL") throw new AppError("Este pedido se cobra por Mercado Pago; se confirma solo", 409);
+  if (order.status === "PAGADO" || order.status === "ENTREGADO") throw new AppError("El pedido ya está pagado", 409);
+  if (order.status === "FALLIDO") throw new AppError("El pedido está cerrado como fallido", 409);
+  const paid = Number(order.amount);
+  const receipt = await prisma.paymentReceipt.create({
+    data: {
+      companyId,
+      customerId: order.customerId,
+      productId: order.productId,
+      productIds: [order.productId],
+      amountExpected: String(paid),
+      amountPaid: String(paid),
+      currency: order.currency,
+      status: "APROBADO",
+      source: "manual",
+      payerName: order.payerName || order.name,
+      paymentSource: "yape_plin",
+      mediaUrl: order.receiptMediaUrl,
+      occurredAt: new Date(),
+      validatedAt: new Date(),
+      validationMode: "MANUAL",
+      validationNote: input.note?.trim() || "Pago Yape/Plin de la tienda web aprobado por el negocio",
+      metadata: { channel: "storefront", storeOrderId: order.id, email: order.email },
+    },
+  });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_NEW, { receiptId: receipt.id, source: "manual" });
+  await fulfillStoreOrder(order, receipt.id, { paid, payerName: order.payerName || order.name, providerLabel: "Yape/Plin (tienda web, aprobado por ti)" });
+  const fresh = await prisma.storeOrder.findUnique({ where: { id: order.id } });
+  return serializeOrderRow(fresh!);
+}
+
+/** Panel: el dueño rechaza un pedido Yape/Plin (FALLIDO con motivo). */
+export async function rejectStoreOrder(companyId: string, orderId: string, input: { reason?: string | null }) {
+  const order = await prisma.storeOrder.findFirst({ where: { id: orderId, companyId } });
+  if (!order) throw new AppError("Pedido no encontrado", 404);
+  if (order.status === "PAGADO" || order.status === "ENTREGADO") throw new AppError("El pedido ya está pagado; no se puede rechazar", 409);
+  const fresh = await prisma.storeOrder.update({
+    where: { id: order.id },
+    data: { status: "FALLIDO", failureReason: `Rechazado: ${input.reason?.trim() || "comprobante no válido"}` },
+  });
+  return serializeOrderRow(fresh);
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +790,7 @@ export async function updateStorefrontConfig(
     logoUrl?: string | null;
     whatsappNumber?: string | null;
     productIds?: string[];
+    manualPaymentsEnabled?: boolean;
   },
 ) {
   if (data.logoUrl) {
@@ -475,6 +811,7 @@ export async function updateStorefrontConfig(
       ...(data.logoUrl !== undefined ? { logoUrl: data.logoUrl || null } : {}),
       ...(data.whatsappNumber !== undefined ? { whatsappNumber: data.whatsappNumber?.replace(/\D/g, "") || null } : {}),
       ...(data.productIds !== undefined ? { productIds: data.productIds } : {}),
+      ...(data.manualPaymentsEnabled !== undefined ? { manualPaymentsEnabled: data.manualPaymentsEnabled } : {}),
     },
     create: {
       companyId,
@@ -485,6 +822,7 @@ export async function updateStorefrontConfig(
       logoUrl: data.logoUrl || null,
       whatsappNumber: data.whatsappNumber?.replace(/\D/g, "") || null,
       productIds: data.productIds ?? [],
+      manualPaymentsEnabled: data.manualPaymentsEnabled ?? true,
     },
   });
   tlsAskCache.clear();
@@ -495,9 +833,12 @@ export async function updateStorefrontConfig(
 export async function storefrontStatus(companyId: string, enabled: boolean) {
   const [company, pc, ent, cfg] = await Promise.all([
     prisma.company.findUnique({ where: { id: companyId }, select: { slug: true } }),
-    prisma.paymentConfig.findUnique({ where: { companyId }, select: { mpEnabled: true, mpAccessToken: true, mpStoreEnabled: true } }),
+    prisma.paymentConfig.findUnique({
+      where: { companyId },
+      select: { enabled: true, mpEnabled: true, mpAccessToken: true, mpStoreEnabled: true, methods: { select: { method: true } } },
+    }),
     getEntitlements(companyId),
-    prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productIds: true } }),
+    prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productIds: true, manualPaymentsEnabled: true } }),
   ]);
   const slug = company?.slug ?? "";
   const slugProblema = storeSlugProblem(slug);
@@ -516,7 +857,12 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
   const moduloMp = ent.legacy || ent.modules.includes("MERCADOPAGO");
   const mpConectado = Boolean(pc?.mpEnabled && pc.mpAccessToken);
   const mpTiendaHabilitado = Boolean(pc?.mpStoreEnabled ?? true);
-  const mpConfigurado = mpConectado && mpTiendaHabilitado;
+  const mpConfigurado = moduloMp && mpConectado && mpTiendaHabilitado;
+  // Yape/Plin: métodos manuales de Pagos + opción de la tienda (default activa).
+  const metodosManuales = pc?.enabled ? (pc.methods ?? []).map((m) => m.method) : [];
+  const manualHabilitado = cfg?.manualPaymentsEnabled ?? true;
+  const pagosManuales = manualHabilitado && metodosManuales.length > 0;
+  const pagosListos = mpConfigurado || pagosManuales;
   return {
     url: slugProblema ? null : storeUrl(slug),
     slug,
@@ -528,42 +874,80 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
     mpConfigurado,
     mpConectado,
     mpTiendaHabilitado,
+    pagosManuales,
+    manualHabilitado,
+    metodosManuales,
+    pagosListos,
     productosElegibles: eligible.map((p) => ({ id: p.id, name: p.name })),
     productosSinCorreo: sinCorreo,
-    lista: enabled && !slugProblema && moduloTienda && moduloMp && mpConfigurado && eligible.length > 0,
+    lista: enabled && !slugProblema && moduloTienda && pagosListos && eligible.length > 0,
   };
 }
 
-export async function listStoreOrders(companyId: string, page = 1, limit = 25) {
-  const [items, total] = await Promise.all([
+const ORDER_ROW_SELECT = {
+  id: true,
+  productId: true,
+  productName: true,
+  name: true,
+  email: true,
+  phone: true,
+  amount: true,
+  currency: true,
+  status: true,
+  paymentMethod: true,
+  receiptMediaUrl: true,
+  payerName: true,
+  recheckAttempts: true,
+  receiptId: true,
+  deliveredAt: true,
+  failureReason: true,
+  createdAt: true,
+  customerId: true,
+  metadata: true,
+} satisfies Prisma.StoreOrderSelect;
+
+type OrderRowSel = Prisma.StoreOrderGetPayload<{ select: typeof ORDER_ROW_SELECT }>;
+
+function serializeOrderRow(o: OrderRowSel) {
+  const md = (o.metadata ?? {}) as Record<string, unknown>;
+  const r = (md.receipt ?? null) as StoreReceiptMeta | null;
+  return {
+    id: o.id,
+    productId: o.productId,
+    productName: o.productName,
+    name: o.name,
+    email: o.email,
+    phone: o.phone,
+    amount: Number(o.amount),
+    amountText: `${symbolFor(o.currency)} ${Number(o.amount).toFixed(2)}`,
+    currency: o.currency,
+    status: o.status,
+    paymentMethod: o.paymentMethod,
+    receiptMediaUrl: o.receiptMediaUrl,
+    payerName: o.payerName,
+    recheckAttempts: o.recheckAttempts,
+    receiptId: o.receiptId,
+    deliveredAt: o.deliveredAt,
+    failureReason: o.failureReason,
+    createdAt: o.createdAt,
+    customerId: o.customerId,
+    // Lo que la visión leyó del comprobante (ayuda al dueño a revisar).
+    comprobante: r ? { montoLeido: r.amountText, operacion: r.operationNumber, codigo: r.securityCode } : null,
+  };
+}
+
+export async function listStoreOrders(companyId: string, page = 1, limit = 25, status?: StoreOrderStatus) {
+  const where: Prisma.StoreOrderWhereInput = { companyId, ...(status ? { status } : {}) };
+  const [items, total, enRevision] = await Promise.all([
     prisma.storeOrder.findMany({
-      where: { companyId },
+      where,
       orderBy: { createdAt: "desc" },
       skip: (page - 1) * limit,
       take: limit,
-      select: {
-        id: true,
-        productId: true,
-        productName: true,
-        name: true,
-        email: true,
-        phone: true,
-        amount: true,
-        currency: true,
-        status: true,
-        receiptId: true,
-        deliveredAt: true,
-        failureReason: true,
-        createdAt: true,
-        customerId: true,
-      },
+      select: ORDER_ROW_SELECT,
     }),
-    prisma.storeOrder.count({ where: { companyId } }),
+    prisma.storeOrder.count({ where }),
+    prisma.storeOrder.count({ where: { companyId, status: "EN_REVISION" } }),
   ]);
-  return {
-    items: items.map((o) => ({ ...o, amount: Number(o.amount), amountText: `${symbolFor(o.currency)} ${Number(o.amount).toFixed(2)}` })),
-    total,
-    page,
-    limit,
-  };
+  return { items: items.map(serializeOrderRow), total, page, limit, enRevision };
 }

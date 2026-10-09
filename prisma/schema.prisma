@@ -141,58 +141,58 @@ enum ServiceBookingStatus {
 }
 
 model Company {
-  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name              String
-  slug              String                @unique
-  adminPhone        String
-  vertical          BusinessVertical      @default(INFOPRODUCT)
+  id                   String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name                 String
+  slug                 String                @unique
+  adminPhone           String
+  vertical             BusinessVertical      @default(INFOPRODUCT)
   // Config de entrega a nivel negocio (restaurante/físico): { cost, time, areas[],
   // pickupAvailable, requiresAddress }. El agente la usa para todos los productos.
-  deliveryConfig    Json?
+  deliveryConfig       Json?
   // Horario de atención para la AGENDA de citas: [{ day: 0-6, from: "09:00", to: "18:00" }]
-  businessHours     Json?
-  timezone          String                @default("America/Lima")
+  businessHours        Json?
+  timezone             String                @default("America/Lima")
   // Moneda del negocio: TODO el embudo la usa (fichas, carrito, validación,
   // reportes, CAPI). "PEN" (S/) default; "USD" ($) opcional.
-  currency          String                @default("PEN")
+  currency             String                @default("PEN")
   // Modo de operación del bot: "AI" (agente IA abierto) | "FLOW" (chatbot de
   // flujos guiados). Excluyentes: en modo FLOW el agente IA no responde.
-  botMode           String                @default("AI")
-  isActive          Boolean               @default(true)
+  botMode              String                @default("AI")
+  isActive             Boolean               @default(true)
   // Firma anexada a los mensajes automáticos (agente IA + flujos). Cuando
   // firmaEnabled, se agrega `*_<firmaText>:_*` al final de cada texto saliente.
-  firmaEnabled      Boolean               @default(false)
-  firmaText         String?
+  firmaEnabled         Boolean               @default(false)
+  firmaText            String?
   // Pausa entre mensajes consecutivos del bot en un mismo turno (presentación,
   // multimedia, entrega, bloques de flujo). Desactivado = ritmo estándar (~1s).
-  messageGapEnabled Boolean               @default(false)
-  messageGapSeconds Int                   @default(3)
-  createdAt         DateTime              @default(now())
-  updatedAt         DateTime              @updatedAt
-  users             User[]
-  agentConfig       AgentConfig?
-  whatsappConfig    WhatsappConfig?
-  paymentConfig     PaymentConfig?
-  products          Product[]
-  customers         Customer[]
-  messages          ConversationMessage[]
-  conversations     Conversation[]
-  carts             Cart[]
-  scheduledMessages ScheduledMessage[]
-  serviceBookings   ServiceBooking[]
-  scheduleBlocks    ScheduleBlock[]
-  orders            Order[]
-  digitalSales      DigitalSale[]
-  paymentReceipts   PaymentReceipt[]
-  webhookEndpoints  WebhookEndpoint[]
-  webchatConfig     WebchatConfig?
-  mcpConfig         McpConfig?
-  metaCapiConfig    MetaCapiConfig?
-  adCatalogEntries  AdCatalogEntry[]
-  bookingWidget     BookingWidgetConfig?
-  platformPayments  PlatformPayment[]
-  storefront        StorefrontConfig?
-  storeOrders       StoreOrder[]
+  messageGapEnabled    Boolean               @default(false)
+  messageGapSeconds    Int                   @default(3)
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  users                User[]
+  agentConfig          AgentConfig?
+  whatsappConfig       WhatsappConfig?
+  paymentConfig        PaymentConfig?
+  products             Product[]
+  customers            Customer[]
+  messages             ConversationMessage[]
+  conversations        Conversation[]
+  carts                Cart[]
+  scheduledMessages    ScheduledMessage[]
+  serviceBookings      ServiceBooking[]
+  scheduleBlocks       ScheduleBlock[]
+  orders               Order[]
+  digitalSales         DigitalSale[]
+  paymentReceipts      PaymentReceipt[]
+  webhookEndpoints     WebhookEndpoint[]
+  webchatConfig        WebchatConfig?
+  mcpConfig            McpConfig?
+  metaCapiConfig       MetaCapiConfig?
+  adCatalogEntries     AdCatalogEntry[]
+  bookingWidget        BookingWidgetConfig?
+  platformPayments     PlatformPayment[]
+  storefront           StorefrontConfig?
+  storeOrders          StoreOrder[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
   crms                 Crm[]
@@ -207,7 +207,7 @@ model Company {
   platformSubscription CompanySubscription?
   wallet               CompanyWallet?
   creditTransactions   CreditTransaction[]
-  redeemedVouchers     Voucher[]            @relation("RedeemedVouchers")
+  redeemedVouchers     Voucher[]             @relation("RedeemedVouchers")
   reportConfig         ReportConfig?
 }
 
@@ -215,97 +215,97 @@ model Company {
 // habilitados globalmente: el selector de rubro de cada cliente solo muestra
 // estos. Fila única con id="global".
 model PlatformConfig {
-  id               String             @id @default("global")
-  enabledVerticals BusinessVertical[]
-  landingScene     String             @default("constelacion")
+  id                   String             @id @default("global")
+  enabledVerticals     BusinessVertical[]
+  landingScene         String             @default("constelacion")
   // Agente de ventas de la PLATAFORMA (chat del landing que capta tenants):
   // puntero al tenant oculto "FlowApp Ventas" + base de conocimiento estructurada.
-  salesAgentCompanyId String?          @db.Uuid
-  salesAgentKnowledge Json?
+  salesAgentCompanyId  String?            @db.Uuid
+  salesAgentKnowledge  Json?
   // Cobros de la PLATAFORMA con Mercado Pago (los tenants pagan su plan/créditos
   // solos desde Mi plan). Token cifrado con credentials-crypto.
-  mpBillingEnabled     Boolean          @default(false)
+  mpBillingEnabled     Boolean            @default(false)
   mpBillingAccessToken String?
   // Avisos al dueño de la PLATAFORMA (nuevos pre-registros, etc.):
   // email destino y teléfono WhatsApp (requiere el tenant de ventas con WA activo).
   alertEmail           String?
   alertPhone           String?
-  updatedAt        DateTime           @updatedAt
+  updatedAt            DateTime           @updatedAt
 }
 
 model User {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId    String   @db.Uuid
-  name         String
-  phone        String   @unique
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId          String    @db.Uuid
+  name               String
+  phone              String    @unique
   // Correo de contacto (del pre-registro o editado por el superadmin).
-  email        String?
+  email              String?
   // Usuario alternativo de login (lowercase, requiere al menos una letra —
   // así nunca colisiona con un celular). null = solo entra por celular.
-  username     String?  @unique
-  passwordHash String
+  username           String?   @unique
+  passwordHash       String
   // Recuperación de contraseña (código de 6 dígitos al correo, hasheado).
   resetCodeHash      String?
   resetCodeExpiresAt DateTime?
   resetCodeAttempts  Int       @default(0)
   resetCodeSentAt    DateTime?
-  role         UserRole
-  isActive     Boolean  @default(true)
-  uiTheme      Json?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  role               UserRole
+  isActive           Boolean   @default(true)
+  uiTheme            Json?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  company            Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@index([companyId])
 }
 
 model AgentConfig {
-  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId      String   @unique @db.Uuid
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId            String   @unique @db.Uuid
   // Proveedor de IA del tenant: OPENAI | ANTHROPIC | GOOGLE (validado por zod).
   // openaiModel/openaiApiKey guardan el modelo y la key DEL PROVEEDOR ELEGIDO
   // (nombre legado; sin rename para no migrar datos).
-  aiProvider     String   @default("OPENAI")
-  openaiModel    String   @default("gpt-4o-mini")
-  openaiApiKey   String?
+  aiProvider           String   @default("OPENAI")
+  openaiModel          String   @default("gpt-4o-mini")
+  openaiApiKey         String?
   // Key de OpenAI SOLO para transcribir notas de voz (Whisper) cuando
   // aiProvider != OPENAI. Cifrada como openaiApiKey.
-  transcriptionApiKey String?
-  temperature    Decimal  @default(0.25) @db.Decimal(4, 2)
-  basePrompt     String
-  salesStyle     String
-  rules          Json
+  transcriptionApiKey  String?
+  temperature          Decimal  @default(0.25) @db.Decimal(4, 2)
+  basePrompt           String
+  salesStyle           String
+  rules                Json
   // Config de recordatorios/seguimientos (horas de abandono, dejado en visto,
   // ventana de timer de oferta, plantillas). Null = usar defaults del agente.
-  followupConfig Json?
+  followupConfig       Json?
   // Modo de respuesta del agente: "OPEN" responde a todos; "ALLOWLIST" solo a
   // los números en testNumbers (modo prueba). Default OPEN.
-  replyMode      String   @default("OPEN")
-  testNumbers    Json?    // array de teléfonos permitidos cuando replyMode=ALLOWLIST
+  replyMode            String   @default("OPEN")
+  testNumbers          Json? // array de teléfonos permitidos cuando replyMode=ALLOWLIST
   // Números en atención humana forzada: el bot nunca les responde; su
   // conversación pasa automáticamente a HUMANO (botPaused).
-  mutedNumbers   Json?
+  mutedNumbers         Json?
   // Tras entregar una venta, si el catálogo tiene UN solo producto y no se
   // ofreció enganche (cross-sell), pasar al cliente a la lista de atención
   // humana automáticamente. Activado por defecto.
-  muteAfterSale  Boolean  @default(true)
+  muteAfterSale        Boolean  @default(true)
   // Negociación de precio: si el cliente pide rebaja/descuento, el agente lo
   // intenta una vez con el argumento de valor y luego DERIVA a un asesor humano
   // (en vez de cerrarse con el precio del catálogo). Apagado por defecto.
-  negotiationHandoff Boolean @default(false)
+  negotiationHandoff   Boolean  @default(false)
   // Rubro Comercial: cómo presenta el agente el catálogo y maneja el match por
   // palabra clave, y si controla stock. Configurables por el dueño.
-  catalogMode    String   @default("preguntar")           // preguntar | resumen_humano | primeros_n
-  keywordMode    String   @default("detalle_y_preguntar") // detalle_y_preguntar | agregar_directo | auto
-  trackStock     Boolean  @default(true)
+  catalogMode          String   @default("preguntar") // preguntar | resumen_humano | primeros_n
+  keywordMode          String   @default("detalle_y_preguntar") // detalle_y_preguntar | agregar_directo | auto
+  trackStock           Boolean  @default(true)
   // Presentación del catálogo: solo texto, solo carta (PDF/imagen), o ambos.
-  catalogMediaMode     String  @default("text") // text | media | both
+  catalogMediaMode     String   @default("text") // text | media | both
   catalogMediaUrl      String?
   catalogMediaType     String?
   catalogMediaFileName String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  company              Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
 // Proveedor del canal WhatsApp del tenant. Solo uno activo por empresa.
@@ -334,9 +334,9 @@ model McpConfig {
 // con el ctwa_clid del lead para que Meta atribuya la conversión al anuncio y
 // optimice las campañas hacia compradores. accessToken cifrado AES-256-GCM.
 model MetaCapiConfig {
-  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId     String   @unique @db.Uuid
-  enabled       Boolean  @default(false)
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId     String    @unique @db.Uuid
+  enabled       Boolean   @default(false)
   datasetId     String
   accessToken   String
   // ID de la página de Facebook que corre los anuncios: Meta lo exige en
@@ -346,9 +346,9 @@ model MetaCapiConfig {
   // Diagnóstico del último intento de envío (visible en la card del panel).
   lastAttemptAt DateTime?
   lastResult    String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
 model WebchatConfig {
@@ -385,27 +385,27 @@ model BookingWidgetConfig {
 }
 
 model WhatsappConfig {
-  id              String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId       String               @unique @db.Uuid
-  provider        WhatsappProviderType @default(SMSTOOLS)
+  id                String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId         String               @unique @db.Uuid
+  provider          WhatsappProviderType @default(SMSTOOLS)
   // --- SMS Tools ---
-  apiUrl          String
-  secret          String
-  account         String?  @unique
-  defaultServerId Int?
-  smsToolsUserId  Int?
+  apiUrl            String
+  secret            String
+  account           String?              @unique
+  defaultServerId   Int?
+  smsToolsUserId    Int?
   // --- Meta WhatsApp Cloud API (app única de la plataforma; token por tenant) ---
   // Token de System User; cifrado ("enc:v1:...") si CREDENTIALS_ENC_KEY está definida
   metaAccessToken   String?
   // Phone Number ID de Meta; resuelve el tenant en el webhook entrante
-  metaPhoneNumberId String?  @unique
+  metaPhoneNumberId String?              @unique
   metaWabaId        String?
   // Cache del display_phone_number (UI / setup / getLinkedPhone)
   metaDisplayPhone  String?
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  isActive          Boolean              @default(true)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  company           Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
 model PaymentConfig {
@@ -451,85 +451,85 @@ model PaymentMethod {
 }
 
 model Product {
-  id               String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId        String                @db.Uuid
-  slug             String
-  active           Boolean               @default(true)
+  id                           String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId                    String                @db.Uuid
+  slug                         String
+  active                       Boolean               @default(true)
   // Visibilidad en el catálogo. Un producto puede estar activo (vendible) pero
   // oculto del catálogo: solo se ofrece como relacionado (cross-sell) o si lo nombran.
-  showInCatalog    Boolean               @default(true)
+  showInCatalog                Boolean               @default(true)
   // Si está ON, tras entregar este producto el bot pasa el chat a atención humana
   // automáticamente, FORZANDO el mute aunque haya producto de enganche o varios
   // productos en el catálogo (override de la heurística por defecto AgentConfig.muteAfterSale).
-  pauseHumanAfterSale Boolean             @default(false)
-  productType      ProductType
-  name             String
-  price            String
-  regularPrice     String?
+  pauseHumanAfterSale          Boolean               @default(false)
+  productType                  ProductType
+  name                         String
+  price                        String
+  regularPrice                 String?
   // Oferta con vigencia: si offerPrice tiene dígitos y now ∈ [offerStartsAt,
   // offerEndsAt] (fechas opcionales = sin límite), el agente presenta, cobra y
   // valida ESTE precio y `price` pasa a mostrarse como "antes" (tachado).
-  offerPrice       String?
-  offerStartsAt    DateTime?
-  offerEndsAt      DateTime?
-  stock            Int?
+  offerPrice                   String?
+  offerStartsAt                DateTime?
+  offerEndsAt                  DateTime?
+  stock                        Int?
   // --- Agenda (rubro SERVICE): datos tipados que usa el motor de disponibilidad.
   // Los campos de texto de verticalData siguen sirviendo de descripción al prompt.
-  durationMin        Int?
-  slotCapacity       Int?     @default(1) // citas simultáneas en el mismo horario
-  bookingLeadMinutes Int?                 // anticipación mínima para reservar
-  bookingHorizonDays Int?                 // hasta cuántos días adelante se puede reservar
-  shortDescription String
-  fullDescription  String
+  durationMin                  Int?
+  slotCapacity                 Int?                  @default(1) // citas simultáneas en el mismo horario
+  bookingLeadMinutes           Int? // anticipación mínima para reservar
+  bookingHorizonDays           Int? // hasta cuántos días adelante se puede reservar
+  shortDescription             String
+  fullDescription              String
   // Mensaje de presentación que el bot envía TAL CUAL al presentar el producto
   // (si está vacío, el bot arma la ficha con los campos estructurados).
-  presentationMessage String?
+  presentationMessage          String?
   // Mensajes adicionales opcionales que acompañan la info completa de presentación:
   // array de {message,mediaUrl,mediaType}. Se envían después del mensaje principal y
   // de la multimedia de presentación. Mismo formato que DigitalDelivery.followupMessages.
-  presentationFollowups Json    @default("[]")
+  presentationFollowups        Json                  @default("[]")
   // Multimedia opcional de la info completa de presentación (se envía con
   // presentationMessage como caption, en un solo mensaje). Vacío => solo texto.
-  presentationMessageMediaUrl  String @default("")
-  presentationMessageMediaType String @default("")
-  deliveryMethod   String?
-  support          String?
+  presentationMessageMediaUrl  String                @default("")
+  presentationMessageMediaType String                @default("")
+  deliveryMethod               String?
+  support                      String?
   // Atributos flexibles libres por rubro (clave→valor). Complemento opcional.
-  attributes       Json?
+  attributes                   Json?
   // Categoría/sección para agrupar el catálogo (restaurante: "Entradas";
   // streaming: la plataforma "Netflix"). Opcional.
-  category         String?
+  category                     String?
   // Datos estructurados del rubro (vertical pack), validados por schema según
   // Company.vertical. Ej. streaming: { billingPeriod, tier, screens, quality }.
-  verticalData     Json?
+  verticalData                 Json?
   // Override opcional de recordatorios por producto y por tipo:
   // { <tipo>: { message?, mediaUrl? } }. Si existe, gana sobre la plantilla del negocio.
-  reminderConfig   Json?
-  sortOrder        Int                   @default(0)
-  createdAt        DateTime              @default(now())
-  updatedAt        DateTime              @updatedAt
-  company          Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  aliases          ProductAlias[]
-  benefits         ProductBenefit[]
-  includes         ProductInclude[]
-  bonuses          ProductBonus[]
-  faqs             ProductFaq[]
-  objections       ProductObjection[]
-  files            ProductFile[]
-  digitalDelivery  DigitalDelivery?
-  physicalDelivery PhysicalDelivery?
-  variants         ProductVariant[]
-  customers        Customer[]
-  messages         ConversationMessage[]
-  cartItems        CartItem[]
-  orders           Order[]
-  orderItems       OrderItem[]
-  digitalSales     DigitalSale[]
-  paymentReceipts  PaymentReceipt[]
-  serviceBookings  ServiceBooking[]
-  streamingCredentials StreamingCredential[]
-  subscriptions    Subscription[]
-  adCatalogEntries AdCatalogEntry[]
+  reminderConfig               Json?
+  sortOrder                    Int                   @default(0)
+  createdAt                    DateTime              @default(now())
+  updatedAt                    DateTime              @updatedAt
+  company                      Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  aliases                      ProductAlias[]
+  benefits                     ProductBenefit[]
+  includes                     ProductInclude[]
+  bonuses                      ProductBonus[]
+  faqs                         ProductFaq[]
+  objections                   ProductObjection[]
+  files                        ProductFile[]
+  digitalDelivery              DigitalDelivery?
+  physicalDelivery             PhysicalDelivery?
+  variants                     ProductVariant[]
+  customers                    Customer[]
+  messages                     ConversationMessage[]
+  cartItems                    CartItem[]
+  orders                       Order[]
+  orderItems                   OrderItem[]
+  digitalSales                 DigitalSale[]
+  paymentReceipts              PaymentReceipt[]
+  serviceBookings              ServiceBooking[]
+  streamingCredentials         StreamingCredential[]
+  subscriptions                Subscription[]
+  adCatalogEntries             AdCatalogEntry[]
 
   @@unique([companyId, slug])
   @@index([companyId, active, sortOrder])
@@ -585,78 +585,78 @@ model ProductObjection {
 }
 
 model ProductFile {
-  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId    String          @db.Uuid
-  type         ProductFileType
-  url          String
-  storagePath  String          @default("")
-  originalName String          @default("")
-  extension    String          @default("")
-  mimeType     String          @default("")
-  size         Int             @default(0)
-  description  String          @default("")
-  sortOrder    Int             @default(0)
+  id                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId          String          @db.Uuid
+  type               ProductFileType
+  url                String
+  storagePath        String          @default("")
+  originalName       String          @default("")
+  extension          String          @default("")
+  mimeType           String          @default("")
+  size               Int             @default(0)
+  description        String          @default("")
+  sortOrder          Int             @default(0)
   // Si true, el archivo se incluye en la presentación/info inicial del producto
   // (envío bulk). Si false, queda disponible solo on-demand (el bot lo manda por
   // fileIds cuando el cliente lo pide o la consulta se relaciona con él).
-  showInPresentation Boolean    @default(true)
+  showInPresentation Boolean         @default(true)
   // Si true, el archivo va ADJUNTO en el correo de entrega del producto (entrega por
   // correo a pedido del cliente). Si el total de adjuntos excede el tope, van como links.
-  sendByEmail  Boolean         @default(false)
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
-  product      Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sendByEmail        Boolean         @default(false)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  product            Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([productId, sortOrder])
 }
 
 model DigitalDelivery {
-  id           String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  productId    String  @unique @db.Uuid
-  link         String
-  instructions String
+  id                         String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId                  String                 @unique @db.Uuid
+  link                       String
+  instructions               String
   // Modo de entrega del acceso (streaming): STATIC = mensaje fijo igual para todos
   // (comportamiento por defecto, infoproducto); POOL_AUTO = toma una credencial del
   // inventario y la asigna; MANUAL = avisa al vendedor para entrega manual.
-  assignmentMode DeliveryAssignmentMode @default(STATIC)
+  assignmentMode             DeliveryAssignmentMode @default(STATIC)
   // Mensajes adicionales opcionales tras la entrega: array de {message,mediaUrl,mediaType}.
-  followupMessages  Json    @default("[]")
+  followupMessages           Json                   @default("[]")
   // Legacy (single) — conservados por compat; el array de arriba es la fuente de verdad.
-  followupMessage   String  @default("")
-  followupMediaUrl  String  @default("")
-  followupMediaType String  @default("")
+  followupMessage            String                 @default("")
+  followupMediaUrl           String                 @default("")
+  followupMediaType          String                 @default("")
   // Producto a ofrecer (cross-sell) tras entregar; se resuelve contra el catálogo
   // en runtime (sin FK formal: si el producto se borra, se ignora).
-  crossSellProductId String? @db.Uuid
+  crossSellProductId         String?                @db.Uuid
   // Mensaje con el que se ofrece el relacionado. Vacío => línea automática.
-  crossSellPitch     String  @default("")
+  crossSellPitch             String                 @default("")
   // Multimedia opcional del mensaje de enganche (se envía con el pitch como caption).
-  crossSellPitchMediaUrl  String @default("")
-  crossSellPitchMediaType String @default("")
+  crossSellPitchMediaUrl     String                 @default("")
+  crossSellPitchMediaType    String                 @default("")
   // Entrega por CORREO a pedido del cliente (solo modo STATIC): si está activa, el agente
   // puede enviar el acceso por email cuando el cliente lo pide y el pago está APROBADO.
   // emailSubject/emailBody vacíos => se derivan del nombre del producto / instructions.
-  emailEnabled Boolean @default(false)
-  emailSubject String?
-  emailBody    String?
+  emailEnabled               Boolean                @default(false)
+  emailSubject               String?
+  emailBody                  String?
   // Acciones al cerrar la venta (entrega del producto): mover al cliente a una pestaña
   // del CRM y/o asignarle etiquetas. Sin FK formal: si el CRM/columna/tag se borra, se ignora.
-  onSaleCrmId        String?  @db.Uuid
-  onSaleCrmColumnId  String?  @db.Uuid
-  onSaleTagIds       String[] @default([]) @db.Uuid
-  onSaleRemoveTagIds String[] @default([]) @db.Uuid
+  onSaleCrmId                String?                @db.Uuid
+  onSaleCrmColumnId          String?                @db.Uuid
+  onSaleTagIds               String[]               @default([]) @db.Uuid
+  onSaleRemoveTagIds         String[]               @default([]) @db.Uuid
   // Acciones al ENVIAR la info completa (presentación): mismo patrón que onSale*.
   // Mueve al cliente a una pestaña del CRM y/o le asigna etiquetas cuando el bot presenta.
-  onPresentationCrmId       String?  @db.Uuid
-  onPresentationCrmColumnId String?  @db.Uuid
-  onPresentationTagIds      String[] @default([]) @db.Uuid
-  onPresentationRemoveTagIds String[] @default([]) @db.Uuid
+  onPresentationCrmId        String?                @db.Uuid
+  onPresentationCrmColumnId  String?                @db.Uuid
+  onPresentationTagIds       String[]               @default([]) @db.Uuid
+  onPresentationRemoveTagIds String[]               @default([]) @db.Uuid
   // Acciones al ENVIAR LOS MÉTODOS DE PAGO (cliente caliente/interesado): mismo patrón.
-  onPaymentCrmId       String?  @db.Uuid
-  onPaymentCrmColumnId String?  @db.Uuid
-  onPaymentTagIds      String[] @default([]) @db.Uuid
-  onPaymentRemoveTagIds String[] @default([]) @db.Uuid
-  product      Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  onPaymentCrmId             String?                @db.Uuid
+  onPaymentCrmColumnId       String?                @db.Uuid
+  onPaymentTagIds            String[]               @default([]) @db.Uuid
+  onPaymentRemoveTagIds      String[]               @default([]) @db.Uuid
+  product                    Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model PhysicalDelivery {
@@ -681,16 +681,16 @@ model ProductVariant {
 
 // Modo de entrega del acceso digital (por producto, en DigitalDelivery).
 enum DeliveryAssignmentMode {
-  STATIC    // mensaje fijo igual para todos (default; infoproducto)
+  STATIC // mensaje fijo igual para todos (default; infoproducto)
   POOL_AUTO // toma una credencial del inventario y la asigna al aprobar el pago
-  MANUAL    // el bot no entrega; avisa al vendedor para entrega manual
+  MANUAL // el bot no entrega; avisa al vendedor para entrega manual
 }
 
 enum StreamingCredentialStatus {
   AVAILABLE // libre, lista para asignar
-  ASSIGNED  // ya entregada a un cliente
-  DOWN      // cuenta caída/reportada (no asignar)
-  DISABLED  // dada de baja
+  ASSIGNED // ya entregada a un cliente
+  DOWN // cuenta caída/reportada (no asignar)
+  DISABLED // dada de baja
 }
 
 // Inventario de credenciales/cuentas/perfiles (streaming). Cada fila es una unidad
@@ -713,7 +713,7 @@ model StreamingCredential {
   assignedCustomerId     String?                   @db.Uuid
   assignedConversationId String?                   @db.Uuid
   assignedAt             DateTime?
-  expiresAt              DateTime?                 // vencimiento de ESTA asignación
+  expiresAt              DateTime? // vencimiento de ESTA asignación
   note                   String?
   createdAt              DateTime                  @default(now())
   updatedAt              DateTime                  @updatedAt
@@ -738,11 +738,11 @@ model Subscription {
   customerId        String             @db.Uuid
   // Producto del catálogo (opcional: las ventas externas pueden no estar en el catálogo).
   productId         String?            @db.Uuid
-  productName       String?            // nombre libre si no hay productId
-  planLabel         String?            // modalidad/plan (ej. "Mensual por perfil")
+  productName       String? // nombre libre si no hay productId
+  planLabel         String? // modalidad/plan (ej. "Mensual por perfil")
   startAt           DateTime           @default(now())
   expiresAt         DateTime
-  durationDays      Int?               // para reprogramar al renovar
+  durationDays      Int? // para reprogramar al renovar
   amount            String?
   status            SubscriptionStatus @default(ACTIVE)
   source            String             @default("MANUAL") // AGENT | MANUAL
@@ -831,25 +831,25 @@ model AdCatalogEntry {
 }
 
 model ConversationMessage {
-  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId      String           @db.Uuid
-  customerId     String           @db.Uuid
-  conversationId String?          @db.Uuid
-  productId      String?          @db.Uuid
-  role           ConversationRole
-  message        String?
-  mediaUrl       String?
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId       String           @db.Uuid
+  customerId      String           @db.Uuid
+  conversationId  String?          @db.Uuid
+  productId       String?          @db.Uuid
+  role            ConversationRole
+  message         String?
+  mediaUrl        String?
   // Tipo del adjunto ("image"|"video"|"audio"|"document") para render correcto en
   // el panel; null en históricos o texto (el frontend infiere por extensión).
-  mediaType      String?
-  rawPayload     Json?
+  mediaType       String?
+  rawPayload      Json?
   // Tracking de entrega vía gateway WhatsApp. gatewayId = messageId/wamid (del
   // envío en ASSISTANT; del inbound en USER — ancla reacciones/citas).
   // deliveryStatus escalera: null=no rastreado, "pending"<"sent"<"delivered"<"read";
   // "failed"/"unknown" aparte. Solo se hace upgrade de rango (webhook whatsapp_status/Meta).
   gatewayId       String?
   deliveryStatus  String?
-  deliveryRetries Int             @default(0)
+  deliveryRetries Int              @default(0)
   // wamid de WhatsApp (3EB0…) del mensaje: en USER llega en data[wamid]; en
   // ASSISTANT (SMS Tools encola con priority=2 y no lo devuelve) se APRENDE
   // del webhook whatsapp_status, que trae el par id+wamid (backfill). Es la
@@ -862,11 +862,11 @@ model ConversationMessage {
   // Respuesta citando: wamid citado + preview resuelto del texto citado (panel + contexto del agente).
   quotedWamid     String?
   quotedPreview   String?
-  createdAt      DateTime         @default(now())
-  company        Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  customer       Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  conversation   Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  product        Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
+  createdAt       DateTime         @default(now())
+  company         Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer        Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation    Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  product         Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   @@index([companyId, customerId, createdAt])
   @@index([conversationId, createdAt])
@@ -1142,17 +1142,17 @@ model ServiceBooking {
   companyId     String               @db.Uuid
   customerId    String               @db.Uuid
   productId     String               @db.Uuid
-  requestedText String               // horario tal como lo dijo el cliente (respaldo/histórico)
-  modality      String?              // presencial | online | ...
+  requestedText String // horario tal como lo dijo el cliente (respaldo/histórico)
+  modality      String? // presencial | online | ...
   status        ServiceBookingStatus @default(SOLICITADA)
   notes         String?
   // --- Agenda real (cita con fecha y hora) ---
-  startsAt      DateTime?            // null = reserva vaga, sin hora fijada
+  startsAt      DateTime? // null = reserva vaga, sin hora fijada
   endsAt        DateTime?
   durationMin   Int?
   bookingCode   String?              @unique
   source        String               @default("agent") // agent | widget | manual
-  cancelToken   String?              // cancelación desde el widget público
+  cancelToken   String? // cancelación desde el widget público
   createdAt     DateTime             @default(now())
   updatedAt     DateTime             @updatedAt
   company       Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -1178,34 +1178,36 @@ model ScheduleBlock {
 }
 
 model Order {
-  id           String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId    String      @db.Uuid
-  customerId   String      @db.Uuid
-  productId    String      @db.Uuid
-  orderCode    String      @unique
-  quantity     Int
-  customerName String
-  address      String
-  reference    String
-  notes        String?
-  status       OrderStatus
+  id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId     String               @db.Uuid
+  customerId    String               @db.Uuid
+  productId     String               @db.Uuid
+  orderCode     String               @unique
+  quantity      Int
+  customerName  String
+  address       String
+  reference     String
+  notes         String?
+  status        OrderStatus
   // Rubro Comercial: total del pedido, estado de pago y placeholder de comprobante (Fase 2 Myfact).
   total         String?
-  paymentStatus String?     // 'PENDIENTE_PAGO' | 'PAGADO' (string, no enum)
+  paymentStatus String? // 'PENDIENTE_PAGO' | 'PAGADO' (string, no enum)
   paymentMethod String?
-  comprobanteId String?     @db.Uuid
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
-  company      Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  customer     Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  product      Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  comprobanteId String?              @db.Uuid
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  company       Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer      Customer             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product       Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
   items         OrderItem[]
   statusHistory OrderStatusHistory[]
 
   @@index([companyId, createdAt])
 }
 
-/** Ítem de un pedido (multi-producto). productName/unitPrice son snapshots. */
+/**
+ * Ítem de un pedido (multi-producto). productName/unitPrice son snapshots.
+ */
 model OrderItem {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orderId      String   @db.Uuid
@@ -1213,7 +1215,7 @@ model OrderItem {
   productName  String
   quantity     Int      @default(1)
   unitPrice    String
-  variantLabel String?  // "Talla: M, Color: Azul"
+  variantLabel String? // "Talla: M, Color: Azul"
   lineTotal    String
   createdAt    DateTime @default(now())
   order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
@@ -1222,13 +1224,15 @@ model OrderItem {
   @@index([orderId])
 }
 
-/** Historial de cambios de estado de un pedido (trazabilidad, transición libre). */
+/**
+ * Historial de cambios de estado de un pedido (trazabilidad, transición libre).
+ */
 model OrderStatusHistory {
   id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orderId    String       @db.Uuid
   fromStatus OrderStatus?
   toStatus   OrderStatus
-  changedBy  String?      // userId del panel, 'agente' o 'sistema'
+  changedBy  String? // userId del panel, 'agente' o 'sistema'
   note       String?
   createdAt  DateTime     @default(now())
   order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
@@ -1355,33 +1359,33 @@ model WebhookEvent {
 //  - `audience`: { recipients: [{customerId?, phone, name?}] } seleccionados en el wizard
 // ---------------------------------------------------------------------------
 model Campaign {
-  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId   String              @db.Uuid
-  name        String
-  status      CampaignStatus      @default(DRAFT)
-  actions     Json                @default("[]")
-  sendConfig  Json                @default("{}")
-  audience    Json                @default("{}")
+  id                  String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId           String              @db.Uuid
+  name                String
+  status              CampaignStatus      @default(DRAFT)
+  actions             Json                @default("[]")
+  sendConfig          Json                @default("{}")
+  audience            Json                @default("{}")
   // Producto en foco de la campaña: al enviar, se siembra en Conversation.state
   // (selectedProductId) para que el agente sepa qué producto se ofreció.
-  contextProductId String?        @db.Uuid
+  contextProductId    String?             @db.Uuid
   // Etiquetas que se aplican a cada destinatario alcanzado por la campaña.
-  contextTagIds    String[]       @default([])
+  contextTagIds       String[]            @default([])
   // Etiquetas a QUITAR a cada destinatario alcanzado (complemento de contextTagIds).
-  contextRemoveTagIds String[]    @default([])
-  totalCount  Int                 @default(0)
-  sentCount   Int                 @default(0)
-  failedCount Int                 @default(0)
+  contextRemoveTagIds String[]            @default([])
+  totalCount          Int                 @default(0)
+  sentCount           Int                 @default(0)
+  failedCount         Int                 @default(0)
   // Cuándo el driver procesará el próximo contacto (para el countdown en la UI).
-  nextSendAt  DateTime?
+  nextSendAt          DateTime?
   // Motivo de la espera actual: "auto" (pausa entre lotes) | "daily-limit" | "schedule".
-  pauseReason String?
-  startedAt   DateTime?
-  completedAt DateTime?
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @updatedAt
-  company     Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  recipients  CampaignRecipient[]
+  pauseReason         String?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  company             Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  recipients          CampaignRecipient[]
 
   @@index([companyId, status])
   @@index([companyId, updatedAt])
@@ -1561,7 +1565,7 @@ model CompanySubscription {
   source       String       @default("SUPERADMIN") // SUPERADMIN | VOUCHER
   voucherId    String?      @db.Uuid // último vale de paquete aplicado
   canceledAt   DateTime?
-  lastNoticeAt DateTime?    // dedupe de avisos de vencimiento
+  lastNoticeAt DateTime? // dedupe de avisos de vencimiento
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
   company      Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -1610,7 +1614,7 @@ model CreditTransaction {
   balanceAfterPen Decimal      @db.Decimal(12, 2)
   note            String?
   voucherId       String?      @db.Uuid
-  customerPhone   String?      // lead cobrado (LEAD_CHARGE)
+  customerPhone   String? // lead cobrado (LEAD_CHARGE)
   createdAt       DateTime     @default(now())
   company         Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
@@ -1622,7 +1626,7 @@ model CreditTransaction {
 model Voucher {
   id                  String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   code                String        @unique
-  name                String        // nombre del lote (ej. "profesional x 1 mes #3")
+  name                String // nombre del lote (ej. "profesional x 1 mes #3")
   type                VoucherType   @default(PLAN)
   planId              String?       @db.Uuid // requerido si type=PLAN
   months              Int? // requerido si type=PLAN
@@ -1650,9 +1654,9 @@ model ReportConfig {
   weeklyEnabled  Boolean  @default(false)
   monthlyEnabled Boolean  @default(false)
   sendHour       Int      @default(8) // hora local del tenant (0-23)
-  lastDailyKey   String?  // "YYYY-MM-DD" (ayer) del último diario enviado
-  lastWeeklyKey  String?  // "YYYY-MM-DD" del lunes de la semana enviada
-  lastMonthlyKey String?  // "YYYY-MM" del mes enviado
+  lastDailyKey   String? // "YYYY-MM-DD" (ayer) del último diario enviado
+  lastWeeklyKey  String? // "YYYY-MM-DD" del lunes de la semana enviada
+  lastMonthlyKey String? // "YYYY-MM" del mes enviado
   lastError      String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -1664,55 +1668,65 @@ model ReportConfig {
 // con pago por Mercado Pago y entrega por correo/WhatsApp.
 // ---------------------------------------------------------------------------
 model StorefrontConfig {
-  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId      String   @unique @db.Uuid
-  enabled        Boolean  @default(false)
-  title          String?
-  tagline        String?
-  accentColor    String?
-  logoUrl        String?
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId             String   @unique @db.Uuid
+  enabled               Boolean  @default(false)
+  title                 String?
+  tagline               String?
+  accentColor           String?
+  logoUrl               String?
   // Número para el botón "Escríbenos por WhatsApp" (solo dígitos, con código de país).
-  whatsappNumber String?
+  whatsappNumber        String?
   // Productos a mostrar; vacío = todos los elegibles (digitales con entrega por correo).
-  productIds     String[] @default([]) @db.Uuid
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productIds            String[] @default([]) @db.Uuid
+  // Pago con Yape/Plin (métodos manuales de Pagos) subiendo el comprobante en la tienda.
+  manualPaymentsEnabled Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
 enum StoreOrderStatus {
   PENDIENTE
+  // Comprobante Yape/Plin subido pero sin match automático: lo revisa el dueño.
+  EN_REVISION
   PAGADO
   ENTREGADO
   FALLIDO
 }
 
 model StoreOrder {
-  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId      String           @db.Uuid
-  customerId     String           @db.Uuid
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId       String           @db.Uuid
+  customerId      String           @db.Uuid
   // Snapshot del producto (sin FK: si se borra el producto, el pedido se conserva).
-  productId      String           @db.Uuid
-  productName    String
-  email          String
-  name           String
-  phone          String?
+  productId       String           @db.Uuid
+  productName     String
+  email           String
+  name            String
+  phone           String?
   // Monto del link de Mercado Pago (incluye comisión si el negocio la traslada).
-  amount         Decimal          @db.Decimal(12, 2)
-  currency       String           @default("PEN")
-  status         StoreOrderStatus @default(PENDIENTE)
-  mpPreferenceId String?
-  mpPaymentId    String?
-  receiptId      String?          @unique @db.Uuid
+  amount          Decimal          @db.Decimal(12, 2)
+  currency        String           @default("PEN")
+  status          StoreOrderStatus @default(PENDIENTE)
+  // "MERCADOPAGO" (checkout MP) | "MANUAL" (Yape/Plin con comprobante subido).
+  paymentMethod   String           @default("MERCADOPAGO")
+  // Comprobante subido por el comprador (pago manual) y datos para el matching.
+  receiptMediaUrl String?
+  payerName       String?
+  recheckAttempts Int              @default(0)
+  mpPreferenceId  String?
+  mpPaymentId     String?
+  receiptId       String?          @unique @db.Uuid
   // Token aleatorio para que la página de gracias consulte el estado del pedido.
-  accessToken    String
-  deliveredAt    DateTime?
-  failureReason  String?
-  metadata       Json?
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
-  company        Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  customer       Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  accessToken     String
+  deliveredAt     DateTime?
+  failureReason   String?
+  metadata        Json?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  company         Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer        Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   @@index([companyId, createdAt])
   @@index([companyId, status])

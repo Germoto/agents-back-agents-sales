@@ -56,7 +56,7 @@ import { listCampaigns, createCampaign, updateCampaign, startCampaign, testCampa
 import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
 import { listSubscriptions } from "../subscriptions/subscriptions.service";
 import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
-import { getStorefrontConfig, listStoreOrders, updateStorefrontConfig } from "../storefront/storefront.service";
+import { approveStoreOrder, getStorefrontConfig, listStoreOrders, rejectStoreOrder, updateStorefrontConfig } from "../storefront/storefront.service";
 import { updateStorefrontConfigSchema } from "../storefront/storefront.schemas";
 import { normalizeQuietHours, normalizePacing } from "../scheduler/quiet-hours";
 import { ScheduledMessageStatus } from "@prisma/client";
@@ -542,7 +542,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "ver_tienda",
       description:
-        "TIENDA WEB pública del negocio (<slug>.flowapp.pe): devuelve si está activa, su URL, el checklist de requisitos (identificador/slug válido, módulos del plan, Mercado Pago configurado, productos elegibles = digitales con entrega por correo activa, productos que faltan por habilitar), la configuración visual y los últimos pedidos web con su estado (PENDIENTE/PAGADO/ENTREGADO/FALLIDO). Úsala antes de proponer cambios o cuando pregunten por ventas de la tienda.",
+        "TIENDA WEB pública del negocio (<slug>.flowapp.pe): devuelve si está activa, su URL, el checklist de requisitos (identificador/slug válido, módulos del plan, Mercado Pago configurado, Yape/Plin disponible = métodos manuales de Pagos + opción de la tienda, productos elegibles = digitales con entrega por correo activa, productos que faltan por habilitar), la configuración visual, los últimos pedidos web con su estado (PENDIENTE/EN_REVISION/PAGADO/ENTREGADO/FALLIDO) y los pedidos EN_REVISION (comprobante Yape/Plin subido sin validación automática: incluye id, comprador, monto, nombre del pagador, lo que la visión leyó y la URL del comprobante). Úsala antes de proponer cambios, cuando pregunten por ventas de la tienda o antes de aprobar/rechazar un pedido.",
       parameters: { type: "object", additionalProperties: false, properties: { pedidos: { type: "number", description: "cuántos pedidos recientes incluir (default 10, máx 50)" } } },
     },
   },
@@ -551,12 +551,46 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_tienda",
       description:
-        "Activa o configura la TIENDA WEB. `data` es PARCIAL: {enabled?, title? (nombre visible), tagline? (frase corta), accentColor? (hex), whatsappNumber? (botón 'Escríbenos', solo dígitos con código de país), productIds? (uuid[]; vacío = todos los elegibles)}. Para que funcione: slug válido (se cambia en configurar_empresa: minúsculas/números/guiones), Mercado Pago conectado en Integraciones y habilitado para la tienda (el token NO se gestiona por chat; el canal sí: configurar_pagos {mpStoreEnabled:true}) y productos con digitalDelivery.emailEnabled=true (actualizar_producto). Si enabled=true y falta un requisito, la tool lo explica. Llámala SOLO tras confirmación.",
+        "Activa o configura la TIENDA WEB. `data` es PARCIAL: {enabled?, title? (nombre visible), tagline? (frase corta), accentColor? (hex), whatsappNumber? (botón 'Escríbenos', solo dígitos con código de país), productIds? (uuid[]; vacío = todos los elegibles), manualPaymentsEnabled? (aceptar Yape/Plin en la tienda subiendo el comprobante; usa los métodos manuales de Pagos; default true)}. Para que funcione: slug válido (se cambia en configurar_empresa: minúsculas/números/guiones), AL MENOS un cobro: Mercado Pago conectado en Integraciones y habilitado para la tienda (el token NO se gestiona por chat; el canal sí: configurar_pagos {mpStoreEnabled:true}) o Yape/Plin (métodos en configurar_pagos + manualPaymentsEnabled), y productos con digitalDelivery.emailEnabled=true (actualizar_producto). Si enabled=true y falta un requisito, la tool lo explica. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["data"],
         properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "aprobar_pedido_tienda",
+      description:
+        "Aprueba un pedido Yape/Plin de la TIENDA WEB que quedó EN_REVISION (o PENDIENTE con comprobante): crea el comprobante APROBADO (validación manual) y ENTREGA el producto por correo (y WhatsApp si dejó número). Antes de llamarla, muestra al dueño el pedido (ver_tienda → pedidosEnRevision: producto, monto, comprador, nombre del pagador, URL del comprobante, lo que leyó la visión) y pide confirmación explícita. Es irreversible (es una venta). Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["orderId"],
+        properties: {
+          orderId: { type: "string", description: "id del pedido (ver_tienda → pedidosEnRevision[].id)" },
+          nota: { type: "string", description: "nota opcional para el comprobante" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "rechazar_pedido_tienda",
+      description:
+        "Rechaza un pedido Yape/Plin de la TIENDA WEB EN_REVISION (comprobante falso, monto distinto, pago no recibido): lo deja FALLIDO con el motivo; no entrega nada. Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["orderId"],
+        properties: {
+          orderId: { type: "string", description: "id del pedido" },
+          motivo: { type: "string", description: "motivo del rechazo (se guarda en el pedido)" },
+        },
       },
     },
   },
@@ -2043,7 +2077,10 @@ export async function runCopilotTool(
     case "ver_tienda": {
       const cfg = await getStorefrontConfig(companyId);
       const limit = Math.min(Math.max(Number(args.pedidos) || 10, 1), 50);
-      const orders = await listStoreOrders(companyId, 1, limit);
+      const [orders, review] = await Promise.all([
+        listStoreOrders(companyId, 1, limit),
+        listStoreOrders(companyId, 1, 20, "EN_REVISION"),
+      ]);
       return {
         result: JSON.stringify({
           activa: cfg.enabled,
@@ -2055,15 +2092,47 @@ export async function runCopilotTool(
             moduloTienda: cfg.status.moduloTienda,
             moduloMercadoPago: cfg.status.moduloMp,
             mercadoPagoConfigurado: cfg.status.mpConfigurado,
+            yapePlinDisponible: cfg.status.pagosManuales,
+            yapePlinHabilitadoEnTienda: cfg.status.manualHabilitado,
+            metodosManuales: cfg.status.metodosManuales,
             productosElegibles: cfg.status.productosElegibles,
             productosSinEntregaPorCorreo: cfg.status.productosSinCorreo,
           },
-          config: { title: cfg.title, tagline: cfg.tagline, accentColor: cfg.accentColor, logoUrl: cfg.logoUrl, whatsappNumber: cfg.whatsappNumber, productIds: cfg.productIds },
-          pedidosRecientes: { total: orders.total, items: orders.items.map((o) => ({ fecha: o.createdAt, producto: o.productName, comprador: o.name, email: o.email, whatsapp: o.phone, monto: o.amountText, estado: o.status, motivo: o.failureReason })) },
-          nota: "Los pedidos ENTREGADOS son ventas reales (comprobante aprobado, canal 'tienda web'). Un producto solo se vende en la tienda si es digital, está en catálogo y tiene entrega por correo activa.",
+          config: { title: cfg.title, tagline: cfg.tagline, accentColor: cfg.accentColor, logoUrl: cfg.logoUrl, whatsappNumber: cfg.whatsappNumber, productIds: cfg.productIds, manualPaymentsEnabled: cfg.manualPaymentsEnabled },
+          pedidosEnRevision: review.items.map((o) => ({
+            id: o.id,
+            fecha: o.createdAt,
+            producto: o.productName,
+            comprador: o.name,
+            email: o.email,
+            monto: o.amountText,
+            nombrePagador: o.payerName,
+            comprobanteUrl: o.receiptMediaUrl,
+            lecturaVision: o.comprobante,
+            reintentosAutomaticos: o.recheckAttempts,
+          })),
+          pedidosRecientes: { total: orders.total, items: orders.items.map((o) => ({ id: o.id, fecha: o.createdAt, producto: o.productName, comprador: o.name, email: o.email, whatsapp: o.phone, monto: o.amountText, metodo: o.paymentMethod === "MANUAL" ? "Yape/Plin" : "Mercado Pago", estado: o.status, motivo: o.failureReason })) },
+          nota: "Los pedidos ENTREGADOS son ventas reales (comprobante aprobado, canal 'tienda web'). EN_REVISION = el comprador subió su comprobante Yape/Plin y no hubo validación automática: el dueño lo revisa (aprobar_pedido_tienda / rechazar_pedido_tienda). Un producto solo se vende en la tienda si es digital, está en catálogo y tiene entrega por correo activa.",
         }),
         wrote: false,
       };
+    }
+
+    case "aprobar_pedido_tienda": {
+      const orderId = asStr(args.orderId) ?? "";
+      if (!orderId) return { result: JSON.stringify({ ok: false, error: "falta orderId" }), wrote: false };
+      const o = await approveStoreOrder(companyId, orderId, { note: asStr(args.nota) ?? null });
+      return {
+        result: JSON.stringify({ ok: true, estado: o.status, producto: o.productName, comprador: o.name, email: o.email, monto: o.amountText, motivo: o.failureReason, nota: o.status === "ENTREGADO" ? "Pago aprobado y acceso enviado por correo." : "Pago aprobado pero la entrega falló; revisa el motivo y reenvía desde la ficha del cliente." }),
+        wrote: true,
+      };
+    }
+
+    case "rechazar_pedido_tienda": {
+      const orderId = asStr(args.orderId) ?? "";
+      if (!orderId) return { result: JSON.stringify({ ok: false, error: "falta orderId" }), wrote: false };
+      const o = await rejectStoreOrder(companyId, orderId, { reason: asStr(args.motivo) ?? null });
+      return { result: JSON.stringify({ ok: true, estado: o.status, motivo: o.failureReason }), wrote: true };
     }
 
     case "configurar_tienda": {
@@ -2075,6 +2144,7 @@ export async function runCopilotTool(
         ...(data.accentColor !== undefined ? { accentColor: asStr(data.accentColor) } : {}),
         ...(data.whatsappNumber !== undefined ? { whatsappNumber: asStr(data.whatsappNumber) } : {}),
         ...(data.productIds !== undefined ? { productIds: asStrList(data.productIds) ?? [] } : {}),
+        ...(typeof data.manualPaymentsEnabled === "boolean" ? { manualPaymentsEnabled: data.manualPaymentsEnabled } : {}),
       });
       if (!parsed.success) {
         return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
@@ -2088,7 +2158,7 @@ export async function runCopilotTool(
           lista: cfg.status.lista,
           pendientes: {
             ...(cfg.status.slugProblema ? { slug: cfg.status.slugProblema } : {}),
-            ...(cfg.status.mpConfigurado ? {} : { mercadoPago: "Falta conectar Mercado Pago en Integraciones (token solo desde el panel) o habilitarlo para la tienda (configurar_pagos {mpStoreEnabled:true})." }),
+            ...(cfg.status.pagosListos ? {} : { pagos: "Sin cobro disponible: conecta Mercado Pago en Integraciones (token solo desde el panel) y habilítalo para la tienda (configurar_pagos {mpStoreEnabled:true}), o configura métodos Yape/Plin en Pagos (configurar_pagos) con manualPaymentsEnabled=true." }),
             ...(cfg.status.productosElegibles.length ? {} : { productos: "Ningún producto elegible: activa la entrega por correo en los productos digitales." }),
           },
           nota: cfg.status.lista ? "Tienda lista para vender." : "Tienda guardada; revisa los pendientes antes de compartir la URL.",
@@ -2569,7 +2639,7 @@ const SYSTEM_GUIDE = [
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
-  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, Mercado Pago conectado en Integraciones y habilitado para el canal tienda, y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos).",
+  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled).",
   "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
   "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en Configurar se elige POR CANAL si se usa en el cobro por chat y/o en la tienda web — p. ej. solo tienda), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
