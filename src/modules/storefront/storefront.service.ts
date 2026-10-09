@@ -46,6 +46,19 @@ export type HeroSlide = { productId: string; kicker: string; headline: string; s
 export type TrustItem = { title: string; sub: string };
 export type StoreFaq = { question: string; answer: string };
 
+export type ProductOverride = { imageUrl?: string | null; category?: string | null; shortDescription?: string | null; sortOrder?: number | null };
+export type ProductOverrides = Record<string, ProductOverride>;
+
+function overridesOf(cfg: { productOverrides?: unknown }): ProductOverrides {
+  const v = cfg.productOverrides;
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as ProductOverrides) : {};
+}
+
+/** Imagen de portada efectiva en la tienda: override o primera imagen de presentación. */
+function storeImageOf(p: { files: { type: string; showInPresentation: boolean; url: string }[] }, ov?: ProductOverride): string | null {
+  return ov?.imageUrl || p.files.find((f) => f.type === "IMAGE" && f.showInPresentation)?.url || null;
+}
+
 export const DEFAULT_TRUST_ITEMS: TrustItem[] = [
   { title: "Entrega inmediata", sub: "El acceso llega a tu correo al confirmar el pago" },
   { title: "Yape, Plin o tarjeta", sub: "Pago seguro y validación automática" },
@@ -174,28 +187,47 @@ export async function getPublicStore(slug: string) {
   const symbol = symbolFor(company.currency);
   const products = await eligibleProducts(company.id, cfg.productIds);
   const [pay, metaPixelId] = await Promise.all([storePaymentOptions(company.id, cfg, ent), storePixelId(company.id)]);
-  const mapped = products.map((p) => ({ p, b: mapBotProduct(p, { currencySymbol: symbol, timezone: company.timezone }) }));
+  const overrides = overridesOf(cfg);
+  const mapped = products
+    .map((p, idx) => {
+      const ov = overrides[p.id];
+      const b = mapBotProduct(p, { currencySymbol: symbol, timezone: company.timezone });
+      const cover = storeImageOf(p, ov);
+      const images = [
+        ...(cover ? [{ url: cover, description: "" }] : []),
+        ...p.files.filter((f) => f.type === "IMAGE" && f.showInPresentation && f.url !== cover).map((f) => ({ url: f.url, description: f.description || "" })),
+      ];
+      return {
+        p,
+        b,
+        ov,
+        images,
+        category: (ov?.category ?? b.category ?? "").trim() || null,
+        shortDescription: (ov?.shortDescription ?? "").trim() || b.shortDescription,
+        order: typeof ov?.sortOrder === "number" ? ov.sortOrder : 1000 + idx,
+      };
+    })
+    .sort((a, b2) => a.order - b2.order);
   const byId = new Map(mapped.map((x) => [x.p.id, x]));
   const slides = jsonArray<HeroSlide>(cfg.heroSlides)
     .filter((sl) => sl && typeof sl.productId === "string" && byId.has(sl.productId))
     .slice(0, 5)
     .map((sl) => {
-      const { p, b } = byId.get(sl.productId)!;
-      const img = p.files.find((f) => f.type === "IMAGE" && f.showInPresentation)?.url ?? null;
+      const { p, b, images, shortDescription } = byId.get(sl.productId)!;
       return {
         productId: p.id,
         productSlug: b.slug,
         kicker: (sl.kicker ?? "").trim(),
         headline: (sl.headline ?? "").trim() || p.name,
-        sub: (sl.sub ?? "").trim() || b.shortDescription,
-        imageUrl: sl.imageUrl || img,
+        sub: (sl.sub ?? "").trim() || shortDescription,
+        imageUrl: sl.imageUrl || images[0]?.url || null,
         bg: sl.bg || null,
         priceText: b.priceText ?? b.price,
         regularPriceText: b.regularPriceText,
         discountPct: discountPct(b.price, b.regularPrice),
       };
     });
-  const categorias = Array.from(new Set(mapped.map((x) => (x.b.category ?? "").trim()).filter(Boolean)));
+  const categorias = Array.from(new Set(mapped.map((x) => x.category ?? "").filter(Boolean)));
   return {
     pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual },
     portada: { slides, autoplay: cfg.carouselAutoplay, intervalSec: cfg.carouselIntervalSec },
@@ -215,7 +247,7 @@ export async function getPublicStore(slug: string) {
       currency: company.currency,
       whatsappNumber: cfg.whatsappNumber ? cfg.whatsappNumber.replace(/\D/g, "") || null : null,
     },
-    productos: mapped.map(({ p, b }) => {
+    productos: mapped.map(({ p, b, images, category, shortDescription }) => {
       return {
         id: b.id,
         slug: b.slug,
@@ -229,17 +261,15 @@ export async function getPublicStore(slug: string) {
         offerEndsText: b.offerEndsText,
         // Para la cuenta regresiva en la tienda (null si no hay oferta vigente con fin).
         offerEndsAt: b.offerEndsAt ? b.offerEndsAt.toISOString() : null,
-        shortDescription: b.shortDescription,
+        shortDescription,
         fullDescription: b.fullDescription,
-        category: b.category,
+        category,
         benefits: b.benefits,
         includes: b.includes,
         bonuses: b.bonuses,
         faqs: b.faqs.map((f) => ({ question: f.question, answer: f.answer })),
-        // Solo imágenes de presentación (nunca los archivos de entrega).
-        images: p.files
-          .filter((f) => f.type === "IMAGE" && f.showInPresentation)
-          .map((f) => ({ url: f.url, description: f.description || "" })),
+        // Solo imágenes de presentación (nunca los archivos de entrega); la portada de la tienda primero.
+        images,
       };
     }),
   };
@@ -301,8 +331,8 @@ export async function getStoreOgHtml(host: string, path: string): Promise<string
       title = `${product.name} · ${title0}`;
       const price = b.priceText ?? b.price;
       description = [price ? `${price}` : null, b.shortDescription || b.fullDescription?.slice(0, 160) || null].filter(Boolean).join(" — ");
-      const img = product.files.find((f) => f.type === "IMAGE" && f.showInPresentation);
-      if (img) image = img.url;
+      const img = storeImageOf(product, overridesOf(cfg)[product.id]);
+      if (img) image = img;
       url = `${base}/p/${encodeURIComponent(product.slug)}`;
     }
   }
@@ -1131,7 +1161,8 @@ async function upsellFor(companyId: string, productIds: string[], cfgProductIds:
     const [cross] = await eligibleProducts(companyId, cfgProductIds).then((rows) => rows.filter((p) => p.id === crossId));
     if (!cross) continue;
     const bot = mapBotProduct(cross, { currencySymbol: symbolFor(company.currency), timezone: company.timezone });
-    const img = cross.files.find((f) => f.type === "IMAGE" && f.showInPresentation)?.url ?? null;
+    const ovCfg = await prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productOverrides: true } });
+    const img = storeImageOf(cross, overridesOf(ovCfg ?? {})[cross.id]);
     const pitchMedia = (b.digitalDelivery?.crossSellPitchMediaUrl ?? "").trim();
     const pitchIsImage = pitchMedia && (b.digitalDelivery?.crossSellPitchMediaType ?? "").toLowerCase().includes("image");
     return {
@@ -1296,14 +1327,33 @@ export async function updateStorefrontConfig(
     trustItems?: TrustItem[] | null;
     faqs?: StoreFaq[];
     footerTagline?: string | null;
+    productOverrides?: Record<string, ProductOverride | null>;
   },
 ) {
   const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
   const isOwnUpload = (u: string) => u.startsWith(`${base}/uploads/`);
   if (data.logoUrl && !isOwnUpload(data.logoUrl)) throw new AppError("El logo debe ser un archivo subido a FlowApp", 400);
+  const eligibleRows = data.heroSlides !== undefined || data.productOverrides !== undefined ? await eligibleProducts(companyId, []) : [];
+  let productOverrides: ProductOverrides | undefined;
+  if (data.productOverrides !== undefined) {
+    productOverrides = {};
+    for (const [pid, ov] of Object.entries(data.productOverrides)) {
+      const prod = eligibleRows.find((p) => p.id === pid);
+      if (!prod || !ov) continue;
+      const own = prod.files.some((f) => f.url === ov.imageUrl);
+      if (ov.imageUrl && !own && !isOwnUpload(ov.imageUrl)) throw new AppError("La portada debe ser un archivo subido a FlowApp", 400);
+      const clean: ProductOverride = {
+        ...(ov.imageUrl ? { imageUrl: ov.imageUrl } : {}),
+        ...(ov.category?.trim() ? { category: ov.category.trim().slice(0, 40) } : {}),
+        ...(ov.shortDescription?.trim() ? { shortDescription: ov.shortDescription.trim().slice(0, 160) } : {}),
+        ...(typeof ov.sortOrder === "number" && Number.isFinite(ov.sortOrder) ? { sortOrder: Math.round(ov.sortOrder) } : {}),
+      };
+      if (Object.keys(clean).length) productOverrides[pid] = clean;
+    }
+  }
   let heroSlides: HeroSlide[] | undefined;
   if (data.heroSlides !== undefined) {
-    const eligible = new Set((await eligibleProducts(companyId, [])).map((p) => p.id));
+    const eligible = new Set(eligibleRows.map((p) => p.id));
     heroSlides = data.heroSlides.slice(0, 5).map((sl) => {
       if (!eligible.has(sl.productId)) throw new AppError("Un slide apunta a un producto que no está listo para la tienda", 400);
       if (sl.imageUrl && !isOwnUpload(sl.imageUrl)) throw new AppError("La imagen del banner debe ser un archivo subido a FlowApp", 400);
@@ -1332,6 +1382,7 @@ export async function updateStorefrontConfig(
     ...(trustItems !== undefined ? { trustItems: trustItems === null ? Prisma.DbNull : (trustItems as unknown as Prisma.InputJsonValue) } : {}),
     ...(faqs !== undefined ? { faqs: faqs as unknown as Prisma.InputJsonValue } : {}),
     ...(data.footerTagline !== undefined ? { footerTagline: data.footerTagline?.trim().slice(0, 160) || null } : {}),
+    ...(productOverrides !== undefined ? { productOverrides: productOverrides as unknown as Prisma.InputJsonValue } : {}),
   };
   if (data.enabled === true) {
     const st = await storefrontStatus(companyId, true);
@@ -1376,8 +1427,9 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
       select: { enabled: true, mpEnabled: true, mpAccessToken: true, mpStoreEnabled: true, methods: { select: { method: true } } },
     }),
     getEntitlements(companyId),
-    prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productIds: true, manualPaymentsEnabled: true } }),
+    prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productIds: true, manualPaymentsEnabled: true, productOverrides: true } }),
   ]);
+  const overrides = overridesOf(cfg ?? {});
   const slug = company?.slug ?? "";
   const slugProblema = storeSlugProblem(slug);
   const eligible = await eligibleProducts(companyId, cfg?.productIds ?? []);
@@ -1416,17 +1468,26 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
     manualHabilitado,
     metodosManuales,
     pagosListos,
-    productosElegibles: eligible.map((p) => {
-      const b = mapBotProduct(p, { currencySymbol: symbolFor(company?.currency ?? "PEN"), timezone: company?.timezone ?? "America/Lima" });
-      return {
-        id: p.id,
-        name: p.name,
-        category: b.category ?? null,
-        priceText: b.priceText ?? b.price,
-        regularPriceText: b.regularPriceText,
-        imageUrl: p.files.find((f) => f.type === "IMAGE" && f.showInPresentation)?.url ?? null,
-      };
-    }),
+    productosElegibles: eligible
+      .map((p, idx) => {
+        const b = mapBotProduct(p, { currencySymbol: symbolFor(company?.currency ?? "PEN"), timezone: company?.timezone ?? "America/Lima" });
+        const ov = overrides[p.id];
+        return {
+          id: p.id,
+          name: p.name,
+          // Valores del PRODUCTO (base) + override de la tienda por separado, para el modal.
+          category: b.category ?? null,
+          shortDescription: b.shortDescription,
+          priceText: b.priceText ?? b.price,
+          regularPriceText: b.regularPriceText,
+          imageUrl: storeImageOf(p, ov),
+          images: p.files.filter((f) => f.type === "IMAGE" && f.showInPresentation).map((f) => f.url),
+          override: ov ?? null,
+          order: typeof ov?.sortOrder === "number" ? ov.sortOrder : 1000 + idx,
+        };
+      })
+      .sort((a, b2) => a.order - b2.order)
+      .map(({ order: _o, ...rest }) => rest),
     productosSinCorreo: sinCorreo,
     lista: enabled && !slugProblema && moduloTienda && pagosListos && eligible.length > 0,
   };

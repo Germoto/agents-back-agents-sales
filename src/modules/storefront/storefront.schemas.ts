@@ -70,6 +70,20 @@ export const updateStorefrontConfigSchema = z.object({
   trustItems: z.array(z.object({ title: z.string().trim().max(60), sub: z.string().trim().max(140) })).max(3).nullable().optional(),
   faqs: z.array(z.object({ question: z.string().trim().max(200), answer: z.string().trim().max(1000) })).max(10).optional(),
   footerTagline: z.string().trim().max(160).nullable().optional(),
+  // Personalización por producto para la tienda (null = quitar el override).
+  productOverrides: z
+    .record(
+      z.string().uuid(),
+      z
+        .object({
+          imageUrl: z.string().trim().max(500).nullable().optional(),
+          category: z.string().trim().max(40).nullable().optional(),
+          shortDescription: z.string().trim().max(160).nullable().optional(),
+          sortOrder: z.number().int().nullable().optional(),
+        })
+        .nullable(),
+    )
+    .optional(),
 });
 
 export const storeOrdersQuerySchema = z.object({

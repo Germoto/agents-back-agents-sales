@@ -1699,6 +1699,9 @@ model StorefrontConfig {
   trustItems            Json?
   faqs                  Json?
   footerTagline         String?
+  // Personalización POR PRODUCTO solo para la tienda (el producto del chat no cambia):
+  // { [productId]: { imageUrl?, category?, shortDescription?, sortOrder? } }
+  productOverrides      Json?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
