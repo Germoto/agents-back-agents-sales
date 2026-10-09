@@ -47,7 +47,14 @@ export type TrustItem = { title: string; sub: string };
 export type StoreFaq = { question: string; answer: string };
 
 export type StoreMediaType = "IMAGE" | "VIDEO" | "PDF" | "OTHER";
-export type StoreMediaItem = { url: string; type: StoreMediaType; title?: string | null };
+export type StoreMediaItem = { url: string; type: StoreMediaType; title?: string | null; description?: string | null };
+
+/** Resuelve spintax de forma fija (primera opción de cada {a|b|c}) y colapsa espacios: texto estable para la tienda. */
+export function firstSpintax(text: string | null | undefined): string {
+  let t = String(text ?? "");
+  for (let i = 0; i < 5 && /\{[^{}]*\|[^{}]*\}/.test(t); i++) t = t.replace(/\{([^{}]*)\}/g, (_m, body: string) => body.split("|")[0] ?? "");
+  return t.replace(/\s+/g, " ").trim();
+}
 export type ProductOverride = {
   imageUrl?: string | null;
   /** Compatibilidad: una sola categoría (se lee como [category]). */
@@ -237,7 +244,11 @@ export async function getPublicStore(slug: string) {
         images,
         categories,
         category: categories[0] ?? null,
-        recursos: mediaOf(ov).map((m) => ({ type: m.type, url: m.url, title: (m.title ?? "").trim() || null })),
+        recursos: mediaOf(ov).map((m) => {
+          const file = p.files.find((f) => f.url === m.url);
+          const description = (m.description ?? "").trim() || firstSpintax(file?.description).slice(0, 200) || null;
+          return { type: m.type, url: m.url, title: (m.title ?? "").trim() || null, description };
+        }),
         shortDescription: (ov?.shortDescription ?? "").trim() || b.shortDescription,
         order: typeof ov?.sortOrder === "number" ? ov.sortOrder : 1000 + idx,
       };
@@ -1387,7 +1398,12 @@ export async function updateStorefrontConfig(
         const url = m.url.trim();
         if (!url) continue;
         if (!isOwnUpload(url) || url.includes("/api/public/dl/")) throw new AppError("Los recursos deben ser archivos públicos subidos a FlowApp", 400);
-        media.push({ url, type: MEDIA_TYPES.includes(m.type) ? m.type : "OTHER", title: (m.title ?? "").trim().slice(0, 80) || null });
+        media.push({
+          url,
+          type: MEDIA_TYPES.includes(m.type) ? m.type : "OTHER",
+          title: (m.title ?? "").trim().slice(0, 80) || null,
+          description: (m.description ?? "").trim().slice(0, 200) || null,
+        });
       }
       const clean: ProductOverride = {
         ...(ov.imageUrl ? { imageUrl: ov.imageUrl } : {}),
@@ -1536,7 +1552,7 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
           // Archivos públicos del producto (para elegir recursos de muestra); los privados no tienen URL pública.
           files: p.files
             .filter((f) => !f.privateDownload)
-            .map((f) => ({ id: f.id, url: f.url, type: f.type, name: f.originalName || f.description || f.url.split("/").pop() || "archivo", description: f.description, showInPresentation: f.showInPresentation })),
+            .map((f) => ({ id: f.id, url: f.url, type: f.type, name: f.originalName || f.url.split("/").pop() || "archivo", description: firstSpintax(f.description).slice(0, 200), showInPresentation: f.showInPresentation })),
           override: ov ?? null,
           order: typeof ov?.sortOrder === "number" ? ov.sortOrder : 1000 + idx,
         };

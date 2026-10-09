@@ -82,7 +82,7 @@ export const updateStorefrontConfigSchema = z.object({
           shortDescription: z.string().trim().max(160).nullable().optional(),
           sortOrder: z.number().int().nullable().optional(),
           media: z
-            .array(z.object({ url: z.string().trim().max(500), type: z.enum(["IMAGE", "VIDEO", "PDF", "OTHER"]), title: z.string().trim().max(80).nullable().optional() }))
+            .array(z.object({ url: z.string().trim().max(500), type: z.enum(["IMAGE", "VIDEO", "PDF", "OTHER"]), title: z.string().trim().max(80).nullable().optional(), description: z.string().trim().max(200).nullable().optional() }))
             .max(12)
             .nullable()
             .optional(),
