@@ -46,8 +46,40 @@ export type HeroSlide = { productId: string; kicker: string; headline: string; s
 export type TrustItem = { title: string; sub: string };
 export type StoreFaq = { question: string; answer: string };
 
-export type ProductOverride = { imageUrl?: string | null; category?: string | null; shortDescription?: string | null; sortOrder?: number | null };
+export type StoreMediaType = "IMAGE" | "VIDEO" | "PDF" | "OTHER";
+export type StoreMediaItem = { url: string; type: StoreMediaType; title?: string | null };
+export type ProductOverride = {
+  imageUrl?: string | null;
+  /** Compatibilidad: una sola categoría (se lee como [category]). */
+  category?: string | null;
+  /** Varias categorías tipo etiquetas (hasta 6). */
+  categories?: string[] | null;
+  shortDescription?: string | null;
+  sortOrder?: number | null;
+  /** Recursos de muestra en la ficha (PDF, video, imágenes); opt-in. */
+  media?: StoreMediaItem[] | null;
+};
 export type ProductOverrides = Record<string, ProductOverride>;
+
+const MEDIA_TYPES: StoreMediaType[] = ["IMAGE", "VIDEO", "PDF", "OTHER"];
+
+/** Categorías efectivas de un producto en la tienda: override (lista o única) o la del producto. */
+function categoriesOf(ov: ProductOverride | undefined, productCategory: string | null | undefined): string[] {
+  const raw = ov?.categories?.length ? ov.categories : ov?.category ? [ov.category] : productCategory ? [productCategory] : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const c of raw) {
+    const t = String(c ?? "").trim();
+    if (!t || seen.has(t.toLowerCase())) continue;
+    seen.add(t.toLowerCase());
+    out.push(t);
+  }
+  return out.slice(0, 6);
+}
+
+function mediaOf(ov: ProductOverride | undefined): StoreMediaItem[] {
+  return (ov?.media ?? []).filter((m) => m && typeof m.url === "string" && MEDIA_TYPES.includes(m.type)).slice(0, 12);
+}
 
 function overridesOf(cfg: { productOverrides?: unknown }): ProductOverrides {
   const v = cfg.productOverrides;
@@ -197,12 +229,15 @@ export async function getPublicStore(slug: string) {
         ...(cover ? [{ url: cover, description: "" }] : []),
         ...p.files.filter((f) => f.type === "IMAGE" && f.showInPresentation && f.url !== cover).map((f) => ({ url: f.url, description: f.description || "" })),
       ];
+      const categories = categoriesOf(ov, b.category);
       return {
         p,
         b,
         ov,
         images,
-        category: (ov?.category ?? b.category ?? "").trim() || null,
+        categories,
+        category: categories[0] ?? null,
+        recursos: mediaOf(ov).map((m) => ({ type: m.type, url: m.url, title: (m.title ?? "").trim() || null })),
         shortDescription: (ov?.shortDescription ?? "").trim() || b.shortDescription,
         order: typeof ov?.sortOrder === "number" ? ov.sortOrder : 1000 + idx,
       };
@@ -227,7 +262,7 @@ export async function getPublicStore(slug: string) {
         discountPct: discountPct(b.price, b.regularPrice),
       };
     });
-  const categorias = Array.from(new Set(mapped.map((x) => x.category ?? "").filter(Boolean)));
+  const categorias = Array.from(new Set(mapped.flatMap((x) => x.categories)));
   return {
     pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual },
     portada: { slides, autoplay: cfg.carouselAutoplay, intervalSec: cfg.carouselIntervalSec },
@@ -247,7 +282,7 @@ export async function getPublicStore(slug: string) {
       currency: company.currency,
       whatsappNumber: cfg.whatsappNumber ? cfg.whatsappNumber.replace(/\D/g, "") || null : null,
     },
-    productos: mapped.map(({ p, b, images, category, shortDescription }) => {
+    productos: mapped.map(({ p, b, images, category, categories, recursos, shortDescription }) => {
       return {
         id: b.id,
         slug: b.slug,
@@ -264,6 +299,8 @@ export async function getPublicStore(slug: string) {
         shortDescription,
         fullDescription: b.fullDescription,
         category,
+        categories,
+        recursos,
         benefits: b.benefits,
         includes: b.includes,
         bonuses: b.bonuses,
@@ -1048,7 +1085,7 @@ export async function deliveryFileLinks(companyId: string, productIds: string[],
 // Analítica ligera (StoreEvent) y upsell post-compra
 // ---------------------------------------------------------------------------
 
-export const STORE_EVENT_TYPES = ["VIEW", "PRODUCT_VIEW", "ADD_TO_CART", "CHECKOUT", "WA_CLICK", "PURCHASE", "DOWNLOAD"] as const;
+export const STORE_EVENT_TYPES = ["VIEW", "PRODUCT_VIEW", "ADD_TO_CART", "CHECKOUT", "WA_CLICK", "PURCHASE", "DOWNLOAD", "RESOURCE_VIEW"] as const;
 export type StoreEventType = (typeof STORE_EVENT_TYPES)[number];
 const STORE_EVENT_RETENTION_DAYS = 180;
 
@@ -1089,9 +1126,9 @@ export async function storeMetrics(companyId: string, days = 30) {
     select: { type: true, productId: true, sessionId: true },
   });
   const sessions = new Set<string>();
-  const count: Record<StoreEventType, number> = { VIEW: 0, PRODUCT_VIEW: 0, ADD_TO_CART: 0, CHECKOUT: 0, WA_CLICK: 0, PURCHASE: 0, DOWNLOAD: 0 };
+  const count: Record<StoreEventType, number> = { VIEW: 0, PRODUCT_VIEW: 0, ADD_TO_CART: 0, CHECKOUT: 0, WA_CLICK: 0, PURCHASE: 0, DOWNLOAD: 0, RESOURCE_VIEW: 0 };
   const buyers = new Set<string>();
-  const byProduct = new Map<string, { vistas: number; carrito: number; checkouts: number; compras: number; whatsapp: number }>();
+  const byProduct = new Map<string, { vistas: number; carrito: number; checkouts: number; compras: number; whatsapp: number; muestras: number }>();
   for (const e of events) {
     sessions.add(e.sessionId);
     const t = e.type as StoreEventType;
@@ -1100,7 +1137,7 @@ export async function storeMetrics(companyId: string, days = 30) {
     if (e.productId) {
       let p = byProduct.get(e.productId);
       if (!p) {
-        p = { vistas: 0, carrito: 0, checkouts: 0, compras: 0, whatsapp: 0 };
+        p = { vistas: 0, carrito: 0, checkouts: 0, compras: 0, whatsapp: 0, muestras: 0 };
         byProduct.set(e.productId, p);
       }
       if (t === "PRODUCT_VIEW") p.vistas += 1;
@@ -1108,6 +1145,7 @@ export async function storeMetrics(companyId: string, days = 30) {
       else if (t === "CHECKOUT") p.checkouts += 1;
       else if (t === "PURCHASE") p.compras += 1;
       else if (t === "WA_CLICK") p.whatsapp += 1;
+      else if (t === "RESOURCE_VIEW") p.muestras += 1;
     }
   }
   const [orders, pending, names] = await Promise.all([
@@ -1342,11 +1380,21 @@ export async function updateStorefrontConfig(
       if (!prod || !ov) continue;
       const own = prod.files.some((f) => f.url === ov.imageUrl);
       if (ov.imageUrl && !own && !isOwnUpload(ov.imageUrl)) throw new AppError("La portada debe ser un archivo subido a FlowApp", 400);
+      const categories = categoriesOf({ categories: ov.categories ?? null, category: ov.category ?? null }, null).map((c) => c.slice(0, 40));
+      const media: StoreMediaItem[] = [];
+      for (const m of (ov.media ?? []).slice(0, 12)) {
+        if (!m || typeof m.url !== "string") continue;
+        const url = m.url.trim();
+        if (!url) continue;
+        if (!isOwnUpload(url) || url.includes("/api/public/dl/")) throw new AppError("Los recursos deben ser archivos públicos subidos a FlowApp", 400);
+        media.push({ url, type: MEDIA_TYPES.includes(m.type) ? m.type : "OTHER", title: (m.title ?? "").trim().slice(0, 80) || null });
+      }
       const clean: ProductOverride = {
         ...(ov.imageUrl ? { imageUrl: ov.imageUrl } : {}),
-        ...(ov.category?.trim() ? { category: ov.category.trim().slice(0, 40) } : {}),
+        ...(categories.length ? { categories } : {}),
         ...(ov.shortDescription?.trim() ? { shortDescription: ov.shortDescription.trim().slice(0, 160) } : {}),
         ...(typeof ov.sortOrder === "number" && Number.isFinite(ov.sortOrder) ? { sortOrder: Math.round(ov.sortOrder) } : {}),
+        ...(media.length ? { media } : {}),
       };
       if (Object.keys(clean).length) productOverrides[pid] = clean;
     }
@@ -1479,11 +1527,16 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
           name: p.name,
           // Valores del PRODUCTO (base) + override de la tienda por separado, para el modal.
           category: b.category ?? null,
+          categories: categoriesOf(ov, b.category),
           shortDescription: b.shortDescription,
           priceText: b.priceText ?? b.price,
           regularPriceText: b.regularPriceText,
           imageUrl: storeImageOf(p, ov),
           images: p.files.filter((f) => f.type === "IMAGE" && f.showInPresentation).map((f) => f.url),
+          // Archivos públicos del producto (para elegir recursos de muestra); los privados no tienen URL pública.
+          files: p.files
+            .filter((f) => !f.privateDownload)
+            .map((f) => ({ id: f.id, url: f.url, type: f.type, name: f.originalName || f.description || f.url.split("/").pop() || "archivo", description: f.description, showInPresentation: f.showInPresentation })),
           override: ov ?? null,
           order: typeof ov?.sortOrder === "number" ? ov.sortOrder : 1000 + idx,
         };
