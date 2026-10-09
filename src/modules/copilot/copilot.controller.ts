@@ -56,7 +56,7 @@ import { listCampaigns, createCampaign, updateCampaign, startCampaign, testCampa
 import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
 import { listSubscriptions } from "../subscriptions/subscriptions.service";
 import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
-import { approveStoreOrder, getStorefrontConfig, listStoreOrders, rejectStoreOrder, storeMetrics, updateStorefrontConfig } from "../storefront/storefront.service";
+import { approveStoreOrder, createCoupon, getStorefrontConfig, listCoupons, listStoreOrders, rejectStoreOrder, storeMetrics, updateCoupon, updateStorefrontConfig } from "../storefront/storefront.service";
 import { updateStorefrontConfigSchema } from "../storefront/storefront.schemas";
 import { normalizeQuietHours, normalizePacing } from "../scheduler/quiet-hours";
 import { ScheduledMessageStatus } from "@prisma/client";
@@ -591,6 +591,48 @@ export const TOOLS: ToolDefinition[] = [
           orderId: { type: "string", description: "id del pedido" },
           motivo: { type: "string", description: "motivo del rechazo (se guarda en el pedido)" },
         },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_cupones",
+      description: "Lista los CUPONES de descuento de la tienda web (código, tipo PERCENT/FIXED, valor, productos a los que aplica, usos/máximo, vencimiento, activo).",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "crear_cupon",
+      description:
+        "Crea un CUPÓN de descuento para la tienda web. {code (3-30 caracteres, se guarda en MAYÚSCULAS), type: 'PERCENT' (value = % 1-100) | 'FIXED' (value = monto en la moneda del negocio), value, productIds? (uuid[]; vacío = todos los productos), maxUses? (límite de usos), expiresAt? (fecha-hora ISO)}. El comprador lo escribe en el checkout de la tienda; el descuento se aplica sobre el precio de lista y el uso se cuenta al pagar. Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["code", "type", "value"],
+        properties: {
+          code: { type: "string" },
+          type: { type: "string", enum: ["PERCENT", "FIXED"] },
+          value: { type: "number" },
+          productIds: { type: "array", items: { type: "string" } },
+          maxUses: { type: "number" },
+          expiresAt: { type: "string" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "desactivar_cupon",
+      description: "Desactiva (active=false) o reactiva (active=true) un cupón de la tienda web por id (ver_cupones). Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["couponId"],
+        properties: { couponId: { type: "string" }, active: { type: "boolean", description: "default false (desactivar)" } },
       },
     },
   },
@@ -2120,6 +2162,32 @@ export async function runCopilotTool(
       };
     }
 
+    case "ver_cupones": {
+      return { result: JSON.stringify({ cupones: await listCoupons(companyId) }), wrote: false };
+    }
+
+    case "crear_cupon": {
+      const type = args.type === "FIXED" ? "FIXED" : "PERCENT";
+      const value = Number(args.value);
+      if (!asStr(args.code) || !Number.isFinite(value)) return { result: JSON.stringify({ ok: false, error: "faltan code/value" }), wrote: false };
+      const c = await createCoupon(companyId, {
+        code: asStr(args.code)!,
+        type,
+        value,
+        productIds: asStrList(args.productIds) ?? [],
+        maxUses: typeof args.maxUses === "number" ? args.maxUses : null,
+        expiresAt: asStr(args.expiresAt) ?? null,
+      });
+      return { result: JSON.stringify({ ok: true, cupon: c, nota: "El comprador escribe el código en el checkout de la tienda web." }), wrote: true };
+    }
+
+    case "desactivar_cupon": {
+      const id = asStr(args.couponId) ?? "";
+      if (!id) return { result: JSON.stringify({ ok: false, error: "falta couponId" }), wrote: false };
+      const c = await updateCoupon(companyId, id, { active: typeof args.active === "boolean" ? args.active : false });
+      return { result: JSON.stringify({ ok: true, cupon: c }), wrote: true };
+    }
+
     case "aprobar_pedido_tienda": {
       const orderId = asStr(args.orderId) ?? "";
       if (!orderId) return { result: JSON.stringify({ ok: false, error: "falta orderId" }), wrote: false };
@@ -2641,7 +2709,7 @@ const SYSTEM_GUIDE = [
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
-  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled). La página de gracias ofrece el producto RELACIONADO (cross-sell del producto comprado, si está visible en la tienda) como upsell, y el panel muestra métricas de 30 días (ver_tienda → metricas30d). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/InitiateCheckout/Purchase) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens).",
+  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled). CUPONES: ver_cupones / crear_cupon / desactivar_cupon (también en Tienda web → Cupones); el comprador los escribe en el checkout. CUENTA REGRESIVA: si un producto tiene oferta con offerEndsAt, la tienda muestra 'Termina en hh:mm:ss' automáticamente. La página de gracias ofrece el producto RELACIONADO (cross-sell del producto comprado, si está visible en la tienda) como upsell, y el panel muestra métricas de 30 días (ver_tienda → metricas30d). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/InitiateCheckout/Purchase) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens).",
   "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
   "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en Configurar se elige POR CANAL si se usa en el cobro por chat y/o en la tienda web — p. ej. solo tienda), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",

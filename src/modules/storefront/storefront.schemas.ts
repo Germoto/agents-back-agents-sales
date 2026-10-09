@@ -20,6 +20,8 @@ export const storeCheckoutSchema = z.object({
   pageUrl: z.string().trim().max(500).optional().nullable(),
   // Sesión anónima de la tienda (analítica).
   sessionId: z.string().trim().max(64).optional().nullable(),
+  // Cupón de descuento (código).
+  coupon: z.string().trim().max(30).optional().nullable(),
 }).refine((b) => Boolean(b.productId || b.productIds?.length), { message: "Elige al menos un producto", path: ["productId"] });
 
 // POST /order/:id/receipt (multipart: file + payerName)
@@ -67,4 +69,28 @@ export const storeEventsSchema = z.object({
 
 export const storeMetricsQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(365).default(30),
+});
+
+// POST /:slug/coupon (previsualizar descuento)
+export const storeCouponPreviewSchema = z.object({
+  code: z.string().trim().min(1).max(30),
+  productIds: z.array(z.string().uuid()).min(1).max(10),
+});
+
+// Panel: cupones
+export const couponIdParamsSchema = z.object({ id: z.string().uuid() });
+export const createCouponSchema = z.object({
+  code: z.string().trim().min(3).max(30),
+  type: z.enum(["PERCENT", "FIXED"]),
+  value: z.coerce.number().positive(),
+  productIds: z.array(z.string().uuid()).max(200).optional(),
+  maxUses: z.coerce.number().int().positive().nullable().optional(),
+  expiresAt: z.string().datetime().nullable().optional(),
+  active: z.boolean().optional(),
+});
+export const updateCouponSchema = z.object({
+  active: z.boolean().optional(),
+  maxUses: z.coerce.number().int().positive().nullable().optional(),
+  expiresAt: z.string().datetime().nullable().optional(),
+  productIds: z.array(z.string().uuid()).max(200).optional(),
 });

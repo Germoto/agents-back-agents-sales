@@ -171,6 +171,8 @@ export async function getPublicStore(slug: string) {
         regularPriceText: b.regularPriceText,
         offerActive: b.offerActive,
         offerEndsText: b.offerEndsText,
+        // Para la cuenta regresiva en la tienda (null si no hay oferta vigente con fin).
+        offerEndsAt: b.offerEndsAt ? b.offerEndsAt.toISOString() : null,
         shortDescription: b.shortDescription,
         fullDescription: b.fullDescription,
         category: b.category,
@@ -288,7 +290,7 @@ export function orderProductIds(order: { productId: string; productIds: string[]
 
 export async function createStoreCheckout(
   slug: string,
-  input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod },
+  input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod; coupon?: string | null },
   client?: StoreWebClient | null,
 ) {
   const { company, cfg, ent } = await resolveStore(slug);
@@ -323,8 +325,25 @@ export async function createStoreCheckout(
     return { productId: p.id, name: p.name, unitPrice, qty: 1 };
   });
   const product = chosen[0];
-  const priceNum = Number(items.reduce((acc, it) => acc + it.unitPrice * it.qty, 0).toFixed(2));
+  const subtotal = Number(items.reduce((acc, it) => acc + it.unitPrice * it.qty, 0).toFixed(2));
   const productName = items.length > 1 ? `${product.name} +${items.length - 1} más` : product.name;
+  // Cupón: descuento sobre el precio de lista; se reparte proporcionalmente en los ítems
+  // (Mercado Pago no acepta ítems negativos) y se cuenta el uso recién al pagar.
+  const coupon = input.coupon?.trim() ? await validateCoupon(companyId, input.coupon, items.map((it) => it.productId), subtotal) : null;
+  if (coupon && coupon.discount > 0) {
+    const factor = (subtotal - coupon.discount) / subtotal;
+    let acc = 0;
+    items.forEach((it, i) => {
+      if (i < items.length - 1) {
+        it.unitPrice = Number((it.unitPrice * factor).toFixed(2));
+        acc += it.unitPrice;
+      } else {
+        it.unitPrice = Number((subtotal - coupon.discount - acc).toFixed(2));
+      }
+    });
+  }
+  const priceNum = Number(items.reduce((acc, it) => acc + it.unitPrice * it.qty, 0).toFixed(2));
+  if (priceNum <= 0) throw new AppError("El total del pedido debe ser mayor a 0", 409);
   // Yape/Plin: precio de lista exacto (sin recargo). MP: link con la comisión según config.
   const linkAmount =
     method === "MANUAL" || !pc
@@ -381,7 +400,12 @@ export async function createStoreCheckout(
       currency: company.currency,
       paymentMethod: method,
       accessToken,
-      metadata: { listPrice: priceNum, feeMode: pc?.mpFeeMode ?? null, ...(client ? { web: client } : {}) },
+      metadata: {
+        listPrice: subtotal,
+        feeMode: pc?.mpFeeMode ?? null,
+        ...(coupon ? { coupon: { couponId: coupon.couponId, code: coupon.code, discount: coupon.discount } } : {}),
+        ...(client ? { web: client } : {}),
+      },
     },
   });
 
@@ -400,6 +424,7 @@ export async function createStoreCheckout(
       feeIncluded: false,
       metodos: pay.manual,
       items,
+      descuento: coupon ? { code: coupon.code, amount: coupon.discount } : null,
     };
   }
 
@@ -443,6 +468,7 @@ export async function createStoreCheckout(
     feeIncluded: linkAmount > priceNum,
     metodos: [] as { method: string; number: string; holder: string }[],
     items,
+    descuento: coupon ? { code: coupon.code, amount: coupon.discount } : null,
   };
 }
 
@@ -530,6 +556,7 @@ export async function fulfillStoreOrder(
   const amountText = `${symbolFor(order.currency)} ${opts.paid.toFixed(2)}`;
 
   void recordPurchaseEvent(order);
+  void consumeCoupon(order);
 
   // Meta CAPI (Purchase de la tienda web). Best-effort, dedupe con el píxel por event_id.
   void reportStorePurchase({
@@ -1030,6 +1057,125 @@ async function upsellFor(companyId: string, productIds: string[], cfgProductIds:
 }
 
 // ---------------------------------------------------------------------------
+// Cupones de descuento
+// ---------------------------------------------------------------------------
+
+export function normalizeCouponCode(code: string): string {
+  return code.trim().toUpperCase().replace(/\s+/g, "").slice(0, 30);
+}
+
+type CouponResult = { couponId: string; code: string; type: string; value: number; discount: number };
+
+/** Valida un cupón para unos productos y un subtotal. Lanza 400 con el motivo si no aplica. */
+export async function validateCoupon(companyId: string, codeRaw: string, productIds: string[], subtotal: number): Promise<CouponResult> {
+  const code = normalizeCouponCode(codeRaw);
+  if (!code) throw new AppError("Escribe el código del cupón", 400);
+  const c = await prisma.coupon.findUnique({ where: { companyId_code: { companyId, code } } });
+  if (!c || !c.active) throw new AppError("Ese cupón no existe o ya no está activo", 400);
+  if (c.expiresAt && c.expiresAt.getTime() < Date.now()) throw new AppError("Ese cupón ya venció", 400);
+  if (c.maxUses !== null && c.uses >= c.maxUses) throw new AppError("Ese cupón ya alcanzó su límite de usos", 400);
+  if (c.productIds.length && !productIds.some((id) => c.productIds.includes(id))) {
+    throw new AppError("Ese cupón no aplica a los productos elegidos", 400);
+  }
+  const value = Number(c.value);
+  const discount = c.type === "FIXED" ? Math.min(value, subtotal) : Math.min(subtotal, (subtotal * value) / 100);
+  return { couponId: c.id, code: c.code, type: c.type, value, discount: Number(discount.toFixed(2)) };
+}
+
+/** Público: previsualiza el descuento de un cupón para el carrito actual. */
+export async function previewCoupon(slug: string, code: string, productIds: string[]) {
+  const { company, cfg } = await resolveStore(slug);
+  const eligible = await eligibleProducts(company.id, cfg.productIds);
+  const chosen = eligible.filter((p) => productIds.includes(p.id));
+  if (!chosen.length) throw new AppError("Producto no disponible", 404);
+  const symbol = symbolFor(company.currency);
+  const subtotal = chosen.reduce((acc, p) => acc + parsePrice(mapBotProduct(p, { currencySymbol: symbol, timezone: company.timezone }).price), 0);
+  const r = await validateCoupon(company.id, code, chosen.map((p) => p.id), subtotal);
+  const total = Number((subtotal - r.discount).toFixed(2));
+  return {
+    valid: true,
+    code: r.code,
+    discount: r.discount,
+    discountText: `${symbol} ${r.discount.toFixed(2)}`,
+    total,
+    totalText: `${symbol} ${total.toFixed(2)}`,
+    descripcion: r.type === "PERCENT" ? `${r.value}% de descuento` : `${symbol} ${r.value.toFixed(2)} de descuento`,
+  };
+}
+
+/** Al pagar: cuenta el uso del cupón una sola vez por pedido. */
+async function consumeCoupon(order: StoreOrderRow) {
+  const md = (order.metadata ?? {}) as { coupon?: { couponId?: string }; couponCounted?: boolean };
+  if (!md.coupon?.couponId || md.couponCounted) return;
+  await prisma.coupon.update({ where: { id: md.coupon.couponId }, data: { uses: { increment: 1 } } }).catch(() => undefined);
+  await prisma.storeOrder.update({ where: { id: order.id }, data: { metadata: { ...(md as object), couponCounted: true } } }).catch(() => undefined);
+}
+
+// Panel: CRUD
+function serializeCoupon(c: { id: string; code: string; type: string; value: unknown; productIds: string[]; maxUses: number | null; uses: number; expiresAt: Date | null; active: boolean; createdAt: Date }) {
+  return { id: c.id, code: c.code, type: c.type, value: Number(c.value), productIds: c.productIds, maxUses: c.maxUses, uses: c.uses, expiresAt: c.expiresAt, active: c.active, createdAt: c.createdAt };
+}
+
+export async function listCoupons(companyId: string) {
+  const rows = await prisma.coupon.findMany({ where: { companyId }, orderBy: { createdAt: "desc" } });
+  return rows.map(serializeCoupon);
+}
+
+export async function createCoupon(
+  companyId: string,
+  data: { code: string; type: "PERCENT" | "FIXED"; value: number; productIds?: string[]; maxUses?: number | null; expiresAt?: string | null; active?: boolean },
+) {
+  const code = normalizeCouponCode(data.code);
+  if (code.length < 3) throw new AppError("El código debe tener al menos 3 caracteres", 400);
+  if (data.type === "PERCENT" && (data.value <= 0 || data.value > 100)) throw new AppError("El porcentaje debe estar entre 1 y 100", 400);
+  if (data.type === "FIXED" && data.value <= 0) throw new AppError("El monto debe ser mayor a 0", 400);
+  try {
+    const c = await prisma.coupon.create({
+      data: {
+        companyId,
+        code,
+        type: data.type,
+        value: new Prisma.Decimal(data.value.toFixed(2)),
+        productIds: data.productIds ?? [],
+        maxUses: data.maxUses ?? null,
+        expiresAt: data.expiresAt ? new Date(data.expiresAt) : null,
+        active: data.active ?? true,
+      },
+    });
+    return serializeCoupon(c);
+  } catch (err) {
+    if ((err as { code?: string })?.code === "P2002") throw new AppError("Ya existe un cupón con ese código", 409);
+    throw err;
+  }
+}
+
+export async function updateCoupon(
+  companyId: string,
+  id: string,
+  data: { active?: boolean; maxUses?: number | null; expiresAt?: string | null; productIds?: string[] },
+) {
+  const c = await prisma.coupon.findFirst({ where: { id, companyId } });
+  if (!c) throw new AppError("Cupón no encontrado", 404);
+  const u = await prisma.coupon.update({
+    where: { id },
+    data: {
+      ...(data.active !== undefined ? { active: data.active } : {}),
+      ...(data.maxUses !== undefined ? { maxUses: data.maxUses } : {}),
+      ...(data.expiresAt !== undefined ? { expiresAt: data.expiresAt ? new Date(data.expiresAt) : null } : {}),
+      ...(data.productIds !== undefined ? { productIds: data.productIds } : {}),
+    },
+  });
+  return serializeCoupon(u);
+}
+
+export async function deleteCoupon(companyId: string, id: string) {
+  const c = await prisma.coupon.findFirst({ where: { id, companyId } });
+  if (!c) throw new AppError("Cupón no encontrado", 404);
+  await prisma.coupon.delete({ where: { id } });
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
 // Panel del tenant
 // ---------------------------------------------------------------------------
 
@@ -1195,6 +1341,7 @@ function serializeOrderRow(o: OrderRowSel) {
     failureReason: o.failureReason,
     createdAt: o.createdAt,
     customerId: o.customerId,
+    cupon: (md.coupon as { code?: string; discount?: number } | undefined)?.code ?? null,
     // Lo que la visión leyó del comprobante (ayuda al dueño a revisar).
     comprobante: r ? { montoLeido: r.amountText, operacion: r.operationNumber, codigo: r.securityCode } : null,
   };

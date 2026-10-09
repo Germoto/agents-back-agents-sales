@@ -3,7 +3,12 @@ import type { StoreOrderStatus } from "@prisma/client";
 import { AppError } from "../../lib/app-error";
 import {
   approveStoreOrder,
+  createCoupon,
   createStoreCheckout,
+  deleteCoupon,
+  listCoupons,
+  previewCoupon,
+  updateCoupon,
   getPublicOrder,
   getPublicStore,
   getStoreOgHtml,
@@ -72,7 +77,25 @@ export async function storeEventsController(req: Request, res: Response) {
   return res.json(await recordStoreEvents(String(req.params.slug), body.sessionId, body.events));
 }
 
+export async function storeCouponPreviewController(req: Request, res: Response) {
+  const body = req.body as { code: string; productIds: string[] };
+  return res.json(await previewCoupon(String(req.params.slug), body.code, body.productIds));
+}
+
 // ---------------- Panel ----------------
+
+export async function listCouponsController(req: Request, res: Response) {
+  return res.json(await listCoupons(req.user!.companyId));
+}
+export async function createCouponController(req: Request, res: Response) {
+  return res.status(201).json(await createCoupon(req.user!.companyId, req.body));
+}
+export async function updateCouponController(req: Request, res: Response) {
+  return res.json(await updateCoupon(req.user!.companyId, String(req.params.id), req.body));
+}
+export async function deleteCouponController(req: Request, res: Response) {
+  return res.json(await deleteCoupon(req.user!.companyId, String(req.params.id)));
+}
 
 export async function storeMetricsController(req: Request, res: Response) {
   return res.json(await storeMetrics(req.user!.companyId, Number(req.query.days) || 30));

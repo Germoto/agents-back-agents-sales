@@ -194,6 +194,7 @@ model Company {
   storefront           StorefrontConfig?
   storeOrders          StoreOrder[]
   storeEvents          StoreEvent[]
+  coupons              Coupon[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
   crms                 Crm[]
@@ -1688,6 +1689,28 @@ model StorefrontConfig {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+/// Cupones de descuento de la tienda web (por empresa; código único en mayúsculas).
+model Coupon {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String    @db.Uuid
+  code       String
+  // PERCENT (value = %) | FIXED (value = monto en la moneda del negocio)
+  type       String    @default("PERCENT")
+  value      Decimal   @db.Decimal(12, 2)
+  // Productos a los que aplica; vacío = todos.
+  productIds String[]  @default([]) @db.Uuid
+  maxUses    Int?
+  uses       Int       @default(0)
+  expiresAt  DateTime?
+  active     Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, code])
+  @@index([companyId, active])
 }
 
 /// Eventos de la tienda web (analítica ligera): visitas, vistas de producto, carrito,
