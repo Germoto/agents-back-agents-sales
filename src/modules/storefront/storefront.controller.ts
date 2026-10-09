@@ -6,6 +6,7 @@ import {
   createStoreCheckout,
   getPublicOrder,
   getPublicStore,
+  getStoreOgHtml,
   getStorefrontConfig,
   listStoreOrders,
   rejectStoreOrder,
@@ -21,6 +22,16 @@ export async function tlsAskController(req: Request, res: Response) {
   const domain = String(req.query.domain ?? "");
   const ok = domain ? await tlsAsk(domain) : false;
   return res.status(ok ? 200 : 404).send(ok ? "ok" : "not found");
+}
+
+/** Preview Open Graph para bots (Caddy reescribe aquí las visitas de WhatsApp/Meta/Telegram). */
+export async function storeOgController(req: Request, res: Response) {
+  const host = String(req.query.host ?? req.headers["x-forwarded-host"] ?? req.headers.host ?? "");
+  const path = String(req.query.path ?? "/");
+  const html = await getStoreOgHtml(host, path);
+  if (!html) return res.status(404).type("text/plain").send("not found");
+  res.setHeader("Cache-Control", "public, max-age=300");
+  return res.type("text/html").send(html);
 }
 
 export async function getPublicStoreController(req: Request, res: Response) {

@@ -9,6 +9,7 @@ import {
   getPublicOrderController,
   getPublicStoreController,
   storeCheckoutController,
+  storeOgController,
   storeReceiptController,
   tlsAskController,
 } from "./storefront.controller";
@@ -23,6 +24,8 @@ const receiptLimiter = makeRateLimiter({ windowMs: 15 * 60_000, max: 5, message:
 
 // Caddy on_demand_tls `ask`: ¿este subdominio tiene tienda activa?
 router.get("/tls-ask", asyncHandler(tlsAskController));
+// Preview al compartir (bots): ?host=<slug>.flowapp.pe&path=/p/<producto>
+router.get("/og", catalogLimiter, asyncHandler(storeOgController));
 router.get("/order/:id", orderLimiter, validate({ params: storeOrderParamsSchema, query: storeOrderQuerySchema }), asyncHandler(getPublicOrderController));
 // Comprobante Yape/Plin: el acceso (id + token) se valida ANTES de recibir el archivo.
 router.post(

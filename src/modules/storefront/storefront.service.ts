@@ -186,6 +186,82 @@ export async function getPublicStore(slug: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Previews al compartir (Open Graph) — HTML mínimo para los bots de WhatsApp/Meta
+// ---------------------------------------------------------------------------
+
+function escapeHtml(v: string): string {
+  return v.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c);
+}
+
+/** Slug de tienda a partir del host (subdominio) o del path (/tienda/<slug>/...). */
+export function storeSlugFromHostOrPath(host: string, path: string): { slug: string; rest: string } | null {
+  const h = host.trim().toLowerCase().split(":")[0];
+  if (env.STORE_DOMAIN && h.endsWith(`.${env.STORE_DOMAIN}`)) {
+    const slug = h.slice(0, -(env.STORE_DOMAIN.length + 1));
+    if (!PLATFORM_HOSTS.has(slug) && isValidStoreSlug(slug)) return { slug, rest: path };
+  }
+  const m = /^\/tienda\/([a-z0-9-]+)(\/.*)?$/i.exec(path);
+  if (m) return { slug: m[1].toLowerCase(), rest: m[2] ?? "/" };
+  return null;
+}
+
+/**
+ * HTML con etiquetas Open Graph para la tienda o un producto (`/p/<slug>`), con
+ * redirección inmediata a la misma URL para humanos. Caddy enruta aquí solo a los
+ * bots (User-Agent de WhatsApp, Facebook, Telegram, etc.); sin esa regla la tienda
+ * funciona igual, solo no hay preview al compartir el link.
+ */
+export async function getStoreOgHtml(host: string, path: string): Promise<string | null> {
+  const target = storeSlugFromHostOrPath(host, path);
+  if (!target) return null;
+  let resolved;
+  try {
+    resolved = await resolveStore(target.slug);
+  } catch {
+    return null;
+  }
+  const { company, cfg } = resolved;
+  const base = storeUrl(company.slug);
+  const symbol = symbolFor(company.currency);
+  const title0 = cfg.title || company.name;
+
+  let title = title0;
+  let description = cfg.tagline || `Tienda online de ${company.name}`;
+  let image = cfg.logoUrl || "";
+  let url = base;
+
+  const pm = /^\/p\/([^/?#]+)/.exec(target.rest || "/");
+  if (pm) {
+    const key = decodeURIComponent(pm[1]);
+    const products = await eligibleProducts(company.id, cfg.productIds);
+    const product = products.find((p) => p.slug === key || p.id === key);
+    if (product) {
+      const b = mapBotProduct(product, { currencySymbol: symbol, timezone: company.timezone });
+      title = `${product.name} · ${title0}`;
+      const price = b.priceText ?? b.price;
+      description = [price ? `${price}` : null, b.shortDescription || b.fullDescription?.slice(0, 160) || null].filter(Boolean).join(" — ");
+      const img = product.files.find((f) => f.type === "IMAGE" && f.showInPresentation);
+      if (img) image = img.url;
+      url = `${base}/p/${encodeURIComponent(product.slug)}`;
+    }
+  }
+
+  const t = escapeHtml(title);
+  const d = escapeHtml(description.slice(0, 300));
+  const u = escapeHtml(url);
+  const img = image ? `<meta property="og:image" content="${escapeHtml(image)}"><meta name="twitter:image" content="${escapeHtml(image)}">` : "";
+  return (
+    `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${t}</title>` +
+    `<meta name="description" content="${d}">` +
+    `<meta property="og:type" content="${pm ? "product" : "website"}"><meta property="og:site_name" content="${escapeHtml(title0)}">` +
+    `<meta property="og:title" content="${t}"><meta property="og:description" content="${d}"><meta property="og:url" content="${u}">${img}` +
+    `<meta name="twitter:card" content="${image ? "summary_large_image" : "summary"}"><meta name="twitter:title" content="${t}"><meta name="twitter:description" content="${d}">` +
+    `<meta http-equiv="refresh" content="0;url=${u}"><link rel="canonical" href="${u}"></head>` +
+    `<body><a href="${u}">${t}</a></body></html>`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Checkout (Mercado Pago)
 // ---------------------------------------------------------------------------
 
