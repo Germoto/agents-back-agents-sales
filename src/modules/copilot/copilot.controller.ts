@@ -56,7 +56,7 @@ import { listCampaigns, createCampaign, updateCampaign, startCampaign, testCampa
 import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
 import { listSubscriptions } from "../subscriptions/subscriptions.service";
 import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
-import { approveStoreOrder, getStorefrontConfig, listStoreOrders, rejectStoreOrder, updateStorefrontConfig } from "../storefront/storefront.service";
+import { approveStoreOrder, getStorefrontConfig, listStoreOrders, rejectStoreOrder, storeMetrics, updateStorefrontConfig } from "../storefront/storefront.service";
 import { updateStorefrontConfigSchema } from "../storefront/storefront.schemas";
 import { normalizeQuietHours, normalizePacing } from "../scheduler/quiet-hours";
 import { ScheduledMessageStatus } from "@prisma/client";
@@ -542,7 +542,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "ver_tienda",
       description:
-        "TIENDA WEB pública del negocio (<slug>.flowapp.pe): devuelve si está activa, su URL, el checklist de requisitos (identificador/slug válido, módulos del plan, Mercado Pago configurado, Yape/Plin disponible = métodos manuales de Pagos + opción de la tienda, productos elegibles = digitales con entrega por correo activa, productos que faltan por habilitar), la configuración visual, los últimos pedidos web con su estado (PENDIENTE/EN_REVISION/PAGADO/ENTREGADO/FALLIDO) y los pedidos EN_REVISION (comprobante Yape/Plin subido sin validación automática: incluye id, comprador, monto, nombre del pagador, lo que la visión leyó y la URL del comprobante). Úsala antes de proponer cambios, cuando pregunten por ventas de la tienda o antes de aprobar/rechazar un pedido.",
+        "TIENDA WEB pública del negocio (<slug>.flowapp.pe): devuelve si está activa, su URL, el checklist de requisitos (identificador/slug válido, módulos del plan, Mercado Pago configurado, Yape/Plin disponible = métodos manuales de Pagos + opción de la tienda, productos elegibles = digitales con entrega por correo activa, productos que faltan por habilitar), la configuración visual, los últimos pedidos web con su estado (PENDIENTE/EN_REVISION/PAGADO/ENTREGADO/FALLIDO), las MÉTRICAS de 30 días (visitas únicas, vistas de producto, carrito, checkouts, clics a WhatsApp, compras, ingresos, conversión % y tabla por producto) y los pedidos EN_REVISION (comprobante Yape/Plin subido sin validación automática: incluye id, comprador, monto, nombre del pagador, lo que la visión leyó y la URL del comprobante). Úsala antes de proponer cambios, cuando pregunten por ventas de la tienda o antes de aprobar/rechazar un pedido.",
       parameters: { type: "object", additionalProperties: false, properties: { pedidos: { type: "number", description: "cuántos pedidos recientes incluir (default 10, máx 50)" } } },
     },
   },
@@ -2077,9 +2077,10 @@ export async function runCopilotTool(
     case "ver_tienda": {
       const cfg = await getStorefrontConfig(companyId);
       const limit = Math.min(Math.max(Number(args.pedidos) || 10, 1), 50);
-      const [orders, review] = await Promise.all([
+      const [orders, review, metricas30d] = await Promise.all([
         listStoreOrders(companyId, 1, limit),
         listStoreOrders(companyId, 1, 20, "EN_REVISION"),
+        storeMetrics(companyId, 30).catch(() => null),
       ]);
       return {
         result: JSON.stringify({
@@ -2099,6 +2100,7 @@ export async function runCopilotTool(
             productosSinEntregaPorCorreo: cfg.status.productosSinCorreo,
           },
           config: { title: cfg.title, tagline: cfg.tagline, accentColor: cfg.accentColor, logoUrl: cfg.logoUrl, whatsappNumber: cfg.whatsappNumber, productIds: cfg.productIds, manualPaymentsEnabled: cfg.manualPaymentsEnabled },
+          metricas30d,
           pedidosEnRevision: review.items.map((o) => ({
             id: o.id,
             fecha: o.createdAt,
@@ -2639,7 +2641,7 @@ const SYSTEM_GUIDE = [
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
-  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/InitiateCheckout/Purchase) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens).",
+  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled). La página de gracias ofrece el producto RELACIONADO (cross-sell del producto comprado, si está visible en la tienda) como upsell, y el panel muestra métricas de 30 días (ver_tienda → metricas30d). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/InitiateCheckout/Purchase) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens).",
   "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
   "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en Configurar se elige POR CANAL si se usa en el cobro por chat y/o en la tienda web — p. ej. solo tienda), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",

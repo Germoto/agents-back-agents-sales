@@ -179,7 +179,7 @@ export async function storePixelId(companyId: string): Promise<string | null> {
   return config?.enabled && config.pixelEnabled && config.datasetId ? config.datasetId : null;
 }
 
-export type StoreWebClient = { ip?: string | null; ua?: string | null; fbp?: string | null; fbc?: string | null; url?: string | null };
+export type StoreWebClient = { ip?: string | null; ua?: string | null; fbp?: string | null; fbc?: string | null; url?: string | null; sessionId?: string | null };
 
 /**
  * Purchase de la TIENDA WEB por CAPI (action_source website). event_id = id del

@@ -6,9 +6,10 @@
  */
 
 import cron from "node-cron";
-import { recheckStoreOrdersInReview } from "./storefront.service";
+import { purgeOldStoreEvents, recheckStoreOrdersInReview } from "./storefront.service";
 
 let running = false;
+let lastPurgeDay = "";
 
 export function startStorefrontWorker() {
   cron.schedule("* * * * *", async () => {
@@ -16,6 +17,13 @@ export function startStorefrontWorker() {
     running = true;
     try {
       await recheckStoreOrdersInReview();
+      // Purga diaria de eventos de analítica (> 180 días).
+      const day = new Date().toISOString().slice(0, 10);
+      if (day !== lastPurgeDay) {
+        lastPurgeDay = day;
+        const n = await purgeOldStoreEvents();
+        if (n) console.log(`[storefront] purgados ${n} eventos antiguos`);
+      }
     } catch (err) {
       console.error("[storefront] worker error:", err instanceof Error ? err.message : err);
     } finally {

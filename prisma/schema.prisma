@@ -193,6 +193,7 @@ model Company {
   platformPayments     PlatformPayment[]
   storefront           StorefrontConfig?
   storeOrders          StoreOrder[]
+  storeEvents          StoreEvent[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
   crms                 Crm[]
@@ -1687,6 +1688,22 @@ model StorefrontConfig {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+/// Eventos de la tienda web (analítica ligera): visitas, vistas de producto, carrito,
+/// checkouts, clics a WhatsApp y compras. Se purgan a los 180 días.
+model StoreEvent {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String   @db.Uuid
+  type      String
+  productId String?  @db.Uuid
+  orderId   String?  @db.Uuid
+  sessionId String
+  createdAt DateTime @default(now())
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, createdAt])
+  @@index([companyId, type, createdAt])
 }
 
 enum StoreOrderStatus {

@@ -18,6 +18,8 @@ export const storeCheckoutSchema = z.object({
   fbp: z.string().trim().max(120).optional().nullable(),
   fbc: z.string().trim().max(300).optional().nullable(),
   pageUrl: z.string().trim().max(500).optional().nullable(),
+  // Sesión anónima de la tienda (analítica).
+  sessionId: z.string().trim().max(64).optional().nullable(),
 }).refine((b) => Boolean(b.productId || b.productIds?.length), { message: "Elige al menos un producto", path: ["productId"] });
 
 // POST /order/:id/receipt (multipart: file + payerName)
@@ -52,4 +54,17 @@ export const storeOrdersQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   status: z.enum(["PENDIENTE", "EN_REVISION", "PAGADO", "ENTREGADO", "FALLIDO"]).optional(),
+});
+
+// POST /:slug/events (analítica ligera, lote)
+export const storeEventsSchema = z.object({
+  sessionId: z.string().trim().min(4).max(64),
+  events: z
+    .array(z.object({ type: z.string().trim().min(2).max(20), productId: z.string().uuid().optional().nullable() }))
+    .min(1)
+    .max(20),
+});
+
+export const storeMetricsQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(365).default(30),
 });

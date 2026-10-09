@@ -479,11 +479,19 @@ export async function getPublicOrder(id: string, token: string) {
     };
   }
   const items = (Array.isArray(order.items) ? (order.items as unknown as StoreOrderItem[]) : null) ?? [];
+  const paidOk = order.status === "PAGADO" || order.status === "ENTREGADO";
+  const upsell = paidOk
+    ? await prisma.storefrontConfig
+        .findUnique({ where: { companyId: order.companyId }, select: { productIds: true } })
+        .then((c) => upsellFor(order.companyId, orderProductIds(order), c?.productIds ?? []))
+        .catch(() => null)
+    : null;
   return {
     id: order.id,
     status: order.status,
     paymentMethod: order.paymentMethod,
     productName: order.productName,
+    upsell,
     productos: items.length ? items.map((it) => it.name) : [order.productName],
     productIds: orderProductIds(order),
     amount: Number(order.amount),
@@ -520,6 +528,8 @@ export async function fulfillStoreOrder(
   });
 
   const amountText = `${symbolFor(order.currency)} ${opts.paid.toFixed(2)}`;
+
+  void recordPurchaseEvent(order);
 
   // Meta CAPI (Purchase de la tienda web). Best-effort, dedupe con el píxel por event_id.
   void reportStorePurchase({
@@ -890,6 +900,133 @@ export async function rejectStoreOrder(companyId: string, orderId: string, input
     data: { status: "FALLIDO", failureReason: `Rechazado: ${input.reason?.trim() || "comprobante no válido"}` },
   });
   return serializeOrderRow(fresh);
+}
+
+// ---------------------------------------------------------------------------
+// Analítica ligera (StoreEvent) y upsell post-compra
+// ---------------------------------------------------------------------------
+
+export const STORE_EVENT_TYPES = ["VIEW", "PRODUCT_VIEW", "ADD_TO_CART", "CHECKOUT", "WA_CLICK", "PURCHASE"] as const;
+export type StoreEventType = (typeof STORE_EVENT_TYPES)[number];
+const STORE_EVENT_RETENTION_DAYS = 180;
+
+/** Eventos enviados por el navegador (lote). Ignora tipos desconocidos; PURCHASE solo lo escribe el backend. */
+export async function recordStoreEvents(slug: string, sessionId: string, events: { type: string; productId?: string | null }[]) {
+  const { company } = await resolveStore(slug);
+  const sid = sessionId.trim().slice(0, 64);
+  if (!sid) return { ok: true, saved: 0 };
+  const rows = events
+    .filter((e) => (STORE_EVENT_TYPES as readonly string[]).includes(e.type) && e.type !== "PURCHASE")
+    .slice(0, 20)
+    .map((e) => ({ companyId: company.id, type: e.type, productId: e.productId || null, sessionId: sid }));
+  if (rows.length) await prisma.storeEvent.createMany({ data: rows });
+  return { ok: true, saved: rows.length };
+}
+
+async function recordPurchaseEvent(order: StoreOrderRow) {
+  const web = ((order.metadata ?? {}) as { web?: { sessionId?: string | null } }).web;
+  const sessionId = web?.sessionId || `order:${order.id}`;
+  await prisma.storeEvent
+    .createMany({
+      data: orderProductIds(order).map((productId) => ({ companyId: order.companyId, type: "PURCHASE", productId, orderId: order.id, sessionId })),
+    })
+    .catch(() => undefined);
+}
+
+/** Purga eventos antiguos (worker, una vez al día). */
+export async function purgeOldStoreEvents(): Promise<number> {
+  const r = await prisma.storeEvent.deleteMany({ where: { createdAt: { lt: new Date(Date.now() - STORE_EVENT_RETENTION_DAYS * 86_400_000) } } });
+  return r.count;
+}
+
+/** KPIs de la tienda en los últimos N días (panel + copiloto). */
+export async function storeMetrics(companyId: string, days = 30) {
+  const since = new Date(Date.now() - days * 86_400_000);
+  const events = await prisma.storeEvent.findMany({
+    where: { companyId, createdAt: { gte: since } },
+    select: { type: true, productId: true, sessionId: true },
+  });
+  const sessions = new Set<string>();
+  const count: Record<StoreEventType, number> = { VIEW: 0, PRODUCT_VIEW: 0, ADD_TO_CART: 0, CHECKOUT: 0, WA_CLICK: 0, PURCHASE: 0 };
+  const buyers = new Set<string>();
+  const byProduct = new Map<string, { vistas: number; carrito: number; checkouts: number; compras: number; whatsapp: number }>();
+  for (const e of events) {
+    sessions.add(e.sessionId);
+    const t = e.type as StoreEventType;
+    if (t in count) count[t] += 1;
+    if (t === "PURCHASE") buyers.add(e.sessionId);
+    if (e.productId) {
+      let p = byProduct.get(e.productId);
+      if (!p) {
+        p = { vistas: 0, carrito: 0, checkouts: 0, compras: 0, whatsapp: 0 };
+        byProduct.set(e.productId, p);
+      }
+      if (t === "PRODUCT_VIEW") p.vistas += 1;
+      else if (t === "ADD_TO_CART") p.carrito += 1;
+      else if (t === "CHECKOUT") p.checkouts += 1;
+      else if (t === "PURCHASE") p.compras += 1;
+      else if (t === "WA_CLICK") p.whatsapp += 1;
+    }
+  }
+  const [orders, names] = await Promise.all([
+    prisma.storeOrder.findMany({
+      where: { companyId, status: "ENTREGADO", createdAt: { gte: since } },
+      select: { amount: true, currency: true },
+    }),
+    byProduct.size
+      ? prisma.product.findMany({ where: { companyId, id: { in: [...byProduct.keys()] } }, select: { id: true, name: true } })
+      : Promise.resolve([] as { id: string; name: string }[]),
+  ]);
+  const nameOf = new Map(names.map((n) => [n.id, n.name]));
+  const ingresos = orders.reduce((acc, o) => acc + Number(o.amount), 0);
+  const currency = orders[0]?.currency ?? "PEN";
+  const visitas = sessions.size;
+  return {
+    dias: days,
+    visitas,
+    vistasProducto: count.PRODUCT_VIEW,
+    agregadosAlCarrito: count.ADD_TO_CART,
+    checkouts: count.CHECKOUT,
+    clicsWhatsApp: count.WA_CLICK,
+    compras: orders.length,
+    ingresos: Number(ingresos.toFixed(2)),
+    ingresosText: `${symbolFor(currency)} ${ingresos.toFixed(2)}`,
+    conversion: visitas > 0 ? Number(((buyers.size / visitas) * 100).toFixed(1)) : null,
+    porProducto: [...byProduct.entries()]
+      .map(([productId, m]) => ({ productId, name: nameOf.get(productId) ?? "(producto eliminado)", ...m }))
+      .sort((a, b) => b.compras - a.compras || b.vistas - a.vistas)
+      .slice(0, 20),
+  };
+}
+
+/** Producto relacionado (cross-sell del producto comprado) si está visible en la tienda. */
+async function upsellFor(companyId: string, productIds: string[], cfgProductIds: string[]) {
+  const [company, bought] = await Promise.all([
+    prisma.company.findUnique({ where: { id: companyId }, select: { currency: true, timezone: true } }),
+    prisma.product.findMany({ where: { companyId, id: { in: productIds } }, select: { id: true, digitalDelivery: { select: { crossSellProductId: true, crossSellPitch: true, crossSellPitchMediaUrl: true, crossSellPitchMediaType: true } } } }),
+  ]);
+  if (!company) return null;
+  for (const b of bought) {
+    const crossId = b.digitalDelivery?.crossSellProductId;
+    if (!crossId || productIds.includes(crossId)) continue;
+    const [cross] = await eligibleProducts(companyId, cfgProductIds).then((rows) => rows.filter((p) => p.id === crossId));
+    if (!cross) continue;
+    const bot = mapBotProduct(cross, { currencySymbol: symbolFor(company.currency), timezone: company.timezone });
+    const img = cross.files.find((f) => f.type === "IMAGE" && f.showInPresentation)?.url ?? null;
+    const pitchMedia = (b.digitalDelivery?.crossSellPitchMediaUrl ?? "").trim();
+    const pitchIsImage = pitchMedia && (b.digitalDelivery?.crossSellPitchMediaType ?? "").toLowerCase().includes("image");
+    return {
+      id: cross.id,
+      slug: cross.slug,
+      name: cross.name,
+      priceText: bot.priceText ?? bot.price,
+      regularPriceText: bot.regularPriceText,
+      shortDescription: bot.shortDescription,
+      image: pitchIsImage ? pitchMedia : img,
+      pitch: (b.digitalDelivery?.crossSellPitch ?? "").trim() || null,
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

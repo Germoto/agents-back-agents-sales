@@ -9,7 +9,9 @@ import {
   getStoreOgHtml,
   getStorefrontConfig,
   listStoreOrders,
+  recordStoreEvents,
   rejectStoreOrder,
+  storeMetrics,
   submitStoreReceipt,
   tlsAsk,
   updateStorefrontConfig,
@@ -39,13 +41,14 @@ export async function getPublicStoreController(req: Request, res: Response) {
 }
 
 export async function storeCheckoutController(req: Request, res: Response) {
-  const b = req.body as { fbp?: string | null; fbc?: string | null; pageUrl?: string | null };
+  const b = req.body as { fbp?: string | null; fbc?: string | null; pageUrl?: string | null; sessionId?: string | null };
   const client = {
     ip: req.ip ?? null,
     ua: typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"].slice(0, 300) : null,
     fbp: b.fbp ?? null,
     fbc: b.fbc ?? null,
     url: b.pageUrl ?? null,
+    sessionId: b.sessionId ?? null,
   };
   return res.status(201).json(await createStoreCheckout(String(req.params.slug), req.body, client));
 }
@@ -64,7 +67,16 @@ export async function storeReceiptController(req: Request, res: Response) {
   return res.json(await submitStoreReceipt(order.id, { mediaUrl, payerName }));
 }
 
+export async function storeEventsController(req: Request, res: Response) {
+  const body = req.body as { sessionId: string; events: { type: string; productId?: string | null }[] };
+  return res.json(await recordStoreEvents(String(req.params.slug), body.sessionId, body.events));
+}
+
 // ---------------- Panel ----------------
+
+export async function storeMetricsController(req: Request, res: Response) {
+  return res.json(await storeMetrics(req.user!.companyId, Number(req.query.days) || 30));
+}
 
 export async function getStorefrontConfigController(req: Request, res: Response) {
   return res.json(await getStorefrontConfig(req.user!.companyId));
