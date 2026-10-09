@@ -1702,6 +1702,9 @@ model StoreOrder {
   // Snapshot del producto (sin FK: si se borra el producto, el pedido se conserva).
   productId       String           @db.Uuid
   productName     String
+  // Carrito: [{productId, name, unitPrice, qty}] y la lista de ids (vacía en pedidos antiguos).
+  items           Json?
+  productIds      String[]         @default([]) @db.Uuid
   email           String
   name            String
   phone           String?

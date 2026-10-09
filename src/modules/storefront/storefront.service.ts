@@ -277,9 +277,16 @@ function syntheticPhone(email: string): string {
 
 export type StoreCheckoutMethod = "MERCADOPAGO" | "MANUAL";
 
+export type StoreOrderItem = { productId: string; name: string; unitPrice: number; qty: number };
+
+/** Ids de producto de un pedido (carrito o pedido antiguo de un solo producto). */
+export function orderProductIds(order: { productId: string; productIds: string[] }): string[] {
+  return order.productIds.length ? order.productIds : [order.productId];
+}
+
 export async function createStoreCheckout(
   slug: string,
-  input: { productId: string; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod },
+  input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod },
 ) {
   const { company, cfg, ent } = await resolveStore(slug);
   const companyId = company.id;
@@ -300,13 +307,21 @@ export async function createStoreCheckout(
     throw new AppError("Esta tienda no acepta pago con Yape/Plin por el momento", 409);
   }
 
-  const [product] = await eligibleProducts(companyId, cfg.productIds).then((rows) =>
-    rows.filter((p) => p.id === input.productId),
-  );
-  if (!product) throw new AppError("Producto no disponible", 404);
-  const bot = mapBotProduct(product, { currencySymbol: symbolFor(company.currency), timezone: company.timezone });
-  const priceNum = parsePrice(bot.price);
-  if (priceNum <= 0) throw new AppError("Este producto no tiene un precio válido para compra online", 409);
+  // Carrito: ids únicos, todos elegibles, precio de lista por producto (digitales: qty 1).
+  const wantedIds = Array.from(new Set([...(input.productIds ?? []), ...(input.productId ? [input.productId] : [])]));
+  if (!wantedIds.length) throw new AppError("Elige al menos un producto", 400);
+  const eligible = await eligibleProducts(companyId, cfg.productIds);
+  const chosen = wantedIds.map((id) => eligible.find((p) => p.id === id)).filter((p): p is (typeof eligible)[number] => Boolean(p));
+  if (chosen.length !== wantedIds.length) throw new AppError(chosen.length ? "Algún producto del carrito ya no está disponible" : "Producto no disponible", 404);
+  const items: StoreOrderItem[] = chosen.map((p) => {
+    const bot = mapBotProduct(p, { currencySymbol: symbolFor(company.currency), timezone: company.timezone });
+    const unitPrice = parsePrice(bot.price);
+    if (unitPrice <= 0) throw new AppError(`«${p.name}» no tiene un precio válido para compra online`, 409);
+    return { productId: p.id, name: p.name, unitPrice, qty: 1 };
+  });
+  const product = chosen[0];
+  const priceNum = Number(items.reduce((acc, it) => acc + it.unitPrice * it.qty, 0).toFixed(2));
+  const productName = items.length > 1 ? `${product.name} +${items.length - 1} más` : product.name;
   // Yape/Plin: precio de lista exacto (sin recargo). MP: link con la comisión según config.
   const linkAmount =
     method === "MANUAL" || !pc
@@ -353,7 +368,9 @@ export async function createStoreCheckout(
       companyId,
       customerId: customer.id,
       productId: product.id,
-      productName: product.name,
+      productName,
+      items,
+      productIds: items.map((it) => it.productId),
       email,
       name,
       phone: digits ? phone : null,
@@ -379,15 +396,24 @@ export async function createStoreCheckout(
       amountText,
       feeIncluded: false,
       metodos: pay.manual,
+      items,
     };
   }
 
   const https = base.startsWith("https://");
   let pref;
   try {
+    // Varios ítems: cada producto a su precio de lista y, si el negocio traslada la
+    // comisión, un ítem extra con el recargo (así el total del link = linkAmount).
+    const fee = Number((linkAmount - priceNum).toFixed(2));
+    const mpItems = [
+      ...items.map((it) => ({ title: it.name, amount: it.unitPrice, quantity: it.qty })),
+      ...(fee > 0 ? [{ title: "Comisión de pago", amount: fee, quantity: 1 }] : []),
+    ];
     pref = await mpCreatePreference(decryptCredential(pc!.mpAccessToken!), {
-      title: product.name,
+      title: productName,
       amount: linkAmount,
+      items: mpItems,
       currency: company.currency.toUpperCase(),
       externalReference: JSON.stringify({ storeOrderId: order.id }),
       notificationUrl: `${env.PUBLIC_BASE_URL}/api/webhooks/mercadopago/${companyId}`,
@@ -413,6 +439,7 @@ export async function createStoreCheckout(
     amountText,
     feeIncluded: linkAmount > priceNum,
     metodos: [] as { method: string; number: string; holder: string }[],
+    items,
   };
 }
 
@@ -448,11 +475,13 @@ export async function getPublicOrder(id: string, token: string) {
       comprobanteSubido: Boolean(order.receiptMediaUrl),
     };
   }
+  const items = (Array.isArray(order.items) ? (order.items as unknown as StoreOrderItem[]) : null) ?? [];
   return {
     id: order.id,
     status: order.status,
     paymentMethod: order.paymentMethod,
     productName: order.productName,
+    productos: items.length ? items.map((it) => it.name) : [order.productName],
     email: order.email,
     deliveredAt: order.deliveredAt,
     mensaje: mensaje[order.status],
@@ -506,7 +535,7 @@ export async function fulfillStoreOrder(
         await handleExternalPaymentApproved({
           companyId,
           conversationId: convo.conversationId,
-          productIds: [order.productId],
+          productIds: orderProductIds(order),
           amountText,
           payerName: opts.payerName,
           provider: opts.providerLabel,
@@ -577,7 +606,7 @@ export async function fulfillStoreOrderFromMp(companyId: string, storeOrderId: s
         companyId,
         customerId: order.customerId,
         productId: order.productId,
-        productIds: [order.productId],
+        productIds: orderProductIds(order),
         amountExpected: String(paid),
         amountPaid: String(paid),
         currency: payment.currency_id ?? order.currency,
@@ -673,7 +702,7 @@ export async function tryMatchStoreOrder(orderId: string): Promise<boolean> {
       matchScore: Math.min(100, Math.max(0, Math.round(top.matchScore))),
       matchStrategy: reasons.join("+") || "storefront_auto",
       matchedPayerNameInput: payerName || codes[0] || "",
-      productIds: [order.productId],
+      productIds: orderProductIds(order),
       note: "Pago Yape/Plin validado automáticamente desde la tienda web",
       metadata: { channel: "storefront", storeOrderId: order.id, email: order.email },
     });
@@ -811,7 +840,7 @@ export async function approveStoreOrder(companyId: string, orderId: string, inpu
       companyId,
       customerId: order.customerId,
       productId: order.productId,
-      productIds: [order.productId],
+      productIds: orderProductIds(order),
       amountExpected: String(paid),
       amountPaid: String(paid),
       currency: order.currency,
@@ -964,6 +993,8 @@ const ORDER_ROW_SELECT = {
   id: true,
   productId: true,
   productName: true,
+  items: true,
+  productIds: true,
   name: true,
   email: true,
   phone: true,
@@ -991,6 +1022,8 @@ function serializeOrderRow(o: OrderRowSel) {
     id: o.id,
     productId: o.productId,
     productName: o.productName,
+    items: (Array.isArray(o.items) ? (o.items as unknown as StoreOrderItem[]) : null) ?? [],
+    productIds: orderProductIds(o),
     name: o.name,
     email: o.email,
     phone: o.phone,

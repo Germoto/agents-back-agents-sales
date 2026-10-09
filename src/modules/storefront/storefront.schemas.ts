@@ -5,14 +5,16 @@ export const storeSlugParamsSchema = z.object({
 });
 
 export const storeCheckoutSchema = z.object({
-  productId: z.string().uuid(),
+  // Un producto (compra directa) o varios (carrito). Al menos uno de los dos.
+  productId: z.string().uuid().optional(),
+  productIds: z.array(z.string().uuid()).min(1).max(10).optional(),
   name: z.string().trim().min(2).max(120),
   email: z.string().trim().min(5).max(160),
   // WhatsApp opcional: si viene, la entrega también sale por WhatsApp.
   phone: z.string().trim().max(30).optional().nullable(),
   // MERCADOPAGO (default) o MANUAL (Yape/Plin con comprobante).
   method: z.enum(["MERCADOPAGO", "MANUAL"]).optional(),
-});
+}).refine((b) => Boolean(b.productId || b.productIds?.length), { message: "Elige al menos un producto", path: ["productId"] });
 
 // POST /order/:id/receipt (multipart: file + payerName)
 export const storeReceiptBodySchema = z.object({

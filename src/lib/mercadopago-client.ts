@@ -59,6 +59,8 @@ export function mpCreatePreference(
   opts: {
     title: string;
     amount: number;
+    /** Varios ítems (tienda web con carrito). Si viene, reemplaza al ítem único title/amount. */
+    items?: { title: string; amount: number; quantity?: number }[];
     currency?: string;
     externalReference: string;
     notificationUrl?: string;
@@ -71,14 +73,12 @@ export function mpCreatePreference(
   return mpFetch<MpPreference>(accessToken, "/checkout/preferences", {
     method: "POST",
     body: JSON.stringify({
-      items: [
-        {
-          title: opts.title.slice(0, 250),
-          quantity: 1,
-          unit_price: Number(opts.amount.toFixed(2)),
-          currency_id: opts.currency ?? "PEN",
-        },
-      ],
+      items: (opts.items?.length ? opts.items : [{ title: opts.title, amount: opts.amount, quantity: 1 }]).map((it) => ({
+        title: it.title.slice(0, 250),
+        quantity: it.quantity ?? 1,
+        unit_price: Number(it.amount.toFixed(2)),
+        currency_id: opts.currency ?? "PEN",
+      })),
       external_reference: opts.externalReference,
       ...(opts.notificationUrl ? { notification_url: opts.notificationUrl } : {}),
       ...(opts.backUrls ? { back_urls: opts.backUrls } : {}),
