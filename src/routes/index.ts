@@ -43,6 +43,7 @@ import registrationRoutes from "../modules/registration/registration.routes";
 import billingPublicRoutes from "../modules/billing/billing-public.routes";
 import storefrontPublicRoutes from "../modules/storefront/storefront.public.routes";
 import storefrontRoutes from "../modules/storefront/storefront.routes";
+import downloadPublicRoutes from "../modules/product-files/download.public.routes";
 import { billingGuard } from "../middlewares/billing.middleware";
 
 const router = Router();
@@ -123,6 +124,8 @@ router.use("/webhooks", webhooksRoutes);
 // Tienda web pública por tenant (<slug>.flowapp.pe): catálogo, checkout MP y
 // estado del pedido. Sin auth (rate limit propio); el gate de plan va adentro.
 router.use("/public/store", storefrontPublicRoutes);
+// Descarga de archivos privados de entrega con enlace firmado (sin auth; token en ?t=).
+router.use("/public/dl", downloadPublicRoutes);
 // Config pública del landing (animación 3D elegida por el superadmin)
 router.use("/public/landing", platformConfigPublicRoutes);
 // Billing del tenant (Mi plan, canje de vales, créditos). Debe funcionar

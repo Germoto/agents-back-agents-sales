@@ -36,6 +36,7 @@ import { readReceiptImage } from "../agent/receipt-vision";
 import { claimPayment, matchPayments, updatePaymentStatus } from "../public-payments/public-payments.service";
 import type { AiSettings } from "../../lib/ai-providers";
 import { reportStorePurchase, storePixelId, type StoreWebClient } from "../meta-capi/meta-capi.service";
+import { signDownloadToken } from "../../lib/jwt";
 
 // ---------------------------------------------------------------------------
 // URL y resolución
@@ -506,6 +507,7 @@ export async function getPublicOrder(id: string, token: string) {
   }
   const items = (Array.isArray(order.items) ? (order.items as unknown as StoreOrderItem[]) : null) ?? [];
   const paidOk = order.status === "PAGADO" || order.status === "ENTREGADO";
+  const archivos = order.status === "ENTREGADO" ? await deliveryFileLinks(order.companyId, orderProductIds(order), `order:${order.id}`) : [];
   const upsell = paidOk
     ? await prisma.storefrontConfig
         .findUnique({ where: { companyId: order.companyId }, select: { productIds: true } })
@@ -518,6 +520,7 @@ export async function getPublicOrder(id: string, token: string) {
     paymentMethod: order.paymentMethod,
     productName: order.productName,
     upsell,
+    archivos,
     productos: items.length ? items.map((it) => it.name) : [order.productName],
     productIds: orderProductIds(order),
     amount: Number(order.amount),
@@ -930,10 +933,36 @@ export async function rejectStoreOrder(companyId: string, orderId: string, input
 }
 
 // ---------------------------------------------------------------------------
+// Archivos de entrega (enlaces firmados para los privados)
+// ---------------------------------------------------------------------------
+
+/** URL de descarga de un archivo: firmada (7 días) si es privado; pública si no. */
+export function fileDownloadUrl(file: { id: string; url: string; privateDownload: boolean }, companyId: string, ref: string): string {
+  if (!file.privateDownload) return file.url;
+  return `${file.url}?t=${encodeURIComponent(signDownloadToken({ companyId, fileId: file.id, ref }))}`;
+}
+
+/** Archivos de entrega de los productos comprados (privados + marcados para correo), con enlace listo. */
+export async function deliveryFileLinks(companyId: string, productIds: string[], ref: string) {
+  const products = await prisma.product.findMany({
+    where: { companyId, id: { in: productIds } },
+    select: { id: true, name: true, files: { where: { OR: [{ privateDownload: true }, { sendByEmail: true }] }, orderBy: { sortOrder: "asc" } } },
+  });
+  return products.flatMap((p) =>
+    p.files.map((f) => ({
+      productName: p.name,
+      name: f.originalName || f.description || `archivo.${f.extension || "bin"}`,
+      url: fileDownloadUrl(f, companyId, ref),
+      privado: f.privateDownload,
+    })),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Analítica ligera (StoreEvent) y upsell post-compra
 // ---------------------------------------------------------------------------
 
-export const STORE_EVENT_TYPES = ["VIEW", "PRODUCT_VIEW", "ADD_TO_CART", "CHECKOUT", "WA_CLICK", "PURCHASE"] as const;
+export const STORE_EVENT_TYPES = ["VIEW", "PRODUCT_VIEW", "ADD_TO_CART", "CHECKOUT", "WA_CLICK", "PURCHASE", "DOWNLOAD"] as const;
 export type StoreEventType = (typeof STORE_EVENT_TYPES)[number];
 const STORE_EVENT_RETENTION_DAYS = 180;
 
@@ -943,7 +972,7 @@ export async function recordStoreEvents(slug: string, sessionId: string, events:
   const sid = sessionId.trim().slice(0, 64);
   if (!sid) return { ok: true, saved: 0 };
   const rows = events
-    .filter((e) => (STORE_EVENT_TYPES as readonly string[]).includes(e.type) && e.type !== "PURCHASE")
+    .filter((e) => (STORE_EVENT_TYPES as readonly string[]).includes(e.type) && e.type !== "PURCHASE" && e.type !== "DOWNLOAD")
     .slice(0, 20)
     .map((e) => ({ companyId: company.id, type: e.type, productId: e.productId || null, sessionId: sid }));
   if (rows.length) await prisma.storeEvent.createMany({ data: rows });
@@ -974,7 +1003,7 @@ export async function storeMetrics(companyId: string, days = 30) {
     select: { type: true, productId: true, sessionId: true },
   });
   const sessions = new Set<string>();
-  const count: Record<StoreEventType, number> = { VIEW: 0, PRODUCT_VIEW: 0, ADD_TO_CART: 0, CHECKOUT: 0, WA_CLICK: 0, PURCHASE: 0 };
+  const count: Record<StoreEventType, number> = { VIEW: 0, PRODUCT_VIEW: 0, ADD_TO_CART: 0, CHECKOUT: 0, WA_CLICK: 0, PURCHASE: 0, DOWNLOAD: 0 };
   const buyers = new Set<string>();
   const byProduct = new Map<string, { vistas: number; carrito: number; checkouts: number; compras: number; whatsapp: number }>();
   for (const e of events) {
@@ -1016,6 +1045,7 @@ export async function storeMetrics(companyId: string, days = 30) {
     checkouts: count.CHECKOUT,
     clicsWhatsApp: count.WA_CLICK,
     compras: orders.length,
+    descargas: count.DOWNLOAD,
     ingresos: Number(ingresos.toFixed(2)),
     ingresosText: `${symbolFor(currency)} ${ingresos.toFixed(2)}`,
     conversion: visitas > 0 ? Number(((buyers.size / visitas) * 100).toFixed(1)) : null,

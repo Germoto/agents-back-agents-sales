@@ -608,6 +608,9 @@ model ProductFile {
   // Si true, el archivo va ADJUNTO en el correo de entrega del producto (entrega por
   // correo a pedido del cliente). Si el total de adjuntos excede el tope, van como links.
   sendByEmail        Boolean         @default(false)
+  // Archivo PRIVADO de entrega: vive fuera de /uploads (private/products/<companyId>/) y
+  // solo se descarga con enlace firmado (/api/public/dl/<id>?t=…, 7 días). Lo marca el dueño.
+  privateDownload    Boolean         @default(false)
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
   product            Product         @relation(fields: [productId], references: [id], onDelete: Cascade)

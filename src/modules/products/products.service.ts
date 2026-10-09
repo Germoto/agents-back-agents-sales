@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import { isPrivateStoragePath, moveProductFile, privateDownloadUrl } from "../../lib/uploads";
 import { mapAdminProduct, productRelations } from "../../lib/product";
 import { env } from "../../config/env";
 
@@ -55,6 +56,7 @@ type ProductPayload = {
     sortOrder: number;
     showInPresentation?: boolean;
     sendByEmail?: boolean;
+    privateDownload?: boolean;
   }>;
   digitalDelivery?: {
     link?: string;
@@ -139,7 +141,7 @@ function cleanFollowupList(
 async function safeUnlinkStorage(storagePath: string | null | undefined) {
   if (!storagePath) return;
   const normalized = storagePath.replace(/\\/g, "/").replace(/^\/+/, "");
-  if (!normalized.startsWith("products/") || normalized.includes("..")) return;
+  if (!(normalized.startsWith("products/") || normalized.startsWith("private/products/")) || normalized.includes("..")) return;
   const absolute = path.resolve(process.cwd(), env.UPLOAD_DIR, normalized);
   try {
     await fs.unlink(absolute);
@@ -158,6 +160,8 @@ async function syncProductFiles(
 ) {
   const existing = await tx.productFile.findMany({ where: { productId } });
   const existingById = new Map(existing.map((f) => [f.id, f] as const));
+  // Archivos a mover entre carpeta pública y privada según `privateDownload` (tras el upsert).
+  const pendingMoves: { id: string; storagePath: string; toPrivate: boolean }[] = [];
   const incomingIds = new Set(files.filter((f) => f.id).map((f) => f.id as string));
 
   // Delete files no longer present
@@ -186,20 +190,47 @@ async function syncProductFiles(
       sortOrder: file.sortOrder ?? 0,
       showInPresentation: file.showInPresentation ?? true,
       sendByEmail: file.sendByEmail ?? false,
+      privateDownload: file.privateDownload ?? false,
     } satisfies Prisma.ProductFileUncheckedUpdateInput;
 
     if (file.id && existingById.has(file.id)) {
+      // El url/storagePath de un archivo ya guardado los decide el servidor (privado ↔ público),
+      // nunca lo que mande el panel (puede traer un enlace firmado de vista previa).
+      const prev = existingById.get(file.id)!;
       await tx.productFile.update({
         where: { id: file.id },
-        data,
+        data: { ...data, url: prev.url, storagePath: prev.storagePath },
       });
+      pendingMoves.push({ id: file.id, storagePath: prev.storagePath, toPrivate: data.privateDownload });
     } else {
-      await tx.productFile.create({
+      const created = await tx.productFile.create({
         data: {
           productId,
           ...data,
         } as Prisma.ProductFileUncheckedCreateInput,
       });
+      pendingMoves.push({ id: created.id, storagePath: created.storagePath, toPrivate: data.privateDownload });
+    }
+  }
+
+  // Privado ↔ público: mover el archivo en disco y fijar url/storagePath canónicos.
+  const moves = pendingMoves.filter((m) => m.storagePath && isPrivateStoragePath(m.storagePath) !== m.toPrivate);
+  if (moves.length) {
+    const product = await tx.product.findUnique({ where: { id: productId }, select: { companyId: true } });
+    if (product) {
+      for (const m of moves) {
+        try {
+          const rel = await moveProductFile(m.storagePath, product.companyId, m.toPrivate);
+          if (!rel) continue;
+          const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
+          await tx.productFile.update({
+            where: { id: m.id },
+            data: { storagePath: rel, url: m.toPrivate ? privateDownloadUrl(m.id) : `${base}/uploads/${rel}` },
+          });
+        } catch (err) {
+          console.warn(`[products] no se pudo mover archivo ${m.id}:`, err instanceof Error ? err.message : err);
+        }
+      }
     }
   }
 }

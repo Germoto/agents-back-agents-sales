@@ -1,3 +1,4 @@
+import { signDownloadToken } from "./jwt";
 import { Prisma } from "@prisma/client";
 
 const productArgs = Prisma.validator<Prisma.ProductDefaultArgs>()({
@@ -16,6 +17,12 @@ const productArgs = Prisma.validator<Prisma.ProductDefaultArgs>()({
 });
 
 export const productRelations = productArgs.include;
+
+/** URL usable de un archivo de producto: firmada si es privado, la pública si no. */
+function signedFileUrl(companyId: string, file: { id: string; url: string; privateDownload: boolean }): string {
+  if (!file.privateDownload) return file.url;
+  return `${file.url}?t=${encodeURIComponent(signDownloadToken({ companyId, fileId: file.id, ref: "agent" }))}`;
+}
 
 export type ProductWithRelations = Prisma.ProductGetPayload<{
   include: typeof productRelations;
@@ -143,8 +150,10 @@ export function mapAdminProduct(product: ProductWithRelations) {
     files: product.files.map((file) => ({
       id: file.id,
       type: file.type,
-      url: file.url,
+      // Privado: enlace firmado para la vista previa del panel (el servidor ignora este url al guardar).
+      url: signedFileUrl(product.companyId, file),
       storagePath: file.storagePath,
+      privateDownload: file.privateDownload,
       originalName: file.originalName,
       extension: file.extension,
       mimeType: file.mimeType,
@@ -252,7 +261,9 @@ export function mapBotProduct(
     files: product.files.map((file) => ({
       id: file.id,
       type: file.type.toLowerCase(),
-      url: file.url,
+      // Privado: enlace firmado (7 días) para que el agente pueda mandarlo bajo demanda.
+      url: signedFileUrl(product.companyId, file),
+      privateDownload: file.privateDownload,
       originalName: file.originalName || null,
       description: file.description,
       sortOrder: file.sortOrder,

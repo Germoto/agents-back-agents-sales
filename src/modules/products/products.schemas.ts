@@ -45,6 +45,8 @@ const productFileSchema = z.object({
   showInPresentation: z.boolean().default(true),
   // Adjuntar en el correo de entrega (entrega por correo a pedido del cliente). Default false.
   sendByEmail: z.boolean().default(false),
+  // Archivo privado: solo descargable con enlace firmado (se mueve fuera de /uploads).
+  privateDownload: z.boolean().default(false),
 });
 
 export const productBodySchema = z.object({

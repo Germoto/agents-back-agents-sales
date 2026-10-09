@@ -17,6 +17,7 @@ import { prisma } from "../../lib/prisma";
 import { mailerEnabled, sendMail } from "../../lib/mailer";
 import { normalizeEmail, maskEmail } from "../../lib/email";
 import { resolveOwnUpload, readUpload, storagePathFromUrl } from "../../lib/uploads";
+import { signDownloadToken } from "../../lib/jwt";
 import { normalizeFollowups } from "../../lib/product";
 import { applySpintax } from "./reminder-templates";
 import { digitalDeliveryEmail, type DeliveryEmailSection } from "./delivery.emails";
@@ -173,7 +174,14 @@ export async function sendDigitalDeliveryEmail(input: SendDigitalDeliveryEmailIn
         await attachOrLink(url, known?.storagePath || storagePathFromUrl(url), known?.originalName || "", known?.mimeType);
       }
     }
-    for (const f of p.files.filter((x) => x.sendByEmail)) {
+    for (const f of p.files.filter((x) => x.sendByEmail || x.privateDownload)) {
+      if (f.privateDownload) {
+        // Archivo protegido: SIEMPRE como enlace firmado (7 días), nunca adjunto.
+        const signed = `${f.url}?t=${encodeURIComponent(signDownloadToken({ companyId: input.companyId, fileId: f.id, ref: `receipt:${receipt.id}` }))}`;
+        links.push({ name: f.originalName || f.description || "archivo", url: signed });
+        byLinks = true;
+        continue;
+      }
       await attachOrLink(f.url, f.storagePath || null, f.originalName, f.mimeType);
     }
     sections.push({
