@@ -24,6 +24,8 @@ interface MpConfigLike {
   feePercent?: number | null;
   feeFixed?: number | null;
   feeIgv?: boolean | null;
+  /** Mercado Pago habilitado para el cobro por chat (default true). */
+  chatEnabled?: boolean | null;
 }
 
 export interface PaymentConfigLike {
@@ -56,7 +58,7 @@ export async function composePaymentMethodsMessage(opts: {
   // El módulo MERCADOPAGO del paquete gatea el link (legacy pasa; cache 60s).
   let mpLine = "";
   const mpAllowed =
-    !opts.simulate && mpCfg?.enabled && mpCfg.accessTokenEnc && opts.amountNum > 0
+    !opts.simulate && mpCfg?.enabled && mpCfg.chatEnabled !== false && mpCfg.accessTokenEnc && opts.amountNum > 0
       ? await getEntitlements(opts.companyId)
           .then((ent) => ent.legacy || ent.modules.includes("MERCADOPAGO"))
           .catch(() => true)

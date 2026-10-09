@@ -425,6 +425,11 @@ model PaymentConfig {
   mpFeePercent      Decimal         @default(3.99) @db.Decimal(5, 2)
   mpFeeFixed        Decimal         @default(1.00) @db.Decimal(8, 2)
   mpFeeIgv          Boolean         @default(true)
+  // Mercado Pago POR CANAL: link en el cobro del agente (chat) y/o checkout de la
+  // tienda web. Ambos true por defecto (comportamiento histórico); el maestro sigue
+  // siendo mpEnabled + token.
+  mpChatEnabled     Boolean         @default(true)
+  mpStoreEnabled    Boolean         @default(true)
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
   company           Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)

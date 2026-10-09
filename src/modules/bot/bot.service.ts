@@ -186,6 +186,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
         feePercent: Number(paymentConfig.mpFeePercent),
         feeFixed: Number(paymentConfig.mpFeeFixed),
         feeIgv: paymentConfig.mpFeeIgv,
+        // Canal chat: el link solo se agrega al cobro si está habilitado para el chat.
+        chatEnabled: paymentConfig.mpChatEnabled,
       },
     },
     agent: {

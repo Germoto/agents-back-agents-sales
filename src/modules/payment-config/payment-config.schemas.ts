@@ -22,4 +22,7 @@ export const updateMercadoPagoSchema = z.object({
   feePercent: z.coerce.number().min(0).max(30).default(3.99),
   feeFixed: z.coerce.number().min(0).max(50).default(1),
   feeIgv: z.boolean().default(true),
+  // Canales (omitidos = no cambian): link en el cobro por chat / checkout de la tienda web.
+  chatEnabled: z.boolean().optional(),
+  storeEnabled: z.boolean().optional(),
 });

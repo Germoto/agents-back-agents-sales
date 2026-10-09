@@ -192,7 +192,7 @@ export async function createStoreCheckout(
     throw new AppError("Esta tienda aún no tiene pagos habilitados", 409);
   }
   const pc = await prisma.paymentConfig.findUnique({ where: { companyId } });
-  if (!pc?.mpEnabled || !pc.mpAccessToken) {
+  if (!pc?.mpEnabled || !pc.mpAccessToken || !pc.mpStoreEnabled) {
     throw new AppError("Esta tienda aún no tiene pagos habilitados", 409);
   }
 
@@ -495,7 +495,7 @@ export async function updateStorefrontConfig(
 export async function storefrontStatus(companyId: string, enabled: boolean) {
   const [company, pc, ent, cfg] = await Promise.all([
     prisma.company.findUnique({ where: { id: companyId }, select: { slug: true } }),
-    prisma.paymentConfig.findUnique({ where: { companyId }, select: { mpEnabled: true, mpAccessToken: true } }),
+    prisma.paymentConfig.findUnique({ where: { companyId }, select: { mpEnabled: true, mpAccessToken: true, mpStoreEnabled: true } }),
     getEntitlements(companyId),
     prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productIds: true } }),
   ]);
@@ -514,7 +514,9 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
   });
   const moduloTienda = ent.legacy || ent.modules.includes("STOREFRONT");
   const moduloMp = ent.legacy || ent.modules.includes("MERCADOPAGO");
-  const mpConfigurado = Boolean(pc?.mpEnabled && pc.mpAccessToken);
+  const mpConectado = Boolean(pc?.mpEnabled && pc.mpAccessToken);
+  const mpTiendaHabilitado = Boolean(pc?.mpStoreEnabled ?? true);
+  const mpConfigurado = mpConectado && mpTiendaHabilitado;
   return {
     url: slugProblema ? null : storeUrl(slug),
     slug,
@@ -524,6 +526,8 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
     moduloTienda,
     moduloMp,
     mpConfigurado,
+    mpConectado,
+    mpTiendaHabilitado,
     productosElegibles: eligible.map((p) => ({ id: p.id, name: p.name })),
     productosSinCorreo: sinCorreo,
     lista: enabled && !slugProblema && moduloTienda && moduloMp && mpConfigurado && eligible.length > 0,

@@ -20,7 +20,7 @@ import { productBodySchema } from "../products/products.schemas";
 import { createProduct, updateProduct, deleteProduct, getProduct } from "../products/products.service";
 import { updateBusinessProfile, type DeliveryConfigInput } from "../business/business.service";
 import { upsertAgentConfig, updateAgentReminders } from "../agent-config/agent-config.service";
-import { upsertPaymentConfig } from "../payment-config/payment-config.service";
+import { upsertPaymentConfig, updateMercadoPagoConfig } from "../payment-config/payment-config.service";
 import {
   createCrm,
   updateCrm,
@@ -551,7 +551,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_tienda",
       description:
-        "Activa o configura la TIENDA WEB. `data` es PARCIAL: {enabled?, title? (nombre visible), tagline? (frase corta), accentColor? (hex), whatsappNumber? (botón 'Escríbenos', solo dígitos con código de país), productIds? (uuid[]; vacío = todos los elegibles)}. Para que funcione: slug válido (se cambia en configurar_empresa: minúsculas/números/guiones), Mercado Pago configurado en Pagos (el token NO se gestiona por chat) y productos con digitalDelivery.emailEnabled=true (actualizar_producto). Si enabled=true y falta un requisito, la tool lo explica. Llámala SOLO tras confirmación.",
+        "Activa o configura la TIENDA WEB. `data` es PARCIAL: {enabled?, title? (nombre visible), tagline? (frase corta), accentColor? (hex), whatsappNumber? (botón 'Escríbenos', solo dígitos con código de país), productIds? (uuid[]; vacío = todos los elegibles)}. Para que funcione: slug válido (se cambia en configurar_empresa: minúsculas/números/guiones), Mercado Pago conectado en Integraciones y habilitado para la tienda (el token NO se gestiona por chat; el canal sí: configurar_pagos {mpStoreEnabled:true}) y productos con digitalDelivery.emailEnabled=true (actualizar_producto). Si enabled=true y falta un requisito, la tool lo explica. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -579,7 +579,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_pagos",
       description:
-        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (se FUSIONAN por método+número: agrega nuevos y actualiza titulares; para QUITAR uno usa reemplazarMetodos=true con la lista final completa), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE)}. Tokens de Mercado Pago NO (dirige a Pagos). Llámala SOLO tras confirmación.",
+        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (se FUSIONAN por método+número: agrega nuevos y actualiza titulares; para QUITAR uno usa reemplazarMetodos=true con la lista final completa), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE), mpChatEnabled? / mpStoreEnabled? (MERCADO PAGO POR CANAL: true/false para usar el link de pago en el cobro por chat de WhatsApp y/o en la tienda web; requiere que MP ya esté conectado)}. El Access Token de Mercado Pago NO se gestiona por chat: se conecta en Integraciones. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1617,6 +1617,12 @@ export async function runCopilotTool(
                 paymentMode: payment.paymentMode,
                 notificationPhone: payment.notificationPhone,
                 methods: payment.methods.map((m) => ({ method: m.method, number: m.number, holder: m.holder })),
+                mercadoPago: {
+                  conectado: Boolean(payment.mpAccessToken),
+                  activo: payment.mpEnabled,
+                  canales: { chat: payment.mpChatEnabled, tienda: payment.mpStoreEnabled },
+                  nota: "Se conecta en Integraciones (token solo desde el panel); los canales se cambian con configurar_pagos {mpChatEnabled, mpStoreEnabled}.",
+                },
               }
             : null,
         }),
@@ -1742,7 +1748,23 @@ export async function runCopilotTool(
         paymentMode: (mode as "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL" | "CUSTOMER_CHOICE" | undefined) ??
           (current?.paymentMode ?? "BEFORE_DELIVERY"),
       });
-      return { result: JSON.stringify({ ok: true, nota: "Pagos actualizados (lo no enviado se conservó)." }), wrote: true };
+      // Mercado Pago por canal (no toca el token ni la comisión).
+      let mpNota = "";
+      if (typeof data.mpChatEnabled === "boolean" || typeof data.mpStoreEnabled === "boolean") {
+        if (!current?.mpAccessToken) {
+          mpNota = " Mercado Pago NO está conectado: los canales se guardarán pero no aplican hasta conectar el token en Integraciones.";
+        }
+        await updateMercadoPagoConfig(companyId, {
+          enabled: current?.mpEnabled ?? false,
+          feeMode: (current?.mpFeeMode as "TENANT" | "CUSTOMER") ?? "TENANT",
+          feePercent: Number(current?.mpFeePercent ?? 3.99),
+          feeFixed: Number(current?.mpFeeFixed ?? 1),
+          feeIgv: current?.mpFeeIgv ?? true,
+          ...(typeof data.mpChatEnabled === "boolean" ? { chatEnabled: data.mpChatEnabled } : {}),
+          ...(typeof data.mpStoreEnabled === "boolean" ? { storeEnabled: data.mpStoreEnabled } : {}),
+        });
+      }
+      return { result: JSON.stringify({ ok: true, nota: "Pagos actualizados (lo no enviado se conservó)." + mpNota }), wrote: true };
     }
 
     case "ver_crm": {
@@ -2066,7 +2088,7 @@ export async function runCopilotTool(
           lista: cfg.status.lista,
           pendientes: {
             ...(cfg.status.slugProblema ? { slug: cfg.status.slugProblema } : {}),
-            ...(cfg.status.mpConfigurado ? {} : { mercadoPago: "Falta configurar Mercado Pago en Pagos (token desde el panel)." }),
+            ...(cfg.status.mpConfigurado ? {} : { mercadoPago: "Falta conectar Mercado Pago en Integraciones (token solo desde el panel) o habilitarlo para la tienda (configurar_pagos {mpStoreEnabled:true})." }),
             ...(cfg.status.productosElegibles.length ? {} : { productos: "Ningún producto elegible: activa la entrega por correo en los productos digitales." }),
           },
           nota: cfg.status.lista ? "Tienda lista para vender." : "Tienda guardada; revisa los pendientes antes de compartir la URL.",
@@ -2547,9 +2569,9 @@ const SYSTEM_GUIDE = [
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
-  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, Mercado Pago configurado en Pagos y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos).",
+  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, Mercado Pago conectado en Integraciones y habilitado para el canal tienda, y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos).",
   "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
-  "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
+  "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en Configurar se elige POR CANAL si se usa en el cobro por chat y/o en la tienda web — p. ej. solo tienda), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
   "",
   "PLANES Y MÓDULOS: cada plan incluye módulos (Campañas masivas, CRM kanban, Flujos guiados, Embudo de ventas, Chat web, Mercado Pago, Webhooks, Tienda web) y un límite de leads/mes. Si una página no aparece en el menú del tenant es porque su plan no incluye ese módulo o su rubro no la usa. Los precios vigentes están en la sección PLANES de este prompt; el plan propio del negocio se consulta con ver_mi_plan.",
