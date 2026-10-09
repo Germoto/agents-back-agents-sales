@@ -232,7 +232,13 @@ async function storePaymentOptions(companyId: string, cfg: { manualPaymentsEnabl
     pc?.enabled && cfg.manualPaymentsEnabled
       ? pc.methods.map((m) => ({ method: m.method, number: m.number, holder: m.holder }))
       : [];
-  return { mercadoPago, manual, pc };
+  // Recargo de Mercado Pago que paga el COMPRADOR (solo si el negocio lo traslada): la tienda
+  // lo muestra antes de redirigir para que el monto del link no sorprenda.
+  const mpRecargo =
+    mercadoPago && pc && pc.mpFeeMode === "CUSTOMER"
+      ? { percent: Number(pc.mpFeePercent), fixed: Number(pc.mpFeeFixed), igv: pc.mpFeeIgv }
+      : null;
+  return { mercadoPago, manual, mpRecargo, pc };
 }
 
 export async function getPublicStore(slug: string) {
@@ -289,7 +295,7 @@ export async function getPublicStore(slug: string) {
     });
   const categorias = Array.from(new Set(mapped.flatMap((x) => x.categories)));
   return {
-    pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual },
+    pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual, mpRecargo: pay.mpRecargo },
     portada: { slides, autoplay: cfg.carouselAutoplay, intervalSec: cfg.carouselIntervalSec },
     confianza: jsonArray<TrustItem>(cfg.trustItems).length ? jsonArray<TrustItem>(cfg.trustItems).slice(0, 3) : DEFAULT_TRUST_ITEMS,
     faqs: jsonArray<StoreFaq>(cfg.faqs).slice(0, 10),
