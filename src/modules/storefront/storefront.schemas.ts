@@ -60,6 +60,13 @@ export const updateStorefrontConfigSchema = z.object({
         sub: z.string().trim().max(240).default(""),
         imageUrl: z.string().trim().max(500).nullable().optional(),
         bg: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
+        style: z.enum(["ambiente", "tarjeta", "poster"]).optional(),
+        highlight: z.string().trim().max(60).optional(),
+        bullets: z.array(z.string().trim().max(60)).max(3).optional(),
+        socialProof: z.string().trim().max(40).optional(),
+        accentColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
+        ctaColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
+        ctaLabel: z.string().trim().max(30).optional(),
       }),
     )
     .max(5)

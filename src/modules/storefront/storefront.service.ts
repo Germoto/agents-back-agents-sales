@@ -42,7 +42,28 @@ import { signDownloadToken } from "../../lib/jwt";
 // Portada: tipos de la configuración (JSON) y valores por defecto
 // ---------------------------------------------------------------------------
 
-export type HeroSlide = { productId: string; kicker: string; headline: string; sub: string; imageUrl: string | null; bg: string | null };
+export type HeroSlideStyle = "ambiente" | "tarjeta" | "poster";
+export const HERO_STYLES: HeroSlideStyle[] = ["ambiente", "tarjeta", "poster"];
+export type HeroSlide = {
+  productId: string;
+  kicker: string;
+  headline: string;
+  sub: string;
+  imageUrl: string | null;
+  bg: string | null;
+  /** Estilo del slide (ambiente | tarjeta | poster). */
+  style?: HeroSlideStyle;
+  /** Parte del titular que va en color de acento (debe aparecer dentro del titular). */
+  highlight?: string;
+  /** Hasta 3 frases cortas (chips en "ambiente", lista ✓ en "tarjeta"). */
+  bullets?: string[];
+  /** Prueba social, ej. "+2,300 compras". */
+  socialProof?: string;
+  /** Color de acento del banner (resaltado, badges) y color del botón. */
+  accentColor?: string | null;
+  ctaColor?: string | null;
+  ctaLabel?: string;
+};
 export type TrustItem = { title: string; sub: string };
 export type StoreFaq = { question: string; answer: string };
 
@@ -288,9 +309,18 @@ export async function getPublicStore(slug: string) {
         sub: (sl.sub ?? "").trim() || shortDescription,
         imageUrl: sl.imageUrl || images[0]?.url || null,
         bg: sl.bg || null,
+        style: HERO_STYLES.includes(sl.style as HeroSlideStyle) ? (sl.style as HeroSlideStyle) : "ambiente",
+        highlight: (sl.highlight ?? "").trim(),
+        bullets: (sl.bullets ?? []).map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 3),
+        socialProof: (sl.socialProof ?? "").trim(),
+        accentColor: sl.accentColor || null,
+        ctaColor: sl.ctaColor || null,
+        ctaLabel: (sl.ctaLabel ?? "").trim() || "Comprar ahora",
         priceText: b.priceText ?? b.price,
         regularPriceText: b.regularPriceText,
         discountPct: discountPct(b.price, b.regularPrice),
+        // Urgencia real: solo si el producto tiene oferta con fecha de fin.
+        offerEndsAt: b.offerEndsAt ? b.offerEndsAt.toISOString() : null,
       };
     });
   const categorias = Array.from(new Set(mapped.flatMap((x) => x.categories)));
@@ -1389,7 +1419,21 @@ export async function updateStorefrontConfig(
     whatsappNumber?: string | null;
     productIds?: string[];
     manualPaymentsEnabled?: boolean;
-    heroSlides?: { productId: string; kicker?: string; headline?: string; sub?: string; imageUrl?: string | null; bg?: string | null }[];
+    heroSlides?: {
+      productId: string;
+      kicker?: string;
+      headline?: string;
+      sub?: string;
+      imageUrl?: string | null;
+      bg?: string | null;
+      style?: string;
+      highlight?: string;
+      bullets?: string[];
+      socialProof?: string;
+      accentColor?: string | null;
+      ctaColor?: string | null;
+      ctaLabel?: string;
+    }[];
     carouselAutoplay?: boolean;
     carouselIntervalSec?: number;
     showOldPrice?: boolean;
@@ -1445,13 +1489,21 @@ export async function updateStorefrontConfig(
     heroSlides = data.heroSlides.slice(0, 5).map((sl) => {
       if (!eligible.has(sl.productId)) throw new AppError("Un slide apunta a un producto que no está listo para la tienda", 400);
       if (sl.imageUrl && !isOwnUpload(sl.imageUrl)) throw new AppError("La imagen del banner debe ser un archivo subido a FlowApp", 400);
+      const hex = (v: string | null | undefined) => (v && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null);
       return {
         productId: sl.productId,
         kicker: (sl.kicker ?? "").trim().slice(0, 40),
         headline: (sl.headline ?? "").trim().slice(0, 120),
         sub: (sl.sub ?? "").trim().slice(0, 240),
         imageUrl: sl.imageUrl || null,
-        bg: sl.bg && /^#[0-9a-fA-F]{6}$/.test(sl.bg) ? sl.bg : null,
+        bg: hex(sl.bg),
+        style: HERO_STYLES.includes(sl.style as HeroSlideStyle) ? (sl.style as HeroSlideStyle) : "ambiente",
+        highlight: (sl.highlight ?? "").trim().slice(0, 60),
+        bullets: (sl.bullets ?? []).map((x) => String(x ?? "").trim().slice(0, 60)).filter(Boolean).slice(0, 3),
+        socialProof: (sl.socialProof ?? "").trim().slice(0, 40),
+        accentColor: hex(sl.accentColor),
+        ctaColor: hex(sl.ctaColor),
+        ctaLabel: (sl.ctaLabel ?? "").trim().slice(0, 30),
       };
     });
   }
