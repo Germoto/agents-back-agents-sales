@@ -72,6 +72,9 @@ const envSchema = z.object({
   // URL pública del panel (para botones en correos, ej. "Iniciar sesión").
   // Vacío = los correos van sin botón.
   FRONTEND_URL: z.string().optional().default(""),
+  // Tienda web pública por tenant: dominio base de los subdominios (<slug>.<STORE_DOMAIN>).
+  // Vacío = sin subdominios; la tienda vive en FRONTEND_URL/tienda/<slug> (desarrollo).
+  STORE_DOMAIN: z.string().optional().default(""),
 });
 
 export const env = envSchema.parse(process.env);

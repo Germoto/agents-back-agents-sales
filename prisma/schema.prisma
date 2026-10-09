@@ -191,6 +191,8 @@ model Company {
   adCatalogEntries  AdCatalogEntry[]
   bookingWidget     BookingWidgetConfig?
   platformPayments  PlatformPayment[]
+  storefront        StorefrontConfig?
+  storeOrders       StoreOrder[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
   crms                 Crm[]
@@ -796,6 +798,7 @@ model Customer {
   deals             CustomerDeal[]
   contactNotes      ContactNote[]
   subscriptions     Subscription[]
+  storeOrders       StoreOrder[]
 
   @@unique([companyId, phone])
   @@index([companyId, lastInteractionAt])
@@ -1420,6 +1423,7 @@ enum PlanModule {
   MERCADOPAGO
   REPORTS
   WEBHOOKS
+  STOREFRONT
 }
 
 enum VoucherType {
@@ -1648,4 +1652,63 @@ model ReportConfig {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Tienda web pública por tenant (<slug>.flowapp.pe): catálogo de infoproductos
+// con pago por Mercado Pago y entrega por correo/WhatsApp.
+// ---------------------------------------------------------------------------
+model StorefrontConfig {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String   @unique @db.Uuid
+  enabled        Boolean  @default(false)
+  title          String?
+  tagline        String?
+  accentColor    String?
+  logoUrl        String?
+  // Número para el botón "Escríbenos por WhatsApp" (solo dígitos, con código de país).
+  whatsappNumber String?
+  // Productos a mostrar; vacío = todos los elegibles (digitales con entrega por correo).
+  productIds     String[] @default([]) @db.Uuid
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+enum StoreOrderStatus {
+  PENDIENTE
+  PAGADO
+  ENTREGADO
+  FALLIDO
+}
+
+model StoreOrder {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String           @db.Uuid
+  customerId     String           @db.Uuid
+  // Snapshot del producto (sin FK: si se borra el producto, el pedido se conserva).
+  productId      String           @db.Uuid
+  productName    String
+  email          String
+  name           String
+  phone          String?
+  // Monto del link de Mercado Pago (incluye comisión si el negocio la traslada).
+  amount         Decimal          @db.Decimal(12, 2)
+  currency       String           @default("PEN")
+  status         StoreOrderStatus @default(PENDIENTE)
+  mpPreferenceId String?
+  mpPaymentId    String?
+  receiptId      String?          @unique @db.Uuid
+  // Token aleatorio para que la página de gracias consulte el estado del pedido.
+  accessToken    String
+  deliveredAt    DateTime?
+  failureReason  String?
+  metadata       Json?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  company        Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer       Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, createdAt])
+  @@index([companyId, status])
 }

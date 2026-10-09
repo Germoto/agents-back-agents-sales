@@ -23,7 +23,7 @@ export const deliveryConfigSchema = z
 
 export const updateBusinessSchema = z.object({
   name: z.string().min(1),
-  slug: z.string().min(1),
+  slug: z.string().trim().min(1),
   adminPhone: z.string().min(6),
   vertical: businessVerticalSchema.default("INFOPRODUCT"),
   timezone: z.string().min(1).default("America/Lima"),

@@ -15,10 +15,13 @@ import { decryptCredential } from "../../lib/credentials-crypto";
 import { mpGetPayment } from "../../lib/mercadopago-client";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { handleExternalPaymentApproved } from "../agent/agent.service";
+import { fulfillStoreOrderFromMp } from "../storefront/storefront.service";
 
 interface MpReference {
   conversationId?: string;
   productIds?: string[];
+  /** Pedido de la tienda web (rama independiente del flujo del chat). */
+  storeOrderId?: string;
 }
 
 export async function processMercadoPagoWebhook(
@@ -60,6 +63,12 @@ export async function processMercadoPagoWebhook(
     ref = JSON.parse(payment.external_reference ?? "{}") as MpReference;
   } catch {
     ref = {};
+  }
+
+  // Pedido de la TIENDA WEB: rama propia (receipt + entrega por correo/WhatsApp).
+  // Los pagos del chat no traen storeOrderId y siguen el camino de siempre.
+  if (ref.storeOrderId) {
+    return fulfillStoreOrderFromMp(companyId, ref.storeOrderId, payment);
   }
 
   const convo = ref.conversationId

@@ -56,6 +56,8 @@ import { listCampaigns, createCampaign, updateCampaign, startCampaign, testCampa
 import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
 import { listSubscriptions } from "../subscriptions/subscriptions.service";
 import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
+import { getStorefrontConfig, listStoreOrders, updateStorefrontConfig } from "../storefront/storefront.service";
+import { updateStorefrontConfigSchema } from "../storefront/storefront.schemas";
 import { normalizeQuietHours, normalizePacing } from "../scheduler/quiet-hours";
 import { ScheduledMessageStatus } from "@prisma/client";
 import { buildBotConfig } from "../bot/bot.service";
@@ -532,6 +534,29 @@ export const TOOLS: ToolDefinition[] = [
           data: { type: "object", description: "Solo los campos a cambiar" },
           reemplazarDominios: { type: "boolean", description: "true = allowedOrigins enviados REEMPLAZAN la lista completa" },
         },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_tienda",
+      description:
+        "TIENDA WEB pública del negocio (<slug>.flowapp.pe): devuelve si está activa, su URL, el checklist de requisitos (identificador/slug válido, módulos del plan, Mercado Pago configurado, productos elegibles = digitales con entrega por correo activa, productos que faltan por habilitar), la configuración visual y los últimos pedidos web con su estado (PENDIENTE/PAGADO/ENTREGADO/FALLIDO). Úsala antes de proponer cambios o cuando pregunten por ventas de la tienda.",
+      parameters: { type: "object", additionalProperties: false, properties: { pedidos: { type: "number", description: "cuántos pedidos recientes incluir (default 10, máx 50)" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_tienda",
+      description:
+        "Activa o configura la TIENDA WEB. `data` es PARCIAL: {enabled?, title? (nombre visible), tagline? (frase corta), accentColor? (hex), whatsappNumber? (botón 'Escríbenos', solo dígitos con código de país), productIds? (uuid[]; vacío = todos los elegibles)}. Para que funcione: slug válido (se cambia en configurar_empresa: minúsculas/números/guiones), Mercado Pago configurado en Pagos (el token NO se gestiona por chat) y productos con digitalDelivery.emailEnabled=true (actualizar_producto). Si enabled=true y falta un requisito, la tool lo explica. Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["data"],
+        properties: { data: { type: "object", description: "Solo los campos a cambiar" } },
       },
     },
   },
@@ -1583,6 +1608,9 @@ export async function runCopilotTool(
             },
             plantillaMeta: fu?.metaTemplate ?? null,
           },
+          tienda: await getStorefrontConfig(companyId)
+            .then((c) => ({ enabled: c.enabled, url: c.status.url, lista: c.status.lista }))
+            .catch(() => null),
           pagos: payment
             ? {
                 enabled: payment.enabled,
@@ -1985,6 +2013,63 @@ export async function runCopilotTool(
           ok: true,
           chatWeb: { enabled: updated.enabled, welcomeMessage: updated.welcomeMessage, accentColor: updated.accentColor },
           nota: "Chat web actualizado (el token del widget no cambió).",
+        }),
+        wrote: true,
+      };
+    }
+
+    case "ver_tienda": {
+      const cfg = await getStorefrontConfig(companyId);
+      const limit = Math.min(Math.max(Number(args.pedidos) || 10, 1), 50);
+      const orders = await listStoreOrders(companyId, 1, limit);
+      return {
+        result: JSON.stringify({
+          activa: cfg.enabled,
+          url: cfg.status.url,
+          lista: cfg.status.lista,
+          checklist: {
+            slugValido: cfg.status.slugValido,
+            slugProblema: cfg.status.slugProblema,
+            moduloTienda: cfg.status.moduloTienda,
+            moduloMercadoPago: cfg.status.moduloMp,
+            mercadoPagoConfigurado: cfg.status.mpConfigurado,
+            productosElegibles: cfg.status.productosElegibles,
+            productosSinEntregaPorCorreo: cfg.status.productosSinCorreo,
+          },
+          config: { title: cfg.title, tagline: cfg.tagline, accentColor: cfg.accentColor, logoUrl: cfg.logoUrl, whatsappNumber: cfg.whatsappNumber, productIds: cfg.productIds },
+          pedidosRecientes: { total: orders.total, items: orders.items.map((o) => ({ fecha: o.createdAt, producto: o.productName, comprador: o.name, email: o.email, whatsapp: o.phone, monto: o.amountText, estado: o.status, motivo: o.failureReason })) },
+          nota: "Los pedidos ENTREGADOS son ventas reales (comprobante aprobado, canal 'tienda web'). Un producto solo se vende en la tienda si es digital, está en catálogo y tiene entrega por correo activa.",
+        }),
+        wrote: false,
+      };
+    }
+
+    case "configurar_tienda": {
+      const data = (args.data ?? {}) as LooseData;
+      const parsed = updateStorefrontConfigSchema.safeParse({
+        ...(typeof data.enabled === "boolean" ? { enabled: data.enabled } : {}),
+        ...(data.title !== undefined ? { title: asStr(data.title) } : {}),
+        ...(data.tagline !== undefined ? { tagline: asStr(data.tagline) } : {}),
+        ...(data.accentColor !== undefined ? { accentColor: asStr(data.accentColor) } : {}),
+        ...(data.whatsappNumber !== undefined ? { whatsappNumber: asStr(data.whatsappNumber) } : {}),
+        ...(data.productIds !== undefined ? { productIds: asStrList(data.productIds) ?? [] } : {}),
+      });
+      if (!parsed.success) {
+        return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
+      }
+      const cfg = await updateStorefrontConfig(companyId, parsed.data);
+      return {
+        result: JSON.stringify({
+          ok: true,
+          activa: cfg.enabled,
+          url: cfg.status.url,
+          lista: cfg.status.lista,
+          pendientes: {
+            ...(cfg.status.slugProblema ? { slug: cfg.status.slugProblema } : {}),
+            ...(cfg.status.mpConfigurado ? {} : { mercadoPago: "Falta configurar Mercado Pago en Pagos (token desde el panel)." }),
+            ...(cfg.status.productosElegibles.length ? {} : { productos: "Ningún producto elegible: activa la entrega por correo en los productos digitales." }),
+          },
+          nota: cfg.status.lista ? "Tienda lista para vender." : "Tienda guardada; revisa los pendientes antes de compartir la URL.",
         }),
         wrote: true,
       };
@@ -2462,11 +2547,12 @@ const SYSTEM_GUIDE = [
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
+  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, Mercado Pago configurado en Pagos y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos).",
   "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
   "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
   "",
-  "PLANES Y MÓDULOS: cada plan incluye módulos (Campañas masivas, CRM kanban, Flujos guiados, Embudo de ventas, Chat web, Mercado Pago, Webhooks) y un límite de leads/mes. Si una página no aparece en el menú del tenant es porque su plan no incluye ese módulo o su rubro no la usa. Los precios vigentes están en la sección PLANES de este prompt; el plan propio del negocio se consulta con ver_mi_plan.",
+  "PLANES Y MÓDULOS: cada plan incluye módulos (Campañas masivas, CRM kanban, Flujos guiados, Embudo de ventas, Chat web, Mercado Pago, Webhooks, Tienda web) y un límite de leads/mes. Si una página no aparece en el menú del tenant es porque su plan no incluye ese módulo o su rubro no la usa. Los precios vigentes están en la sección PLANES de este prompt; el plan propio del negocio se consulta con ver_mi_plan.",
   "=== FIN DE LA GUÍA ===",
 ].join("\n");
 

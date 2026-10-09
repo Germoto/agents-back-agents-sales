@@ -1,6 +1,7 @@
 import { BusinessVertical, Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
+import { storeSlugProblem } from "../../lib/slug";
 import { getEnabledVerticals } from "../platform-config/platform-config.service";
 import { getEntitlements } from "../billing/entitlements";
 import { invalidateFirmaCache } from "../agent/firma";
@@ -52,10 +53,16 @@ export async function updateBusinessProfile(companyId: string, data: {
 }) {
   const existing = await prisma.company.findUnique({
     where: { id: companyId },
-    select: { vertical: true, _count: { select: { products: true } } },
+    select: { vertical: true, slug: true, _count: { select: { products: true } } },
   });
   if (!existing) {
     throw new AppError("Empresa no encontrada", 404);
+  }
+  // El slug es el subdominio de la tienda web: se valida SOLO cuando cambia
+  // (los existentes siguen funcionando aunque no cumplan el formato).
+  if (data.slug !== existing.slug) {
+    const problem = storeSlugProblem(data.slug);
+    if (problem) throw new AppError(`Identificador no válido: ${problem}`, 400);
   }
 
   // Lock de rubro: no se puede cambiar el rubro si ya hay productos (toda la

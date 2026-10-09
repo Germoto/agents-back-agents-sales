@@ -39,6 +39,7 @@ const ALL_MODULES: PlanModule[] = [
   "MERCADOPAGO",
   "REPORTS",
   "WEBHOOKS",
+  "STOREFRONT",
 ];
 const ALL_VERTICALS: BusinessVertical[] = [
   "INFOPRODUCT",

@@ -46,7 +46,7 @@ export interface EmailDeliveryRecord {
   email: string;
   productIds: string[];
   at: string;
-  trigger: "agent" | "panel";
+  trigger: "agent" | "panel" | "web";
   attachments: number;
   byLinks: boolean;
   /** Mensajes adicionales incluidos en el correo. */
@@ -59,7 +59,7 @@ export interface SendDigitalDeliveryEmailInput {
   /** Comprobante concreto; si se omite, se usa el último APROBADO del cliente. */
   receiptId?: string | null;
   email: string;
-  trigger: "agent" | "panel";
+  trigger: "agent" | "panel" | "web";
 }
 
 export interface SendDigitalDeliveryEmailResult {
