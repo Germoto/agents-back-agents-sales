@@ -139,6 +139,22 @@ export interface TurnContext {
   /** modo simulación (Pruebas): los tools que escriben datos compartidos/reales
    * (validar_pago, registrar pedidos, reservas) se stubean para no afectar datos. */
   simulate?: boolean;
+  /** Nombres de las tools ejecutadas en ESTE turno (en orden). Lo llena el runtime;
+   *  permite guardas deterministas sobre el texto final (p. ej. tras enviar_metodos_pago). */
+  toolsCalled?: string[];
+}
+
+/**
+ * Guardia determinista tras `enviar_metodos_pago`: el mensaje de cobro ya cierra
+ * solo (monto, métodos, cómo validar). Si el modelo igual agrega un párrafo que no
+ * responde ninguna pregunta (ni el cliente preguntó algo ni el texto pregunta),
+ * se descarta: evita el "He enviado los métodos de pago…" redundante que suena a bot.
+ */
+export function shouldDropFinalTextAfterPayment(ctx: TurnContext, finalText: string, lastUserText: string): boolean {
+  if (!finalText.trim()) return false;
+  if (!(ctx.toolsCalled ?? []).includes("enviar_metodos_pago")) return false;
+  const asks = (t: string) => /[?¿]/.test(t);
+  return !asks(lastUserText) && !asks(finalText);
 }
 
 /**
@@ -2006,7 +2022,7 @@ export async function executeTool(
         sent: true,
         mercadoPagoLink: Boolean(mpLine),
         nota:
-          "Ya envié el monto y los métodos de pago al cliente. NO los repitas en tu texto final; cierra breve o deja el texto vacío." +
+          "Ya envié el monto y los métodos de pago al cliente (con la instrucción de mandar el comprobante). Deja tu texto final VACÍO: NO repitas el monto, los métodos ni 'envíame el comprobante'. Solo escribe algo si el cliente hizo una pregunta concreta que el mensaje de cobro no responde (y contéstala en UNA línea)." +
           (mpLine
             ? " Si el cliente paga por el link de Mercado Pago, la confirmación y la entrega son AUTOMÁTICAS: no le pidas comprobante por ese medio."
             : ""),

@@ -11,7 +11,7 @@ import { buildBotConfig } from "../bot/bot.service";
 import { runAgentTurn } from "./agent-runtime";
 import { buildHistory, saveState, resetConversation, type ConversationState } from "./conversation.service";
 import { runFlowTurn, trailingUserText, type FlowIO, type FlowTraceEntry } from "../flows/flow-engine";
-import type { TurnContext, OutboxMessage } from "./agent-tools";
+import { shouldDropFinalTextAfterPayment, type TurnContext, type OutboxMessage } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveReminderSequence, applySpintax, type ReminderType } from "./reminder-templates";
 
@@ -206,6 +206,7 @@ export async function simulateTurn(
     finalText = "Disculpa, tuve un inconveniente. (simulación)";
     console.error("[simulate] runAgentTurn falló:", err instanceof Error ? err.message : err);
   }
+  if (shouldDropFinalTextAfterPayment(ctx, finalText, trailingUserText(history))) finalText = "";
   finalText = applySpintax(finalText);
 
   const replies: SimMessage[] = [];

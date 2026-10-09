@@ -17,7 +17,7 @@ const envSchema = z.object({
   // Ventana de debounce (ms): tras un inbound se espera este lapso para juntar la
   // ráfaga de mensajes del cliente y responder UNA sola vez. El temporizador se
   // reinicia con cada mensaje nuevo; el turno corre tras `sendAt = ultimo + ventana`.
-  AGENT_DEBOUNCE_MS: z.coerce.number().int().nonnegative().default(6000),
+  AGENT_DEBOUNCE_MS: z.coerce.number().int().nonnegative().default(8000),
   // Ritmo anti-ráfaga de recordatorios (defaults por empresa; cada tenant puede
   // ajustarlo en Recordatorios → Horario): separación al azar entre envíos
   // consecutivos de la misma empresa y tope de recordatorios visibles por hora.

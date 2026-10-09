@@ -113,6 +113,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
         } catch {
           parsed = {};
         }
+        (ctx.toolsCalled ??= []).push(call.function.name);
         const result = await executeTool(call.function.name, parsed, ctx).catch((err) =>
           JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "tool error" }),
         );

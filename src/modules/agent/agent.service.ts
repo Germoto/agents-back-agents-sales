@@ -45,7 +45,7 @@ import {
   recheckFlowPayment,
   type FlowSessionState,
 } from "../flows/flow-engine";
-import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, type TurnContext } from "./agent-tools";
+import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
 import { getLinkedPhone } from "../whatsapp-config/whatsapp-config.service";
@@ -763,6 +763,10 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     void alertAiProviderFailure(companyId, err).catch(() => undefined);
   } finally {
     stopTyping();
+  }
+  if (shouldDropFinalTextAfterPayment(ctx, finalText, trailingUserText(history))) {
+    console.log(`[agent] texto final descartado tras enviar_metodos_pago (redundante) convo=${ctx.conversationId}`);
+    finalText = "";
   }
 
   // Dedup de multimedia repetida en el mismo turno: si el modelo reenvía con
