@@ -65,6 +65,8 @@ export type ProductOverride = {
   sortOrder?: number | null;
   /** Recursos de muestra en la ficha (PDF, video, imágenes); opt-in. */
   media?: StoreMediaItem[] | null;
+  /** Imágenes del producto que la tienda NO muestra (solo tienda; el producto no cambia). */
+  hiddenImages?: string[] | null;
 };
 export type ProductOverrides = Record<string, ProductOverride>;
 
@@ -94,8 +96,20 @@ function overridesOf(cfg: { productOverrides?: unknown }): ProductOverrides {
 }
 
 /** Imagen de portada efectiva en la tienda: override o primera imagen de presentación. */
+function hiddenOf(ov?: ProductOverride): Set<string> {
+  return new Set((ov?.hiddenImages ?? []).filter((u) => typeof u === "string"));
+}
+
+/** Imágenes de presentación visibles en la tienda (sin las ocultas). */
+function visibleImagesOf(p: { files: { type: string; showInPresentation: boolean; url: string }[] }, ov?: ProductOverride): string[] {
+  const hidden = hiddenOf(ov);
+  return p.files.filter((f) => f.type === "IMAGE" && f.showInPresentation && !hidden.has(f.url)).map((f) => f.url);
+}
+
 function storeImageOf(p: { files: { type: string; showInPresentation: boolean; url: string }[] }, ov?: ProductOverride): string | null {
-  return ov?.imageUrl || p.files.find((f) => f.type === "IMAGE" && f.showInPresentation)?.url || null;
+  const hidden = hiddenOf(ov);
+  if (ov?.imageUrl && !hidden.has(ov.imageUrl)) return ov.imageUrl;
+  return visibleImagesOf(p, ov)[0] ?? null;
 }
 
 export const DEFAULT_TRUST_ITEMS: TrustItem[] = [
@@ -234,7 +248,7 @@ export async function getPublicStore(slug: string) {
       const cover = storeImageOf(p, ov);
       const images = [
         ...(cover ? [{ url: cover, description: "" }] : []),
-        ...p.files.filter((f) => f.type === "IMAGE" && f.showInPresentation && f.url !== cover).map((f) => ({ url: f.url, description: f.description || "" })),
+        ...visibleImagesOf(p, ov).filter((u) => u !== cover).map((u) => ({ url: u, description: "" })),
       ];
       const categories = categoriesOf(ov, b.category);
       return {
@@ -1405,8 +1419,12 @@ export async function updateStorefrontConfig(
           description: (m.description ?? "").trim().slice(0, 200) || null,
         });
       }
+      const productImages = new Set(prod.files.filter((f) => f.type === "IMAGE").map((f) => f.url));
+      const hiddenImages = Array.from(new Set((ov.hiddenImages ?? []).filter((u) => typeof u === "string" && productImages.has(u))));
+      const imageUrl = ov.imageUrl && !hiddenImages.includes(ov.imageUrl) ? ov.imageUrl : null;
       const clean: ProductOverride = {
-        ...(ov.imageUrl ? { imageUrl: ov.imageUrl } : {}),
+        ...(imageUrl ? { imageUrl } : {}),
+        ...(hiddenImages.length ? { hiddenImages } : {}),
         ...(categories.length ? { categories } : {}),
         ...(ov.shortDescription?.trim() ? { shortDescription: ov.shortDescription.trim().slice(0, 160) } : {}),
         ...(typeof ov.sortOrder === "number" && Number.isFinite(ov.sortOrder) ? { sortOrder: Math.round(ov.sortOrder) } : {}),
@@ -1549,6 +1567,7 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
           regularPriceText: b.regularPriceText,
           imageUrl: storeImageOf(p, ov),
           images: p.files.filter((f) => f.type === "IMAGE" && f.showInPresentation).map((f) => f.url),
+          hiddenImages: Array.from(hiddenOf(ov)),
           // Archivos públicos del producto (para elegir recursos de muestra); los privados no tienen URL pública.
           files: p.files
             .filter((f) => !f.privateDownload)

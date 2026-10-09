@@ -543,8 +543,8 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "ver_tienda",
       description:
-        "TIENDA WEB pública del negocio (<slug>.flowapp.pe): devuelve si está activa, su URL, el checklist de requisitos (identificador/slug válido, módulos del plan, Mercado Pago configurado, Yape/Plin disponible = métodos manuales de Pagos + opción de la tienda, productos elegibles = digitales con entrega por correo activa, productos que faltan por habilitar), la configuración visual, los últimos pedidos web con su estado (PENDIENTE/EN_REVISION/PAGADO/ENTREGADO/FALLIDO), las MÉTRICAS de 30 días (visitas únicas, vistas de producto, carrito, checkouts, clics a WhatsApp, compras, ingresos, conversión % y tabla por producto) y los pedidos EN_REVISION (comprobante Yape/Plin subido sin validación automática: incluye id, comprador, monto, nombre del pagador, lo que la visión leyó y la URL del comprobante). Úsala antes de proponer cambios, cuando pregunten por ventas de la tienda o antes de aprobar/rechazar un pedido.",
-      parameters: { type: "object", additionalProperties: false, properties: { pedidos: { type: "number", description: "cuántos pedidos recientes incluir (default 10, máx 50)" } } },
+        "TIENDA WEB pública del negocio (<slug>.flowapp.pe): devuelve si está activa, su URL, el checklist de requisitos (identificador/slug válido, módulos del plan, Mercado Pago configurado, Yape/Plin disponible = métodos manuales de Pagos + opción de la tienda, productos elegibles = digitales con entrega por correo activa, productos que faltan por habilitar), la configuración visual, los últimos pedidos web con su estado (PENDIENTE/EN_REVISION/PAGADO/ENTREGADO/FALLIDO), las MÉTRICAS (7/30/90 días con `dias`; visitas únicas, vistas de producto, carrito, checkouts, clics a WhatsApp, compras, ingresos, conversión % y tabla por producto) y los pedidos EN_REVISION (comprobante Yape/Plin subido sin validación automática: incluye id, comprador, monto, nombre del pagador, lo que la visión leyó y la URL del comprobante). Úsala antes de proponer cambios, cuando pregunten por ventas de la tienda o antes de aprobar/rechazar un pedido.",
+      parameters: { type: "object", additionalProperties: false, properties: { pedidos: { type: "number", description: "cuántos pedidos recientes incluir (default 10, máx 50)" }, dias: { type: "number", description: "periodo de las métricas: 7, 30 (default) o 90 días" } } },
     },
   },
   {
@@ -552,7 +552,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_tienda",
       description:
-        "Activa o configura la TIENDA WEB. `data` es PARCIAL: {enabled?, title? (nombre visible), tagline? (frase corta), accentColor? (hex), whatsappNumber? (botón 'Escríbenos', solo dígitos con código de país), productIds? (uuid[]; vacío = todos los elegibles), manualPaymentsEnabled? (aceptar Yape/Plin en la tienda subiendo el comprobante; usa los métodos manuales de Pagos; default true), heroSlides? (PORTADA/carrusel: hasta 5 [{productId (elegible), kicker ('Lo más vendido'), headline, sub, bg? (hex oscuro)}]; la imagen del banner se sube desde el panel, no por chat), carouselAutoplay?, carouselIntervalSec? (3-12), showOldPrice? (precio anterior tachado y -%), trustItems? (3 [{title, sub}]; null = por defecto), faqs? ([{question, answer}] generales de la tienda, máx 10), footerTagline?, productOverrides? ({[productId]: {categories? (string[] hasta 6, tipo etiquetas; alimentan los filtros de la tienda), shortDescription?, sortOrder?, media? ([{url, type: IMAGE|VIDEO|PDF|OTHER, title?, description? (texto vendedor que ve el comprador; si falta se usa la descripción del archivo del producto)}] RECURSOS DE MUESTRA que se ven en la ficha de la tienda — usa urls de archivos públicos del producto (ver_producto → files, no privados); subir archivos nuevos solo desde el panel)} | null} — personalización SOLO para la tienda, el producto del chat no cambia; la portada se elige desde el panel; null quita el override)}. Para que funcione: slug válido (se cambia en configurar_empresa: minúsculas/números/guiones), AL MENOS un cobro: Mercado Pago conectado en Integraciones y habilitado para la tienda (el token NO se gestiona por chat; el canal sí: configurar_pagos {mpStoreEnabled:true}) o Yape/Plin (métodos en configurar_pagos + manualPaymentsEnabled), y productos con digitalDelivery.emailEnabled=true (actualizar_producto). Si enabled=true y falta un requisito, la tool lo explica. Llámala SOLO tras confirmación.",
+        "Activa o configura la TIENDA WEB. `data` es PARCIAL: {enabled?, title? (nombre visible), tagline? (frase corta), accentColor? (hex), logoUrl? (URL de una imagen subida a FlowApp, p. ej. de adjuntar_foto_producto/generar_imagen; null quita el logo), whatsappNumber? (botón 'Escríbenos', solo dígitos con código de país), productIds? (uuid[]; vacío = todos los elegibles), manualPaymentsEnabled? (aceptar Yape/Plin en la tienda subiendo el comprobante; usa los métodos manuales de Pagos; default true), heroSlides? (PORTADA/carrusel: hasta 5 [{productId (elegible), kicker ('Lo más vendido'), headline, sub, imageUrl? (URL de una imagen del producto — ver_tienda → productosElegibles[].images — o subida con adjuntar_foto_producto/generar_imagen; vacío = portada del producto), bg? (hex oscuro)}]), carouselAutoplay?, carouselIntervalSec? (3-12), showOldPrice? (precio anterior tachado y -%), trustItems? (3 [{title, sub}]; null = por defecto), faqs? ([{question, answer}] generales de la tienda, máx 10), footerTagline?, productOverrides? ({[productId]: {imageUrl? (PORTADA en la tienda: URL de una imagen del producto o subida por adjuntar_foto_producto/generar_imagen), hiddenImages? (string[] de URLs de imágenes del producto que la tienda NO muestra — quitar solo de la tienda, el producto del agente no cambia), categories? (string[] hasta 6, tipo etiquetas; alimentan los filtros de la tienda), shortDescription?, sortOrder?, media? ([{url, type: IMAGE|VIDEO|PDF|OTHER, title?, description? (texto vendedor que ve el comprador; si falta se usa la descripción del archivo del producto)}] RECURSOS DE MUESTRA que se ven en la ficha — usa urls de archivos públicos del producto (ver_tienda → productosElegibles[].files, no privados); PDFs/videos nuevos solo se suben desde el panel)} | null} — personalización SOLO para la tienda, el producto del chat no cambia; null quita el override)}. Para que funcione: slug válido (se cambia en configurar_empresa: minúsculas/números/guiones), AL MENOS un cobro: Mercado Pago conectado en Integraciones y habilitado para la tienda (el token NO se gestiona por chat; el canal sí: configurar_pagos {mpStoreEnabled:true}) o Yape/Plin (métodos en configurar_pagos + manualPaymentsEnabled), y productos con digitalDelivery.emailEnabled=true (actualizar_producto). Si enabled=true y falta un requisito, la tool lo explica. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -620,6 +620,25 @@ export const TOOLS: ToolDefinition[] = [
           productIds: { type: "array", items: { type: "string" } },
           maxUses: { type: "number" },
           expiresAt: { type: "string" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "editar_cupon",
+      description: "Edita un cupón existente de la tienda web: {couponId, maxUses? (null = sin límite), expiresAt? (ISO; null = sin vencimiento), productIds? (uuid[]; vacío = todos), active?}. Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["couponId"],
+        properties: {
+          couponId: { type: "string" },
+          maxUses: { type: ["number", "null"] },
+          expiresAt: { type: ["string", "null"] },
+          productIds: { type: "array", items: { type: "string" } },
+          active: { type: "boolean" },
         },
       },
     },
@@ -2124,7 +2143,7 @@ export async function runCopilotTool(
       const [orders, review, metricas30d] = await Promise.all([
         listStoreOrders(companyId, 1, limit),
         listStoreOrders(companyId, 1, 20, "EN_REVISION"),
-        storeMetrics(companyId, 30).catch(() => null),
+        storeMetrics(companyId, [7, 30, 90].includes(Number(args.dias)) ? Number(args.dias) : 30).catch(() => null),
       ]);
       return {
         result: JSON.stringify({
@@ -2148,7 +2167,7 @@ export async function runCopilotTool(
             portada: { heroSlides: cfg.heroSlides, carouselAutoplay: cfg.carouselAutoplay, carouselIntervalSec: cfg.carouselIntervalSec, showOldPrice: cfg.showOldPrice, trustItems: cfg.trustItems, faqs: cfg.faqs, footerTagline: cfg.footerTagline },
             productOverrides: cfg.productOverrides,
           },
-          metricas30d,
+          metricas: metricas30d,
           pedidosEnRevision: review.items.map((o) => ({
             id: o.id,
             fecha: o.createdAt,
@@ -2187,6 +2206,18 @@ export async function runCopilotTool(
       return { result: JSON.stringify({ ok: true, cupon: c, nota: "El comprador escribe el código en el checkout de la tienda web." }), wrote: true };
     }
 
+    case "editar_cupon": {
+      const id = asStr(args.couponId) ?? "";
+      if (!id) return { result: JSON.stringify({ ok: false, error: "falta couponId" }), wrote: false };
+      const c = await updateCoupon(companyId, id, {
+        ...(args.maxUses !== undefined ? { maxUses: typeof args.maxUses === "number" ? args.maxUses : null } : {}),
+        ...(args.expiresAt !== undefined ? { expiresAt: asStr(args.expiresAt) ?? null } : {}),
+        ...(args.productIds !== undefined ? { productIds: asStrList(args.productIds) ?? [] } : {}),
+        ...(typeof args.active === "boolean" ? { active: args.active } : {}),
+      });
+      return { result: JSON.stringify({ ok: true, cupon: c }), wrote: true };
+    }
+
     case "desactivar_cupon": {
       const id = asStr(args.couponId) ?? "";
       if (!id) return { result: JSON.stringify({ ok: false, error: "falta couponId" }), wrote: false };
@@ -2218,6 +2249,7 @@ export async function runCopilotTool(
         ...(data.title !== undefined ? { title: asStr(data.title) } : {}),
         ...(data.tagline !== undefined ? { tagline: asStr(data.tagline) } : {}),
         ...(data.accentColor !== undefined ? { accentColor: asStr(data.accentColor) } : {}),
+        ...(data.logoUrl !== undefined ? { logoUrl: asStr(data.logoUrl) ?? null } : {}),
         ...(data.whatsappNumber !== undefined ? { whatsappNumber: asStr(data.whatsappNumber) } : {}),
         ...(data.productIds !== undefined ? { productIds: asStrList(data.productIds) ?? [] } : {}),
         ...(typeof data.manualPaymentsEnabled === "boolean" ? { manualPaymentsEnabled: data.manualPaymentsEnabled } : {}),
@@ -2723,7 +2755,7 @@ const SYSTEM_GUIDE = [
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
-  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled, portada). En el panel, Tienda web tiene pestañas: Resumen (métricas), Apariencia y cobro, Portada (carrusel de hasta 5 productos destacados con banner, franja de confianza, FAQ generales, pie, precio anterior), Cupones y Pedidos (ahí se aprueban los Yape/Plin en revisión). La tienda pública tiene buscador y filtros por categoría, carrusel, carrito lateral y ficha con beneficios/bonos/FAQ. Cada producto puede tener portada, varias categorías (etiquetas), descripción corta, orden y RECURSOS DE MUESTRA (PDF, video, imágenes que el comprador ve en la ficha) propios para la tienda (Apariencia y cobro → Productos visibles → Personalizar) sin tocar el producto que usa el agente de WhatsApp (configurar_tienda productOverrides). ARCHIVOS PROTEGIDOS: en el paso Archivos del producto, 'Solo por enlace firmado (privado)' saca el archivo de la URL pública; se entrega como enlace firmado de 7 días en el correo, en la página de gracias y en el chat (actualizar_producto files[].privateDownload=true). CUPONES: ver_cupones / crear_cupon / desactivar_cupon (también en Tienda web → Cupones); el comprador los escribe en el checkout. CUENTA REGRESIVA: si un producto tiene oferta con offerEndsAt, la tienda muestra 'Termina en hh:mm:ss' automáticamente. La página de gracias ofrece el producto RELACIONADO (cross-sell del producto comprado, si está visible en la tienda) como upsell, y el panel muestra métricas de 30 días (ver_tienda → metricas30d). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/InitiateCheckout/Purchase) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens).",
+  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled, portada). En el panel, Tienda web tiene pestañas: Resumen (métricas), Apariencia y cobro, Portada (carrusel de hasta 5 productos destacados con banner, franja de confianza, FAQ generales, pie, precio anterior), Cupones y Pedidos (ahí se aprueban los Yape/Plin en revisión). La tienda pública tiene buscador y filtros por categoría, carrusel, carrito lateral y ficha con beneficios/bonos/FAQ. Cada producto puede tener portada, varias categorías (etiquetas), descripción corta, orden y RECURSOS DE MUESTRA (PDF, video, imágenes que el comprador ve en la ficha) propios para la tienda (Apariencia y cobro → Productos visibles → Personalizar) sin tocar el producto que usa el agente de WhatsApp (configurar_tienda productOverrides). ARCHIVOS PROTEGIDOS: en el paso Archivos del producto, 'Solo por enlace firmado (privado)' saca el archivo de la URL pública; se entrega como enlace firmado de 7 días en el correo, en la página de gracias y en el chat (actualizar_producto files[].privateDownload=true). La portada de cada producto en la tienda se puede cambiar u ocultar (productOverrides imageUrl/hiddenImages) sin tocar el producto; los recursos de muestra se previsualizan en el panel. CUPONES: ver_cupones / crear_cupon / editar_cupon / desactivar_cupon (también en Tienda web → Cupones); el comprador los escribe en el checkout. CUENTA REGRESIVA: si un producto tiene oferta con offerEndsAt, la tienda muestra 'Termina en hh:mm:ss' automáticamente. La página de gracias ofrece el producto RELACIONADO (cross-sell del producto comprado, si está visible en la tienda) como upsell, y el panel muestra métricas de 30 días (ver_tienda → metricas30d). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/InitiateCheckout/Purchase) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens).",
   "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
   "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en Configurar se elige POR CANAL si se usa en el cobro por chat y/o en la tienda web — p. ej. solo tienda), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
