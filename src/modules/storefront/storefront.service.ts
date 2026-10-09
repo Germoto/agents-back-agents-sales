@@ -67,12 +67,23 @@ async function resolveStore(slug: string) {
   return { company: company as StoreCompany, cfg, ent };
 }
 
-/** Caddy on_demand_tls `ask`: 200 solo si el host es una tienda activa. Cache 60 s. */
+/**
+ * Hosts fijos de la plataforma bajo el dominio base. Con un site `*.<dominio>`
+ * en on_demand, Caddy agrupa bajo esa política a los subdominios sin opciones
+ * `tls` propias (api, www) y consulta el `ask` también para ellos: si se
+ * rechazan, su TLS se cae. Siempre se aprueban.
+ */
+const PLATFORM_HOSTS = new Set(["api", "www", "app"]);
+
+/** Caddy on_demand_tls `ask`: 200 si el host es una tienda activa o un host fijo de la plataforma. Cache 60 s. */
 const tlsAskCache = new Map<string, { ok: boolean; ts: number }>();
 export async function tlsAsk(domain: string): Promise<boolean> {
   const host = domain.trim().toLowerCase();
-  if (!env.STORE_DOMAIN || !host.endsWith(`.${env.STORE_DOMAIN}`)) return false;
+  if (!env.STORE_DOMAIN) return false;
+  if (host === env.STORE_DOMAIN) return true;
+  if (!host.endsWith(`.${env.STORE_DOMAIN}`)) return false;
   const slug = host.slice(0, -(env.STORE_DOMAIN.length + 1));
+  if (PLATFORM_HOSTS.has(slug)) return true;
   if (!isValidStoreSlug(slug)) return false;
   const hit = tlsAskCache.get(host);
   if (hit && Date.now() - hit.ts < 60_000) return hit.ok;
