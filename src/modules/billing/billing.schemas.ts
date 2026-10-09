@@ -12,6 +12,7 @@ export const planModuleSchema = z.enum([
   "MERCADOPAGO",
   "REPORTS",
   "WEBHOOKS",
+  "STOREFRONT",
 ]);
 
 const round2 = (n: number) => Math.round(n * 100) / 100;

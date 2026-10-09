@@ -225,6 +225,7 @@ const ALL_ADMIN_MODULES: PlanModule[] = [
   "MERCADOPAGO",
   "REPORTS",
   "WEBHOOKS",
+  "STOREFRONT",
 ];
 
 const ALL_PLAN_VERTICALS: BusinessVertical[] = [
