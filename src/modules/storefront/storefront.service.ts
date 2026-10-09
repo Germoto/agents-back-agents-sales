@@ -39,6 +39,32 @@ import { reportStorePurchase, storePixelId, type StoreWebClient } from "../meta-
 import { signDownloadToken } from "../../lib/jwt";
 
 // ---------------------------------------------------------------------------
+// Portada: tipos de la configuración (JSON) y valores por defecto
+// ---------------------------------------------------------------------------
+
+export type HeroSlide = { productId: string; kicker: string; headline: string; sub: string; imageUrl: string | null; bg: string | null };
+export type TrustItem = { title: string; sub: string };
+export type StoreFaq = { question: string; answer: string };
+
+export const DEFAULT_TRUST_ITEMS: TrustItem[] = [
+  { title: "Entrega inmediata", sub: "El acceso llega a tu correo al confirmar el pago" },
+  { title: "Yape, Plin o tarjeta", sub: "Pago seguro y validación automática" },
+  { title: "Soporte por WhatsApp", sub: "Te ayudamos antes y después de comprar" },
+];
+
+function jsonArray<T>(v: unknown): T[] {
+  return Array.isArray(v) ? (v as T[]) : [];
+}
+
+/** -% entre precio de lista (regular) y precio efectivo; null si no hay descuento real. */
+function discountPct(price: string | null | undefined, regular: string | null | undefined): number | null {
+  const p = parsePrice(price);
+  const r = parsePrice(regular);
+  if (p <= 0 || r <= p) return null;
+  return Math.round((1 - p / r) * 100);
+}
+
+// ---------------------------------------------------------------------------
 // URL y resolución
 // ---------------------------------------------------------------------------
 
@@ -148,8 +174,36 @@ export async function getPublicStore(slug: string) {
   const symbol = symbolFor(company.currency);
   const products = await eligibleProducts(company.id, cfg.productIds);
   const [pay, metaPixelId] = await Promise.all([storePaymentOptions(company.id, cfg, ent), storePixelId(company.id)]);
+  const mapped = products.map((p) => ({ p, b: mapBotProduct(p, { currencySymbol: symbol, timezone: company.timezone }) }));
+  const byId = new Map(mapped.map((x) => [x.p.id, x]));
+  const slides = jsonArray<HeroSlide>(cfg.heroSlides)
+    .filter((sl) => sl && typeof sl.productId === "string" && byId.has(sl.productId))
+    .slice(0, 5)
+    .map((sl) => {
+      const { p, b } = byId.get(sl.productId)!;
+      const img = p.files.find((f) => f.type === "IMAGE" && f.showInPresentation)?.url ?? null;
+      return {
+        productId: p.id,
+        productSlug: b.slug,
+        kicker: (sl.kicker ?? "").trim(),
+        headline: (sl.headline ?? "").trim() || p.name,
+        sub: (sl.sub ?? "").trim() || b.shortDescription,
+        imageUrl: sl.imageUrl || img,
+        bg: sl.bg || null,
+        priceText: b.priceText ?? b.price,
+        regularPriceText: b.regularPriceText,
+        discountPct: discountPct(b.price, b.regularPrice),
+      };
+    });
+  const categorias = Array.from(new Set(mapped.map((x) => (x.b.category ?? "").trim()).filter(Boolean)));
   return {
     pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual },
+    portada: { slides, autoplay: cfg.carouselAutoplay, intervalSec: cfg.carouselIntervalSec },
+    confianza: jsonArray<TrustItem>(cfg.trustItems).length ? jsonArray<TrustItem>(cfg.trustItems).slice(0, 3) : DEFAULT_TRUST_ITEMS,
+    faqs: jsonArray<StoreFaq>(cfg.faqs).slice(0, 10),
+    mostrarPrecioAnterior: cfg.showOldPrice,
+    footerTagline: cfg.footerTagline || cfg.tagline || null,
+    categorias,
     negocio: {
       metaPixelId,
       slug: company.slug,
@@ -161,15 +215,16 @@ export async function getPublicStore(slug: string) {
       currency: company.currency,
       whatsappNumber: cfg.whatsappNumber ? cfg.whatsappNumber.replace(/\D/g, "") || null : null,
     },
-    productos: products.map((p) => {
-      const b = mapBotProduct(p, { currencySymbol: symbol, timezone: company.timezone });
+    productos: mapped.map(({ p, b }) => {
       return {
         id: b.id,
         slug: b.slug,
         name: b.name,
         price: b.price,
         priceText: b.priceText,
+        regularPrice: b.regularPrice ?? null,
         regularPriceText: b.regularPriceText,
+        discountPct: discountPct(b.price, b.regularPrice),
         offerActive: b.offerActive,
         offerEndsText: b.offerEndsText,
         // Para la cuenta regresiva en la tienda (null si no hay oferta vigente con fin).
@@ -232,7 +287,8 @@ export async function getStoreOgHtml(host: string, path: string): Promise<string
 
   let title = title0;
   let description = cfg.tagline || `Tienda online de ${company.name}`;
-  let image = cfg.logoUrl || "";
+  const firstSlide = jsonArray<HeroSlide>(cfg.heroSlides)[0];
+  let image = firstSlide?.imageUrl || cfg.logoUrl || "";
   let url = base;
 
   const pm = /^\/p\/([^/?#]+)/.exec(target.rest || "/");
@@ -867,7 +923,7 @@ export async function recheckStoreOrdersInReview(): Promise<void> {
 async function notifyOwnerOrderInReview(order: StoreOrderRow) {
   const companyId = order.companyId;
   const amountText = `${symbolFor(order.currency)} ${Number(order.amount).toFixed(2)}`;
-  const panel = `${(env.FRONTEND_URL || "").replace(/\/$/, "")}/tienda-web`;
+  const panel = `${(env.FRONTEND_URL || "").replace(/\/$/, "")}/tienda-web?tab=pedidos`;
   const text =
     `🧾 Pedido de tu tienda web pendiente de revisión: *${order.productName}* · ${amountText} · ${order.name} (${order.email})` +
     (order.payerName ? ` · pagó: ${order.payerName}` : "") +
@@ -1024,9 +1080,13 @@ export async function storeMetrics(companyId: string, days = 30) {
       else if (t === "WA_CLICK") p.whatsapp += 1;
     }
   }
-  const [orders, names] = await Promise.all([
+  const [orders, pending, names] = await Promise.all([
     prisma.storeOrder.findMany({
       where: { companyId, status: "ENTREGADO", createdAt: { gte: since } },
+      select: { amount: true, currency: true },
+    }),
+    prisma.storeOrder.findMany({
+      where: { companyId, status: { in: ["PENDIENTE", "EN_REVISION"] }, createdAt: { gte: since } },
       select: { amount: true, currency: true },
     }),
     byProduct.size
@@ -1035,7 +1095,8 @@ export async function storeMetrics(companyId: string, days = 30) {
   ]);
   const nameOf = new Map(names.map((n) => [n.id, n.name]));
   const ingresos = orders.reduce((acc, o) => acc + Number(o.amount), 0);
-  const currency = orders[0]?.currency ?? "PEN";
+  const currency = orders[0]?.currency ?? pending[0]?.currency ?? "PEN";
+  const pendMonto = pending.reduce((acc, o) => acc + Number(o.amount), 0);
   const visitas = sessions.size;
   return {
     dias: days,
@@ -1048,6 +1109,7 @@ export async function storeMetrics(companyId: string, days = 30) {
     descargas: count.DOWNLOAD,
     ingresos: Number(ingresos.toFixed(2)),
     ingresosText: `${symbolFor(currency)} ${ingresos.toFixed(2)}`,
+    pendientes: { pedidos: pending.length, monto: Number(pendMonto.toFixed(2)), montoText: `${symbolFor(currency)} ${pendMonto.toFixed(2)}` },
     conversion: visitas > 0 ? Number(((buyers.size / visitas) * 100).toFixed(1)) : null,
     porProducto: [...byProduct.entries()]
       .map(([productId, m]) => ({ productId, name: nameOf.get(productId) ?? "(producto eliminado)", ...m }))
@@ -1227,12 +1289,50 @@ export async function updateStorefrontConfig(
     whatsappNumber?: string | null;
     productIds?: string[];
     manualPaymentsEnabled?: boolean;
+    heroSlides?: { productId: string; kicker?: string; headline?: string; sub?: string; imageUrl?: string | null; bg?: string | null }[];
+    carouselAutoplay?: boolean;
+    carouselIntervalSec?: number;
+    showOldPrice?: boolean;
+    trustItems?: TrustItem[] | null;
+    faqs?: StoreFaq[];
+    footerTagline?: string | null;
   },
 ) {
-  if (data.logoUrl) {
-    const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
-    if (!data.logoUrl.startsWith(`${base}/uploads/`)) throw new AppError("El logo debe ser un archivo subido a FlowApp", 400);
+  const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
+  const isOwnUpload = (u: string) => u.startsWith(`${base}/uploads/`);
+  if (data.logoUrl && !isOwnUpload(data.logoUrl)) throw new AppError("El logo debe ser un archivo subido a FlowApp", 400);
+  let heroSlides: HeroSlide[] | undefined;
+  if (data.heroSlides !== undefined) {
+    const eligible = new Set((await eligibleProducts(companyId, [])).map((p) => p.id));
+    heroSlides = data.heroSlides.slice(0, 5).map((sl) => {
+      if (!eligible.has(sl.productId)) throw new AppError("Un slide apunta a un producto que no está listo para la tienda", 400);
+      if (sl.imageUrl && !isOwnUpload(sl.imageUrl)) throw new AppError("La imagen del banner debe ser un archivo subido a FlowApp", 400);
+      return {
+        productId: sl.productId,
+        kicker: (sl.kicker ?? "").trim().slice(0, 40),
+        headline: (sl.headline ?? "").trim().slice(0, 120),
+        sub: (sl.sub ?? "").trim().slice(0, 240),
+        imageUrl: sl.imageUrl || null,
+        bg: sl.bg && /^#[0-9a-fA-F]{6}$/.test(sl.bg) ? sl.bg : null,
+      };
+    });
   }
+  const trustItems =
+    data.trustItems === undefined
+      ? undefined
+      : data.trustItems === null
+        ? null
+        : data.trustItems.slice(0, 3).map((t) => ({ title: (t.title ?? "").trim().slice(0, 60), sub: (t.sub ?? "").trim().slice(0, 140) }));
+  const faqs = data.faqs === undefined ? undefined : data.faqs.slice(0, 10).map((f) => ({ question: (f.question ?? "").trim().slice(0, 200), answer: (f.answer ?? "").trim().slice(0, 1000) })).filter((f) => f.question && f.answer);
+  const extra = {
+    ...(heroSlides !== undefined ? { heroSlides: heroSlides as unknown as Prisma.InputJsonValue } : {}),
+    ...(data.carouselAutoplay !== undefined ? { carouselAutoplay: data.carouselAutoplay } : {}),
+    ...(data.carouselIntervalSec !== undefined ? { carouselIntervalSec: Math.min(12, Math.max(3, Math.round(data.carouselIntervalSec))) } : {}),
+    ...(data.showOldPrice !== undefined ? { showOldPrice: data.showOldPrice } : {}),
+    ...(trustItems !== undefined ? { trustItems: trustItems === null ? Prisma.DbNull : (trustItems as unknown as Prisma.InputJsonValue) } : {}),
+    ...(faqs !== undefined ? { faqs: faqs as unknown as Prisma.InputJsonValue } : {}),
+    ...(data.footerTagline !== undefined ? { footerTagline: data.footerTagline?.trim().slice(0, 160) || null } : {}),
+  };
   if (data.enabled === true) {
     const st = await storefrontStatus(companyId, true);
     if (!st.slugValido) throw new AppError(`No se puede activar: ${st.slugProblema}`, 409);
@@ -1248,6 +1348,7 @@ export async function updateStorefrontConfig(
       ...(data.whatsappNumber !== undefined ? { whatsappNumber: data.whatsappNumber?.replace(/\D/g, "") || null } : {}),
       ...(data.productIds !== undefined ? { productIds: data.productIds } : {}),
       ...(data.manualPaymentsEnabled !== undefined ? { manualPaymentsEnabled: data.manualPaymentsEnabled } : {}),
+      ...extra,
     },
     create: {
       companyId,
@@ -1259,6 +1360,7 @@ export async function updateStorefrontConfig(
       whatsappNumber: data.whatsappNumber?.replace(/\D/g, "") || null,
       productIds: data.productIds ?? [],
       manualPaymentsEnabled: data.manualPaymentsEnabled ?? true,
+      ...extra,
     },
   });
   tlsAskCache.clear();
@@ -1268,7 +1370,7 @@ export async function updateStorefrontConfig(
 /** Checklist de requisitos de la tienda (para el panel y el copiloto). */
 export async function storefrontStatus(companyId: string, enabled: boolean) {
   const [company, pc, ent, cfg] = await Promise.all([
-    prisma.company.findUnique({ where: { id: companyId }, select: { slug: true } }),
+    prisma.company.findUnique({ where: { id: companyId }, select: { slug: true, currency: true, timezone: true } }),
     prisma.paymentConfig.findUnique({
       where: { companyId },
       select: { enabled: true, mpEnabled: true, mpAccessToken: true, mpStoreEnabled: true, methods: { select: { method: true } } },
@@ -1314,7 +1416,17 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
     manualHabilitado,
     metodosManuales,
     pagosListos,
-    productosElegibles: eligible.map((p) => ({ id: p.id, name: p.name })),
+    productosElegibles: eligible.map((p) => {
+      const b = mapBotProduct(p, { currencySymbol: symbolFor(company?.currency ?? "PEN"), timezone: company?.timezone ?? "America/Lima" });
+      return {
+        id: p.id,
+        name: p.name,
+        category: b.category ?? null,
+        priceText: b.priceText ?? b.price,
+        regularPriceText: b.regularPriceText,
+        imageUrl: p.files.find((f) => f.type === "IMAGE" && f.showInPresentation)?.url ?? null,
+      };
+    }),
     productosSinCorreo: sinCorreo,
     lista: enabled && !slugProblema && moduloTienda && pagosListos && eligible.length > 0,
   };

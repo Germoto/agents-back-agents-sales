@@ -1689,6 +1689,16 @@ model StorefrontConfig {
   productIds            String[] @default([]) @db.Uuid
   // Pago con Yape/Plin (métodos manuales de Pagos) subiendo el comprobante en la tienda.
   manualPaymentsEnabled Boolean  @default(true)
+  // Portada de la tienda: carrusel de productos destacados [{productId, kicker, headline, sub, imageUrl, bg}].
+  heroSlides            Json?
+  carouselAutoplay      Boolean  @default(true)
+  carouselIntervalSec   Int      @default(5)
+  // Mostrar el precio anterior tachado y el badge -% (si el producto tiene precio regular/oferta).
+  showOldPrice          Boolean  @default(true)
+  // Franja de confianza [{title, sub}] (null = los 3 textos por defecto), FAQ generales [{question, answer}], pie.
+  trustItems            Json?
+  faqs                  Json?
+  footerTagline         String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

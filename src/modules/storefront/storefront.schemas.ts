@@ -50,6 +50,26 @@ export const updateStorefrontConfigSchema = z.object({
   whatsappNumber: z.string().trim().max(30).nullable().optional(),
   productIds: z.array(z.string().uuid()).max(200).optional(),
   manualPaymentsEnabled: z.boolean().optional(),
+  // Portada
+  heroSlides: z
+    .array(
+      z.object({
+        productId: z.string().uuid(),
+        kicker: z.string().trim().max(40).default(""),
+        headline: z.string().trim().max(120).default(""),
+        sub: z.string().trim().max(240).default(""),
+        imageUrl: z.string().trim().max(500).nullable().optional(),
+        bg: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
+      }),
+    )
+    .max(5)
+    .optional(),
+  carouselAutoplay: z.boolean().optional(),
+  carouselIntervalSec: z.coerce.number().int().min(3).max(12).optional(),
+  showOldPrice: z.boolean().optional(),
+  trustItems: z.array(z.object({ title: z.string().trim().max(60), sub: z.string().trim().max(140) })).max(3).nullable().optional(),
+  faqs: z.array(z.object({ question: z.string().trim().max(200), answer: z.string().trim().max(1000) })).max(10).optional(),
+  footerTagline: z.string().trim().max(160).nullable().optional(),
 });
 
 export const storeOrdersQuerySchema = z.object({
