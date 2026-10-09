@@ -1432,7 +1432,9 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
   const overrides = overridesOf(cfg ?? {});
   const slug = company?.slug ?? "";
   const slugProblema = storeSlugProblem(slug);
-  const eligible = await eligibleProducts(companyId, cfg?.productIds ?? []);
+  // TODOS los elegibles (no filtrados por la selección): la lista del panel debe mostrar
+  // también los ocultos para poder volver a activarlos; la visibilidad la decide productIds.
+  const eligible = await eligibleProducts(companyId, []);
   const sinCorreo = await prisma.product.findMany({
     where: {
       companyId,
