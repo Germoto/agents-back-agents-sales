@@ -59,3 +59,19 @@ export function verifyDownloadToken(token: string): DownloadJwtPayload {
   if (payload?.kind !== "download" || !payload.fileId || !payload.companyId) throw new Error("Token de descarga inválido");
   return payload;
 }
+
+// ---------------------------------------------------------------------------
+// Baja de correos de la tienda (enlace "Darme de baja"). `kind: "email-unsub"`, sin vencimiento corto.
+// ---------------------------------------------------------------------------
+
+export type EmailUnsubPayload = { kind: "email-unsub"; companyId: string; customerId: string };
+
+export function signEmailUnsubToken(payload: Omit<EmailUnsubPayload, "kind">) {
+  return jwt.sign({ kind: "email-unsub", ...payload }, env.JWT_SECRET, { expiresIn: "365d" });
+}
+
+export function verifyEmailUnsubToken(token: string): EmailUnsubPayload {
+  const payload = jwt.verify(token, env.JWT_SECRET) as EmailUnsubPayload;
+  if (payload?.kind !== "email-unsub" || !payload.companyId || !payload.customerId) throw new Error("Token de baja inválido");
+  return payload;
+}

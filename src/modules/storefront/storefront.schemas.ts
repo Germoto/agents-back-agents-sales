@@ -22,6 +22,8 @@ export const storeCheckoutSchema = z.object({
   sessionId: z.string().trim().max(64).optional().nullable(),
   // Cupón de descuento (código).
   coupon: z.string().trim().max(30).optional().nullable(),
+  // Consentimiento para promociones por correo (casilla del checkout).
+  emailMarketing: z.boolean().optional(),
 }).refine((b) => Boolean(b.productId || b.productIds?.length), { message: "Elige al menos un producto", path: ["productId"] });
 
 // POST /order/:id/receipt (multipart: file + payerName)
@@ -78,6 +80,7 @@ export const updateStorefrontConfigSchema = z.object({
   faqs: z.array(z.object({ question: z.string().trim().max(200), answer: z.string().trim().max(1000) })).max(10).optional(),
   footerTagline: z.string().trim().max(160).nullable().optional(),
   // Personalización por producto para la tienda (null = quitar el override).
+  emailReminders: z.any().optional(),
   productOverrides: z
     .record(
       z.string().uuid(),
@@ -141,4 +144,23 @@ export const updateCouponSchema = z.object({
   maxUses: z.coerce.number().int().positive().nullable().optional(),
   expiresAt: z.string().datetime().nullable().optional(),
   productIds: z.array(z.string().uuid()).max(200).optional(),
+});
+
+// POST /:slug/subscribe (bloque "Recibe ofertas" del pie)
+export const storeSubscribeSchema = z.object({
+  email: z.string().trim().min(5).max(160),
+  name: z.string().trim().max(120).optional().nullable(),
+});
+
+// Panel: correos
+export const storeEmailsQuerySchema = z.object({
+  kind: z.enum(["ABANDONED_CHECKOUT", "POST_PURCHASE", "WELCOME", "CAMPAIGN", "TEST"]).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+export const storeEmailTestSchema = z.object({
+  to: z.string().trim().min(5).max(160),
+  subject: z.string().trim().min(1).max(120),
+  body: z.string().trim().min(1).max(3000),
+  couponCode: z.string().trim().max(30).nullable().optional(),
+  kind: z.string().trim().max(30).optional(),
 });

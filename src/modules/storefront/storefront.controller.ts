@@ -22,6 +22,8 @@ import {
   updateStorefrontConfig,
 } from "./storefront.service";
 import { storeReceiptPublicUrl, type StoreOrderRequest } from "./storefront-upload.middleware";
+import { listStoreEmails, sendStoreTestEmail, subscribeToStore, unsubscribeByToken } from "./storefront-email.service";
+import { prisma } from "../../lib/prisma";
 
 // ---------------- Público ----------------
 
@@ -82,7 +84,38 @@ export async function storeCouponPreviewController(req: Request, res: Response) 
   return res.json(await previewCoupon(String(req.params.slug), body.code, body.productIds));
 }
 
+/** Suscripción al boletín de la tienda (pie). */
+export async function storeSubscribeController(req: Request, res: Response) {
+  const slug = String(req.params.slug ?? "").trim().toLowerCase();
+  const company = await prisma.company.findUnique({ where: { slug }, select: { id: true, isActive: true } });
+  if (!company || !company.isActive) throw new AppError("Tienda no encontrada", 404);
+  const body = req.body as { email: string; name?: string | null };
+  return res.json(await subscribeToStore(company.id, body));
+}
+
+/** Página mínima de baja (enlace "Darme de baja" de los correos). */
+export async function storeUnsubController(req: Request, res: Response) {
+  const esc = (v: string) => v.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
+  try {
+    const r = await unsubscribeByToken(String(req.query.t ?? ""));
+    return res.type("text/html").send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Baja confirmada</title></head><body style="margin:0;background:#f6f5f2;font-family:Arial,sans-serif;color:#17151f"><div style="max-width:480px;margin:60px auto;background:#fff;border:1px solid #e7e4de;border-radius:18px;padding:32px;text-align:center"><div style="font-size:40px">✓</div><h1 style="font-size:22px;margin:12px 0 8px">Listo, no recibirás más correos de ${esc(r.storeName)}</h1><p style="color:#6b6775;font-size:14px;margin:0 0 20px">Si fue un error, puedes volver a suscribirte desde la tienda.</p>${r.storeLink ? `<a href="${esc(r.storeLink)}" style="display:inline-block;background:#5b34e0;color:#fff;text-decoration:none;font-weight:700;padding:12px 20px;border-radius:12px">Ir a la tienda</a>` : ""}</div></body></html>`);
+  } catch (err) {
+    const msg = err instanceof AppError ? err.message : "El enlace no es válido";
+    return res.status(400).type("text/html").send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Enlace inválido</title></head><body style="font-family:Arial,sans-serif;padding:40px;text-align:center"><h1 style="font-size:20px">${esc(msg)}</h1></body></html>`);
+  }
+}
+
 // ---------------- Panel ----------------
+
+export async function listStoreEmailsController(req: Request, res: Response) {
+  const kind = (req.query.kind as string | undefined) || undefined;
+  const limit = Number(req.query.limit) || 50;
+  return res.json(await listStoreEmails(req.user!.companyId, kind, limit));
+}
+
+export async function storeEmailTestController(req: Request, res: Response) {
+  return res.json(await sendStoreTestEmail(req.user!.companyId, req.body));
+}
 
 export async function listCouponsController(req: Request, res: Response) {
   return res.json(await listCoupons(req.user!.companyId));

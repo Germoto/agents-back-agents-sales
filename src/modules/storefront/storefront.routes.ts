@@ -4,12 +4,14 @@ import { Router } from "express";
 import { asyncHandler } from "../../lib/async-handler";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { validate } from "../../middlewares/validate";
-import { approveStoreOrderSchema, couponIdParamsSchema, createCouponSchema, rejectStoreOrderSchema, updateCouponSchema, storeMetricsQuerySchema, storeOrderParamsSchema, storeOrdersQuerySchema, updateStorefrontConfigSchema } from "./storefront.schemas";
+import { approveStoreOrderSchema, couponIdParamsSchema, createCouponSchema, rejectStoreOrderSchema, storeEmailTestSchema, storeEmailsQuerySchema, updateCouponSchema, storeMetricsQuerySchema, storeOrderParamsSchema, storeOrdersQuerySchema, updateStorefrontConfigSchema } from "./storefront.schemas";
 import {
   approveStoreOrderController,
   createCouponController,
   deleteCouponController,
   listCouponsController,
+  listStoreEmailsController,
+  storeEmailTestController,
   updateCouponController,
   getStorefrontConfigController,
   listStoreOrdersController,
@@ -23,6 +25,9 @@ const router = Router();
 router.use(requireAuth);
 router.get("/config", asyncHandler(getStorefrontConfigController));
 router.put("/config", validate({ body: updateStorefrontConfigSchema }), asyncHandler(updateStorefrontConfigController));
+// Correos automáticos: historial y prueba
+router.get("/emails", validate({ query: storeEmailsQuerySchema }), asyncHandler(listStoreEmailsController));
+router.post("/emails/test", validate({ body: storeEmailTestSchema }), asyncHandler(storeEmailTestController));
 router.get("/metrics", validate({ query: storeMetricsQuerySchema }), asyncHandler(storeMetricsController));
 router.get("/orders", validate({ query: storeOrdersQuerySchema }), asyncHandler(listStoreOrdersController));
 // Pedidos Yape/Plin: aprobar (crea el comprobante y entrega) o rechazar.

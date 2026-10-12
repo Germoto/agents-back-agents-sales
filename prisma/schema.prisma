@@ -195,6 +195,7 @@ model Company {
   storeOrders          StoreOrder[]
   storeEvents          StoreEvent[]
   coupons              Coupon[]
+  storeEmails          StoreEmail[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
   crms                 Crm[]
@@ -1702,6 +1703,8 @@ model StorefrontConfig {
   // Personalización POR PRODUCTO solo para la tienda (el producto del chat no cambia):
   // { [productId]: { imageUrl?, category?, shortDescription?, sortOrder? } }
   productOverrides      Json?
+  // Correos automáticos de la tienda: {abandonedCheckout: {enabled, steps[]}, postPurchase: {...}, welcome: {...}}.
+  emailReminders        Json?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -1727,6 +1730,39 @@ model Coupon {
 
   @@unique([companyId, code])
   @@index([companyId, active])
+}
+
+/// Correos de la tienda web (recordatorios automáticos, bienvenida y campañas). El worker
+/// de la tienda los envía cuando vence sendAt. Nunca se envía a quien se dio de baja.
+model StoreEmail {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId     String    @db.Uuid
+  customerId    String?   @db.Uuid
+  orderId       String?   @db.Uuid
+  campaignId    String?   @db.Uuid
+  // ABANDONED_CHECKOUT | POST_PURCHASE | WELCOME | CAMPAIGN | TEST
+  kind          String
+  email         String
+  subject       String
+  // Cuerpo en texto plano ya resuelto (variables y spintax aplicados).
+  body          String
+  ctaLabel      String?
+  ctaUrl        String?
+  couponCode    String?
+  // PENDING | SENT | FAILED | CANCELLED
+  status        String    @default("PENDING")
+  sendAt        DateTime
+  sentAt        DateTime?
+  failureReason String?
+  metadata      Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([status, sendAt])
+  @@index([companyId, createdAt])
+  @@index([orderId])
+  @@index([campaignId])
 }
 
 /// Eventos de la tienda web (analítica ligera): visitas, vistas de producto, carrito,

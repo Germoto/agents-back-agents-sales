@@ -37,6 +37,7 @@ import { claimPayment, matchPayments, updatePaymentStatus } from "../public-paym
 import type { AiSettings } from "../../lib/ai-providers";
 import { reportStorePurchase, storePixelId, type StoreWebClient } from "../meta-capi/meta-capi.service";
 import { signDownloadToken } from "../../lib/jwt";
+import { cancelOrderEmails, emailRemindersOf, sanitizeEmailReminders, scheduleAbandonedCheckout, schedulePostPurchase, type EmailReminders } from "./storefront-email.service";
 
 // ---------------------------------------------------------------------------
 // Portada: tipos de la configuración (JSON) y valores por defecto
@@ -155,12 +156,8 @@ function discountPct(price: string | null | undefined, regular: string | null | 
 // URL y resolución
 // ---------------------------------------------------------------------------
 
-/** URL pública de la tienda de un slug (subdominio en prod; path en desarrollo). */
-export function storeUrl(slug: string): string {
-  if (env.STORE_DOMAIN) return `https://${slug}.${env.STORE_DOMAIN}`;
-  const base = (env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
-  return `${base}/tienda/${slug}`;
-}
+export { storeUrl } from "./storefront-url";
+import { storeUrl } from "./storefront-url";
 
 type StoreCompany = {
   id: string;
@@ -475,7 +472,7 @@ export function orderProductIds(order: { productId: string; productIds: string[]
 
 export async function createStoreCheckout(
   slug: string,
-  input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod; coupon?: string | null },
+  input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod; coupon?: string | null; emailMarketing?: boolean },
   client?: StoreWebClient | null,
 ) {
   const { company, cfg, ent } = await resolveStore(slug);
@@ -564,10 +561,17 @@ export async function createStoreCheckout(
       email,
       status: "activo",
       lastInteractionAt: new Date(),
-      metadata: { origin: "storefront" },
+      metadata: { origin: "storefront", emailMarketing: input.emailMarketing !== false },
     },
-    select: { id: true },
+    select: { id: true, metadata: true },
   });
+  // Consentimiento para promociones por correo (la casilla del checkout). No toca la baja total.
+  if (existing && input.emailMarketing !== undefined) {
+    const md = (customer.metadata ?? {}) as Record<string, unknown>;
+    if (md.emailMarketing !== input.emailMarketing && !md.emailOptOut) {
+      await prisma.customer.update({ where: { id: customer.id }, data: { metadata: { ...md, emailMarketing: input.emailMarketing } } }).catch(() => undefined);
+    }
+  }
 
   const accessToken = crypto.randomBytes(18).toString("base64url");
   const order = await prisma.storeOrder.create({
@@ -597,6 +601,8 @@ export async function createStoreCheckout(
   const base = storeUrl(company.slug);
   const thanks = `${base}/gracias?o=${order.id}&t=${accessToken}`;
   const amountText = `${symbolFor(company.currency)} ${linkAmount.toFixed(2)}`;
+  // Recordatorios por correo si el pago queda a medias (se cancelan solos al pagar).
+  void scheduleAbandonedCheckout(order);
 
   if (method === "MANUAL") {
     return {
@@ -739,6 +745,8 @@ export async function fulfillStoreOrder(
     where: { id: order.id },
     data: { status: "PAGADO", receiptId, ...(opts.extraData ?? {}) },
   });
+  void cancelOrderEmails(order.id, "Pedido pagado");
+  void schedulePostPurchase(order);
 
   const amountText = `${symbolFor(order.currency)} ${opts.paid.toFixed(2)}`;
 
@@ -1012,6 +1020,8 @@ export async function submitStoreReceipt(
     },
   });
 
+  void cancelOrderEmails(order.id, "El comprador subió su comprobante");
+
   // 2) Matching inmediato.
   const approved = await tryMatchStoreOrder(order.id);
   if (approved) {
@@ -1113,6 +1123,7 @@ export async function rejectStoreOrder(companyId: string, orderId: string, input
     where: { id: order.id },
     data: { status: "FALLIDO", failureReason: `Rechazado: ${input.reason?.trim() || "comprobante no válido"}` },
   });
+  void cancelOrderEmails(order.id, "Pedido rechazado");
   return serializeOrderRow(fresh);
 }
 
@@ -1146,7 +1157,7 @@ export async function deliveryFileLinks(companyId: string, productIds: string[],
 // Analítica ligera (StoreEvent) y upsell post-compra
 // ---------------------------------------------------------------------------
 
-export const STORE_EVENT_TYPES = ["VIEW", "PRODUCT_VIEW", "ADD_TO_CART", "CHECKOUT", "WA_CLICK", "PURCHASE", "DOWNLOAD", "RESOURCE_VIEW"] as const;
+export const STORE_EVENT_TYPES = ["VIEW", "PRODUCT_VIEW", "ADD_TO_CART", "CHECKOUT", "WA_CLICK", "PURCHASE", "DOWNLOAD", "RESOURCE_VIEW", "EMAIL_CLICK"] as const;
 export type StoreEventType = (typeof STORE_EVENT_TYPES)[number];
 const STORE_EVENT_RETENTION_DAYS = 180;
 
@@ -1187,7 +1198,7 @@ export async function storeMetrics(companyId: string, days = 30) {
     select: { type: true, productId: true, sessionId: true },
   });
   const sessions = new Set<string>();
-  const count: Record<StoreEventType, number> = { VIEW: 0, PRODUCT_VIEW: 0, ADD_TO_CART: 0, CHECKOUT: 0, WA_CLICK: 0, PURCHASE: 0, DOWNLOAD: 0, RESOURCE_VIEW: 0 };
+  const count: Record<StoreEventType, number> = { VIEW: 0, PRODUCT_VIEW: 0, ADD_TO_CART: 0, CHECKOUT: 0, WA_CLICK: 0, PURCHASE: 0, DOWNLOAD: 0, RESOURCE_VIEW: 0, EMAIL_CLICK: 0 };
   const buyers = new Set<string>();
   const byProduct = new Map<string, { vistas: number; carrito: number; checkouts: number; compras: number; whatsapp: number; muestras: number }>();
   for (const e of events) {
@@ -1236,6 +1247,7 @@ export async function storeMetrics(companyId: string, days = 30) {
     clicsWhatsApp: count.WA_CLICK,
     compras: orders.length,
     descargas: count.DOWNLOAD,
+    clicsCorreo: count.EMAIL_CLICK,
     ingresos: Number(ingresos.toFixed(2)),
     ingresosText: `${symbolFor(currency)} ${ingresos.toFixed(2)}`,
     pendientes: { pedidos: pending.length, monto: Number(pendMonto.toFixed(2)), montoText: `${symbolFor(currency)} ${pendMonto.toFixed(2)}` },
@@ -1405,7 +1417,8 @@ export async function getStorefrontConfig(companyId: string) {
   const cfg =
     (await prisma.storefrontConfig.findUnique({ where: { companyId } })) ??
     (await prisma.storefrontConfig.create({ data: { companyId } }));
-  return { ...cfg, status: await storefrontStatus(companyId, cfg.enabled) };
+  const emailReminders: EmailReminders = emailRemindersOf(cfg.emailReminders);
+  return { ...cfg, emailReminders, status: await storefrontStatus(companyId, cfg.enabled) };
 }
 
 export async function updateStorefrontConfig(
@@ -1441,6 +1454,7 @@ export async function updateStorefrontConfig(
     faqs?: StoreFaq[];
     footerTagline?: string | null;
     productOverrides?: Record<string, ProductOverride | null>;
+    emailReminders?: unknown;
   },
 ) {
   const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
@@ -1523,6 +1537,7 @@ export async function updateStorefrontConfig(
     ...(faqs !== undefined ? { faqs: faqs as unknown as Prisma.InputJsonValue } : {}),
     ...(data.footerTagline !== undefined ? { footerTagline: data.footerTagline?.trim().slice(0, 160) || null } : {}),
     ...(productOverrides !== undefined ? { productOverrides: productOverrides as unknown as Prisma.InputJsonValue } : {}),
+    ...(data.emailReminders !== undefined ? { emailReminders: sanitizeEmailReminders(data.emailReminders) as unknown as Prisma.InputJsonValue } : {}),
   };
   if (data.enabled === true) {
     const st = await storefrontStatus(companyId, true);
@@ -1555,7 +1570,7 @@ export async function updateStorefrontConfig(
     },
   });
   tlsAskCache.clear();
-  return { ...cfg, status: await storefrontStatus(companyId, cfg.enabled) };
+  return { ...cfg, emailReminders: emailRemindersOf(cfg.emailReminders), status: await storefrontStatus(companyId, cfg.enabled) };
 }
 
 /** Checklist de requisitos de la tienda (para el panel y el copiloto). */

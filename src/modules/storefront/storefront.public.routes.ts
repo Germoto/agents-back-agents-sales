@@ -4,7 +4,7 @@ import { Router } from "express";
 import { asyncHandler } from "../../lib/async-handler";
 import { validate } from "../../middlewares/validate";
 import { makeRateLimiter } from "../../middlewares/rate-limit.middleware";
-import { storeCheckoutSchema, storeCouponPreviewSchema, storeEventsSchema, storeOrderParamsSchema, storeOrderQuerySchema, storeReceiptBodySchema, storeSlugParamsSchema } from "./storefront.schemas";
+import { storeCheckoutSchema, storeCouponPreviewSchema, storeEventsSchema, storeSubscribeSchema, storeOrderParamsSchema, storeOrderQuerySchema, storeReceiptBodySchema, storeSlugParamsSchema } from "./storefront.schemas";
 import {
   getPublicOrderController,
   getPublicStoreController,
@@ -13,6 +13,8 @@ import {
   storeEventsController,
   storeOgController,
   storeReceiptController,
+  storeSubscribeController,
+  storeUnsubController,
   tlsAskController,
 } from "./storefront.controller";
 import { storeOrderAccess, storeReceiptUploadMiddleware } from "./storefront-upload.middleware";
@@ -29,6 +31,8 @@ const receiptLimiter = makeRateLimiter({ windowMs: 15 * 60_000, max: 5, message:
 router.get("/tls-ask", asyncHandler(tlsAskController));
 // Preview al compartir (bots): ?host=<slug>.flowapp.pe&path=/p/<producto>
 router.get("/og", catalogLimiter, asyncHandler(storeOgController));
+// Baja de correos (enlace firmado en cada correo).
+router.get("/unsub", orderLimiter, asyncHandler(storeUnsubController));
 router.get("/order/:id", orderLimiter, validate({ params: storeOrderParamsSchema, query: storeOrderQuerySchema }), asyncHandler(getPublicOrderController));
 // Comprobante Yape/Plin: el acceso (id + token) se valida ANTES de recibir el archivo.
 router.post(
@@ -42,6 +46,7 @@ router.post(
 );
 router.get("/:slug", catalogLimiter, validate({ params: storeSlugParamsSchema }), asyncHandler(getPublicStoreController));
 router.post("/:slug/events", eventsLimiter, validate({ params: storeSlugParamsSchema, body: storeEventsSchema }), asyncHandler(storeEventsController));
+router.post("/:slug/subscribe", receiptLimiter, validate({ params: storeSlugParamsSchema, body: storeSubscribeSchema }), asyncHandler(storeSubscribeController));
 router.post("/:slug/coupon", checkoutLimiter, validate({ params: storeSlugParamsSchema, body: storeCouponPreviewSchema }), asyncHandler(storeCouponPreviewController));
 router.post("/:slug/checkout", checkoutLimiter, validate({ params: storeSlugParamsSchema, body: storeCheckoutSchema }), asyncHandler(storeCheckoutController));
 
