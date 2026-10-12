@@ -58,6 +58,7 @@ import { listSubscriptions } from "../subscriptions/subscriptions.service";
 import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
 import { approveStoreOrder, createCoupon, getStorefrontConfig, listCoupons, listStoreOrders, rejectStoreOrder, storeMetrics, updateCoupon, updateStorefrontConfig } from "../storefront/storefront.service";
 import { listStoreEmails } from "../storefront/storefront-email.service";
+import { createCampaign as createEmailCampaign, listCampaigns as listEmailCampaigns, previewAudience as previewEmailAudience, sendCampaignTest as sendEmailCampaignTest, startCampaign as startEmailCampaign } from "../storefront/storefront-campaigns.service";
 import { updateStorefrontConfigSchema } from "../storefront/storefront.schemas";
 import { normalizeQuietHours, normalizePacing } from "../scheduler/quiet-hours";
 import { ScheduledMessageStatus } from "@prisma/client";
@@ -594,6 +595,54 @@ export const TOOLS: ToolDefinition[] = [
           motivo: { type: "string", description: "motivo del rechazo (se guarda en el pedido)" },
         },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_campanas_correo",
+      description: "Lista las CAMPAÑAS DE CORREO (promociones) de la tienda web con estado, enviados, fallidos, clics y compras atribuidas.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "crear_campana_correo",
+      description:
+        "Crea una CAMPAÑA DE CORREO (promoción) para contactos con correo y consentimiento. {name, subject, body (variables {nombre} {correo} {ultimo_producto} {productos_comprados} {dias_desde_compra} {tienda} {cupon} {link} {campo1..3} y spintax), ctaLabel? ('Ver la tienda'), ctaUrl? (vacío = portada de la tienda; o URL de un producto), couponCode?, audience: {source: 'all' (todos con correo) | 'buyers' (compradores de la tienda; productId? limita a quienes compraron ese producto) | 'subscribers' (suscriptores del pie) | 'whatsapp' (contactos de WhatsApp con correo) | 'manual' (solo los de abajo), tagId?, customerIds? (contactos a mano), emails? (correos sueltos), rows? ([{email, nombre, campo1, campo2, campo3, cupon}] para mensajes personalizados por persona)}, enviar?: false (default: queda en BORRADOR para revisar en el panel; true = envía ya), scheduledAt? (ISO para programar)}. Antes de crear, muestra al dueño el tamaño de la audiencia (previsualizar_audiencia_correo) y el texto, y pide confirmación. Llámala SOLO tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "subject", "body", "audience"],
+        properties: {
+          name: { type: "string" },
+          subject: { type: "string" },
+          body: { type: "string" },
+          ctaLabel: { type: "string" },
+          ctaUrl: { type: "string" },
+          couponCode: { type: "string" },
+          audience: { type: "object", description: "ver descripción" },
+          enviar: { type: "boolean" },
+          scheduledAt: { type: "string" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "previsualizar_audiencia_correo",
+      description: "Cuenta cuántos contactos recibirían una campaña de correo con esa audiencia (misma forma que crear_campana_correo.audience) y muestra una muestra.",
+      parameters: { type: "object", additionalProperties: false, required: ["audience"], properties: { audience: { type: "object" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "enviar_prueba_campana_correo",
+      description: "Envía una campaña de correo existente como PRUEBA a un correo (con datos de ejemplo). {campaignId, to}.",
+      parameters: { type: "object", additionalProperties: false, required: ["campaignId", "to"], properties: { campaignId: { type: "string" }, to: { type: "string" } } },
     },
   },
   {
@@ -2191,6 +2240,34 @@ export async function runCopilotTool(
       };
     }
 
+    case "listar_campanas_correo": {
+      return { result: JSON.stringify({ campanas: await listEmailCampaigns(companyId) }), wrote: false };
+    }
+
+    case "previsualizar_audiencia_correo": {
+      return { result: JSON.stringify(await previewEmailAudience(companyId, args.audience)), wrote: false };
+    }
+
+    case "crear_campana_correo": {
+      const name = asStr(args.name) ?? "";
+      const subject = asStr(args.subject) ?? "";
+      const body = asStr(args.body) ?? "";
+      if (!name || !subject || !body) return { result: JSON.stringify({ ok: false, error: "faltan name/subject/body" }), wrote: false };
+      const c = await createEmailCampaign(companyId, { name, subject, body, ctaLabel: asStr(args.ctaLabel) ?? null, ctaUrl: asStr(args.ctaUrl) ?? null, couponCode: asStr(args.couponCode) ?? null, audience: args.audience ?? { source: "buyers" } });
+      if (args.enviar === true) {
+        const started = await startEmailCampaign(companyId, c.id, { scheduledAt: asStr(args.scheduledAt) ?? null });
+        return { result: JSON.stringify({ ok: true, campana: started, nota: started.status === "SCHEDULED" ? "Programada." : "Enviándose (ritmo controlado)." }), wrote: true };
+      }
+      return { result: JSON.stringify({ ok: true, campana: c, nota: "Quedó en BORRADOR: el dueño la revisa y envía desde Tienda web → Correos → Promociones (o vuelve a llamar con enviar=true)." }), wrote: true };
+    }
+
+    case "enviar_prueba_campana_correo": {
+      const id = asStr(args.campaignId) ?? "";
+      const to = asStr(args.to) ?? "";
+      if (!id || !to) return { result: JSON.stringify({ ok: false, error: "faltan campaignId/to" }), wrote: false };
+      return { result: JSON.stringify(await sendEmailCampaignTest(companyId, id, to)), wrote: true };
+    }
+
     case "ver_cupones": {
       return { result: JSON.stringify({ cupones: await listCoupons(companyId) }), wrote: false };
     }
@@ -2760,7 +2837,7 @@ const SYSTEM_GUIDE = [
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
   "- Chat Web (/chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
-  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled, portada). En el panel, Tienda web tiene pestañas: Resumen (métricas), Apariencia y cobro, Portada (carrusel de hasta 5 productos destacados con banner y 3 estilos: ambiente, tarjeta o póster, con titular resaltado, bullets y prueba social; franja de confianza, FAQ generales, pie, precio anterior), Cupones y Pedidos (ahí se aprueban los Yape/Plin en revisión). La tienda pública tiene buscador y filtros por categoría, carrusel, carrito lateral y ficha con beneficios/bonos/FAQ. Cada producto puede tener portada, varias categorías (etiquetas), descripción corta, orden y RECURSOS DE MUESTRA (PDF, video, imágenes que el comprador ve en la ficha) propios para la tienda (Apariencia y cobro → Productos visibles → Personalizar) sin tocar el producto que usa el agente de WhatsApp (configurar_tienda productOverrides). ARCHIVOS PROTEGIDOS: en el paso Archivos del producto, 'Solo por enlace firmado (privado)' saca el archivo de la URL pública; se entrega como enlace firmado de 7 días en el correo, en la página de gracias y en el chat (actualizar_producto files[].privateDownload=true). La portada de cada producto en la tienda se puede cambiar u ocultar (productOverrides imageUrl/hiddenImages) sin tocar el producto; los recursos de muestra se previsualizan en el panel. CORREOS AUTOMÁTICOS (Tienda web → Correos): checkout abandonado (hasta 3 correos cuando un pedido queda sin pagar; se cancelan al pagar), post-compra a los N días con el producto relacionado y cupón, y bienvenida a quien se suscribe en el pie de la tienda; cada correo lleva enlace de baja y nunca se envía a quien se dio de baja; se configuran con configurar_tienda emailReminders y se consultan en ver_tienda → correos. CUPONES: ver_cupones / crear_cupon / editar_cupon / desactivar_cupon (también en Tienda web → Cupones); el comprador los escribe en el checkout. CUENTA REGRESIVA: si un producto tiene oferta con offerEndsAt, la tienda muestra 'Termina en hh:mm:ss' automáticamente. La página de gracias ofrece el producto RELACIONADO (cross-sell del producto comprado, si está visible en la tienda) como upsell, y el panel muestra métricas de 30 días (ver_tienda → metricas30d). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/AddToCart/InitiateCheckout/Purchase, con advanced matching del correo/teléfono al iniciar el checkout) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens). Si en Integraciones la comisión de Mercado Pago la asume el CLIENTE, la tienda muestra el total con recargo en el botón y una nota antes de ir a Mercado Pago (Yape/Plin nunca lleva recargo).",
+  "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled, portada). En el panel, Tienda web tiene pestañas: Resumen (métricas), Apariencia y cobro, Portada (carrusel de hasta 5 productos destacados con banner y 3 estilos: ambiente, tarjeta o póster, con titular resaltado, bullets y prueba social; franja de confianza, FAQ generales, pie, precio anterior), Cupones y Pedidos (ahí se aprueban los Yape/Plin en revisión). La tienda pública tiene buscador y filtros por categoría, carrusel, carrito lateral y ficha con beneficios/bonos/FAQ. Cada producto puede tener portada, varias categorías (etiquetas), descripción corta, orden y RECURSOS DE MUESTRA (PDF, video, imágenes que el comprador ve en la ficha) propios para la tienda (Apariencia y cobro → Productos visibles → Personalizar) sin tocar el producto que usa el agente de WhatsApp (configurar_tienda productOverrides). ARCHIVOS PROTEGIDOS: en el paso Archivos del producto, 'Solo por enlace firmado (privado)' saca el archivo de la URL pública; se entrega como enlace firmado de 7 días en el correo, en la página de gracias y en el chat (actualizar_producto files[].privateDownload=true). La portada de cada producto en la tienda se puede cambiar u ocultar (productOverrides imageUrl/hiddenImages) sin tocar el producto; los recursos de muestra se previsualizan en el panel. CORREOS AUTOMÁTICOS (Tienda web → Correos): checkout abandonado (hasta 3 correos cuando un pedido queda sin pagar; se cancelan al pagar), post-compra a los N días con el producto relacionado y cupón, y bienvenida a quien se suscribe en el pie de la tienda; cada correo lleva enlace de baja y nunca se envía a quien se dio de baja; se configuran con configurar_tienda emailReminders y se consultan en ver_tienda → correos. PROMOCIONES POR CORREO (Tienda web → Correos → Promociones): campañas a compradores, suscriptores, contactos de WhatsApp con correo, por etiqueta, contactos elegidos a mano, correos pegados o CSV con campos propios (campo1..3, cupón por persona); solo a quien tiene consentimiento y no se dio de baja; ritmo y tope diario automáticos; métricas de clics y compras atribuidas (listar_campanas_correo, previsualizar_audiencia_correo, crear_campana_correo, enviar_prueba_campana_correo). CUPONES: ver_cupones / crear_cupon / editar_cupon / desactivar_cupon (también en Tienda web → Cupones); el comprador los escribe en el checkout. CUENTA REGRESIVA: si un producto tiene oferta con offerEndsAt, la tienda muestra 'Termina en hh:mm:ss' automáticamente. La página de gracias ofrece el producto RELACIONADO (cross-sell del producto comprado, si está visible en la tienda) como upsell, y el panel muestra métricas de 30 días (ver_tienda → metricas30d). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/AddToCart/InitiateCheckout/Purchase, con advanced matching del correo/teléfono al iniciar el checkout) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens). Si en Integraciones la comisión de Mercado Pago la asume el CLIENTE, la tienda muestra el total con recargo en el botón y una nota antes de ir a Mercado Pago (Yape/Plin nunca lleva recargo).",
   "- Pruebas (/pruebas): simulador para chatear con el agente sin gastar WhatsApp real.",
   "- Integraciones (/integraciones): Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en Configurar se elige POR CANAL si se usa en el cobro por chat y/o en la tienda web — p. ej. solo tienda), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",

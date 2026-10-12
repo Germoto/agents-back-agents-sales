@@ -1162,14 +1162,14 @@ export type StoreEventType = (typeof STORE_EVENT_TYPES)[number];
 const STORE_EVENT_RETENTION_DAYS = 180;
 
 /** Eventos enviados por el navegador (lote). Ignora tipos desconocidos; PURCHASE solo lo escribe el backend. */
-export async function recordStoreEvents(slug: string, sessionId: string, events: { type: string; productId?: string | null }[]) {
+export async function recordStoreEvents(slug: string, sessionId: string, events: { type: string; productId?: string | null; campaignId?: string | null }[]) {
   const { company } = await resolveStore(slug);
   const sid = sessionId.trim().slice(0, 64);
   if (!sid) return { ok: true, saved: 0 };
   const rows = events
     .filter((e) => (STORE_EVENT_TYPES as readonly string[]).includes(e.type) && e.type !== "PURCHASE" && e.type !== "DOWNLOAD")
     .slice(0, 20)
-    .map((e) => ({ companyId: company.id, type: e.type, productId: e.productId || null, sessionId: sid }));
+    .map((e) => ({ companyId: company.id, type: e.type, productId: e.productId || null, campaignId: e.campaignId || null, sessionId: sid }));
   if (rows.length) await prisma.storeEvent.createMany({ data: rows });
   return { ok: true, saved: rows.length };
 }
@@ -1632,6 +1632,7 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
         return {
           id: p.id,
           name: p.name,
+          slug: b.slug,
           // Valores del PRODUCTO (base) + override de la tienda por separado, para el modal.
           category: b.category ?? null,
           categories: categoriesOf(ov, b.category),

@@ -8,6 +8,7 @@
 import cron from "node-cron";
 import { purgeOldStoreEvents, recheckStoreOrdersInReview } from "./storefront.service";
 import { processStoreEmails } from "./storefront-email.service";
+import { reconcileCampaigns } from "./storefront-campaigns.service";
 
 let running = false;
 let lastPurgeDay = "";
@@ -19,8 +20,10 @@ export function startStorefrontWorker() {
     try {
       await recheckStoreOrdersInReview();
       // Correos de la tienda vencidos (recordatorios, bienvenida, campañas).
+      await reconcileCampaigns();
       const mails = await processStoreEmails();
       if (mails) console.log(`[store-email] enviados ${mails}`);
+      if (mails) await reconcileCampaigns();
       // Purga diaria de eventos de analítica (> 180 días).
       const day = new Date().toISOString().slice(0, 10);
       if (day !== lastPurgeDay) {

@@ -113,10 +113,39 @@ export const storeOrdersQuerySchema = z.object({
 export const storeEventsSchema = z.object({
   sessionId: z.string().trim().min(4).max(64),
   events: z
-    .array(z.object({ type: z.string().trim().min(2).max(20), productId: z.string().uuid().optional().nullable() }))
+    .array(z.object({ type: z.string().trim().min(2).max(20), productId: z.string().uuid().optional().nullable(), campaignId: z.string().uuid().optional().nullable() }))
     .min(1)
     .max(20),
 });
+
+// Panel: campañas de correo
+export const campaignIdParamsSchema = z.object({ id: z.string().uuid() });
+const campaignAudienceSchema = z.object({
+  source: z.enum(["all", "buyers", "subscribers", "whatsapp", "manual"]).default("buyers"),
+  productId: z.string().uuid().nullable().optional(),
+  tagId: z.string().uuid().nullable().optional(),
+  customerIds: z.array(z.string().uuid()).max(5000).optional(),
+  emails: z.array(z.string().trim().max(160)).max(5000).optional(),
+  rows: z
+    .array(z.object({ email: z.string().trim().max(160), nombre: z.string().trim().max(120).nullable().optional(), campo1: z.string().trim().max(200).nullable().optional(), campo2: z.string().trim().max(200).nullable().optional(), campo3: z.string().trim().max(200).nullable().optional(), cupon: z.string().trim().max(30).nullable().optional() }))
+    .max(5000)
+    .optional(),
+});
+export const createCampaignSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  subject: z.string().trim().min(1).max(150),
+  body: z.string().trim().min(1).max(6000),
+  imageUrl: z.string().trim().max(500).nullable().optional(),
+  ctaLabel: z.string().trim().max(40).nullable().optional(),
+  ctaUrl: z.string().trim().max(500).nullable().optional(),
+  couponCode: z.string().trim().max(30).nullable().optional(),
+  audience: campaignAudienceSchema.optional(),
+});
+export const updateCampaignSchema = createCampaignSchema.partial();
+export const campaignAudiencePreviewSchema = z.object({ audience: campaignAudienceSchema });
+export const campaignTestSchema = z.object({ to: z.string().trim().min(5).max(160) });
+export const campaignStartSchema = z.object({ scheduledAt: z.string().datetime().nullable().optional() });
+export const emailContactsQuerySchema = z.object({ q: z.string().trim().max(80).default(""), limit: z.coerce.number().int().min(1).max(100).default(30) });
 
 export const storeMetricsQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(365).default(30),

@@ -23,6 +23,7 @@ import {
 } from "./storefront.service";
 import { storeReceiptPublicUrl, type StoreOrderRequest } from "./storefront-upload.middleware";
 import { listStoreEmails, sendStoreTestEmail, subscribeToStore, unsubscribeByToken } from "./storefront-email.service";
+import { cancelCampaign, createCampaign, deleteCampaign, duplicateCampaign, getCampaign, listCampaigns, listEmailTags, previewAudience, searchEmailContacts, sendCampaignTest, startCampaign, updateCampaign } from "./storefront-campaigns.service";
 import { prisma } from "../../lib/prisma";
 
 // ---------------- Público ----------------
@@ -75,7 +76,7 @@ export async function storeReceiptController(req: Request, res: Response) {
 }
 
 export async function storeEventsController(req: Request, res: Response) {
-  const body = req.body as { sessionId: string; events: { type: string; productId?: string | null }[] };
+  const body = req.body as { sessionId: string; events: { type: string; productId?: string | null; campaignId?: string | null }[] };
   return res.json(await recordStoreEvents(String(req.params.slug), body.sessionId, body.events));
 }
 
@@ -155,4 +156,43 @@ export async function approveStoreOrderController(req: Request, res: Response) {
 
 export async function rejectStoreOrderController(req: Request, res: Response) {
   return res.json(await rejectStoreOrder(req.user!.companyId, String(req.params.id), req.body ?? {}));
+}
+
+// ---------------- Panel: campañas de correo ----------------
+
+export async function listCampaignsController(req: Request, res: Response) {
+  return res.json(await listCampaigns(req.user!.companyId));
+}
+export async function getCampaignController(req: Request, res: Response) {
+  return res.json(await getCampaign(req.user!.companyId, String(req.params.id)));
+}
+export async function createCampaignController(req: Request, res: Response) {
+  return res.status(201).json(await createCampaign(req.user!.companyId, req.body));
+}
+export async function updateCampaignController(req: Request, res: Response) {
+  return res.json(await updateCampaign(req.user!.companyId, String(req.params.id), req.body));
+}
+export async function deleteCampaignController(req: Request, res: Response) {
+  return res.json(await deleteCampaign(req.user!.companyId, String(req.params.id)));
+}
+export async function duplicateCampaignController(req: Request, res: Response) {
+  return res.status(201).json(await duplicateCampaign(req.user!.companyId, String(req.params.id)));
+}
+export async function previewAudienceController(req: Request, res: Response) {
+  return res.json(await previewAudience(req.user!.companyId, (req.body as { audience: unknown }).audience));
+}
+export async function campaignTestController(req: Request, res: Response) {
+  return res.json(await sendCampaignTest(req.user!.companyId, String(req.params.id), (req.body as { to: string }).to));
+}
+export async function startCampaignController(req: Request, res: Response) {
+  return res.json(await startCampaign(req.user!.companyId, String(req.params.id), req.body ?? {}));
+}
+export async function cancelCampaignController(req: Request, res: Response) {
+  return res.json(await cancelCampaign(req.user!.companyId, String(req.params.id)));
+}
+export async function emailContactsController(req: Request, res: Response) {
+  return res.json(await searchEmailContacts(req.user!.companyId, String(req.query.q ?? ""), Number(req.query.limit) || 30));
+}
+export async function emailTagsController(req: Request, res: Response) {
+  return res.json(await listEmailTags(req.user!.companyId));
 }

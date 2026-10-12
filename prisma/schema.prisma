@@ -196,6 +196,7 @@ model Company {
   storeEvents          StoreEvent[]
   coupons              Coupon[]
   storeEmails          StoreEmail[]
+  storeEmailCampaigns  StoreEmailCampaign[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
   crms                 Crm[]
@@ -1765,20 +1766,52 @@ model StoreEmail {
   @@index([campaignId])
 }
 
+/// Campañas de correo de la tienda (promociones). Los envíos son filas StoreEmail (kind CAMPAIGN).
+model StoreEmailCampaign {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String    @db.Uuid
+  name        String
+  subject     String
+  body        String
+  imageUrl    String?
+  ctaLabel    String?
+  ctaUrl      String?
+  couponCode  String?
+  // { source, productId?, tagId?, customerIds[], emails[], rows[] } — ver storefront-campaigns.service
+  audience    Json      @default("{}")
+  // DRAFT | SCHEDULED | RUNNING | COMPLETED | CANCELLED
+  status      String    @default("DRAFT")
+  scheduledAt DateTime?
+  totalCount  Int       @default(0)
+  sentCount   Int       @default(0)
+  failedCount Int       @default(0)
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, createdAt])
+  @@index([status, scheduledAt])
+}
+
 /// Eventos de la tienda web (analítica ligera): visitas, vistas de producto, carrito,
 /// checkouts, clics a WhatsApp y compras. Se purgan a los 180 días.
 model StoreEvent {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String   @db.Uuid
-  type      String
-  productId String?  @db.Uuid
-  orderId   String?  @db.Uuid
-  sessionId String
-  createdAt DateTime @default(now())
-  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String   @db.Uuid
+  type       String
+  productId  String?  @db.Uuid
+  orderId    String?  @db.Uuid
+  // Campaña de correo de origen (clics con utm_campaign=<id>).
+  campaignId String?  @db.Uuid
+  sessionId  String
+  createdAt  DateTime @default(now())
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@index([companyId, createdAt])
   @@index([companyId, type, createdAt])
+  @@index([campaignId])
 }
 
 enum StoreOrderStatus {

@@ -149,12 +149,17 @@ export function renderStoreEmail(p: {
     ? `<img src="${escapeHtml(p.logoUrl)}" alt="" width="40" height="40" style="width:40px;height:40px;border-radius:10px;vertical-align:middle;margin-right:10px;">`
     : "";
   const unsub = p.unsubUrl ? ` · <a href="${escapeHtml(p.unsubUrl)}" style="color:#8a8597;">Darme de baja</a>` : "";
+  // Banner: si la primera línea del cuerpo es una imagen subida a FlowApp (campañas), va como <img> y no como texto.
+  const bannerMatch = /^(https?:\/\/\S+\.(?:png|jpe?g|gif|webp))\s*\n+/i.exec(p.body);
+  const bodyText = bannerMatch ? p.body.slice(bannerMatch[0].length) : p.body;
+  const banner = bannerMatch ? `<img src="${escapeHtml(bannerMatch[1])}" alt="" style="display:block;width:100%;height:auto;">` : "";
   const html = `
 <div style="background:#f6f5f2;padding:28px 12px;font-family:Arial,Helvetica,sans-serif;color:#17151f;">
   <div style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #e7e4de;border-radius:18px;overflow:hidden;">
     <div style="background:${accent};color:#ffffff;padding:18px 24px;font-size:18px;font-weight:800;">${logo}<a href="${escapeHtml(p.storeLink)}" style="color:#ffffff;text-decoration:none;">${escapeHtml(p.storeName)}</a></div>
+    ${banner}
     <div style="padding:26px 24px 22px;font-size:15px;line-height:1.6;color:#2c2936;">
-      ${plainTextToHtml(p.body)}
+      ${plainTextToHtml(bodyText)}
       ${cta}
       ${coupon}
     </div>
@@ -163,7 +168,7 @@ export function renderStoreEmail(p: {
     </div>
   </div>
 </div>`;
-  const text = `${p.body}\n\n${p.ctaUrl ? `${p.ctaLabel ?? "Ver"}: ${p.ctaUrl}\n` : ""}${p.couponCode ? `Cupón: ${p.couponCode}\n` : ""}\n— ${p.storeName} (vía FlowApp)${p.unsubUrl ? `\nDarme de baja: ${p.unsubUrl}` : ""}`;
+  const text = `${bodyText}\n\n${p.ctaUrl ? `${p.ctaLabel ?? "Ver"}: ${p.ctaUrl}\n` : ""}${p.couponCode ? `Cupón: ${p.couponCode}\n` : ""}\n— ${p.storeName} (vía FlowApp)${p.unsubUrl ? `\nDarme de baja: ${p.unsubUrl}` : ""}`;
   return { html, text };
 }
 
