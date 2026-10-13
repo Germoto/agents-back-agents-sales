@@ -24,6 +24,8 @@ export const storeCheckoutSchema = z.object({
   coupon: z.string().trim().max(30).optional().nullable(),
   // Consentimiento para promociones por correo (casilla del checkout).
   emailMarketing: z.boolean().optional(),
+  // Order bump de la landing del producto principal (precio especial validado en el backend).
+  bumpProductId: z.string().uuid().optional().nullable(),
 }).refine((b) => Boolean(b.productId || b.productIds?.length), { message: "Elige al menos un producto", path: ["productId"] });
 
 // POST /order/:id/receipt (multipart: file + payerName)
@@ -76,11 +78,15 @@ export const updateStorefrontConfigSchema = z.object({
   carouselAutoplay: z.boolean().optional(),
   carouselIntervalSec: z.coerce.number().int().min(3).max(12).optional(),
   showOldPrice: z.boolean().optional(),
-  trustItems: z.array(z.object({ title: z.string().trim().max(60), sub: z.string().trim().max(140) })).max(3).nullable().optional(),
+  trustItems: z.array(z.object({ icon: z.string().trim().max(4).nullable().optional(), title: z.string().trim().max(60), sub: z.string().trim().max(140) })).max(4).nullable().optional(),
   faqs: z.array(z.object({ question: z.string().trim().max(200), answer: z.string().trim().max(1000) })).max(10).optional(),
   footerTagline: z.string().trim().max(160).nullable().optional(),
   // Personalización por producto para la tienda (null = quitar el override).
   emailReminders: z.any().optional(),
+  // Modo ventas (se sanitizan en el servicio).
+  announcement: z.any().optional(),
+  volumePricing: z.any().optional(),
+  salesSettings: z.any().optional(),
   productOverrides: z
     .record(
       z.string().uuid(),
@@ -97,6 +103,7 @@ export const updateStorefrontConfigSchema = z.object({
             .max(12)
             .nullable()
             .optional(),
+          landing: z.any().optional(),
         })
         .nullable(),
     )
@@ -155,6 +162,13 @@ export const storeMetricsQuerySchema = z.object({
 export const storeCouponPreviewSchema = z.object({
   code: z.string().trim().min(1).max(30),
   productIds: z.array(z.string().uuid()).min(1).max(10),
+});
+
+// POST /:slug/quote — cotización del carrito (combo + bump + cupón)
+export const storeQuoteSchema = z.object({
+  productIds: z.array(z.string().uuid()).min(1).max(10),
+  coupon: z.string().trim().max(30).optional().nullable(),
+  bumpProductId: z.string().uuid().optional().nullable(),
 });
 
 // Panel: cupones

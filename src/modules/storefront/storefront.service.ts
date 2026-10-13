@@ -38,6 +38,24 @@ import type { AiSettings } from "../../lib/ai-providers";
 import { reportStorePurchase, storePixelId, type StoreWebClient } from "../meta-capi/meta-capi.service";
 import { signDownloadToken } from "../../lib/jwt";
 import { cancelOrderEmails, emailRemindersOf, sanitizeEmailReminders, scheduleAbandonedCheckout, schedulePostPurchase, type EmailReminders } from "./storefront-email.service";
+import {
+  announcementOf,
+  computeCombo,
+  DEFAULT_SAMPLE,
+  distributeTotal,
+  fillPrice,
+  guaranteeOf,
+  salesSettingsOf,
+  sanitizeAnnouncement,
+  sanitizeLanding,
+  sanitizeSalesSettings,
+  sanitizeVolumePricing,
+  videoEmbedUrl,
+  volumePricingOf,
+  type LandingOverride,
+  type PricedItem,
+  type VolumePricing,
+} from "./storefront-sales";
 
 // ---------------------------------------------------------------------------
 // Portada: tipos de la configuración (JSON) y valores por defecto
@@ -65,7 +83,7 @@ export type HeroSlide = {
   ctaColor?: string | null;
   ctaLabel?: string;
 };
-export type TrustItem = { title: string; sub: string };
+export type TrustItem = { title: string; sub: string; icon?: string | null };
 export type StoreFaq = { question: string; answer: string };
 
 export type StoreMediaType = "IMAGE" | "VIDEO" | "PDF" | "OTHER";
@@ -89,6 +107,8 @@ export type ProductOverride = {
   media?: StoreMediaItem[] | null;
   /** Imágenes del producto que la tienda NO muestra (solo tienda; el producto no cambia). */
   hiddenImages?: string[] | null;
+  /** Landing de ventas de la ficha (hero, cifras, dolor, muestra, testimonios, order bump, garantía). */
+  landing?: LandingOverride | null;
 };
 export type ProductOverrides = Record<string, ProductOverride>;
 
@@ -135,9 +155,9 @@ function storeImageOf(p: { files: { type: string; showInPresentation: boolean; u
 }
 
 export const DEFAULT_TRUST_ITEMS: TrustItem[] = [
-  { title: "Entrega inmediata", sub: "El acceso llega a tu correo al confirmar el pago" },
-  { title: "Yape, Plin o tarjeta", sub: "Pago seguro y validación automática" },
-  { title: "Soporte por WhatsApp", sub: "Te ayudamos antes y después de comprar" },
+  { icon: "⚡", title: "Entrega inmediata", sub: "El acceso llega a tu correo al confirmar el pago" },
+  { icon: "◎", title: "Yape, Plin o tarjeta", sub: "Pago seguro y validación automática" },
+  { icon: "✆", title: "Soporte por WhatsApp", sub: "Te ayudamos antes y después de comprar" },
 ];
 
 function jsonArray<T>(v: unknown): T[] {
@@ -321,10 +341,42 @@ export async function getPublicStore(slug: string) {
       };
     });
   const categorias = Array.from(new Set(mapped.flatMap((x) => x.categories)));
+  const ventas = salesSettingsOf(cfg.salesSettings);
+  const combos = volumePricingOf(cfg.volumePricing);
+  const anuncio = announcementOf(cfg.announcement);
+  // Countdown de la barra: "offer" = la oferta con fin más próxima entre los productos visibles.
+  const nearestOffer = mapped
+    .map((x) => x.b.offerEndsAt)
+    .filter((d): d is Date => Boolean(d && d.getTime() > Date.now()))
+    .sort((a, b2) => a.getTime() - b2.getTime())[0];
+  const anuncioEndsAt = anuncio.countdown === "offer" ? (nearestOffer ? nearestOffer.toISOString() : null) : anuncio.countdown === "none" ? null : new Date(anuncio.countdown).toISOString();
+  const bundlePriceText = combos.allBundle.price !== null ? `${symbol} ${combos.allBundle.price.toFixed(2)}` : "";
+  const trust = jsonArray<TrustItem>(cfg.trustItems).length ? jsonArray<TrustItem>(cfg.trustItems).slice(0, 4) : DEFAULT_TRUST_ITEMS;
   return {
     pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual, mpRecargo: pay.mpRecargo },
     portada: { slides, autoplay: cfg.carouselAutoplay, intervalSec: cfg.carouselIntervalSec },
-    confianza: jsonArray<TrustItem>(cfg.trustItems).length ? jsonArray<TrustItem>(cfg.trustItems).slice(0, 3) : DEFAULT_TRUST_ITEMS,
+    anuncio: anuncio.enabled && anuncio.text ? { text: anuncio.text, endsAt: anuncioEndsAt && new Date(anuncioEndsAt).getTime() > Date.now() ? anuncioEndsAt : null } : null,
+    combos: combos.enabled && (combos.tiers.length || combos.allBundle.enabled)
+      ? {
+          tiers: combos.tiers,
+          allBundle: combos.allBundle.enabled ? { price: combos.allBundle.price as number, priceText: bundlePriceText, label: combos.allBundle.label, total: mapped.length } : null,
+          seccion: combos.allBundle.enabled
+            ? {
+                kicker: ventas.comboSection.kicker,
+                headline: fillPrice(ventas.comboSection.headline, bundlePriceText),
+                sub: fillPrice(ventas.comboSection.sub, bundlePriceText),
+                ctaLabel: fillPrice(ventas.comboSection.ctaLabel, bundlePriceText),
+              }
+            : null,
+        }
+      : null,
+    ventas: {
+      ctaColor: ventas.ctaColor,
+      catalogTitle: ventas.catalogTitle || null,
+      guarantee: ventas.guarantee.enabled ? { days: ventas.guarantee.days, title: ventas.guarantee.title.replace(/\{dias\}/g, String(ventas.guarantee.days)), text: ventas.guarantee.text } : null,
+      cartRecommendations: ventas.cartRecommendations,
+    },
+    confianza: trust.map((t) => ({ icon: (t.icon ?? "").trim() || null, title: t.title, sub: t.sub })),
     faqs: jsonArray<StoreFaq>(cfg.faqs).slice(0, 10),
     mostrarPrecioAnterior: cfg.showOldPrice,
     footerTagline: cfg.footerTagline || cfg.tagline || null,
@@ -340,9 +392,40 @@ export async function getPublicStore(slug: string) {
       currency: company.currency,
       whatsappNumber: cfg.whatsappNumber ? cfg.whatsappNumber.replace(/\D/g, "") || null : null,
     },
-    productos: mapped.map(({ p, b, images, category, categories, recursos, shortDescription }) => {
+    productos: mapped.map(({ p, b, ov, images, category, categories, recursos, shortDescription }) => {
+      const ld = ov?.landing ?? {};
+      const priceText = b.priceText ?? b.price;
+      const bump = ld.orderBump && byId.has(ld.orderBump.productId) ? byId.get(ld.orderBump.productId)! : null;
+      const video = videoEmbedUrl(ld.videoUrl ?? null);
+      const guarantee = ld.guarantee ? guaranteeOf(ld.guarantee, ventas.guarantee) : ventas.guarantee;
+      const landing = {
+        kicker: (ld.kicker ?? "").trim() || category || "",
+        headline: (ld.headline ?? "").trim() || b.name,
+        ctaLabel: (ld.ctaLabel ?? "").trim() || `Sí, quiero ${b.name} →`,
+        video: video ? { kind: video.kind, url: ld.videoUrl as string, embedUrl: video.embedUrl } : null,
+        stats: ld.stats ?? [],
+        pain: ld.pain && (ld.pain.headline || ld.pain.items.length) ? ld.pain : null,
+        includesHeadline: (ld.includesHeadline ?? "").trim() || `Todo esto por un solo pago de ${priceText}`,
+        sample: { ...DEFAULT_SAMPLE, ...(ld.sample ?? {}) },
+        testimonialsHeadline: (ld.testimonialsHeadline ?? "").trim() || "Lo que dicen otros clientes",
+        testimonials: ld.testimonials ?? [],
+        orderBump: bump && ld.orderBump
+          ? {
+              productId: bump.p.id,
+              name: bump.p.name,
+              price: ld.orderBump.price,
+              priceText: `${symbol} ${ld.orderBump.price.toFixed(2)}`,
+              regularPriceText: bump.b.priceText ?? bump.b.price,
+              title: ld.orderBump.title || `Sí, agrega ${bump.p.name} por solo ${symbol} ${ld.orderBump.price.toFixed(2)}`,
+              note: ld.orderBump.note || "Oferta única en esta página. No se vende por separado a este precio.",
+              imageUrl: bump.images[0]?.url ?? null,
+            }
+          : null,
+        guarantee: guarantee.enabled ? { days: guarantee.days, title: guarantee.title.replace(/\{dias\}/g, String(guarantee.days)), text: guarantee.text } : null,
+      };
       return {
         id: b.id,
+        landing,
         slug: b.slug,
         name: b.name,
         price: b.price,
@@ -470,9 +553,86 @@ export function orderProductIds(order: { productId: string; productIds: string[]
   return order.productIds.length ? order.productIds : [order.productId];
 }
 
+type EligibleRow = Awaited<ReturnType<typeof eligibleProducts>>[number];
+
+export type CartPricing = {
+  items: PricedItem[];
+  /** Subtotal de lista del carrito (sin bump). */
+  subtotal: number;
+  combo: { discount: number; label: string | null; bundle: boolean; next: { missing: number; discountPct: number } | null };
+  bump: { productId: string; name: string; price: number; regularPrice: number } | null;
+  coupon: { couponId: string; code: string; type: string; value: number; discount: number } | null;
+  /** Total a cobrar (Yape/Plin exacto; MP le suma el recargo aparte). */
+  total: number;
+};
+
+/**
+ * Precio del carrito con todo aplicado, en este orden: tramos por volumen / bundle total
+ * (solo sobre los productos del carrito) → order bump (precio especial de la landing del
+ * producto principal) → cupón sobre el resultado. Los ítems salen ya repartidos para MP.
+ */
+async function priceCart(
+  company: StoreCompany,
+  cfg: { productIds: string[]; productOverrides: unknown; volumePricing: unknown },
+  input: { productIds: string[]; bumpProductId?: string | null; coupon?: string | null },
+): Promise<CartPricing> {
+  const wantedIds = Array.from(new Set(input.productIds));
+  if (!wantedIds.length) throw new AppError("Elige al menos un producto", 400);
+  const eligible = await eligibleProducts(company.id, cfg.productIds);
+  const chosen = wantedIds.map((id) => eligible.find((p) => p.id === id)).filter((p): p is EligibleRow => Boolean(p));
+  if (chosen.length !== wantedIds.length) throw new AppError(chosen.length ? "Algún producto del carrito ya no está disponible" : "Producto no disponible", 404);
+  const symbol = symbolFor(company.currency);
+  const listPrice = (p: EligibleRow) => parsePrice(mapBotProduct(p, { currencySymbol: symbol, timezone: company.timezone }).price);
+  const items: PricedItem[] = chosen.map((p) => {
+    const unitPrice = listPrice(p);
+    if (unitPrice <= 0) throw new AppError(`«${p.name}» no tiene un precio válido para compra online`, 409);
+    return { productId: p.id, name: p.name, unitPrice, qty: 1 };
+  });
+  const subtotal = Number(items.reduce((acc, it) => acc + it.unitPrice * it.qty, 0).toFixed(2));
+  const combo = computeCombo(items, volumePricingOf(cfg.volumePricing), eligible.map((p) => p.id));
+  // Order bump: solo el que declara la landing del producto principal, y si no está ya en el carrito.
+  let bump: CartPricing["bump"] = null;
+  if (input.bumpProductId && !wantedIds.includes(input.bumpProductId)) {
+    const ov = overridesOf(cfg)[chosen[0].id];
+    const ob = ov?.landing?.orderBump;
+    const bp = ob && ob.productId === input.bumpProductId ? eligible.find((p) => p.id === ob.productId) : null;
+    if (!bp || !ob) throw new AppError("Esa oferta adicional ya no está disponible", 404);
+    bump = { productId: bp.id, name: bp.name, price: ob.price, regularPrice: listPrice(bp) };
+    items.push({ productId: bp.id, name: bp.name, unitPrice: ob.price, qty: 1, bump: true });
+  }
+  const afterCombo = Number((subtotal - combo.discount + (bump?.price ?? 0)).toFixed(2));
+  const coupon = input.coupon?.trim() ? await validateCoupon(company.id, input.coupon, items.map((it) => it.productId), afterCombo) : null;
+  const total = Number((afterCombo - (coupon?.discount ?? 0)).toFixed(2));
+  if (total <= 0) throw new AppError("El total del pedido debe ser mayor a 0", 409);
+  distributeTotal(items, total);
+  return { items, subtotal, combo: { discount: combo.discount, label: combo.label, bundle: combo.bundle, next: combo.next }, bump, coupon, total };
+}
+
+/** Público: cotización del carrito (combo, bump, cupón, total y total con recargo de MP). */
+export async function quoteStoreCart(slug: string, input: { productIds: string[]; bumpProductId?: string | null; coupon?: string | null }) {
+  const { company, cfg, ent } = await resolveStore(slug);
+  const [pricing, pay] = await Promise.all([priceCart(company, cfg, input), storePaymentOptions(company.id, cfg, ent)]);
+  const symbol = symbolFor(company.currency);
+  const money = (n: number) => `${symbol} ${n.toFixed(2)}`;
+  const pc = pay.pc;
+  const totalMp = pay.mercadoPago && pc ? mpLinkAmount(pricing.total, { feeMode: pc.mpFeeMode, feePercent: Number(pc.mpFeePercent), feeFixed: Number(pc.mpFeeFixed), feeIgv: pc.mpFeeIgv }) : pricing.total;
+  return {
+    subtotal: pricing.subtotal,
+    subtotalText: money(pricing.subtotal),
+    combo: pricing.combo.discount > 0 ? { discount: pricing.combo.discount, discountText: money(pricing.combo.discount), label: pricing.combo.label, bundle: pricing.combo.bundle } : null,
+    siguienteTramo: pricing.combo.next,
+    bump: pricing.bump ? { productId: pricing.bump.productId, name: pricing.bump.name, price: pricing.bump.price, priceText: money(pricing.bump.price) } : null,
+    cupon: pricing.coupon ? { code: pricing.coupon.code, discount: pricing.coupon.discount, discountText: money(pricing.coupon.discount) } : null,
+    total: pricing.total,
+    totalText: money(pricing.total),
+    totalMp: Number(totalMp.toFixed(2)),
+    totalMpText: money(totalMp),
+  };
+}
+
 export async function createStoreCheckout(
   slug: string,
-  input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod; coupon?: string | null; emailMarketing?: boolean },
+  input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod; coupon?: string | null; emailMarketing?: boolean; bumpProductId?: string | null },
   client?: StoreWebClient | null,
 ) {
   const { company, cfg, ent } = await resolveStore(slug);
@@ -494,38 +654,16 @@ export async function createStoreCheckout(
     throw new AppError("Esta tienda no acepta pago con Yape/Plin por el momento", 409);
   }
 
-  // Carrito: ids únicos, todos elegibles, precio de lista por producto (digitales: qty 1).
-  const wantedIds = Array.from(new Set([...(input.productIds ?? []), ...(input.productId ? [input.productId] : [])]));
-  if (!wantedIds.length) throw new AppError("Elige al menos un producto", 400);
-  const eligible = await eligibleProducts(companyId, cfg.productIds);
-  const chosen = wantedIds.map((id) => eligible.find((p) => p.id === id)).filter((p): p is (typeof eligible)[number] => Boolean(p));
-  if (chosen.length !== wantedIds.length) throw new AppError(chosen.length ? "Algún producto del carrito ya no está disponible" : "Producto no disponible", 404);
-  const items: StoreOrderItem[] = chosen.map((p) => {
-    const bot = mapBotProduct(p, { currencySymbol: symbolFor(company.currency), timezone: company.timezone });
-    const unitPrice = parsePrice(bot.price);
-    if (unitPrice <= 0) throw new AppError(`«${p.name}» no tiene un precio válido para compra online`, 409);
-    return { productId: p.id, name: p.name, unitPrice, qty: 1 };
-  });
-  const product = chosen[0];
-  const subtotal = Number(items.reduce((acc, it) => acc + it.unitPrice * it.qty, 0).toFixed(2));
+  // Carrito: ids únicos, todos elegibles (digitales: qty 1); combo + order bump + cupón
+  // se calculan en priceCart y los ítems salen repartidos (MP no acepta ítems negativos).
+  const wantedIds = Array.from(new Set([...(input.productId ? [input.productId] : []), ...(input.productIds ?? [])]));
+  const pricing = await priceCart(company, cfg, { productIds: wantedIds, bumpProductId: input.bumpProductId ?? null, coupon: input.coupon ?? null });
+  const items: StoreOrderItem[] = pricing.items.map((it) => ({ productId: it.productId, name: it.name, unitPrice: it.unitPrice, qty: it.qty }));
+  const product = { id: pricing.items[0].productId, name: pricing.items[0].name };
+  const subtotal = pricing.subtotal;
+  const coupon = pricing.coupon;
   const productName = items.length > 1 ? `${product.name} +${items.length - 1} más` : product.name;
-  // Cupón: descuento sobre el precio de lista; se reparte proporcionalmente en los ítems
-  // (Mercado Pago no acepta ítems negativos) y se cuenta el uso recién al pagar.
-  const coupon = input.coupon?.trim() ? await validateCoupon(companyId, input.coupon, items.map((it) => it.productId), subtotal) : null;
-  if (coupon && coupon.discount > 0) {
-    const factor = (subtotal - coupon.discount) / subtotal;
-    let acc = 0;
-    items.forEach((it, i) => {
-      if (i < items.length - 1) {
-        it.unitPrice = Number((it.unitPrice * factor).toFixed(2));
-        acc += it.unitPrice;
-      } else {
-        it.unitPrice = Number((subtotal - coupon.discount - acc).toFixed(2));
-      }
-    });
-  }
-  const priceNum = Number(items.reduce((acc, it) => acc + it.unitPrice * it.qty, 0).toFixed(2));
-  if (priceNum <= 0) throw new AppError("El total del pedido debe ser mayor a 0", 409);
+  const priceNum = pricing.total;
   // Yape/Plin: precio de lista exacto (sin recargo). MP: link con la comisión según config.
   const linkAmount =
     method === "MANUAL" || !pc
@@ -593,6 +731,14 @@ export async function createStoreCheckout(
         listPrice: subtotal,
         feeMode: pc?.mpFeeMode ?? null,
         ...(coupon ? { coupon: { couponId: coupon.couponId, code: coupon.code, discount: coupon.discount } } : {}),
+        // Desglose para la página de gracias, el panel y los correos.
+        pricing: {
+          subtotal,
+          combo: pricing.combo.discount > 0 ? { discount: pricing.combo.discount, label: pricing.combo.label, bundle: pricing.combo.bundle } : null,
+          bump: pricing.bump ? { productId: pricing.bump.productId, name: pricing.bump.name, price: pricing.bump.price } : null,
+          coupon: coupon ? { code: coupon.code, discount: coupon.discount } : null,
+          total: pricing.total,
+        },
         ...(client ? { web: client } : {}),
       },
     },
@@ -704,11 +850,13 @@ export async function getPublicOrder(id: string, token: string) {
         .then((c) => upsellFor(order.companyId, orderProductIds(order), c?.productIds ?? []))
         .catch(() => null)
     : null;
+  const pricing = ((order.metadata ?? {}) as Record<string, unknown>).pricing ?? null;
   return {
     id: order.id,
     status: order.status,
     paymentMethod: order.paymentMethod,
     productName: order.productName,
+    pricing,
     upsell,
     archivos,
     productos: items.length ? items.map((it) => it.name) : [order.productName],
@@ -1413,12 +1561,17 @@ export async function deleteCoupon(companyId: string, id: string) {
 // Panel del tenant
 // ---------------------------------------------------------------------------
 
+/** Campos JSON de venta resueltos con defaults (para el panel y el copiloto). */
+function resolvedSales(cfg: { emailReminders: unknown; announcement: unknown; volumePricing: unknown; salesSettings: unknown }) {
+  const emailReminders: EmailReminders = emailRemindersOf(cfg.emailReminders);
+  return { emailReminders, announcement: announcementOf(cfg.announcement), volumePricing: volumePricingOf(cfg.volumePricing) as VolumePricing, salesSettings: salesSettingsOf(cfg.salesSettings) };
+}
+
 export async function getStorefrontConfig(companyId: string) {
   const cfg =
     (await prisma.storefrontConfig.findUnique({ where: { companyId } })) ??
     (await prisma.storefrontConfig.create({ data: { companyId } }));
-  const emailReminders: EmailReminders = emailRemindersOf(cfg.emailReminders);
-  return { ...cfg, emailReminders, status: await storefrontStatus(companyId, cfg.enabled) };
+  return { ...cfg, ...resolvedSales(cfg), status: await storefrontStatus(companyId, cfg.enabled) };
 }
 
 export async function updateStorefrontConfig(
@@ -1455,6 +1608,9 @@ export async function updateStorefrontConfig(
     footerTagline?: string | null;
     productOverrides?: Record<string, ProductOverride | null>;
     emailReminders?: unknown;
+    announcement?: unknown;
+    volumePricing?: unknown;
+    salesSettings?: unknown;
   },
 ) {
   const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
@@ -1486,7 +1642,9 @@ export async function updateStorefrontConfig(
       const productImages = new Set(prod.files.filter((f) => f.type === "IMAGE").map((f) => f.url));
       const hiddenImages = Array.from(new Set((ov.hiddenImages ?? []).filter((u) => typeof u === "string" && productImages.has(u))));
       const imageUrl = ov.imageUrl && !hiddenImages.includes(ov.imageUrl) ? ov.imageUrl : null;
+      const landing = sanitizeLanding(ov.landing, { isOwnUpload, productFileUrls: new Set(prod.files.map((f) => f.url)), productId: pid, eligibleIds: new Set(eligibleRows.map((p) => p.id)) });
       const clean: ProductOverride = {
+        ...(landing ? { landing } : {}),
         ...(imageUrl ? { imageUrl } : {}),
         ...(hiddenImages.length ? { hiddenImages } : {}),
         ...(categories.length ? { categories } : {}),
@@ -1526,7 +1684,7 @@ export async function updateStorefrontConfig(
       ? undefined
       : data.trustItems === null
         ? null
-        : data.trustItems.slice(0, 3).map((t) => ({ title: (t.title ?? "").trim().slice(0, 60), sub: (t.sub ?? "").trim().slice(0, 140) }));
+        : data.trustItems.slice(0, 4).map((t) => ({ icon: (t.icon ?? "").trim().slice(0, 4) || null, title: (t.title ?? "").trim().slice(0, 60), sub: (t.sub ?? "").trim().slice(0, 140) }));
   const faqs = data.faqs === undefined ? undefined : data.faqs.slice(0, 10).map((f) => ({ question: (f.question ?? "").trim().slice(0, 200), answer: (f.answer ?? "").trim().slice(0, 1000) })).filter((f) => f.question && f.answer);
   const extra = {
     ...(heroSlides !== undefined ? { heroSlides: heroSlides as unknown as Prisma.InputJsonValue } : {}),
@@ -1538,6 +1696,9 @@ export async function updateStorefrontConfig(
     ...(data.footerTagline !== undefined ? { footerTagline: data.footerTagline?.trim().slice(0, 160) || null } : {}),
     ...(productOverrides !== undefined ? { productOverrides: productOverrides as unknown as Prisma.InputJsonValue } : {}),
     ...(data.emailReminders !== undefined ? { emailReminders: sanitizeEmailReminders(data.emailReminders) as unknown as Prisma.InputJsonValue } : {}),
+    ...(data.announcement !== undefined ? { announcement: sanitizeAnnouncement(data.announcement) as unknown as Prisma.InputJsonValue } : {}),
+    ...(data.volumePricing !== undefined ? { volumePricing: sanitizeVolumePricing(data.volumePricing) as unknown as Prisma.InputJsonValue } : {}),
+    ...(data.salesSettings !== undefined ? { salesSettings: sanitizeSalesSettings(data.salesSettings) as unknown as Prisma.InputJsonValue } : {}),
   };
   if (data.enabled === true) {
     const st = await storefrontStatus(companyId, true);
@@ -1570,7 +1731,7 @@ export async function updateStorefrontConfig(
     },
   });
   tlsAskCache.clear();
-  return { ...cfg, emailReminders: emailRemindersOf(cfg.emailReminders), status: await storefrontStatus(companyId, cfg.enabled) };
+  return { ...cfg, ...resolvedSales(cfg), status: await storefrontStatus(companyId, cfg.enabled) };
 }
 
 /** Checklist de requisitos de la tienda (para el panel y el copiloto). */
@@ -1709,6 +1870,9 @@ function serializeOrderRow(o: OrderRowSel) {
     createdAt: o.createdAt,
     customerId: o.customerId,
     cupon: (md.coupon as { code?: string; discount?: number } | undefined)?.code ?? null,
+    // Desglose de combo / order bump (si lo hubo).
+    descuentoCombo: (md.pricing as { combo?: { discount?: number; label?: string | null } } | undefined)?.combo?.discount ?? null,
+    bump: (md.pricing as { bump?: { name?: string; price?: number } } | undefined)?.bump?.name ?? null,
     // Lo que la visión leyó del comprobante (ayuda al dueño a revisar).
     comprobante: r ? { montoLeido: r.amountText, operacion: r.operationNumber, codigo: r.securityCode } : null,
   };

@@ -8,6 +8,7 @@ import {
   deleteCoupon,
   listCoupons,
   previewCoupon,
+  quoteStoreCart,
   updateCoupon,
   getPublicOrder,
   getPublicStore,
@@ -78,6 +79,11 @@ export async function storeReceiptController(req: Request, res: Response) {
 export async function storeEventsController(req: Request, res: Response) {
   const body = req.body as { sessionId: string; events: { type: string; productId?: string | null; campaignId?: string | null }[] };
   return res.json(await recordStoreEvents(String(req.params.slug), body.sessionId, body.events));
+}
+
+export async function storeQuoteController(req: Request, res: Response) {
+  const body = req.body as { productIds: string[]; coupon?: string | null; bumpProductId?: string | null };
+  return res.json(await quoteStoreCart(String(req.params.slug), body));
 }
 
 export async function storeCouponPreviewController(req: Request, res: Response) {

@@ -1706,6 +1706,12 @@ model StorefrontConfig {
   productOverrides      Json?
   // Correos automáticos de la tienda: {abandonedCheckout: {enabled, steps[]}, postPurchase: {...}, welcome: {...}}.
   emailReminders        Json?
+  // Barra de anuncio superior {enabled, text, countdown: "none" | "offer" | ISO}.
+  announcement          Json?
+  // Combos por volumen {enabled, tiers: [{minQty, discountPct}], allBundle: {enabled, price, label}}.
+  volumePricing         Json?
+  // Ajustes de venta {ctaColor, catalogTitle, comboSection, guarantee, cartRecommendations}.
+  salesSettings         Json?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

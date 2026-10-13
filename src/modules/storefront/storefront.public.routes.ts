@@ -4,12 +4,13 @@ import { Router } from "express";
 import { asyncHandler } from "../../lib/async-handler";
 import { validate } from "../../middlewares/validate";
 import { makeRateLimiter } from "../../middlewares/rate-limit.middleware";
-import { storeCheckoutSchema, storeCouponPreviewSchema, storeEventsSchema, storeSubscribeSchema, storeOrderParamsSchema, storeOrderQuerySchema, storeReceiptBodySchema, storeSlugParamsSchema } from "./storefront.schemas";
+import { storeCheckoutSchema, storeCouponPreviewSchema, storeQuoteSchema, storeEventsSchema, storeSubscribeSchema, storeOrderParamsSchema, storeOrderQuerySchema, storeReceiptBodySchema, storeSlugParamsSchema } from "./storefront.schemas";
 import {
   getPublicOrderController,
   getPublicStoreController,
   storeCheckoutController,
   storeCouponPreviewController,
+  storeQuoteController,
   storeEventsController,
   storeOgController,
   storeReceiptController,
@@ -47,6 +48,7 @@ router.post(
 router.get("/:slug", catalogLimiter, validate({ params: storeSlugParamsSchema }), asyncHandler(getPublicStoreController));
 router.post("/:slug/events", eventsLimiter, validate({ params: storeSlugParamsSchema, body: storeEventsSchema }), asyncHandler(storeEventsController));
 router.post("/:slug/subscribe", receiptLimiter, validate({ params: storeSlugParamsSchema, body: storeSubscribeSchema }), asyncHandler(storeSubscribeController));
+router.post("/:slug/quote", orderLimiter, validate({ params: storeSlugParamsSchema, body: storeQuoteSchema }), asyncHandler(storeQuoteController));
 router.post("/:slug/coupon", checkoutLimiter, validate({ params: storeSlugParamsSchema, body: storeCouponPreviewSchema }), asyncHandler(storeCouponPreviewController));
 router.post("/:slug/checkout", checkoutLimiter, validate({ params: storeSlugParamsSchema, body: storeCheckoutSchema }), asyncHandler(storeCheckoutController));
 
