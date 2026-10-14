@@ -456,7 +456,11 @@ export async function getPublicStore(slug: string) {
         benefits: b.benefits,
         includes: b.includes,
         bonuses: b.bonuses,
-        faqs: b.faqs.map((f) => ({ question: f.question, answer: f.answer })),
+        // FAQ de la ficha: las del producto (menos las ocultas para la tienda) + las propias de la tienda.
+        faqs: [
+          ...p.faqs.filter((f) => !(ld.faqHiddenIds ?? []).includes(f.id)).map((f) => ({ question: f.question, answer: f.answer })),
+          ...(ld.faqExtra ?? []),
+        ],
         // Solo imágenes de presentación (nunca los archivos de entrega); la portada de la tienda primero.
         images,
       };
@@ -1838,6 +1842,7 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
           category: b.category ?? null,
           categories: categoriesOf(ov, b.category),
           shortDescription: b.shortDescription,
+          faqs: p.faqs.map((f) => ({ id: f.id, question: f.question, answer: f.answer })),
           priceText: b.priceText ?? b.price,
           regularPriceText: b.regularPriceText,
           imageUrl: storeImageOf(p, ov),

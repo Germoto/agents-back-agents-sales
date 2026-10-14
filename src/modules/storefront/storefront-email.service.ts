@@ -26,10 +26,11 @@ import { storeUrl } from "./storefront-url";
 // Configuración (StorefrontConfig.emailReminders) y defaults
 // ---------------------------------------------------------------------------
 
-export type EmailStep = { delayMinutes: number; subject: string; body: string; couponCode?: string | null };
+/** couponByProduct: cupón distinto según el producto principal del pedido (vacío = couponCode). */
+export type EmailStep = { delayMinutes: number; subject: string; body: string; couponCode?: string | null; couponByProduct?: Record<string, string> | null };
 export type EmailReminders = {
   abandonedCheckout: { enabled: boolean; steps: EmailStep[] };
-  postPurchase: { enabled: boolean; delayDays: number; subject: string; body: string; couponCode?: string | null };
+  postPurchase: { enabled: boolean; delayDays: number; subject: string; body: string; couponCode?: string | null; couponByProduct?: Record<string, string> | null };
   welcome: { enabled: boolean; subject: string; body: string; couponCode?: string | null };
 };
 
@@ -87,11 +88,21 @@ export function emailRemindersOf(raw: unknown): EmailReminders {
 /** Normaliza/recorta lo que manda el panel o el copiloto antes de guardarlo. */
 export function sanitizeEmailReminders(input: unknown): EmailReminders {
   const r = emailRemindersOf(input);
+  const byProduct = (v: unknown): Record<string, string> | null => {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+    const out: Record<string, string> = {};
+    for (const [pid, code] of Object.entries(v as Record<string, unknown>)) {
+      const c = String(code ?? "").trim().toUpperCase().slice(0, 30);
+      if (pid && c) out[pid] = c;
+    }
+    return Object.keys(out).length ? out : null;
+  };
   const step = (s: EmailStep): EmailStep => ({
     delayMinutes: Math.min(43200, Math.max(5, Math.round(Number(s.delayMinutes) || 60))),
     subject: String(s.subject ?? "").trim().slice(0, 120),
     body: String(s.body ?? "").trim().slice(0, 3000),
     couponCode: (s.couponCode ?? "").toString().trim().toUpperCase().slice(0, 30) || null,
+    couponByProduct: byProduct(s.couponByProduct),
   });
   return {
     abandonedCheckout: { enabled: Boolean(r.abandonedCheckout.enabled), steps: r.abandonedCheckout.steps.map(step).filter((s) => s.subject && s.body).slice(0, 3) },
@@ -101,6 +112,7 @@ export function sanitizeEmailReminders(input: unknown): EmailReminders {
       subject: String(r.postPurchase.subject ?? "").trim().slice(0, 120),
       body: String(r.postPurchase.body ?? "").trim().slice(0, 3000),
       couponCode: (r.postPurchase.couponCode ?? "").toString().trim().toUpperCase().slice(0, 30) || null,
+      couponByProduct: byProduct(r.postPurchase.couponByProduct),
     },
     welcome: {
       enabled: Boolean(r.welcome.enabled),
@@ -242,7 +254,7 @@ export async function scheduleAbandonedCheckout(order: OrderLike): Promise<void>
     const now = Date.now();
     const rows: Prisma.StoreEmailCreateManyInput[] = [];
     for (const [i, step] of ctx.reminders.abandonedCheckout.steps.entries()) {
-      const coupon = await couponIsUsable(order.companyId, step.couponCode);
+      const coupon = await couponIsUsable(order.companyId, step.couponByProduct?.[order.productId] ?? step.couponCode);
       const ctaUrl = withUtm(link, "abandoned_checkout", coupon ? { cupon: coupon } : undefined);
       const vars: EmailVars = { nombre: firstName(order.name) || "Hola", producto: order.productName, precio: price, link: ctaUrl, cupon: coupon ?? "", tienda: ctx.storeName };
       rows.push({
@@ -286,7 +298,7 @@ export async function schedulePostPurchase(order: OrderLike): Promise<void> {
     });
     const crossId = product?.digitalDelivery?.crossSellProductId;
     const cross = crossId ? await prisma.product.findFirst({ where: { id: crossId, companyId: order.companyId, active: true }, select: { name: true, slug: true } }) : null;
-    const coupon = await couponIsUsable(order.companyId, pp.couponCode);
+    const coupon = await couponIsUsable(order.companyId, pp.couponByProduct?.[order.productId] ?? pp.couponCode);
     const target = cross ? `${ctx.base}/p/${cross.slug}` : ctx.base;
     const ctaUrl = withUtm(target, "post_purchase", coupon ? { cupon: coupon } : undefined);
     const vars: EmailVars = {

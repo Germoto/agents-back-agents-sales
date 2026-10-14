@@ -74,6 +74,10 @@ export type LandingOverride = {
   orderBump?: OrderBump | null;
   /** null/undefined = hereda la garantía de la tienda. */
   guarantee?: Guarantee | null;
+  /** FAQ del producto (ids de ProductFaq) que NO se muestran en la tienda. */
+  faqHiddenIds?: string[] | null;
+  /** FAQ adicionales solo para la tienda (hasta 10). */
+  faqExtra?: { question: string; answer: string }[] | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -298,6 +302,13 @@ export function sanitizeLanding(
     out.orderBump = { productId: bumpId, price: Number(price.toFixed(2)), title: str(bump.title, 120), note: str(bump.note, 160) };
   }
   if (o.guarantee && typeof o.guarantee === "object") out.guarantee = guaranteeOf(o.guarantee);
+  const faqHiddenIds = Array.from(new Set((Array.isArray(o.faqHiddenIds) ? o.faqHiddenIds : []).map((x) => str(x, 64)).filter(Boolean))).slice(0, 50);
+  if (faqHiddenIds.length) out.faqHiddenIds = faqHiddenIds;
+  const faqExtra = (Array.isArray(o.faqExtra) ? o.faqExtra : [])
+    .map((f) => ({ question: str(obj(f).question, 200), answer: str(obj(f).answer, 1000) }))
+    .filter((f) => f.question && f.answer)
+    .slice(0, 10);
+  if (faqExtra.length) out.faqExtra = faqExtra;
   return Object.keys(out).length ? out : null;
 }
 
