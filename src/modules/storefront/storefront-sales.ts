@@ -35,6 +35,8 @@ export type FooterSettings = {
   showPayments: boolean;
   showWhatsapp: boolean;
   note: string;
+  /** Línea del negocio (nombre, frase, pagos, WhatsApp, nota). */
+  showInfo: boolean;
 };
 export type SalesSettings = {
   ctaColor: string | null;
@@ -95,6 +97,7 @@ export const DEFAULT_FOOTER: FooterSettings = {
   showPayments: true,
   showWhatsapp: true,
   note: "",
+  showInfo: true,
 };
 export const DEFAULT_SAMPLE: LandingSample = {
   kicker: "MIRA ANTES DE COMPRAR",
@@ -174,6 +177,7 @@ export function footerOf(v: unknown): FooterSettings {
     showPayments: o.showPayments !== false,
     showWhatsapp: o.showWhatsapp !== false,
     note: str(o.note, 160),
+    showInfo: o.showInfo !== false,
   };
 }
 
