@@ -41,6 +41,7 @@ import { cancelOrderEmails, emailRemindersOf, sanitizeEmailReminders, scheduleAb
 import {
   announcementOf,
   computeCombo,
+  deepMergeJson,
   DEFAULT_SAMPLE,
   distributeTotal,
   fillPrice,
@@ -1617,8 +1618,30 @@ export async function updateStorefrontConfig(
     announcement?: unknown;
     volumePricing?: unknown;
     salesSettings?: unknown;
+    /** true = el panel manda la config completa (reemplaza); false/omitido = parcial, se fusiona con lo guardado (copiloto). */
+    replace?: boolean;
   },
 ) {
+  // Modo fusión (copiloto): lo que no venga se conserva; null borra; listas reemplazan.
+  const mergeable = data.productOverrides !== undefined || data.salesSettings !== undefined || data.announcement !== undefined || data.volumePricing !== undefined || data.emailReminders !== undefined;
+  if (!data.replace && mergeable) {
+    const cur = await prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productOverrides: true, salesSettings: true, announcement: true, volumePricing: true, emailReminders: true } });
+    const merged = { ...data };
+    if (data.productOverrides !== undefined) {
+      const current = overridesOf(cur ?? {});
+      const next: Record<string, ProductOverride | null> = { ...current };
+      for (const [pid, ov] of Object.entries(data.productOverrides)) {
+        if (ov === null) delete next[pid];
+        else next[pid] = deepMergeJson(current[pid] ?? {}, ov) as ProductOverride;
+      }
+      merged.productOverrides = next;
+    }
+    if (data.salesSettings !== undefined) merged.salesSettings = deepMergeJson(cur?.salesSettings ?? {}, data.salesSettings);
+    if (data.announcement !== undefined) merged.announcement = deepMergeJson(cur?.announcement ?? {}, data.announcement);
+    if (data.volumePricing !== undefined) merged.volumePricing = deepMergeJson(cur?.volumePricing ?? {}, data.volumePricing);
+    if (data.emailReminders !== undefined) merged.emailReminders = deepMergeJson(emailRemindersOf(cur?.emailReminders), data.emailReminders);
+    data = merged;
+  }
   const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
   const isOwnUpload = (u: string) => u.startsWith(`${base}/uploads/`);
   if (data.logoUrl && !isOwnUpload(data.logoUrl)) throw new AppError("El logo debe ser un archivo subido a FlowApp", 400);
@@ -1660,6 +1683,12 @@ export async function updateStorefrontConfig(
         ...(media.length ? { media } : {}),
       };
       if (Object.keys(clean).length) productOverrides[pid] = clean;
+    }
+    // Modo fusión: conserva tal cual los overrides de productos que hoy no son elegibles (no se pierden si vuelven).
+    if (!data.replace) {
+      for (const [pid, ov] of Object.entries(data.productOverrides)) {
+        if (ov && !productOverrides[pid] && !eligibleRows.some((p) => p.id === pid)) productOverrides[pid] = ov;
+      }
     }
   }
   let heroSlides: HeroSlide[] | undefined;

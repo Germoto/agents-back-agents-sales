@@ -41,6 +41,8 @@ export const storeOrderParamsSchema = z.object({ id: z.string().uuid() });
 export const storeOrderQuerySchema = z.object({ t: z.string().min(8).max(200) });
 
 export const updateStorefrontConfigSchema = z.object({
+  // true = config completa (panel); omitido = parcial, se fusiona con lo guardado (copiloto).
+  replace: z.boolean().optional(),
   enabled: z.boolean().optional(),
   title: z.string().trim().max(80).nullable().optional(),
   tagline: z.string().trim().max(160).nullable().optional(),

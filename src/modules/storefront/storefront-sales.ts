@@ -297,6 +297,25 @@ export function sanitizeLanding(
 }
 
 // ---------------------------------------------------------------------------
+// Fusión parcial de JSON (copiloto): objetos campo a campo, listas y primitivos
+// reemplazan, `null` explícito borra la clave.
+// ---------------------------------------------------------------------------
+
+type JsonObj = Record<string, unknown>;
+const isObj = (v: unknown): v is JsonObj => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+
+export function deepMergeJson(base: unknown, patch: unknown): unknown {
+  if (!isObj(patch)) return patch;
+  const out: JsonObj = isObj(base) ? { ...base } : {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null) delete out[k];
+    else if (isObj(v) && isObj(out[k])) out[k] = deepMergeJson(out[k], v);
+    else out[k] = v;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Precios: combo por volumen / bundle total / order bump (puro, sin DB)
 // ---------------------------------------------------------------------------
 
