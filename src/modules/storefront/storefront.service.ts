@@ -25,6 +25,7 @@ import { symbolFor } from "../../lib/currency";
 import { normalizeEmail } from "../../lib/email";
 import { isValidStoreSlug, storeSlugProblem } from "../../lib/slug";
 import { getEntitlements } from "../billing/entitlements";
+import { zonedDayBoundary } from "../dashboard/dashboard.service";
 import { gateNewLead } from "../billing/billing.service";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { normalizePhone, loadOrCreateConversation, notifyOwner } from "../agent/conversation.service";
@@ -1354,10 +1355,23 @@ export async function purgeOldStoreEvents(): Promise<number> {
 }
 
 /** KPIs de la tienda en los últimos N días (panel + copiloto). */
-export async function storeMetrics(companyId: string, days = 30) {
-  const since = new Date(Date.now() - days * 86_400_000);
+export type StoreMetricsOpts = { days?: number; from?: string; to?: string; productId?: string | null };
+
+/**
+ * Métricas de la tienda por rango de días (YYYY-MM-DD en la zona horaria del negocio) o
+ * por `days` hacia atrás, con filtro opcional por producto y el embudo ya armado.
+ */
+export async function storeMetrics(companyId: string, opts: StoreMetricsOpts | number = 30) {
+  const o: StoreMetricsOpts = typeof opts === "number" ? { days: opts } : opts;
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true, currency: true } });
+  const tz = company?.timezone ?? "America/Lima";
+  const ymd = /^\d{4}-\d{2}-\d{2}$/;
+  const days = Math.min(365, Math.max(1, Math.round(o.days ?? 30)));
+  const since = o.from && ymd.test(o.from) ? zonedDayBoundary(o.from, tz, false) : new Date(Date.now() - days * 86_400_000);
+  const until = o.to && ymd.test(o.to) ? zonedDayBoundary(o.to, tz, true) : new Date();
+  const productId = o.productId || null;
   const events = await prisma.storeEvent.findMany({
-    where: { companyId, createdAt: { gte: since } },
+    where: { companyId, createdAt: { gte: since, lte: until } },
     select: { type: true, productId: true, sessionId: true },
   });
   const sessions = new Set<string>();
@@ -1365,6 +1379,8 @@ export async function storeMetrics(companyId: string, days = 30) {
   const buyers = new Set<string>();
   const byProduct = new Map<string, { vistas: number; carrito: number; checkouts: number; compras: number; whatsapp: number; muestras: number }>();
   for (const e of events) {
+    // Con filtro de producto solo cuentan los eventos de ese producto (las visitas = sesiones que lo vieron).
+    if (productId && e.productId !== productId) continue;
     sessions.add(e.sessionId);
     const t = e.type as StoreEventType;
     if (t in count) count[t] += 1;
@@ -1383,26 +1399,37 @@ export async function storeMetrics(companyId: string, days = 30) {
       else if (t === "RESOURCE_VIEW") p.muestras += 1;
     }
   }
+  const orderWhere = { companyId, createdAt: { gte: since, lte: until }, ...(productId ? { productIds: { has: productId } } : {}) };
   const [orders, pending, names] = await Promise.all([
-    prisma.storeOrder.findMany({
-      where: { companyId, status: "ENTREGADO", createdAt: { gte: since } },
-      select: { amount: true, currency: true },
-    }),
-    prisma.storeOrder.findMany({
-      where: { companyId, status: { in: ["PENDIENTE", "EN_REVISION"] }, createdAt: { gte: since } },
-      select: { amount: true, currency: true },
-    }),
+    prisma.storeOrder.findMany({ where: { ...orderWhere, status: "ENTREGADO" }, select: { amount: true, currency: true } }),
+    prisma.storeOrder.findMany({ where: { ...orderWhere, status: { in: ["PENDIENTE", "EN_REVISION"] } }, select: { amount: true, currency: true } }),
     byProduct.size
       ? prisma.product.findMany({ where: { companyId, id: { in: [...byProduct.keys()] } }, select: { id: true, name: true } })
       : Promise.resolve([] as { id: string; name: string }[]),
   ]);
   const nameOf = new Map(names.map((n) => [n.id, n.name]));
-  const ingresos = orders.reduce((acc, o) => acc + Number(o.amount), 0);
-  const currency = orders[0]?.currency ?? pending[0]?.currency ?? "PEN";
-  const pendMonto = pending.reduce((acc, o) => acc + Number(o.amount), 0);
+  const ingresos = orders.reduce((acc, o2) => acc + Number(o2.amount), 0);
+  const currency = orders[0]?.currency ?? pending[0]?.currency ?? company?.currency ?? "PEN";
+  const pendMonto = pending.reduce((acc, o2) => acc + Number(o2.amount), 0);
   const visitas = sessions.size;
+  const money = (n: number) => `${symbolFor(currency)} ${n.toFixed(2)}`;
+  // Embudo: cada paso con % del paso anterior y % de las visitas (para que se note dónde se cae).
+  const steps = [
+    { id: "visitas", label: "Visitas", value: visitas, fuente: "Sesiones únicas que abrieron la tienda" },
+    { id: "vistas", label: "Vistas de producto", value: count.PRODUCT_VIEW, fuente: "Aperturas de una ficha (PRODUCT_VIEW)" },
+    { id: "carrito", label: "Agregaron al carrito", value: count.ADD_TO_CART, fuente: "Clics en «Agregar» (ADD_TO_CART)" },
+    { id: "checkout", label: "Iniciaron el pago", value: count.CHECKOUT, fuente: "Pulsaron «Pagar» (CHECKOUT)" },
+    { id: "compras", label: "Compras", value: orders.length, fuente: "Pedidos entregados" },
+  ];
+  const embudo = steps.map((st, i) => ({
+    ...st,
+    pctPrev: i === 0 ? null : steps[i - 1].value > 0 ? Number(((st.value / steps[i - 1].value) * 100).toFixed(1)) : null,
+    pctVisitas: i === 0 ? null : visitas > 0 ? Number(((st.value / visitas) * 100).toFixed(1)) : null,
+  }));
   return {
     dias: days,
+    rango: { from: since.toISOString(), to: until.toISOString() },
+    productId,
     visitas,
     vistasProducto: count.PRODUCT_VIEW,
     agregadosAlCarrito: count.ADD_TO_CART,
@@ -1412,14 +1439,41 @@ export async function storeMetrics(companyId: string, days = 30) {
     descargas: count.DOWNLOAD,
     clicsCorreo: count.EMAIL_CLICK,
     ingresos: Number(ingresos.toFixed(2)),
-    ingresosText: `${symbolFor(currency)} ${ingresos.toFixed(2)}`,
-    pendientes: { pedidos: pending.length, monto: Number(pendMonto.toFixed(2)), montoText: `${symbolFor(currency)} ${pendMonto.toFixed(2)}` },
+    ingresosText: money(ingresos),
+    ticketPromedio: orders.length ? Number((ingresos / orders.length).toFixed(2)) : 0,
+    ticketPromedioText: money(orders.length ? ingresos / orders.length : 0),
+    pendientes: { pedidos: pending.length, monto: Number(pendMonto.toFixed(2)), montoText: money(pendMonto) },
     conversion: visitas > 0 ? Number(((buyers.size / visitas) * 100).toFixed(1)) : null,
+    embudo,
     porProducto: [...byProduct.entries()]
-      .map(([productId, m]) => ({ productId, name: nameOf.get(productId) ?? "(producto eliminado)", ...m }))
+      .map(([pid, m]) => ({ productId: pid, name: nameOf.get(pid) ?? "(producto eliminado)", ...m }))
       .sort((a, b) => b.compras - a.compras || b.vistas - a.vistas)
       .slice(0, 20),
   };
+}
+
+/**
+ * Borra un pedido (pruebas) con lo relacionado: sus correos programados/enviados, sus eventos
+ * de analítica y el comprobante que creó, si nada más lo referencia. No toca cliente ni chat.
+ */
+export async function deleteStoreOrder(companyId: string, orderId: string) {
+  const order = await prisma.storeOrder.findFirst({ where: { id: orderId, companyId }, select: { id: true, receiptId: true, productName: true } });
+  if (!order) throw new AppError("Pedido no encontrado", 404);
+  const [emails, events] = await Promise.all([
+    prisma.storeEmail.deleteMany({ where: { companyId, orderId } }),
+    prisma.storeEvent.deleteMany({ where: { companyId, orderId } }),
+  ]);
+  await prisma.storeOrder.delete({ where: { id: orderId } });
+  let comprobante: "borrado" | "conservado" | "ninguno" = "ninguno";
+  if (order.receiptId) {
+    try {
+      await prisma.paymentReceipt.delete({ where: { id: order.receiptId } });
+      comprobante = "borrado";
+    } catch {
+      comprobante = "conservado";
+    }
+  }
+  return { ok: true, pedido: order.productName, correos: emails.count, eventos: events.count, comprobante };
 }
 
 /** Producto relacionado (cross-sell del producto comprado) si está visible en la tienda. */

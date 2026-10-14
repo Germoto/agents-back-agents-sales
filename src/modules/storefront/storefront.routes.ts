@@ -7,6 +7,7 @@ import { validate } from "../../middlewares/validate";
 import { approveStoreOrderSchema, campaignAudiencePreviewSchema, campaignIdParamsSchema, campaignStartSchema, campaignTestSchema, couponIdParamsSchema, createCampaignSchema, createCouponSchema, emailContactsQuerySchema, rejectStoreOrderSchema, storeEmailTestSchema, storeEmailsQuerySchema, updateCampaignSchema, updateCouponSchema, storeMetricsQuerySchema, storeOrderParamsSchema, storeOrdersQuerySchema, updateStorefrontConfigSchema } from "./storefront.schemas";
 import {
   approveStoreOrderController,
+  deleteStoreOrderController,
   cancelCampaignController,
   campaignTestController,
   createCampaignController,
@@ -58,6 +59,7 @@ router.get("/orders", validate({ query: storeOrdersQuerySchema }), asyncHandler(
 // Pedidos Yape/Plin: aprobar (crea el comprobante y entrega) o rechazar.
 router.post("/orders/:id/approve", validate({ params: storeOrderParamsSchema, body: approveStoreOrderSchema }), asyncHandler(approveStoreOrderController));
 router.post("/orders/:id/reject", validate({ params: storeOrderParamsSchema, body: rejectStoreOrderSchema }), asyncHandler(rejectStoreOrderController));
+router.delete("/orders/:id", validate({ params: storeOrderParamsSchema }), asyncHandler(deleteStoreOrderController));
 
 // Cupones de descuento
 router.get("/coupons", asyncHandler(listCouponsController));

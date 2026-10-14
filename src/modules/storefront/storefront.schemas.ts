@@ -157,7 +157,10 @@ export const campaignStartSchema = z.object({ scheduledAt: z.string().datetime()
 export const emailContactsQuerySchema = z.object({ q: z.string().trim().max(80).default(""), limit: z.coerce.number().int().min(1).max(100).default(30) });
 
 export const storeMetricsQuerySchema = z.object({
-  days: z.coerce.number().int().min(1).max(365).default(30),
+  days: z.coerce.number().int().min(1).max(365).optional(),
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  productId: z.string().uuid().optional(),
 });
 
 // POST /:slug/coupon (previsualizar descuento)

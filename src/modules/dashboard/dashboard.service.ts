@@ -387,7 +387,7 @@ function tzOffsetMs(date: Date, timeZone: string): number {
 }
 
 /** Instante UTC del inicio (00:00) o fin (23:59:59.999) del día local `ymd` en la TZ del tenant. */
-function zonedDayBoundary(ymd: string, timeZone: string, end: boolean): Date {
+export function zonedDayBoundary(ymd: string, timeZone: string, end: boolean): Date {
   const base = new Date(`${ymd}T${end ? "23:59:59.999" : "00:00:00.000"}Z`);
   const offset = tzOffsetMs(base, timeZone);
   return new Date(base.getTime() - offset);

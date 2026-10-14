@@ -17,6 +17,7 @@ import {
   listStoreOrders,
   recordStoreEvents,
   rejectStoreOrder,
+  deleteStoreOrder,
   storeMetrics,
   submitStoreReceipt,
   tlsAsk,
@@ -138,7 +139,12 @@ export async function deleteCouponController(req: Request, res: Response) {
 }
 
 export async function storeMetricsController(req: Request, res: Response) {
-  return res.json(await storeMetrics(req.user!.companyId, Number(req.query.days) || 30));
+  const q = req.query as { days?: string; from?: string; to?: string; productId?: string };
+  return res.json(await storeMetrics(req.user!.companyId, { days: q.days ? Number(q.days) : undefined, from: q.from, to: q.to, productId: q.productId ?? null }));
+}
+
+export async function deleteStoreOrderController(req: Request, res: Response) {
+  return res.json(await deleteStoreOrder(req.user!.companyId, String(req.params.id)));
 }
 
 export async function getStorefrontConfigController(req: Request, res: Response) {
