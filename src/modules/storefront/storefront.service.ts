@@ -379,6 +379,8 @@ export async function getPublicStore(slug: string) {
       catalogTitle: ventas.catalogTitle || null,
       guarantee: ventas.guarantee.enabled ? { days: ventas.guarantee.days, title: ventas.guarantee.title.replace(/\{dias\}/g, String(ventas.guarantee.days)), text: ventas.guarantee.text } : null,
       cartRecommendations: ventas.cartRecommendations,
+      landingBar: ventas.landingBar,
+      footer: ventas.footer,
     },
     confianza: trust.map((t) => ({ icon: (t.icon ?? "").trim() || null, title: t.title, sub: t.sub })),
     faqs: jsonArray<StoreFaq>(cfg.faqs).slice(0, 10),

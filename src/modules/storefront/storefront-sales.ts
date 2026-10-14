@@ -25,12 +25,26 @@ export type VolumePricing = {
 
 export type ComboSection = { kicker: string; headline: string; sub: string; ctaLabel: string };
 export type Guarantee = { enabled: boolean; days: number; title: string; text: string };
+export type LandingBar = "top" | "bottom" | "both";
+export type FooterSettings = {
+  /** auto = oscuro en la landing, claro en el resto; dark/light fuerzan. */
+  theme: "auto" | "dark" | "light";
+  showSubscribe: boolean;
+  subscribeTitle: string;
+  subscribeSub: string;
+  showPayments: boolean;
+  showWhatsapp: boolean;
+  note: string;
+};
 export type SalesSettings = {
   ctaColor: string | null;
   catalogTitle: string;
   comboSection: ComboSection;
   guarantee: Guarantee;
   cartRecommendations: boolean;
+  /** Dónde va la barra de compra de la landing al pasar el hero. */
+  landingBar: LandingBar;
+  footer: FooterSettings;
 };
 
 export type LandingStat = { value: string; label: string };
@@ -72,6 +86,15 @@ export const DEFAULT_GUARANTEE: Guarantee = {
   days: 7,
   title: "Garantía de {dias} días",
   text: "Si el contenido no es lo que prometimos, te devolvemos tu dinero. Sin preguntas.",
+};
+export const DEFAULT_FOOTER: FooterSettings = {
+  theme: "auto",
+  showSubscribe: true,
+  subscribeTitle: "Recibe ofertas y novedades",
+  subscribeSub: "Te avisamos de lanzamientos y descuentos. Sin spam.",
+  showPayments: true,
+  showWhatsapp: true,
+  note: "",
 };
 export const DEFAULT_SAMPLE: LandingSample = {
   kicker: "MIRA ANTES DE COMPRAR",
@@ -136,6 +159,21 @@ export function salesSettingsOf(v: unknown): SalesSettings {
     },
     guarantee: guaranteeOf(o.guarantee),
     cartRecommendations: o.cartRecommendations !== false,
+    landingBar: o.landingBar === "bottom" || o.landingBar === "both" ? o.landingBar : "top",
+    footer: footerOf(o.footer),
+  };
+}
+
+export function footerOf(v: unknown): FooterSettings {
+  const o = obj(v);
+  return {
+    theme: o.theme === "dark" || o.theme === "light" ? o.theme : "auto",
+    showSubscribe: o.showSubscribe !== false,
+    subscribeTitle: str(o.subscribeTitle, 60) || DEFAULT_FOOTER.subscribeTitle,
+    subscribeSub: str(o.subscribeSub, 120) || DEFAULT_FOOTER.subscribeSub,
+    showPayments: o.showPayments !== false,
+    showWhatsapp: o.showWhatsapp !== false,
+    note: str(o.note, 160),
   };
 }
 
