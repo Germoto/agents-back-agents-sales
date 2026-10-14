@@ -87,7 +87,7 @@ export type TrustItem = { title: string; sub: string; icon?: string | null };
 export type StoreFaq = { question: string; answer: string };
 
 export type StoreMediaType = "IMAGE" | "VIDEO" | "PDF" | "OTHER";
-export type StoreMediaItem = { url: string; type: StoreMediaType; title?: string | null; description?: string | null };
+export type StoreMediaItem = { url: string; type: StoreMediaType; title?: string | null; description?: string | null; cta?: boolean | null; ctaLabel?: string | null };
 
 /** Resuelve spintax de forma fija (primera opción de cada {a|b|c}) y colapsa espacios: texto estable para la tienda. */
 export function firstSpintax(text: string | null | undefined): string {
@@ -302,11 +302,15 @@ export async function getPublicStore(slug: string) {
         images,
         categories,
         category: categories[0] ?? null,
-        recursos: mediaOf(ov).map((m) => {
-          const file = p.files.find((f) => f.url === m.url);
-          const description = (m.description ?? "").trim() || firstSpintax(file?.description).slice(0, 200) || null;
-          return { type: m.type, url: m.url, title: (m.title ?? "").trim() || null, description };
-        }),
+        // Título/descripción solo si el dueño los puso (sin ellos, la tienda muestra solo el archivo).
+        recursos: mediaOf(ov).map((m) => ({
+          type: m.type,
+          url: m.url,
+          title: (m.title ?? "").trim() || null,
+          description: (m.description ?? "").trim() || null,
+          cta: m.cta === true,
+          ctaLabel: (m.ctaLabel ?? "").trim() || null,
+        })),
         shortDescription: (ov?.shortDescription ?? "").trim() || b.shortDescription,
         order: typeof ov?.sortOrder === "number" ? ov.sortOrder : 1000 + idx,
       };
@@ -1637,6 +1641,7 @@ export async function updateStorefrontConfig(
           type: MEDIA_TYPES.includes(m.type) ? m.type : "OTHER",
           title: (m.title ?? "").trim().slice(0, 80) || null,
           description: (m.description ?? "").trim().slice(0, 200) || null,
+          ...(m.cta === true ? { cta: true, ctaLabel: (m.ctaLabel ?? "").trim().slice(0, 40) || null } : {}),
         });
       }
       const productImages = new Set(prod.files.filter((f) => f.type === "IMAGE").map((f) => f.url));
