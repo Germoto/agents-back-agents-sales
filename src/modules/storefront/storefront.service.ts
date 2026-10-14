@@ -382,6 +382,7 @@ export async function getPublicStore(slug: string) {
       cartRecommendations: ventas.cartRecommendations,
       landingBar: ventas.landingBar,
       footer: ventas.footer,
+      ctaEffect: ventas.ctaEffect,
     },
     confianza: trust.map((t) => ({ icon: (t.icon ?? "").trim() || null, title: t.title, sub: t.sub })),
     faqs: jsonArray<StoreFaq>(cfg.faqs).slice(0, 10),

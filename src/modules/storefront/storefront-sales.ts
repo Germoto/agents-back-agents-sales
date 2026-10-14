@@ -26,6 +26,8 @@ export type VolumePricing = {
 export type ComboSection = { kicker: string; headline: string; sub: string; ctaLabel: string };
 export type Guarantee = { enabled: boolean; days: number; title: string; text: string };
 export type LandingBar = "top" | "bottom" | "both";
+export type CtaEffect = "none" | "pulse" | "shine" | "bounce";
+const CTA_EFFECTS: CtaEffect[] = ["none", "pulse", "shine", "bounce"];
 export type FooterSettings = {
   /** auto = oscuro en la landing, claro en el resto; dark/light fuerzan. */
   theme: "auto" | "dark" | "light";
@@ -47,6 +49,8 @@ export type SalesSettings = {
   /** Dónde va la barra de compra de la landing al pasar el hero. */
   landingBar: LandingBar;
   footer: FooterSettings;
+  /** Efecto para resaltar los botones que llevan al checkout. */
+  ctaEffect: CtaEffect;
 };
 
 export type LandingStat = { value: string; label: string };
@@ -164,6 +168,7 @@ export function salesSettingsOf(v: unknown): SalesSettings {
     cartRecommendations: o.cartRecommendations !== false,
     landingBar: o.landingBar === "bottom" || o.landingBar === "both" ? o.landingBar : "top",
     footer: footerOf(o.footer),
+    ctaEffect: CTA_EFFECTS.includes(o.ctaEffect as CtaEffect) ? (o.ctaEffect as CtaEffect) : "pulse",
   };
 }
 
