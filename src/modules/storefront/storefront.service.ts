@@ -408,12 +408,15 @@ export async function getPublicStore(slug: string) {
       const landing = {
         kicker: (ld.kicker ?? "").trim() || category || "",
         headline: (ld.headline ?? "").trim() || b.name,
-        ctaLabel: (ld.ctaLabel ?? "").trim() || `Sí, quiero ${b.name} →`,
+        ctaLabel: (ld.ctaLabel ?? "").trim() || "Comprar ahora →",
         video: video ? { kind: video.kind, url: ld.videoUrl as string, embedUrl: video.embedUrl } : null,
         stats: ld.stats ?? [],
         pain: ld.pain && (ld.pain.headline || ld.pain.items.length) ? ld.pain : null,
-        includesHeadline: (ld.includesHeadline ?? "").trim() || `Todo esto por un solo pago de ${priceText}`,
-        sample: { ...DEFAULT_SAMPLE, ...(ld.sample ?? {}) },
+        includesHeadline: (ld.includesHeadline ?? "").trim() || `Todo esto por ${priceText}`,
+        // Cabecera de "Muestra" solo si el dueño escribió algo (sin textos inventados); los recursos se ven igual.
+        sample: ld.sample && Object.values(ld.sample).some((v) => typeof v === "string" && v.trim())
+          ? { ...DEFAULT_SAMPLE, kicker: "", headline: "", text: "", ...ld.sample }
+          : null,
         testimonialsHeadline: (ld.testimonialsHeadline ?? "").trim() || "Lo que dicen otros clientes",
         testimonials: ld.testimonials ?? [],
         orderBump: bump && ld.orderBump
@@ -424,7 +427,7 @@ export async function getPublicStore(slug: string) {
               priceText: `${symbol} ${ld.orderBump.price.toFixed(2)}`,
               regularPriceText: bump.b.priceText ?? bump.b.price,
               title: ld.orderBump.title || `Sí, agrega ${bump.p.name} por solo ${symbol} ${ld.orderBump.price.toFixed(2)}`,
-              note: ld.orderBump.note || "Oferta única en esta página. No se vende por separado a este precio.",
+              note: ld.orderBump.note || "Oferta válida solo en este checkout.",
               imageUrl: bump.images[0]?.url ?? null,
             }
           : null,
