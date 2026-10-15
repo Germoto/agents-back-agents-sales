@@ -340,38 +340,50 @@ export type PricedItem = { productId: string; name: string; unitPrice: number; q
 export type ComboResult = {
   /** Descuento aplicado sobre el subtotal del carrito (sin el bump). */
   discount: number;
-  /** "3 o más · −20 %" o la etiqueta del bundle; null si no aplica. */
+  /** "3 o más · −20 %" o "Todos los packs (6)"; null si no aplica. */
   label: string | null;
+  kind: "tier" | "bundle" | null;
   tier: VolumeTier | null;
   bundle: boolean;
   /** Siguiente tramo alcanzable: cuántos faltan y qué % darían. */
   next: { missing: number; discountPct: number } | null;
+  /** Cuántos faltan para completar "todos los packs" (si está activo) y su precio. */
+  nextBundle: { missing: number; price: number } | null;
 };
 
+/**
+ * Regla: si el carrito lleva TODOS los productos visibles y "Todos los packs" está activo,
+ * manda el precio fijo (aunque un tramo diera más descuento); los tramos por cantidad
+ * aplican solo a carritos parciales. Si el precio fijo no baja la suma de lista, no aplica.
+ */
 export function computeCombo(cartItems: PricedItem[], vp: VolumePricing, visibleIds: string[]): ComboResult {
-  const none: ComboResult = { discount: 0, label: null, tier: null, bundle: false, next: null };
+  const none: ComboResult = { discount: 0, label: null, kind: null, tier: null, bundle: false, next: null, nextBundle: null };
   if (!vp.enabled) return none;
   const qty = cartItems.reduce((a, it) => a + it.qty, 0);
   const subtotal = Number(cartItems.reduce((a, it) => a + it.unitPrice * it.qty, 0).toFixed(2));
+  const ids = new Set(cartItems.map((it) => it.productId));
+  const bundleOn = vp.allBundle.enabled && vp.allBundle.price !== null && visibleIds.length >= 2;
+  const missingForBundle = bundleOn ? visibleIds.filter((id) => !ids.has(id)).length : 0;
+  const hasAll = bundleOn && missingForBundle === 0;
+  if (hasAll) {
+    const bundleDiscount = Number((subtotal - (vp.allBundle.price as number)).toFixed(2));
+    if (bundleDiscount > 0) {
+      return { discount: Math.min(bundleDiscount, subtotal), label: `${vp.allBundle.label} (${visibleIds.length})`, kind: "bundle", tier: null, bundle: true, next: null, nextBundle: null };
+    }
+  }
   let tier: VolumeTier | null = null;
   for (const t of vp.tiers) if (qty >= t.minQty) tier = t;
   const nextTier = vp.tiers.find((t) => t.minQty > qty) ?? null;
-  let discount = tier ? Number(((subtotal * tier.discountPct) / 100).toFixed(2)) : 0;
-  let label = tier ? `${tier.minQty} o más · −${tier.discountPct}%` : null;
-  let bundle = false;
-  const ids = new Set(cartItems.map((it) => it.productId));
-  const hasAll = vp.allBundle.enabled && vp.allBundle.price !== null && visibleIds.length >= 2 && visibleIds.every((id) => ids.has(id));
-  if (hasAll) {
-    const bundleDiscount = Number((subtotal - (vp.allBundle.price as number)).toFixed(2));
-    if (bundleDiscount > discount) {
-      discount = bundleDiscount;
-      label = vp.allBundle.label;
-      bundle = true;
-    }
-  }
-  discount = Math.max(0, Math.min(discount, subtotal));
-  const next = !bundle && nextTier ? { missing: nextTier.minQty - qty, discountPct: nextTier.discountPct } : null;
-  return { discount, label, tier, bundle, next };
+  const discount = tier ? Math.max(0, Math.min(Number(((subtotal * tier.discountPct) / 100).toFixed(2)), subtotal)) : 0;
+  return {
+    discount,
+    label: tier ? `${tier.minQty} o más · −${tier.discountPct}%` : null,
+    kind: tier ? "tier" : null,
+    tier,
+    bundle: false,
+    next: nextTier ? { missing: nextTier.minQty - qty, discountPct: nextTier.discountPct } : null,
+    nextBundle: bundleOn && missingForBundle > 0 ? { missing: missingForBundle, price: vp.allBundle.price as number } : null,
+  };
 }
 
 /** Reparte un total objetivo entre los ítems proporcionalmente (MP no acepta ítems negativos). */

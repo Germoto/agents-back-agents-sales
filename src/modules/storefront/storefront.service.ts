@@ -575,7 +575,7 @@ export type CartPricing = {
   items: PricedItem[];
   /** Subtotal de lista del carrito (sin bump). */
   subtotal: number;
-  combo: { discount: number; label: string | null; bundle: boolean; next: { missing: number; discountPct: number } | null };
+  combo: { discount: number; label: string | null; kind: "tier" | "bundle" | null; bundle: boolean; next: { missing: number; discountPct: number } | null; nextBundle: { missing: number; price: number } | null };
   bump: { productId: string; name: string; price: number; regularPrice: number } | null;
   coupon: { couponId: string; code: string; type: string; value: number; discount: number } | null;
   /** Total a cobrar (Yape/Plin exacto; MP le suma el recargo aparte). */
@@ -621,7 +621,7 @@ async function priceCart(
   const total = Number((afterCombo - (coupon?.discount ?? 0)).toFixed(2));
   if (total <= 0) throw new AppError("El total del pedido debe ser mayor a 0", 409);
   distributeTotal(items, total);
-  return { items, subtotal, combo: { discount: combo.discount, label: combo.label, bundle: combo.bundle, next: combo.next }, bump, coupon, total };
+  return { items, subtotal, combo: { discount: combo.discount, label: combo.label, kind: combo.kind, bundle: combo.bundle, next: combo.next, nextBundle: combo.nextBundle }, bump, coupon, total };
 }
 
 /** Público: cotización del carrito (combo, bump, cupón, total y total con recargo de MP). */
@@ -635,8 +635,9 @@ export async function quoteStoreCart(slug: string, input: { productIds: string[]
   return {
     subtotal: pricing.subtotal,
     subtotalText: money(pricing.subtotal),
-    combo: pricing.combo.discount > 0 ? { discount: pricing.combo.discount, discountText: money(pricing.combo.discount), label: pricing.combo.label, bundle: pricing.combo.bundle } : null,
+    combo: pricing.combo.discount > 0 ? { discount: pricing.combo.discount, discountText: money(pricing.combo.discount), label: pricing.combo.label, kind: pricing.combo.kind, bundle: pricing.combo.bundle } : null,
     siguienteTramo: pricing.combo.next,
+    siguienteBundle: pricing.combo.nextBundle ? { missing: pricing.combo.nextBundle.missing, price: pricing.combo.nextBundle.price, priceText: money(pricing.combo.nextBundle.price) } : null,
     bump: pricing.bump ? { productId: pricing.bump.productId, name: pricing.bump.name, price: pricing.bump.price, priceText: money(pricing.bump.price) } : null,
     cupon: pricing.coupon ? { code: pricing.coupon.code, discount: pricing.coupon.discount, discountText: money(pricing.coupon.discount) } : null,
     total: pricing.total,
