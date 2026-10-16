@@ -49,9 +49,11 @@ import { getBillingMe } from "../billing/billing.service";
 import { getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 import { getDashboardStats } from "../dashboard/dashboard.service";
 import { approveReceipt, associateReceiptProduct, ignoreReceipt, listReceipts, rejectReceipt } from "../receipts/receipts.service";
-import { listOrders } from "../orders/orders.service";
+import { listOrders, updateOrderStatus } from "../orders/orders.service";
+import { createNote, deleteCustomer, getCustomer, listNotes, updateCustomer } from "../customers/customers.service";
 import { listConversations, listConversationMessages } from "../agent/conversation.service";
-import { listBookings } from "../bookings/bookings.service";
+import { createBooking, createScheduleBlock, deleteScheduleBlock, listBookings, listScheduleBlocks, rescheduleBooking, updateBookingStatus } from "../bookings/bookings.service";
+import type { OrderStatus, ServiceBookingStatus } from "@prisma/client";
 import { listCampaigns, createCampaign, updateCampaign, deleteCampaign, startCampaign, testCampaign } from "../campaigns/campaigns.service";
 import type { CampaignAction } from "../campaigns/campaigns.types";
 import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
@@ -844,6 +846,70 @@ export const TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "ver_cliente",
+      description: "Ficha de un CLIENTE por teléfono o id: datos (nombre, correo, origen, idioma…), etiquetas, producto en foco, deals y notas internas. Úsala antes de editar.",
+      parameters: { type: "object", additionalProperties: false, required: ["cliente"], properties: { cliente: { type: "string", description: "teléfono o id" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_cliente",
+      description: "Edita los datos de un CLIENTE (por teléfono o id). `data` PARCIAL: {name?, email?, phone? (corregir el número), sexo?, fechaNacimiento? (YYYY-MM-DD), idioma?, origenDeLead?}. Para CRM/etiquetas usa gestionar_cliente_crm. Llámala tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["cliente", "data"], properties: { cliente: { type: "string" }, data: { type: "object" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "agregar_nota_cliente",
+      description: "Agrega una NOTA INTERNA a un cliente (solo la ve el equipo, no se envía).",
+      parameters: { type: "object", additionalProperties: false, required: ["cliente", "texto"], properties: { cliente: { type: "string" }, texto: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "eliminar_cliente",
+      description: "ELIMINA un cliente con su conversación, notas y etiquetas. Irreversible: SOLO tras confirmación explícita con nombre y teléfono.",
+      parameters: { type: "object", additionalProperties: false, required: ["cliente"], properties: { cliente: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_pedido",
+      description: "Cambia el ESTADO de un pedido (rubros restaurante/comercial; listar_pedidos → codigo): PEDIDO_REGISTRADO | EN_COORDINACION | DESPACHADO | CANCELADO | PENDIENTE_PAGO | PAGADO | ENTREGADO. Avisa al cliente igual que el panel. Llámala tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["codigo", "estado"], properties: { codigo: { type: "string", description: "código o id del pedido" }, estado: { type: "string" }, nota: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "crear_cita",
+      description: "Crea una CITA/reserva para un cliente (teléfono o id) y un servicio (producto por id o nombre) con fecha-hora ISO (zona del negocio). Valida disponibilidad y programa los recordatorios. Llámala tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["cliente", "servicio", "inicio"], properties: { cliente: { type: "string" }, servicio: { type: "string" }, inicio: { type: "string", description: "ISO, ej. 2026-10-20T15:00:00-05:00" }, modalidad: { type: "string" }, notas: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_cita",
+      description: "Cambia el estado de una cita (listar_citas → codigo): SOLICITADA | CONFIRMADA | CANCELADA | COMPLETADA, o la REPROGRAMA con `inicio` (ISO). Llámala tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["codigo"], properties: { codigo: { type: "string", description: "código o id de la cita" }, estado: { type: "string" }, inicio: { type: "string", description: "nueva fecha-hora ISO (reprogramar)" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "bloquear_horario",
+      description: "Bloquea un rango de la agenda (vacaciones, feriado, almuerzo): el bot no ofrece citas ahí. {inicio, fin} ISO, motivo opcional. Para ver/quitar bloqueos: listar=true o quitarId.",
+      parameters: { type: "object", additionalProperties: false, properties: { inicio: { type: "string" }, fin: { type: "string" }, motivo: { type: "string" }, listar: { type: "boolean" }, quitarId: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "listar_citas",
       description: "Citas/reservas (rubros servicios/inmobiliaria) por rango y estado (SOLICITADA, CONFIRMADA, CANCELADA, COMPLETADA).",
       parameters: {
@@ -1519,6 +1585,18 @@ async function resolveCampaignSteps(companyId: string, pasos: unknown[], fallbac
   }
   if (!out.length) throw new AppError("La campaña necesita al menos un paso de mensaje", 400);
   return out;
+}
+
+/** Cliente por id o por teléfono (dígitos; coincidencia parcial). */
+async function findCustomerRef(companyId: string, ref: unknown) {
+  const raw = String(ref ?? "").trim();
+  if (!raw) throw new AppError("Indica el teléfono o el id del cliente", 400);
+  const byId = /^[0-9a-f-]{36}$/i.test(raw) ? await prisma.customer.findFirst({ where: { id: raw, companyId }, select: { id: true, name: true, phone: true } }) : null;
+  if (byId) return byId;
+  const digits = raw.replace(/\D/g, "");
+  const c = digits ? await prisma.customer.findFirst({ where: { companyId, phone: { contains: digits } }, select: { id: true, name: true, phone: true } }) : null;
+  if (!c) throw new AppError(`No encontré un cliente con «${raw}»`, 404);
+  return c;
 }
 
 /** Nombres de etiquetas → ids (error si alguna no existe). */
@@ -2683,6 +2761,7 @@ export async function runCopilotTool(
       const orders = await listOrders(companyId);
       const filtered = estado ? orders.filter((o) => o.status === estado) : orders;
       const rows = filtered.slice(0, limit).map((o) => ({
+        id: o.id,
         codigo: o.orderCode,
         estado: o.status,
         total: o.total,
@@ -2739,6 +2818,126 @@ export async function runCopilotTool(
       };
     }
 
+    case "ver_cliente": {
+      try {
+        const ref = await findCustomerRef(companyId, args.cliente);
+        const [c, notes] = await Promise.all([getCustomer(companyId, ref.id), listNotes(companyId, ref.id)]);
+        return { result: JSON.stringify({ cliente: c, notas: notes.map((n) => ({ id: n.id, texto: n.text, fecha: n.createdAt })) }), wrote: false };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no encontrado" }), wrote: false };
+      }
+    }
+
+    case "actualizar_cliente": {
+      try {
+        const ref = await findCustomerRef(companyId, args.cliente);
+        const d = (args.data ?? {}) as LooseData;
+        const data = {
+          ...(d.phone !== undefined ? { phone: String(d.phone) } : {}),
+          ...(d.name !== undefined ? { name: asStr(d.name) ?? null } : {}),
+          ...(d.email !== undefined ? { email: asStr(d.email) ?? null } : {}),
+          ...(d.sexo !== undefined ? { sexo: asStr(d.sexo) ?? null } : {}),
+          ...(d.fechaNacimiento !== undefined ? { fechaNacimiento: asStr(d.fechaNacimiento) ?? null } : {}),
+          ...(d.idioma !== undefined ? { idioma: asStr(d.idioma) ?? null } : {}),
+          ...(d.origenDeLead !== undefined ? { origenDeLead: asStr(d.origenDeLead) ?? null } : {}),
+        };
+        if (!Object.keys(data).length) return { result: JSON.stringify({ ok: false, error: "nada que cambiar" }), wrote: false };
+        const u = await updateCustomer(companyId, ref.id, data);
+        return { result: JSON.stringify({ ok: true, cliente: { id: u.id, name: u.name, phone: u.phone, email: u.email } }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo actualizar" }), wrote: false };
+      }
+    }
+
+    case "agregar_nota_cliente": {
+      try {
+        const ref = await findCustomerRef(companyId, args.cliente);
+        const n = await createNote(companyId, ref.id, { text: asStr(args.texto) ?? "" });
+        return { result: JSON.stringify({ ok: true, notaId: n.id }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo guardar" }), wrote: false };
+      }
+    }
+
+    case "eliminar_cliente": {
+      try {
+        const ref = await findCustomerRef(companyId, args.cliente);
+        await deleteCustomer(companyId, ref.id);
+        return { result: JSON.stringify({ ok: true, eliminado: ref.name ?? ref.phone }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo eliminar" }), wrote: false };
+      }
+    }
+
+    case "actualizar_pedido": {
+      const codigo = asStr(args.codigo) ?? "";
+      const estado = (asStr(args.estado) ?? "").toUpperCase() as OrderStatus;
+      const VALID: OrderStatus[] = ["PEDIDO_REGISTRADO", "EN_COORDINACION", "DESPACHADO", "CANCELADO", "PENDIENTE_PAGO", "PAGADO", "ENTREGADO"];
+      if (!VALID.includes(estado)) return { result: JSON.stringify({ ok: false, error: `estado inválido; usa ${VALID.join(" | ")}` }), wrote: false };
+      const order = await prisma.order.findFirst({ where: { companyId, OR: [{ id: /^[0-9a-f-]{36}$/i.test(codigo) ? codigo : "00000000-0000-0000-0000-000000000000" }, { orderCode: codigo }] }, select: { id: true, orderCode: true } });
+      if (!order) return { result: JSON.stringify({ ok: false, error: `pedido «${codigo}» no encontrado` }), wrote: false };
+      try {
+        const u = await updateOrderStatus(companyId, order.id, estado, { note: asStr(args.nota) ?? null, changedBy: "copiloto" });
+        return { result: JSON.stringify({ ok: true, codigo: order.orderCode, estado: (u as { status?: string }).status ?? estado }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo actualizar" }), wrote: false };
+      }
+    }
+
+    case "crear_cita": {
+      try {
+        const ref = await findCustomerRef(companyId, args.cliente);
+        const sref = asStr(args.servicio) ?? "";
+        const products = await prisma.product.findMany({ where: { companyId, active: true }, select: { id: true, name: true } });
+        const p = products.find((x) => x.id === sref || x.name.trim().toLowerCase() === sref.trim().toLowerCase());
+        if (!p) return { result: JSON.stringify({ ok: false, error: `servicio «${sref}» no encontrado` }), wrote: false };
+        const b = await createBooking({ companyId, customerId: ref.id, productId: p.id, startsAt: asStr(args.inicio) ?? null, modality: asStr(args.modalidad) ?? null, notes: asStr(args.notas) ?? null, source: "copiloto" });
+        return { result: JSON.stringify({ ok: true, cita: { codigo: (b as { bookingCode?: string }).bookingCode ?? null, estado: (b as { status?: string }).status ?? null, inicio: (b as { startsAt?: Date | null }).startsAt ?? null } }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo crear" }), wrote: false };
+      }
+    }
+
+    case "actualizar_cita": {
+      const codigo = asStr(args.codigo) ?? "";
+      const booking = await prisma.serviceBooking.findFirst({ where: { companyId, OR: [{ id: /^[0-9a-f-]{36}$/i.test(codigo) ? codigo : "00000000-0000-0000-0000-000000000000" }, { bookingCode: codigo }] }, select: { id: true, bookingCode: true } });
+      if (!booking) return { result: JSON.stringify({ ok: false, error: `cita «${codigo}» no encontrada` }), wrote: false };
+      try {
+        const inicio = asStr(args.inicio);
+        if (inicio) await rescheduleBooking(companyId, booking.id, inicio);
+        const estado = (asStr(args.estado) ?? "").toUpperCase() as ServiceBookingStatus;
+        const VALID: ServiceBookingStatus[] = ["SOLICITADA", "CONFIRMADA", "CANCELADA", "COMPLETADA"];
+        if (estado) {
+          if (!VALID.includes(estado)) return { result: JSON.stringify({ ok: false, error: `estado inválido; usa ${VALID.join(" | ")}` }), wrote: false };
+          await updateBookingStatus(companyId, booking.id, estado);
+        }
+        if (!inicio && !estado) return { result: JSON.stringify({ ok: false, error: "indica estado o inicio" }), wrote: false };
+        return { result: JSON.stringify({ ok: true, codigo: booking.bookingCode }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo actualizar" }), wrote: false };
+      }
+    }
+
+    case "bloquear_horario": {
+      try {
+        if (args.listar === true) {
+          const blocks = await listScheduleBlocks(companyId);
+          return { result: JSON.stringify({ bloqueos: blocks }), wrote: false };
+        }
+        const quitar = asStr(args.quitarId);
+        if (quitar) {
+          await deleteScheduleBlock(companyId, quitar);
+          return { result: JSON.stringify({ ok: true, eliminado: quitar }), wrote: true };
+        }
+        const inicio = asStr(args.inicio); const fin = asStr(args.fin);
+        if (!inicio || !fin) return { result: JSON.stringify({ ok: false, error: "indica inicio y fin (ISO), o listar=true, o quitarId" }), wrote: false };
+        const b = await createScheduleBlock(companyId, { startsAt: inicio, endsAt: fin, reason: asStr(args.motivo) ?? null });
+        return { result: JSON.stringify({ ok: true, bloqueo: b }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo bloquear" }), wrote: false };
+      }
+    }
+
     case "listar_citas": {
       const bookings = await listBookings(companyId, {
         status: asStr(args.estado)?.toUpperCase() as never,
@@ -2746,6 +2945,7 @@ export async function runCopilotTool(
         to: args.hasta ? new Date(String(args.hasta)) : undefined,
       });
       const rows = bookings.slice(0, 100).map((b) => ({
+        id: b.id,
         codigo: b.bookingCode,
         estado: b.status,
         inicio: b.startsAt,
@@ -3141,7 +3341,7 @@ const SYSTEM_GUIDE = [
   "- Activación (/activacion): checklist de puesta en marcha con % de avance y botón de capacitación 1:1 por WhatsApp. Desaparece del menú al llegar al 100%.",
   "- Dashboard (/dashboard): métricas del negocio.",
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto).",
-  "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM).",
+  "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar).",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 65–90s); en números nuevos recomienda tope diario 30-70. Flujo seguro OBLIGATORIO: crear borrador → mostrar total de contactos + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible).",
   "- Campañas: además de mensajes, cada campaña puede llevar PASOS por contacto (esperar N segundos, etiquetar/quitar etiquetas, mover a una columna del CRM, pasar a modo humano) y etiquetas de contexto a cada alcanzado (crear_campana pasos / etiquetasContexto, actualizar_campana en borrador, eliminar_campana tras confirmación). Las respuestas rápidas también ejecutan ACCIONES al enviarse: mover al CRM, etiquetar/quitar etiquetas, marcar entregado y fijar el producto presentado (crear/actualizar_respuesta_rapida acciones por nombres).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
@@ -3208,7 +3408,7 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",
-    "- eliminar_producto, eliminar_pedido_tienda y eliminar_campana: SOLO si lo pidió explícitamente y confirmó. Nunca elimines por iniciativa propia.",
+    "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana y eliminar_cliente: SOLO si lo pidió explícitamente y confirmó. Nunca elimines por iniciativa propia.",
     "- No gestionas datos sensibles (API keys de OpenAI, tokens de Mercado Pago/Meta, credenciales de WhatsApp): para eso indícale la página del panel correspondiente (Agente IA, Pagos, WhatsApp API).",
     "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación en Activación (/activacion). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",
     "- Tras crear/modificar, resume QUÉ quedó hecho y sugiere el siguiente paso (revisar en el panel, probar en el simulador...).",
