@@ -57,7 +57,11 @@ import type { OrderStatus, ServiceBookingStatus } from "@prisma/client";
 import { listCampaigns, createCampaign, updateCampaign, deleteCampaign, startCampaign, testCampaign } from "../campaigns/campaigns.service";
 import type { CampaignAction } from "../campaigns/campaigns.types";
 import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
-import { listSubscriptions } from "../subscriptions/subscriptions.service";
+import { createSubscription, listSubscriptions, markCancelled, markRenewed } from "../subscriptions/subscriptions.service";
+import { createCredentials, credentialStats, deleteCredential, listCredentials, updateCredential } from "../streaming-inventory/streaming-inventory.service";
+import { getReportConfig, sendReport, updateReportConfig } from "../reports/reports.service";
+import { listFlows, toggleFlow } from "../flows/flows.service";
+import { getMetaCapiConfig, updateMetaCapiConfig } from "../meta-capi/meta-capi.service";
 import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
 import { approveStoreOrder, createCoupon, deleteStoreOrder, getStorefrontConfig, listCoupons, listStoreOrders, rejectStoreOrder, storeMetrics, updateCoupon, updateStorefrontConfig } from "../storefront/storefront.service";
 import { listStoreEmails } from "../storefront/storefront-email.service";
@@ -1091,6 +1095,65 @@ export const TOOLS: ToolDefinition[] = [
         required: ["campaignId"],
         properties: { campaignId: { type: "string" } },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "gestionar_suscripcion",
+      description:
+        "SUSCRIPCIONES (rubro STREAMER): accion 'crear' {cliente (teléfono o id), producto (id o nombre), plan?, vence? (ISO) o duracionDias?, monto?, nota?} | 'renovar' {subscriptionId} (extiende según su plan y reprograma el aviso de vencimiento) | 'cancelar' {subscriptionId}. listar_suscripciones da los ids. Llámala tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["accion"], properties: { accion: { type: "string", description: "crear | renovar | cancelar" }, subscriptionId: { type: "string" }, cliente: { type: "string" }, producto: { type: "string" }, plan: { type: "string" }, vence: { type: "string" }, duracionDias: { type: "number" }, monto: { type: "string" }, nota: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_inventario_streaming",
+      description: "INVENTARIO de cuentas/credenciales de streaming (rubro STREAMER): resumen por producto (disponibles/asignadas/caídas/deshabilitadas) y, con productId, la lista (sin contraseñas completas).",
+      parameters: { type: "object", additionalProperties: false, properties: { productId: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_inventario_streaming",
+      description:
+        "Gestiona credenciales de streaming: accion 'agregar' {producto (id o nombre), items: [{email?, username?, password?, profileName?, pin?, optionLabel? (perfil/plan), note?}]} | 'editar' {credentialId, data: {mismos campos, status?: AVAILABLE|DOWN|DISABLED}} | 'eliminar' {credentialId}. Las contraseñas se guardan tal cual (el bot las entrega al vender). Llámala tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["accion"], properties: { accion: { type: "string" }, producto: { type: "string" }, items: { type: "array", items: { type: "object" } }, credentialId: { type: "string" }, data: { type: "object" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_reportes",
+      description:
+        "REPORTES programados del dashboard por correo/WhatsApp: sin `data` devuelve la config actual; con `data` PARCIAL {email?, waPhone?, dailyEnabled?, weeklyEnabled?, monthlyEnabled?, sendHour? (0-23)} la actualiza; con `prueba`: 'daily'|'weekly'|'monthly' envía uno de prueba ahora. Llámala tras confirmación cuando cambies algo.",
+      parameters: { type: "object", additionalProperties: false, properties: { data: { type: "object" }, prueba: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listar_flujos",
+      description: "Lista los FLUJOS de chatbot (nombre, activo, disparador, nº de pasos). Los flujos se diseñan en el editor visual (/flujos) con su propio copiloto; aquí solo se listan y se activan/desactivan.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "activar_flujo",
+      description: "Activa o desactiva un flujo de chatbot {flowId, activo}. Llámala tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["flowId", "activo"], properties: { flowId: { type: "string" }, activo: { type: "boolean" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_pixel_tienda",
+      description: "Enciende o apaga el PÍXEL de Meta en la tienda web {activo}. Requiere que Meta CAPI ya esté configurado en Integraciones (token y Dataset ID se gestionan SOLO desde el panel). Sin `activo` devuelve el estado.",
+      parameters: { type: "object", additionalProperties: false, properties: { activo: { type: "boolean" } } },
     },
   },
   {
@@ -3220,10 +3283,138 @@ export async function runCopilotTool(
       }
     }
 
+    case "gestionar_suscripcion": {
+      const accion = asStr(args.accion) ?? "";
+      try {
+        if (accion === "crear") {
+          const ref = await findCustomerRef(companyId, args.cliente);
+          const pref = asStr(args.producto) ?? "";
+          const products = await prisma.product.findMany({ where: { companyId }, select: { id: true, name: true } });
+          const p = products.find((x) => x.id === pref || x.name.trim().toLowerCase() === pref.trim().toLowerCase());
+          const sub = await createSubscription(companyId, {
+            customerId: ref.id,
+            productId: p?.id ?? null,
+            productName: p?.name ?? (pref || null),
+            planLabel: asStr(args.plan) ?? null,
+            expiresAt: asStr(args.vence) ?? null,
+            durationDays: Number(args.duracionDias) || null,
+            amount: asStr(args.monto) ?? null,
+            note: asStr(args.nota) ?? null,
+            source: "MANUAL",
+          });
+          return { result: JSON.stringify({ ok: true, subscriptionId: (sub as { id?: string }).id ?? null, vence: (sub as { expiresAt?: Date | null }).expiresAt ?? null }), wrote: true };
+        }
+        const id = asStr(args.subscriptionId) ?? "";
+        if (!id) return { result: JSON.stringify({ ok: false, error: "falta subscriptionId" }), wrote: false };
+        if (accion === "renovar") { const r = await markRenewed(companyId, id); return { result: JSON.stringify({ ok: true, vence: (r as { expiresAt?: Date | null }).expiresAt ?? null }), wrote: true }; }
+        if (accion === "cancelar") { await markCancelled(companyId, id); return { result: JSON.stringify({ ok: true }), wrote: true }; }
+        return { result: JSON.stringify({ ok: false, error: "accion inválida: crear | renovar | cancelar" }), wrote: false };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo procesar" }), wrote: false };
+      }
+    }
+
+    case "ver_inventario_streaming": {
+      const productId = asStr(args.productId);
+      const [stats, products] = await Promise.all([credentialStats(companyId), prisma.product.findMany({ where: { companyId }, select: { id: true, name: true } })]);
+      const resumen = Object.entries(stats).map(([pid, st]) => ({ productId: pid, producto: products.find((p) => p.id === pid)?.name ?? pid, ...st }));
+      const mask = (v: string | null | undefined) => (v ? `${v.slice(0, 2)}…${v.slice(-1)}` : null);
+      const items = productId ? (await listCredentials(companyId, productId)).map((c) => ({ id: c.id, estado: c.status, perfil: c.optionLabel, email: c.email, usuario: c.username, password: mask(c.password), profileName: c.profileName, pin: mask(c.pin), nota: c.note })) : undefined;
+      return { result: JSON.stringify({ resumen, ...(items ? { items } : {}) }), wrote: false };
+    }
+
+    case "actualizar_inventario_streaming": {
+      const accion = asStr(args.accion) ?? "";
+      try {
+        if (accion === "agregar") {
+          const pref = asStr(args.producto) ?? "";
+          const products = await prisma.product.findMany({ where: { companyId }, select: { id: true, name: true } });
+          const p = products.find((x) => x.id === pref || x.name.trim().toLowerCase() === pref.trim().toLowerCase());
+          if (!p) return { result: JSON.stringify({ ok: false, error: `producto «${pref}» no encontrado` }), wrote: false };
+          const items = (Array.isArray(args.items) ? args.items : []).map((it) => {
+            const o = (it && typeof it === "object" ? it : {}) as Record<string, unknown>;
+            return { optionLabel: asStr(o.optionLabel) ?? null, email: asStr(o.email) ?? null, username: asStr(o.username) ?? null, password: asStr(o.password) ?? null, profileName: asStr(o.profileName) ?? null, pin: asStr(o.pin) ?? null, extra: asStr(o.extra) ?? null, note: asStr(o.note) ?? null };
+          });
+          if (!items.length) return { result: JSON.stringify({ ok: false, error: "items vacío" }), wrote: false };
+          const created = await createCredentials(companyId, p.id, items);
+          return { result: JSON.stringify({ ok: true, agregadas: Array.isArray(created) ? created.length : items.length }), wrote: true };
+        }
+        const id = asStr(args.credentialId) ?? "";
+        if (!id) return { result: JSON.stringify({ ok: false, error: "falta credentialId" }), wrote: false };
+        if (accion === "eliminar") { await deleteCredential(companyId, id); return { result: JSON.stringify({ ok: true }), wrote: true }; }
+        if (accion === "editar") {
+          const d = (args.data ?? {}) as LooseData;
+          const u = await updateCredential(companyId, id, {
+            ...(d.optionLabel !== undefined ? { optionLabel: asStr(d.optionLabel) ?? null } : {}),
+            ...(d.email !== undefined ? { email: asStr(d.email) ?? null } : {}),
+            ...(d.username !== undefined ? { username: asStr(d.username) ?? null } : {}),
+            ...(d.password !== undefined ? { password: asStr(d.password) ?? null } : {}),
+            ...(d.profileName !== undefined ? { profileName: asStr(d.profileName) ?? null } : {}),
+            ...(d.pin !== undefined ? { pin: asStr(d.pin) ?? null } : {}),
+            ...(d.note !== undefined ? { note: asStr(d.note) ?? null } : {}),
+            ...(d.status !== undefined ? { status: String(d.status).toUpperCase() } : {}),
+          });
+          return { result: JSON.stringify({ ok: true, estado: (u as { status?: string }).status ?? null }), wrote: true };
+        }
+        return { result: JSON.stringify({ ok: false, error: "accion inválida: agregar | editar | eliminar" }), wrote: false };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo procesar" }), wrote: false };
+      }
+    }
+
+    case "configurar_reportes": {
+      try {
+        const current = await getReportConfig(companyId);
+        const d = (args.data ?? null) as LooseData | null;
+        let cfg = current;
+        if (d && Object.keys(d).length) {
+          cfg = { ...(await updateReportConfig(companyId, {
+            email: d.email !== undefined ? (asStr(d.email) ?? null) : current.email,
+            waPhone: d.waPhone !== undefined ? (asStr(d.waPhone) ?? null) : current.waPhone,
+            dailyEnabled: typeof d.dailyEnabled === "boolean" ? d.dailyEnabled : current.dailyEnabled,
+            weeklyEnabled: typeof d.weeklyEnabled === "boolean" ? d.weeklyEnabled : current.weeklyEnabled,
+            monthlyEnabled: typeof d.monthlyEnabled === "boolean" ? d.monthlyEnabled : current.monthlyEnabled,
+            sendHour: d.sendHour !== undefined ? Number(d.sendHour) : current.sendHour,
+          })), mailerEnabled: current.mailerEnabled };
+        }
+        const prueba = asStr(args.prueba);
+        const test = prueba === "daily" || prueba === "weekly" || prueba === "monthly" ? await sendReport(companyId, prueba) : null;
+        return { result: JSON.stringify({ ok: true, config: cfg, ...(test ? { prueba: test } : {}) }), wrote: Boolean(d && Object.keys(d).length) || Boolean(test) };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo procesar" }), wrote: false };
+      }
+    }
+
+    case "listar_flujos": {
+      return { result: JSON.stringify({ flujos: await listFlows(companyId), nota: "Los flujos se editan en /flujos (editor visual con copiloto propio)." }), wrote: false };
+    }
+
+    case "activar_flujo": {
+      try {
+        const f = await toggleFlow(companyId, asStr(args.flowId) ?? "", args.activo === true);
+        return { result: JSON.stringify({ ok: true, flujo: { id: (f as { id?: string }).id, activo: (f as { isActive?: boolean }).isActive } }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo cambiar" }), wrote: false };
+      }
+    }
+
+    case "configurar_pixel_tienda": {
+      const cfg = await getMetaCapiConfig(companyId);
+      if (typeof args.activo !== "boolean") return { result: JSON.stringify({ capiActivo: cfg.enabled, datasetId: cfg.datasetId ?? null, pixelTienda: cfg.pixelEnabled }), wrote: false };
+      if (!cfg.enabled || !cfg.datasetId) return { result: JSON.stringify({ ok: false, error: "Meta CAPI no está configurado: el token y el Dataset ID se cargan en Integraciones (solo desde el panel)." }), wrote: false };
+      try {
+        await updateMetaCapiConfig(companyId, { enabled: cfg.enabled, datasetId: cfg.datasetId, pageId: cfg.pageId ?? null, testEventCode: cfg.testEventCode ?? null, pixelEnabled: args.activo });
+        return { result: JSON.stringify({ ok: true, pixelTienda: args.activo }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo cambiar" }), wrote: false };
+      }
+    }
+
     case "listar_suscripciones": {
       const filtro = asStr(args.filtro) as "active" | "due" | "expired" | undefined;
       const subs = await listSubscriptions(companyId, { filter: filtro ?? "active" });
       const rows = subs.slice(0, 100).map((s) => ({
+        id: s.id,
         cliente: { nombre: s.customer?.name ?? null, phone: s.customer?.phone ?? null },
         producto: s.productName,
         plan: s.planLabel,
@@ -3351,7 +3542,7 @@ const SYSTEM_GUIDE = [
   "- Empresa (/empresa): nombre, rubro, zona horaria, MONEDA del negocio (soles S/ por defecto o dólares $ — todo el embudo la usa: fichas, carrito, cobro, validación, reportes), horario de atención, delivery, firma. Incluye el tab Anuncios: catálogo de anuncios Meta (mapea IDs/títulos de anuncios a descripciones amigables para los leads y el reporte por anuncio).",
   "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
   "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper): si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI solo para audios — sin ella los audios no se transcriben.",
-  "- Flujos de chatbot (/flujos): flujos guiados visuales con su propio copiloto IA (módulo Flujos).",
+  "- Flujos de chatbot (/flujos): flujos guiados visuales con su propio copiloto IA (módulo Flujos). Por chat solo listar_flujos y activar_flujo. REPORTES programados (correo/WhatsApp, diario/semanal/mensual): configurar_reportes (ver, cambiar, enviar prueba). SUSCRIPCIONES (STREAMER): gestionar_suscripcion (crear/renovar/cancelar) y el INVENTARIO de cuentas con ver_inventario_streaming / actualizar_inventario_streaming (agregar, editar, eliminar credenciales). PÍXEL de la tienda: configurar_pixel_tienda enciende/apaga el píxel si CAPI ya está configurado en Integraciones (tokens solo desde el panel).",
   "- Recordatorios (/recordatorios): mensajes programados (carrito abandonado, dejado en visto, recordatorios de cita, renovaciones). ANTI-BLOQUEO (pestaña Horario): lo que cae fuera de horario NO sale todo a la hora de apertura — se dispersa al azar en los primeros minutos (spreadMinutes, default 90) y los recordatorios de la empresa salen espaciados (pacing 25-70 s al azar, tope 60/hora; si hay una campaña enviando, el ritmo se duplica). Los mensajes admiten SPINTAX {Hola|Buenas|Qué tal} para variar el texto entre clientes. Si el usuario sufrió un bloqueo de WhatsApp: recomienda ritmo 60-120 s, tope 20-30/h y dispersión 120 min la primera semana, textos con spintax y {nombre}, y no programar campañas en la misma franja que los recordatorios.",
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
