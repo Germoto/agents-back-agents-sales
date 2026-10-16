@@ -48,11 +48,12 @@ import { upsertQuickReplySchema } from "../quick-replies/quick-replies.schemas";
 import { getBillingMe } from "../billing/billing.service";
 import { getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 import { getDashboardStats } from "../dashboard/dashboard.service";
-import { listReceipts } from "../receipts/receipts.service";
+import { approveReceipt, associateReceiptProduct, ignoreReceipt, listReceipts, rejectReceipt } from "../receipts/receipts.service";
 import { listOrders } from "../orders/orders.service";
 import { listConversations, listConversationMessages } from "../agent/conversation.service";
 import { listBookings } from "../bookings/bookings.service";
-import { listCampaigns, createCampaign, updateCampaign, startCampaign, testCampaign } from "../campaigns/campaigns.service";
+import { listCampaigns, createCampaign, updateCampaign, deleteCampaign, startCampaign, testCampaign } from "../campaigns/campaigns.service";
+import type { CampaignAction } from "../campaigns/campaigns.types";
 import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
 import { listSubscriptions } from "../subscriptions/subscriptions.service";
 import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
@@ -458,7 +459,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "crear_respuesta_rapida",
       description:
-        "Crea una RESPUESTA RÁPIDA (atajo que el asesor humano envía con un clic o escribiendo /comando en Conversaciones; el bot NO las envía solo). messages es la secuencia (1-10): texto {type:'text', text} o multimedia {type:'image'|'video'|'audio'|'document', mediaUrl (puede ser un adjunto de esta conversación), text? como caption}. Llámala tras confirmación.",
+        "Crea una RESPUESTA RÁPIDA (atajo que el asesor humano envía con un clic o escribiendo /comando en Conversaciones; el bot NO las envía solo). messages es la secuencia (1-10): texto {type:'text', text} o multimedia {type:'image'|'video'|'audio'|'document', mediaUrl (puede ser un adjunto de esta conversación), text? como caption}. acciones (opcional) = lo que pasa con el CLIENTE al enviarla: {tablero (nombre del tablero del CRM), columna (nombre de la columna a la que se mueve), agregarEtiquetas: string[] (nombres), quitarEtiquetas: string[], marcarEntregado (true = si el chat tiene comprobante pendiente, el panel ofrece marcar la venta como entregada), presentaProducto (nombre del producto que esta respuesta presenta: el bot lo toma como ya presentado)}. Los nombres deben existir (ver_crm / listar_productos); si no, la tool falla sin crear nada. Llámala tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -468,6 +469,7 @@ export const TOOLS: ToolDefinition[] = [
           command: { type: "string", description: "Atajo, ej. '/gracias' (opcional, único por negocio)" },
           category: { type: "string", description: "Nombre de la categoría (se crea si no existe)" },
           messages: { type: "array", items: { type: "object" }, description: "Secuencia de mensajes" },
+          acciones: { type: "object", description: "{tablero?, columna?, agregarEtiquetas?, quitarEtiquetas?, marcarEntregado?, presentaProducto?} por NOMBRES" },
         },
       },
     },
@@ -477,7 +479,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "actualizar_respuesta_rapida",
       description:
-        "Modifica una respuesta rápida. `data` es PARCIAL: {title?, command?, category?, messages?}. Los messages enviados se AGREGAN al final de la secuencia; para reescribirla o quitar mensajes usa reemplazarMensajes=true con la secuencia final completa. Llámala tras confirmación.",
+        "Modifica una respuesta rápida. `data` es PARCIAL: {title?, command?, category?, messages?, acciones?}. Los messages enviados se AGREGAN al final de la secuencia; para reescribirla o quitar mensajes usa reemplazarMensajes=true con la secuencia final completa. acciones se fusiona campo a campo: {tablero, columna, agregarEtiquetas, quitarEtiquetas, marcarEntregado, presentaProducto} por NOMBRES; un campo en null lo quita (tablero: null quita el movimiento de CRM; agregarEtiquetas: null quita todas). Llámala tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -893,7 +895,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "crear_campana",
       description:
-        "Crea una campaña de envío masivo de WhatsApp EN BORRADOR (no envía nada). La audiencia se arma con filtros combinables (tagIds del CRM, funnelStatus NUEVO|INTERESADO|ESPERANDO_PAGO|PAGADO|ENTREGADO, adSourceId del catálogo de anuncios) y/o phones explícitos. sendConfig controla el ritmo anti-ban: intervalSec/intervalMaxSec (RANGO aleatorio en segundos entre contactos, definido por el usuario), pauseEvery + pauseSec/pauseMaxSec (pausa larga cada N), dailyLimit (tope diario; SIN sendFrom el tope reanuda a MEDIANOCHE — recomienda horario), sendFrom/sendUntil (HH:mm), excludeMuted (no molestar a quienes están en atención humana, default true). Devuelve el total de contactos y un resumen interpretado del plan de envío: MUÉSTRASELO al usuario. Flujo seguro: crear borrador → enviar_prueba_campana al número del dueño → confirmación explícita → iniciar_campana. Llámala tras confirmación.",
+        "Crea una campaña de envío masivo de WhatsApp EN BORRADOR (no envía nada). La audiencia se arma con filtros combinables (tagIds del CRM, funnelStatus NUEVO|INTERESADO|ESPERANDO_PAGO|PAGADO|ENTREGADO, adSourceId del catálogo de anuncios) y/o phones explícitos. sendConfig controla el ritmo anti-ban: intervalSec/intervalMaxSec (RANGO aleatorio en segundos entre contactos, definido por el usuario), pauseEvery + pauseSec/pauseMaxSec (pausa larga cada N), dailyLimit (tope diario; SIN sendFrom el tope reanuda a MEDIANOCHE — recomienda horario), sendFrom/sendUntil (HH:mm), excludeMuted (no molestar a quienes están en atención humana, default true). PASOS (opcional, `pasos`): secuencia por contacto en orden: {tipo:'mensaje', mensajes:[...]} | {tipo:'esperar', segundos} | {tipo:'etiquetar', agregar:[nombres], quitar:[nombres]} | {tipo:'mover_crm', tablero, columna} | {tipo:'modo_humano', avisarDueno?}; si no mandas pasos, se usa un único paso de mensaje con `mensajes`. etiquetasContexto / quitarEtiquetasContexto (nombres) se aplican a cada contacto alcanzado. Devuelve el total de contactos y un resumen interpretado del plan de envío: MUÉSTRASELO al usuario. Flujo seguro: crear borrador → enviar_prueba_campana al número del dueño → confirmación explícita → iniciar_campana. Llámala tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -939,9 +941,62 @@ export const TOOLS: ToolDefinition[] = [
             },
           },
           contextProductId: { type: "string", description: "Producto en foco: el agente sabrá de qué producto hablar cuando respondan" },
-          contextTagIds: { type: "array", items: { type: "string" }, description: "Etiquetas a aplicar a cada contacto alcanzado" },
+          contextTagIds: { type: "array", items: { type: "string" }, description: "Etiquetas (ids) a aplicar a cada contacto alcanzado" },
+          etiquetasContexto: { type: "array", items: { type: "string" }, description: "Etiquetas (NOMBRES) a aplicar a cada contacto alcanzado" },
+          quitarEtiquetasContexto: { type: "array", items: { type: "string" }, description: "Etiquetas (NOMBRES) a quitar a cada contacto alcanzado" },
+          pasos: { type: "array", items: { type: "object" }, description: "Secuencia por contacto: mensaje | esperar | etiquetar | mover_crm | modo_humano (ver descripción)" },
         },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_campana",
+      description:
+        "Modifica una campaña EN BORRADOR (las lanzadas solo admiten cambiar el nombre). `data` PARCIAL: {name?, pasos? (reemplaza la secuencia completa; mismo formato que crear_campana), audiencia? (mismos filtros; reemplaza la audiencia), sendConfig? (se fusiona), contextProductId?, etiquetasContexto?, quitarEtiquetasContexto? (nombres; reemplazan)}. Llámala tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["campaignId", "data"], properties: { campaignId: { type: "string" }, data: { type: "object" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "eliminar_campana",
+      description: "Elimina una campaña (borrador, terminada o cancelada; una en curso primero se detiene). Irreversible: SOLO tras confirmación explícita con el nombre.",
+      parameters: { type: "object", additionalProperties: false, required: ["campaignId"], properties: { campaignId: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "aprobar_comprobante",
+      description:
+        "APRUEBA un comprobante de pago del chat (listar_comprobantes → id) y lo marca como venta: opcionalmente lo asocia a un producto (productId o nombre) y al teléfono del pagador. Dispara la entrega/flujo post-pago igual que el botón del panel. Irreversible: muestra monto, pagador y producto y pide confirmación explícita antes.",
+      parameters: { type: "object", additionalProperties: false, required: ["receiptId"], properties: { receiptId: { type: "string" }, producto: { type: "string", description: "id o nombre del producto (opcional)" }, telefonoPagador: { type: "string", description: "teléfono del cliente (opcional)" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "rechazar_comprobante",
+      description: "RECHAZA un comprobante pendiente del chat con un motivo (el cliente puede recibir aviso según el flujo). Llámala SOLO tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["receiptId", "motivo"], properties: { receiptId: { type: "string" }, motivo: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ignorar_comprobante",
+      description: "Marca un comprobante pendiente como IGNORADO (no es un pago real: captura repetida, prueba, spam). Llámala SOLO tras confirmación.",
+      parameters: { type: "object", additionalProperties: false, required: ["receiptId"], properties: { receiptId: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "asociar_comprobante",
+      description: "Asocia un comprobante a un producto (id o nombre) y/o al teléfono del pagador sin cambiar su estado (para ordenar antes de aprobar).",
+      parameters: { type: "object", additionalProperties: false, required: ["receiptId"], properties: { receiptId: { type: "string" }, producto: { type: "string" }, telefonoPagador: { type: "string" } } },
     },
   },
   {
@@ -1418,6 +1473,146 @@ async function resolveCampaignAudience(
 }
 
 /** Resuelve una categoría de respuestas rápidas por NOMBRE (case-insensitive), creándola si no existe. */
+/** Pasos de campaña por NOMBRES → CampaignAction[] (mensaje | esperar | etiquetar | mover_crm | modo_humano). */
+async function resolveCampaignSteps(companyId: string, pasos: unknown[], fallbackMessages: CampaignMessageItem[]): Promise<CampaignAction[]> {
+  const [tags, boards, columns] = await Promise.all([
+    prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    prisma.crm.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    prisma.crmColumn.findMany({ where: { crm: { companyId } }, select: { id: true, name: true, crmId: true } }),
+  ]);
+  const norm = (v: string) => v.trim().toLowerCase();
+  const tagIds = (names: unknown) => (asStrList(names) ?? []).map((n) => {
+    const t = tags.find((x) => x.id === n || norm(x.name) === norm(n));
+    if (!t) throw new AppError(`La etiqueta «${n}» no existe (créala con crear_etiqueta)`, 400);
+    return t.id;
+  });
+  const VALID = new Set(["text", "image", "video", "audio", "document"]);
+  const out: CampaignAction[] = [];
+  for (const raw of pasos) {
+    const st = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const tipo = String(st.tipo ?? st.type ?? "");
+    if (tipo === "mensaje") {
+      const msgs = (Array.isArray(st.mensajes) ? st.mensajes : fallbackMessages).map((m) => {
+        const o = (m && typeof m === "object" ? m : {}) as Record<string, unknown>;
+        const type = VALID.has(String(o.type ?? "")) ? (String(o.type) as CampaignMessageItem["type"]) : "text";
+        return { type, text: asStr(o.text) ?? undefined, mediaUrl: asStr(o.mediaUrl) ?? undefined };
+      }).filter((m) => m.text || m.mediaUrl);
+      if (msgs.length) out.push({ type: "send-message", messages: msgs });
+    } else if (tipo === "esperar") {
+      out.push({ type: "wait", seconds: Math.max(1, Math.round(Number(st.segundos ?? st.seconds) || 60)) });
+    } else if (tipo === "etiquetar") {
+      const add = tagIds(st.agregar ?? st.agregarEtiquetas);
+      const remove = tagIds(st.quitar ?? st.quitarEtiquetas);
+      if (add.length || remove.length) out.push({ type: "tag", ...(add.length ? { addTagIds: add } : {}), ...(remove.length ? { removeTagIds: remove } : {}) });
+    } else if (tipo === "mover_crm") {
+      const bName = String(st.tablero ?? "");
+      const cName = String(st.columna ?? "");
+      const b = boards.find((x) => x.id === bName || norm(x.name) === norm(bName));
+      const c = columns.find((x) => (b ? x.crmId === b.id : true) && (x.id === cName || norm(x.name) === norm(cName)));
+      if (!c) throw new AppError(`Columna «${cName}»${bName ? ` del tablero «${bName}»` : ""} no existe (ver_crm)`, 400);
+      out.push({ type: "crm-move", crmId: c.crmId, columnId: c.id });
+    } else if (tipo === "modo_humano") {
+      out.push({ type: "handoff", notifyOwner: st.avisarDueno !== false });
+    } else {
+      throw new AppError(`Paso desconocido «${tipo}» (usa mensaje | esperar | etiquetar | mover_crm | modo_humano)`, 400);
+    }
+  }
+  if (!out.length) throw new AppError("La campaña necesita al menos un paso de mensaje", 400);
+  return out;
+}
+
+/** Nombres de etiquetas → ids (error si alguna no existe). */
+async function tagIdsByName(companyId: string, names: unknown): Promise<string[] | undefined> {
+  const list = asStrList(names);
+  if (list === null || list === undefined) return undefined;
+  const tags = await prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true } });
+  return list.map((n) => {
+    const t = tags.find((x) => x.id === n || x.name.trim().toLowerCase() === n.trim().toLowerCase());
+    if (!t) throw new AppError(`La etiqueta «${n}» no existe (créala con crear_etiqueta)`, 400);
+    return t.id;
+  });
+}
+
+/** Acciones de una respuesta rápida por NOMBRES (tablero, columna, etiquetas, producto) → ids. Nombre inexistente = error claro. */
+async function resolveQuickReplyActions(
+  companyId: string,
+  raw: LooseData,
+  current: Record<string, unknown> | null,
+): Promise<{ tagIds: string[]; removeTagIds: string[]; crmId: string | null; crmColumnId: string | null; markDelivered: boolean; presentProductId: string | null } | null> {
+  const cur = current ?? {};
+  const [tags, boards, columns, products] = await Promise.all([
+    prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    prisma.crm.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    prisma.crmColumn.findMany({ where: { crm: { companyId } }, select: { id: true, name: true, crmId: true } }),
+    prisma.product.findMany({ where: { companyId }, select: { id: true, name: true } }),
+  ]);
+  const norm = (v: string) => v.trim().toLowerCase();
+  const tagIdsFrom = (names: string[] | null | undefined, keepCurrent: unknown): string[] => {
+    if (names === undefined) return Array.isArray(keepCurrent) ? (keepCurrent as string[]) : [];
+    if (names === null) return [];
+    return names.map((n) => {
+      const t = tags.find((x) => x.id === n || norm(x.name) === norm(n));
+      if (!t) throw new AppError(`La etiqueta «${n}» no existe (créala con crear_etiqueta)`, 400);
+      return t.id;
+    });
+  };
+  const tagIds = tagIdsFrom(raw.agregarEtiquetas === undefined ? undefined : (asStrList(raw.agregarEtiquetas) ?? null), cur.tagIds);
+  const removeTagIds = tagIdsFrom(raw.quitarEtiquetas === undefined ? undefined : (asStrList(raw.quitarEtiquetas) ?? null), cur.removeTagIds);
+  let crmId = typeof cur.crmId === "string" ? cur.crmId : null;
+  let crmColumnId = typeof cur.crmColumnId === "string" ? cur.crmColumnId : null;
+  if (raw.tablero === null || raw.columna === null) { crmId = null; crmColumnId = null; }
+  if (typeof raw.tablero === "string" && raw.tablero.trim()) {
+    const b = boards.find((x) => x.id === raw.tablero || norm(x.name) === norm(String(raw.tablero)));
+    if (!b) throw new AppError(`El tablero «${raw.tablero}» no existe (ver_crm lista los tableros)`, 400);
+    crmId = b.id;
+    if (raw.columna === undefined) crmColumnId = null;
+  }
+  if (typeof raw.columna === "string" && raw.columna.trim()) {
+    const cands = columns.filter((c) => (crmId ? c.crmId === crmId : true));
+    const c = cands.find((x) => x.id === raw.columna || norm(x.name) === norm(String(raw.columna)));
+    if (!c) throw new AppError(`La columna «${raw.columna}» no existe${crmId ? " en ese tablero" : ""} (ver_crm lista las columnas)`, 400);
+    crmId = c.crmId;
+    crmColumnId = c.id;
+  }
+  if (crmId && !crmColumnId) throw new AppError("Indica también la columna del tablero (columna)", 400);
+  let presentProductId = typeof cur.presentProductId === "string" ? cur.presentProductId : null;
+  if (raw.presentaProducto === null) presentProductId = null;
+  else if (typeof raw.presentaProducto === "string" && raw.presentaProducto.trim()) {
+    const p = products.find((x) => x.id === raw.presentaProducto || norm(x.name) === norm(String(raw.presentaProducto)));
+    if (!p) throw new AppError(`El producto «${raw.presentaProducto}» no existe`, 400);
+    presentProductId = p.id;
+  }
+  const markDelivered = typeof raw.marcarEntregado === "boolean" ? raw.marcarEntregado : cur.markDelivered === true;
+  const out = { tagIds, removeTagIds, crmId, crmColumnId, markDelivered, presentProductId };
+  const empty = !tagIds.length && !removeTagIds.length && !crmId && !markDelivered && !presentProductId;
+  return empty ? null : out;
+}
+
+/** Acciones de una respuesta rápida con nombres (para ver_respuestas_rapidas). */
+async function describeQuickReplyActions(companyId: string, replies: { actions: unknown }[]) {
+  const [tags, boards, columns, products] = await Promise.all([
+    prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    prisma.crm.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    prisma.crmColumn.findMany({ where: { crm: { companyId } }, select: { id: true, name: true } }),
+    prisma.product.findMany({ where: { companyId }, select: { id: true, name: true } }),
+  ]);
+  const nameOf = (list: { id: string; name: string }[], id: unknown) => (typeof id === "string" ? list.find((x) => x.id === id)?.name ?? null : null);
+  return replies.map((r) => {
+    const a = (r.actions && typeof r.actions === "object" ? r.actions : {}) as Record<string, unknown>;
+    const names = (ids: unknown) => (Array.isArray(ids) ? ids.map((id) => nameOf(tags, id)).filter(Boolean) : []);
+    const out = {
+      agregarEtiquetas: names(a.tagIds),
+      quitarEtiquetas: names(a.removeTagIds),
+      tablero: nameOf(boards, a.crmId),
+      columna: nameOf(columns, a.crmColumnId),
+      marcarEntregado: a.markDelivered === true,
+      presentaProducto: nameOf(products, a.presentProductId),
+    };
+    const any = out.agregarEtiquetas.length || out.quitarEtiquetas.length || out.tablero || out.marcarEntregado || out.presentaProducto;
+    return any ? out : null;
+  });
+}
+
 async function resolveQuickReplyCategory(companyId: string, name?: string): Promise<string | undefined> {
   const trimmed = name?.trim();
   if (!trimmed) return undefined;
@@ -2046,9 +2241,10 @@ export async function runCopilotTool(
 
     case "ver_respuestas_rapidas": {
       const [replies, categories] = await Promise.all([listQuickReplies(companyId), listCategories(companyId)]);
+      const acciones = await describeQuickReplyActions(companyId, replies);
       return {
         result: JSON.stringify({
-          respuestas: replies.map((r) => ({
+          respuestas: replies.map((r, i) => ({
             id: r.id,
             title: r.title,
             command: r.command,
@@ -2056,10 +2252,12 @@ export async function runCopilotTool(
             // Contenido COMPLETO (máx 10 por respuesta): sin esto el modelo no
             // puede auditar/editar sin riesgo de perder lo existente.
             mensajes: Array.isArray(r.messages) ? r.messages : [],
+            // Acciones al enviar (CRM, etiquetas, entregado, producto) con nombres.
+            acciones: acciones[i],
           })),
           categorias: categories,
           nota:
-            "Para modificar una usa actualizar_respuesta_rapida {quickReplyId, data, reemplazarMensajes?}: los messages enviados se AGREGAN al final; reemplazarMensajes=true reescribe la secuencia completa (envía la versión final).",
+            "Para modificar una usa actualizar_respuesta_rapida {quickReplyId, data, reemplazarMensajes?}: los messages enviados se AGREGAN al final; reemplazarMensajes=true reescribe la secuencia completa (envía la versión final). Las acciones (tablero/columna del CRM, etiquetas a agregar/quitar, marcarEntregado, presentaProducto) se cambian con data.acciones por NOMBRES.",
         }),
         wrote: false,
       };
@@ -2067,18 +2265,28 @@ export async function runCopilotTool(
 
     case "crear_respuesta_rapida": {
       const categoryId = await resolveQuickReplyCategory(companyId, asStr(args.category));
+      let actions: Awaited<ReturnType<typeof resolveQuickReplyActions>> = null;
+      if (args.acciones && typeof args.acciones === "object") {
+        try {
+          actions = await resolveQuickReplyActions(companyId, args.acciones as LooseData, null);
+        } catch (err) {
+          return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "acciones inválidas" }), wrote: false };
+        }
+      }
       const parsed = upsertQuickReplySchema.safeParse({
         title: String(args.title ?? "").trim(),
         command: asStr(args.command) ?? null,
         ...(categoryId ? { categoryId } : {}),
         messages: Array.isArray(args.messages) ? args.messages : [],
+        ...(actions ? { actions } : {}),
       });
       if (!parsed.success) {
         return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
       }
       try {
         const created = await createQuickReply(companyId, parsed.data);
-        return { result: JSON.stringify({ ok: true, quickReplyId: created.id, title: created.title, command: created.command }), wrote: true };
+        const [acc] = await describeQuickReplyActions(companyId, [created]);
+        return { result: JSON.stringify({ ok: true, quickReplyId: created.id, title: created.title, command: created.command, acciones: acc }), wrote: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : "no se pudo crear";
         return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
@@ -2092,6 +2300,17 @@ export async function runCopilotTool(
       const data = (args.data ?? {}) as LooseData;
       const categoryId =
         data.category !== undefined ? await resolveQuickReplyCategory(companyId, asStr(data.category)) : current.categoryId;
+      let nextActions: unknown = current.actions ?? null;
+      if (data.acciones !== undefined) {
+        if (data.acciones === null) nextActions = null;
+        else {
+          try {
+            nextActions = await resolveQuickReplyActions(companyId, data.acciones as LooseData, (current.actions ?? null) as Record<string, unknown> | null);
+          } catch (err) {
+            return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "acciones inválidas" }), wrote: false };
+          }
+        }
+      }
       const parsed = upsertQuickReplySchema.safeParse({
         title: asStr(data.title) ?? current.title,
         command: data.command !== undefined ? asStr(data.command) ?? null : current.command,
@@ -2103,14 +2322,15 @@ export async function runCopilotTool(
             ? data.messages
             : [...((current.messages as unknown[]) ?? []), ...data.messages]
           : (current.messages as unknown[]),
-        ...(current.actions ? { actions: current.actions } : {}),
+        ...(nextActions ? { actions: nextActions } : {}),
       });
       if (!parsed.success) {
         return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
       }
       try {
         const updated = await updateQuickReply(companyId, quickReplyId, parsed.data);
-        return { result: JSON.stringify({ ok: true, title: updated.title, command: updated.command, nota: "Respuesta rápida actualizada (lo no enviado se conservó)." }), wrote: true };
+        const [acc] = await describeQuickReplyActions(companyId, [updated]);
+        return { result: JSON.stringify({ ok: true, title: updated.title, command: updated.command, acciones: acc, nota: "Respuesta rápida actualizada (lo no enviado se conservó)." }), wrote: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : "no se pudo actualizar";
         return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
@@ -2444,6 +2664,7 @@ export async function runCopilotTool(
         to: asStr(args.hasta),
       });
       const rows = receipts.slice(0, limit).map((r) => ({
+        id: r.id,
         fecha: r.occurredAt ?? r.validatedAt ?? r.createdAt,
         monto: r.amountPaid ?? r.amountExpected,
         moneda: r.currency,
@@ -2662,13 +2883,19 @@ export async function runCopilotTool(
       }
       const cfg = parseSendConfig(args.sendConfig ?? {});
       try {
+        const actions: CampaignAction[] = Array.isArray(args.pasos) && args.pasos.length
+          ? await resolveCampaignSteps(companyId, args.pasos, messages)
+          : [{ type: "send-message", messages }];
+        const ctxTags = (await tagIdsByName(companyId, args.etiquetasContexto)) ?? (Array.isArray(args.contextTagIds) ? args.contextTagIds.map((t) => String(t)).filter(Boolean) : undefined);
+        const ctxRemove = await tagIdsByName(companyId, args.quitarEtiquetasContexto);
         const created = await createCampaign(companyId, { name });
         await updateCampaign(companyId, created.id, {
-          actions: [{ type: "send-message", messages }],
+          actions,
           sendConfig: cfg,
           audience: { recipients },
           ...(args.contextProductId !== undefined ? { contextProductId: asStr(args.contextProductId) ?? null } : {}),
-          ...(Array.isArray(args.contextTagIds) ? { contextTagIds: args.contextTagIds.map((t) => String(t)).filter(Boolean) } : {}),
+          ...(ctxTags ? { contextTagIds: ctxTags } : {}),
+          ...(ctxRemove ? { contextRemoveTagIds: ctxRemove } : {}),
         });
         return {
           result: JSON.stringify({
@@ -2685,6 +2912,78 @@ export async function runCopilotTool(
       } catch (err) {
         const message = err instanceof Error ? err.message : "no se pudo crear la campaña";
         return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
+      }
+    }
+
+    case "actualizar_campana": {
+      const campaignId = asStr(args.campaignId) ?? "";
+      const data = (args.data ?? {}) as LooseData;
+      if (!campaignId) return { result: JSON.stringify({ ok: false, error: "falta campaignId" }), wrote: false };
+      try {
+        const current = (await listCampaigns(companyId)).find((c) => c.id === campaignId);
+        if (!current) return { result: JSON.stringify({ ok: false, error: "campaña no encontrada" }), wrote: false };
+        const patch: Parameters<typeof updateCampaign>[2] = {};
+        if (asStr(data.name)) patch.name = asStr(data.name) as string;
+        if (Array.isArray(data.pasos) && data.pasos.length) patch.actions = await resolveCampaignSteps(companyId, data.pasos, []);
+        if (data.audiencia && typeof data.audiencia === "object") {
+          const recipients = await resolveCampaignAudience(companyId, data.audiencia as Record<string, unknown>);
+          if (!recipients.length) return { result: JSON.stringify({ ok: false, error: "La audiencia quedó vacía." }), wrote: false };
+          patch.audience = { recipients };
+        }
+        if (data.sendConfig && typeof data.sendConfig === "object") patch.sendConfig = parseSendConfig({ ...((current as { sendConfig?: Record<string, unknown> }).sendConfig ?? {}), ...(data.sendConfig as Record<string, unknown>) });
+        if (data.contextProductId !== undefined) patch.contextProductId = asStr(data.contextProductId) ?? null;
+        const ctxTags = await tagIdsByName(companyId, data.etiquetasContexto);
+        if (ctxTags) patch.contextTagIds = ctxTags;
+        const ctxRemove = await tagIdsByName(companyId, data.quitarEtiquetasContexto);
+        if (ctxRemove) patch.contextRemoveTagIds = ctxRemove;
+        const updated = await updateCampaign(companyId, campaignId, patch);
+        return { result: JSON.stringify({ ok: true, campaignId: updated.id, estado: updated.status, nota: "Campaña actualizada (lo no enviado se conservó)." }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo actualizar" }), wrote: false };
+      }
+    }
+
+    case "eliminar_campana": {
+      const campaignId = asStr(args.campaignId) ?? "";
+      if (!campaignId) return { result: JSON.stringify({ ok: false, error: "falta campaignId" }), wrote: false };
+      try {
+        await deleteCampaign(companyId, campaignId);
+        return { result: JSON.stringify({ ok: true }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo eliminar" }), wrote: false };
+      }
+    }
+
+    case "aprobar_comprobante":
+    case "asociar_comprobante": {
+      const receiptId = asStr(args.receiptId) ?? "";
+      if (!receiptId) return { result: JSON.stringify({ ok: false, error: "falta receiptId" }), wrote: false };
+      let productId: string | null = null;
+      const prodRef = asStr(args.producto);
+      if (prodRef) {
+        const products = await prisma.product.findMany({ where: { companyId }, select: { id: true, name: true } });
+        const p = products.find((x) => x.id === prodRef || x.name.trim().toLowerCase() === prodRef.trim().toLowerCase());
+        if (!p) return { result: JSON.stringify({ ok: false, error: `producto «${prodRef}» no encontrado` }), wrote: false };
+        productId = p.id;
+      }
+      const phone = asStr(args.telefonoPagador)?.replace(/\D/g, "") || null;
+      try {
+        const r = name === "aprobar_comprobante" ? await approveReceipt(companyId, receiptId, productId, phone) : await associateReceiptProduct(companyId, receiptId, productId, phone);
+        return { result: JSON.stringify({ ok: true, estado: (r as { status?: string }).status ?? null, nota: name === "aprobar_comprobante" ? "Comprobante aprobado: cuenta como venta y dispara la entrega configurada." : "Comprobante asociado." }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo procesar" }), wrote: false };
+      }
+    }
+
+    case "rechazar_comprobante":
+    case "ignorar_comprobante": {
+      const receiptId = asStr(args.receiptId) ?? "";
+      if (!receiptId) return { result: JSON.stringify({ ok: false, error: "falta receiptId" }), wrote: false };
+      try {
+        const r = name === "rechazar_comprobante" ? await rejectReceipt(companyId, receiptId, asStr(args.motivo) ?? "rechazado por el dueño") : await ignoreReceipt(companyId, receiptId);
+        return { result: JSON.stringify({ ok: true, estado: (r as { status?: string }).status ?? null }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo procesar" }), wrote: false };
       }
     }
 
@@ -2844,8 +3143,9 @@ const SYSTEM_GUIDE = [
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto).",
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM).",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 65–90s); en números nuevos recomienda tope diario 30-70. Flujo seguro OBLIGATORIO: crear borrador → mostrar total de contactos + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible).",
+  "- Campañas: además de mensajes, cada campaña puede llevar PASOS por contacto (esperar N segundos, etiquetar/quitar etiquetas, mover a una columna del CRM, pasar a modo humano) y etiquetas de contexto a cada alcanzado (crear_campana pasos / etiquetasContexto, actualizar_campana en borrador, eliminar_campana tras confirmación). Las respuestas rápidas también ejecutan ACCIONES al enviarse: mover al CRM, etiquetar/quitar etiquetas, marcar entregado y fijar el producto presentado (crear/actualizar_respuesta_rapida acciones por nombres).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
-  "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación. Desde la ficha del cliente (Conversaciones → pestaña Contacto) el asesor también puede reenviar el acceso de una compra aprobada POR CORREO (si el producto tiene entrega por correo activa).",
+  "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación. Por chat: listar_comprobantes (con id) y, tras confirmación explícita, aprobar_comprobante (cuenta como venta y entrega), rechazar_comprobante, ignorar_comprobante y asociar_comprobante (producto/teléfono). Desde la ficha del cliente (Conversaciones → pestaña Contacto) el asesor también puede reenviar el acceso de una compra aprobada POR CORREO (si el producto tiene entrega por correo activa).",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (/reservas-online): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
   "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat). Los productos digitales pueden tener ENTREGA POR CORREO a pedido del cliente (editar producto → paso 'Entrega del acceso' → pestaña '📧 Correo', o digitalDelivery.emailEnabled por chat): si el cliente que ya pagó pide el acceso por email, el agente se lo envía y guarda su correo. Cada producto puede tener OFERTA con vigencia (precio de oferta + desde/hasta): vigente, el agente la presenta, cobra y valida ese precio y el normal sale tachado como 'antes'. Además hay OFERTAS ESCALONADAS en los recordatorios: cada paso puede llevar su precio (si el cliente no compra, el recordatorio 1 ofrece un precio y el 2 uno mejor — solo para ese cliente).",
   "- Empresa (/empresa): nombre, rubro, zona horaria, MONEDA del negocio (soles S/ por defecto o dólares $ — todo el embudo la usa: fichas, carrito, cobro, validación, reportes), horario de atención, delivery, firma. Incluye el tab Anuncios: catálogo de anuncios Meta (mapea IDs/títulos de anuncios a descripciones amigables para los leads y el reporte por anuncio).",
@@ -2908,7 +3208,7 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",
-    "- eliminar_producto y eliminar_pedido_tienda: SOLO si lo pidió explícitamente y confirmó. Nunca elimines por iniciativa propia.",
+    "- eliminar_producto, eliminar_pedido_tienda y eliminar_campana: SOLO si lo pidió explícitamente y confirmó. Nunca elimines por iniciativa propia.",
     "- No gestionas datos sensibles (API keys de OpenAI, tokens de Mercado Pago/Meta, credenciales de WhatsApp): para eso indícale la página del panel correspondiente (Agente IA, Pagos, WhatsApp API).",
     "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación en Activación (/activacion). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",
     "- Tras crear/modificar, resume QUÉ quedó hecho y sugiere el siguiente paso (revisar en el panel, probar en el simulador...).",
