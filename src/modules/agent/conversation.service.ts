@@ -347,44 +347,43 @@ export async function annotateMessageText(messageId: string, text: string): Prom
 // -------------------------------------------------------------------------
 // Lecturas para el panel admin (visor de conversaciones en tiempo real)
 // -------------------------------------------------------------------------
-export async function listConversations(companyId: string, limit = 50) {
-  const rows = await prisma.conversation.findMany({
-    // whatsapp + web (chat embebido); excluye la conversación del simulador (canal "sim")
-    where: { companyId, channel: { in: ["whatsapp", "web"] } },
-    orderBy: { lastMessageAt: "desc" },
-    take: limit,
+const conversationSummarySelect = {
+  id: true,
+  status: true,
+  botPaused: true,
+  pinnedAt: true,
+  state: true,
+  channel: true,
+  lastMessageAt: true,
+  openedAt: true,
+  customer: {
     select: {
       id: true,
-      status: true,
-      botPaused: true,
-      state: true,
-      channel: true,
-      lastMessageAt: true,
-      openedAt: true,
-      customer: {
-        select: {
-          id: true,
-          phone: true,
-          name: true,
-          avatarUrl: true,
-          waUsername: true,
-          adSourceId: true,
-          adTitle: true,
-          tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
-        },
-      },
-      messages: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { message: true, role: true, createdAt: true },
-      },
+      phone: true,
+      name: true,
+      avatarUrl: true,
+      waUsername: true,
+      adSourceId: true,
+      adTitle: true,
+      optOutAt: true,
+      tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
     },
-  });
-  const adMap = await resolveAdDescriptions(companyId);
-  return rows.map((c) => ({
+  },
+  messages: {
+    orderBy: { createdAt: "desc" as const },
+    take: 1,
+    select: { message: true, role: true, createdAt: true },
+  },
+} satisfies Prisma.ConversationSelect;
+
+type ConversationSummaryRow = Prisma.ConversationGetPayload<{ select: typeof conversationSummarySelect }>;
+
+function serializeConversationSummary(c: ConversationSummaryRow, adMap: Map<string, string>) {
+  return {
     id: c.id,
     status: c.status,
     botPaused: c.botPaused,
+    pinnedAt: c.pinnedAt,
     channel: c.channel,
     // Etapa del embudo (state.status). Distinto de `status` (OPEN/HUMAN/CLOSED).
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
@@ -393,7 +392,27 @@ export async function listConversations(companyId: string, limit = 50) {
     openedAt: c.openedAt,
     customer: serializeCustomerWithTags(c.customer, adMap),
     lastMessage: c.messages[0] ?? null,
-  }));
+  };
+}
+
+export async function listConversations(companyId: string, limit = 50) {
+  // whatsapp + web (chat embebido); excluye la conversación del simulador (canal "sim").
+  // Los FIJADOS van todos (sin límite) además de los `limit` más recientes: un
+  // chat fijado antiguo no desaparece de la lista.
+  const where = { companyId, channel: { in: ["whatsapp", "web"] } };
+  const [pinned, recent] = await Promise.all([
+    prisma.conversation.findMany({ where: { ...where, pinnedAt: { not: null } }, orderBy: { pinnedAt: "desc" }, select: conversationSummarySelect }),
+    prisma.conversation.findMany({ where, orderBy: { lastMessageAt: "desc" }, take: limit, select: conversationSummarySelect }),
+  ]);
+  const seen = new Set<string>();
+  const rows: ConversationSummaryRow[] = [];
+  for (const c of [...pinned, ...recent]) {
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    rows.push(c);
+  }
+  const adMap = await resolveAdDescriptions(companyId);
+  return rows.map((c) => serializeConversationSummary(c, adMap));
 }
 
 /**
@@ -404,8 +423,63 @@ export function humanReasonOf(state: ConversationState | null | undefined, botPa
   if (!botPaused) return null;
   const pending = state?.pendingAction;
   if (typeof pending !== "string" || !pending.startsWith("HUMAN")) return null;
-  const reason = pending.replace(/^HUMAN(\[[A-Z]+\])?:\s*/, "").trim();
+  const reason = pending.replace(/^HUMAN(\[[A-Z_]+\])?:\s*/, "").trim();
+  if (pending.startsWith("HUMAN[NO_CONTACTAR]")) return `El cliente pidió que no le escriban${reason ? ` — ${reason}` : ""}`;
   return reason || null;
+}
+
+/**
+ * Fija / desfija un chat en el panel (sin límite de fijados). Orden: fijado más
+ * reciente primero. Scoped por empresa.
+ */
+export async function setConversationPinned(companyId: string, conversationId: string, pinned: boolean) {
+  const pinnedAt = pinned ? new Date() : null;
+  const r = await prisma.conversation.updateMany({ where: { id: conversationId, companyId }, data: { pinnedAt } });
+  if (!r.count) throw new AppError("Conversación no encontrada", 404);
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, { conversationId, pinnedAt });
+  return { pinnedAt };
+}
+
+/**
+ * Marca / desmarca a un CLIENTE como "no contactar" (pidió que no le escriban).
+ * Al marcar: optOutAt = ahora, se cancelan TODOS sus recordatorios pendientes
+ * (incluidos los manuales) y, si se indica, se pausa el bot con ese motivo.
+ * Al desmarcar: solo se limpia la marca (reactivar el bot es decisión aparte).
+ * Campañas (WhatsApp y correo) y recordatorios automáticos respetan la marca
+ * aunque el dueño reactive el bot.
+ */
+export async function setCustomerOptOut(
+  companyId: string,
+  customerId: string,
+  optOut: boolean,
+  opts: { pauseBot?: boolean; reason?: string } = {},
+): Promise<{ cancelled: number }> {
+  const r = await prisma.customer.updateMany({ where: { id: customerId, companyId }, data: { optOutAt: optOut ? new Date() : null } });
+  if (!r.count) throw new AppError("Cliente no encontrado", 404);
+  let cancelled = 0;
+  if (optOut) {
+    cancelled = await cancelPendingReminders(companyId, customerId, undefined, {
+      includeManual: true,
+      reason: "el cliente pidió no ser contactado",
+    }).catch(() => 0);
+    if (opts.pauseBot) {
+      const convos = await prisma.conversation.findMany({
+        where: { companyId, customerId, channel: { in: ["whatsapp", "web"] } },
+        select: { id: true, state: true, botPaused: true },
+      });
+      for (const c of convos) {
+        const state = ((c.state as ConversationState) ?? {}) as ConversationState;
+        state.status = "ASESOR_HUMANO";
+        state.pendingAction = `HUMAN[NO_CONTACTAR]: ${opts.reason ?? "marcado desde el panel"}`;
+        await prisma.conversation.update({ where: { id: c.id }, data: { state: state as Prisma.InputJsonValue } });
+        await setBotPaused(companyId, c.id, true, { reason: humanReasonOf(state, true) });
+      }
+    }
+  }
+  // Refrescar listas del panel (badge "No contactar").
+  const convo = await prisma.conversation.findFirst({ where: { companyId, customerId }, orderBy: { lastMessageAt: "desc" }, select: { id: true } });
+  if (convo) socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, { conversationId: convo.id, optOut });
+  return { cancelled };
 }
 
 /** Aplana tagLinks → tags y resuelve el anuncio de origen (atribución CTWA). */
@@ -418,6 +492,7 @@ function serializeCustomerWithTags(
     waUsername?: string | null;
     adSourceId?: string | null;
     adTitle?: string | null;
+    optOutAt?: Date | null;
     tagLinks: Array<{ tag: { id: string; name: string; color: string } }>;
   },
   adMap?: Map<string, string>,
@@ -438,47 +513,13 @@ function serializeCustomerWithTags(
 export async function getConversationSummary(companyId: string, conversationId: string) {
   const c = await prisma.conversation.findFirst({
     where: { id: conversationId, companyId, channel: { in: ["whatsapp", "web"] } },
-    select: {
-      id: true,
-      status: true,
-      botPaused: true,
-      state: true,
-      channel: true,
-      lastMessageAt: true,
-      openedAt: true,
-      customer: {
-        select: {
-          id: true,
-          phone: true,
-          name: true,
-          avatarUrl: true,
-          waUsername: true,
-          adSourceId: true,
-          adTitle: true,
-          tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
-        },
-      },
-      messages: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { message: true, role: true, createdAt: true },
-      },
-    },
+    select: conversationSummarySelect,
   });
   if (!c) return null;
-  return {
-    id: c.id,
-    status: c.status,
-    botPaused: c.botPaused,
-    channel: c.channel,
-    funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
-    humanReason: humanReasonOf(c.state as ConversationState, c.botPaused),
-    lastMessageAt: c.lastMessageAt,
-    openedAt: c.openedAt,
-    customer: serializeCustomerWithTags(c.customer, await resolveAdDescriptions(companyId)),
-    lastMessage: c.messages[0] ?? null,
-  };
+  const adMap = await resolveAdDescriptions(companyId);
+  return serializeConversationSummary(c, adMap);
 }
+
 
 /**
  * Estado runtime fresco de una conversación (para el turno debounced del agente,

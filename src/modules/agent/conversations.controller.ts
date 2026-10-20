@@ -19,6 +19,8 @@ import {
   deleteConversations,
   notifyOwner,
   scheduleManualReminder,
+  setConversationPinned,
+  setCustomerOptOut,
 } from "./conversation.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
 
@@ -61,6 +63,25 @@ export const pauseConversationController = asyncHandler(async (req: Request, res
   }
 
   res.json({ success: true, data: { paused } });
+});
+
+/** Fijar / desfijar un chat en la lista (sin límite de fijados). */
+export const pinConversationController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const pinned = req.body?.pinned !== false; // default true
+  const r = await setConversationPinned(companyId, String(req.params.id), pinned);
+  res.json({ success: true, data: { pinned, pinnedAt: r.pinnedAt } });
+});
+
+/** Marcar / desmarcar al cliente del chat como "no contactar". Al marcar, pausa el bot. */
+export const optOutConversationController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const conversationId = String(req.params.id);
+  const optOut = req.body?.optOut !== false; // default true
+  const customerId = await getConversationCustomerId(companyId, conversationId);
+  if (!customerId) throw new AppError("Conversación no encontrada", 404);
+  const r = await setCustomerOptOut(companyId, customerId, optOut, { pauseBot: true, reason: "marcado desde el panel" });
+  res.json({ success: true, data: { optOut, cancelled: r.cancelled } });
 });
 
 export const scheduleReminderController = asyncHandler(async (req: Request, res: Response) => {

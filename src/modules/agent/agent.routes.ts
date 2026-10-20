@@ -7,6 +7,8 @@ import {
   getConversationController,
   listMessagesController,
   pauseConversationController,
+  pinConversationController,
+  optOutConversationController,
   replyConversationController,
   reactConversationController,
   typingConversationController,
@@ -40,6 +42,8 @@ router.post("/conversations/start", requireAuth, startConversationController);
 router.post("/conversations/delete-bulk", requireAuth, deleteConversationsBulkController);
 router.get("/conversations/:id/messages", requireAuth, listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
+router.post("/conversations/:id/pin", requireAuth, pinConversationController);
+router.post("/conversations/:id/opt-out", requireAuth, optOutConversationController);
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);
 router.post("/conversations/:id/react", requireAuth, reactConversationController);
 router.post("/conversations/:id/typing", requireAuth, typingConversationController);

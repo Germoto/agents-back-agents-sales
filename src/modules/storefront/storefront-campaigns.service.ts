@@ -117,10 +117,10 @@ export async function resolveAudience(companyId: string, rawAudience: unknown): 
       });
       where = { ...where, id: { in: buyers.map((b) => b.customerId) } };
     }
-    const customers = await prisma.customer.findMany({ where, select: { id: true, name: true, email: true, metadata: true }, take: 20000 });
+    const customers = await prisma.customer.findMany({ where, select: { id: true, name: true, email: true, metadata: true, optOutAt: true }, take: 20000 });
     for (const c of customers) {
       const m = md(c);
-      if (m.emailOptOut === true || m.emailMarketing === false) continue;
+      if (m.emailOptOut === true || m.emailMarketing === false || c.optOutAt) continue;
       const email = normalizeEmail(c.email);
       if (!email) continue;
       add({ customerId: c.id, email, name: c.name, lastProduct: null, productsBought: [], daysSincePurchase: null, fields: {}, couponCode: null });
@@ -129,9 +129,9 @@ export async function resolveAudience(companyId: string, rawAudience: unknown): 
 
   // 2) Contactos elegidos a mano
   if (a.customerIds?.length) {
-    const customers = await prisma.customer.findMany({ where: { companyId, id: { in: a.customerIds }, email: { not: null } }, select: { id: true, name: true, email: true, metadata: true } });
+    const customers = await prisma.customer.findMany({ where: { companyId, id: { in: a.customerIds }, email: { not: null } }, select: { id: true, name: true, email: true, metadata: true, optOutAt: true } });
     for (const c of customers) {
-      if (md(c).emailOptOut === true) continue;
+      if (md(c).emailOptOut === true || c.optOutAt) continue;
       const email = normalizeEmail(c.email);
       if (email) add({ customerId: c.id, email, name: c.name, lastProduct: null, productsBought: [], daysSincePurchase: null, fields: {}, couponCode: null });
     }
@@ -148,11 +148,11 @@ export async function resolveAudience(companyId: string, rawAudience: unknown): 
     })),
   ];
   for (const e of extra) {
-    const existing = await prisma.customer.findFirst({ where: { companyId, email: e.email }, select: { id: true, name: true, metadata: true } });
+    const existing = await prisma.customer.findFirst({ where: { companyId, email: e.email }, select: { id: true, name: true, metadata: true, optOutAt: true } });
     let customerId: string;
     let name = e.nombre;
     if (existing) {
-      if (md(existing).emailOptOut === true) continue;
+      if (md(existing).emailOptOut === true || existing.optOutAt) continue;
       customerId = existing.id;
       name = existing.name ?? e.nombre;
       if (md(existing).emailMarketing !== true) {

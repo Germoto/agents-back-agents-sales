@@ -13,6 +13,9 @@ import { extractEmail } from "../../lib/email";
 import { prisma } from "../../lib/prisma";
 
 const MAX_ITERATIONS = 6;
+/** Frases típicas de "no me escribas más" (sin acentos obligatorios). */
+const OPT_OUT_RE =
+  /\b((ya )?no (me |nos |m)?(escrib|molest|insist|mand|envi)|dej(a|e|en|ar) de (escribir|molestar|insistir|mandar|enviar)|no (me )?(vuelv|vuelva|vuelvan|volver) a escribir|b[oó]rr(a|e|en)(me|nos)|elim[ií]n(a|e|en)(me|nos)|no (me )?interesa[,.! ]+(no|ya no|deja|dejen)|no quiero (que (me )?escrib|recibir|m[aá]s mensajes)|s[aá](c|q)(a|ame|anos|uenme|enme|uennos) de (la|su|tu) lista|^\s*stop\s*$)/i;
 const FALLBACK_TEXT =
   "Disculpa, tuve un problema para procesar tu mensaje. ¿Me lo repites o me dices qué producto te interesa?";
 
@@ -63,6 +66,18 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       messages.push({ role: "system", content: hint });
       console.log(`[agent] FAQ determinística inyectada convo=${ctx.conversationId}`);
     }
+  }
+
+  // Opt-out determinista (red de seguridad): si el texto parece pedir que no le
+  // escriban más, se recuerda al modelo la regla NO_CONTACTAR. El modelo decide
+  // (evita falsos positivos tipo "no me escribas por ahora, te aviso").
+  if (inboundText && OPT_OUT_RE.test(inboundText)) {
+    messages.push({
+      role: "system",
+      content:
+        "El cliente parece pedir que NO le escriban más. Si es así, respóndele UNA línea breve y respetuosa (sin vender ni preguntar) y llama derivar_humano con motivo NO_CONTACTAR en este mismo turno. Si en realidad solo pospone ('ahora no', 'luego te aviso'), sigue normal.",
+    });
+    console.log(`[agent] posible opt-out detectado convo=${ctx.conversationId}`);
   }
 
   // Validación determinista: si la visión ya leyó un CÓDIGO de seguridad, la

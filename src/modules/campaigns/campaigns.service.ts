@@ -196,9 +196,19 @@ export async function deleteCampaign(companyId: string, id: string) {
 // Control de ejecución
 // ---------------------------------------------------------------------------
 
-/** Construye el set de dígitos a excluir (atención humana) cuando excludeMuted. */
-async function buildExclusionSet(companyId: string): Promise<Set<string>> {
+/**
+ * Construye el set de dígitos a excluir. Los clientes que pidieron NO ser
+ * contactados (Customer.optOutAt) se excluyen SIEMPRE; los de atención humana
+ * (mutedNumbers / botPaused) solo cuando excludeMuted.
+ */
+async function buildExclusionSet(companyId: string, excludeMuted: boolean): Promise<Set<string>> {
   const set = new Set<string>();
+  const optedOut = await prisma.customer.findMany({
+    where: { companyId, optOutAt: { not: null } },
+    select: { phone: true },
+  });
+  for (const c of optedOut) set.add(digitsOf(c.phone));
+  if (!excludeMuted) return set;
   const cfg = await prisma.agentConfig.findUnique({
     where: { companyId },
     select: { mutedNumbers: true },
@@ -228,7 +238,7 @@ export async function startCampaign(companyId: string, id: string) {
   if (!audience.recipients.length) throw new AppError("Selecciona al menos un destinatario", 400);
 
   const cfg = parseSendConfig(campaign.sendConfig);
-  const exclude = cfg.excludeMuted ? await buildExclusionSet(companyId) : new Set<string>();
+  const exclude = await buildExclusionSet(companyId, cfg.excludeMuted);
 
   // Dedup por dígitos + filtro de exclusión.
   const seen = new Set<string>();

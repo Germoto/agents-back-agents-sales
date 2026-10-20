@@ -51,7 +51,7 @@ import { getDashboardStats } from "../dashboard/dashboard.service";
 import { approveReceipt, associateReceiptProduct, ignoreReceipt, listReceipts, rejectReceipt } from "../receipts/receipts.service";
 import { listOrders, updateOrderStatus } from "../orders/orders.service";
 import { createNote, deleteCustomer, getCustomer, listNotes, updateCustomer } from "../customers/customers.service";
-import { listConversations, listConversationMessages } from "../agent/conversation.service";
+import { listConversations, listConversationMessages, setConversationPinned, setCustomerOptOut } from "../agent/conversation.service";
 import { createBooking, createScheduleBlock, deleteScheduleBlock, listBookings, listScheduleBlocks, rescheduleBooking, updateBookingStatus } from "../bookings/bookings.service";
 import type { OrderStatus, ServiceBookingStatus } from "@prisma/client";
 import { listCampaigns, createCampaign, updateCampaign, deleteCampaign, startCampaign, testCampaign } from "../campaigns/campaigns.service";
@@ -822,7 +822,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "listar_conversaciones",
       description:
-        "Conversaciones recientes con estado, etapa del embudo (NUEVO/INTERESADO/ESPERANDO_PAGO/PAGADO/ENTREGADO...), si están en atención humana (y por qué) y el último mensaje. Filtro opcional por etapa.",
+        "Conversaciones recientes con estado, etapa del embudo (NUEVO/INTERESADO/ESPERANDO_PAGO/PAGADO/ENTREGADO...), si están en atención humana (y por qué), si están fijadas (fijado), si el cliente pidió no ser contactado (noContactar) y el último mensaje. Filtro opcional por etapa.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -850,6 +850,19 @@ export const TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "fijar_conversacion",
+      description: "Fija (o desfija) el chat de un cliente arriba de la lista de Conversaciones del panel. Sin límite de fijados; el panel muestra los 2 más recientes y el resto con 'Ver más'.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["cliente"],
+        properties: { cliente: { type: "string", description: "teléfono o id del cliente" }, fijar: { type: "boolean", description: "true = fijar (default), false = desfijar" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "ver_cliente",
       description: "Ficha de un CLIENTE por teléfono o id: datos (nombre, correo, origen, idioma…), etiquetas, producto en foco, deals y notas internas. Úsala antes de editar.",
       parameters: { type: "object", additionalProperties: false, required: ["cliente"], properties: { cliente: { type: "string", description: "teléfono o id" } } },
@@ -859,7 +872,7 @@ export const TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "actualizar_cliente",
-      description: "Edita los datos de un CLIENTE (por teléfono o id). `data` PARCIAL: {name?, email?, phone? (corregir el número), sexo?, fechaNacimiento? (YYYY-MM-DD), idioma?, origenDeLead?}. Para CRM/etiquetas usa gestionar_cliente_crm. Llámala tras confirmación.",
+      description: "Edita los datos de un CLIENTE (por teléfono o id). `data` PARCIAL: {name?, email?, phone? (corregir el número), sexo?, fechaNacimiento? (YYYY-MM-DD), idioma?, origenDeLead?, noContactar? (true = el cliente pidió que no le escriban: pausa el bot, cancela sus recordatorios y lo excluye de campañas; false = quitar la marca)}. Para CRM/etiquetas usa gestionar_cliente_crm. Llámala tras confirmación.",
       parameters: { type: "object", additionalProperties: false, required: ["cliente", "data"], properties: { cliente: { type: "string" }, data: { type: "object" } } },
     },
   },
@@ -2849,6 +2862,8 @@ export async function runCopilotTool(
         estado: c.status,
         etapa: c.funnelStatus,
         atencionHumana: c.botPaused ? c.humanReason ?? true : false,
+        fijado: Boolean(c.pinnedAt),
+        noContactar: Boolean(c.customer.optOutAt),
         ultimoMensaje: c.lastMessage
           ? { rol: c.lastMessage.role, texto: String(c.lastMessage.message ?? "").slice(0, 200), fecha: c.lastMessage.createdAt }
           : null,
@@ -2881,11 +2896,34 @@ export async function runCopilotTool(
       };
     }
 
+    case "fijar_conversacion": {
+      try {
+        const ref = await findCustomerRef(companyId, args.cliente);
+        const convo = await prisma.conversation.findFirst({
+          where: { companyId, customerId: ref.id, channel: { in: ["whatsapp", "web"] } },
+          orderBy: { lastMessageAt: "desc" },
+          select: { id: true },
+        });
+        if (!convo) return { result: JSON.stringify({ ok: false, error: "el cliente no tiene conversación" }), wrote: false };
+        const fijar = args.fijar !== false;
+        await setConversationPinned(companyId, convo.id, fijar);
+        return { result: JSON.stringify({ ok: true, fijado: fijar }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no encontrado" }), wrote: false };
+      }
+    }
+
     case "ver_cliente": {
       try {
         const ref = await findCustomerRef(companyId, args.cliente);
         const [c, notes] = await Promise.all([getCustomer(companyId, ref.id), listNotes(companyId, ref.id)]);
-        return { result: JSON.stringify({ cliente: c, notas: notes.map((n) => ({ id: n.id, texto: n.text, fecha: n.createdAt })) }), wrote: false };
+        return {
+          result: JSON.stringify({
+            cliente: { ...c, noContactar: Boolean((c as { optOutAt?: Date | null }).optOutAt) },
+            notas: notes.map((n) => ({ id: n.id, texto: n.text, fecha: n.createdAt })),
+          }),
+          wrote: false,
+        };
       } catch (err) {
         return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no encontrado" }), wrote: false };
       }
@@ -2904,9 +2942,17 @@ export async function runCopilotTool(
           ...(d.idioma !== undefined ? { idioma: asStr(d.idioma) ?? null } : {}),
           ...(d.origenDeLead !== undefined ? { origenDeLead: asStr(d.origenDeLead) ?? null } : {}),
         };
-        if (!Object.keys(data).length) return { result: JSON.stringify({ ok: false, error: "nada que cambiar" }), wrote: false };
+        let optOutNote: Record<string, unknown> = {};
+        if (typeof d.noContactar === "boolean") {
+          const r = await setCustomerOptOut(companyId, ref.id, d.noContactar, { pauseBot: true, reason: "marcado por el dueño (copiloto)" });
+          optOutNote = { noContactar: d.noContactar, recordatoriosCancelados: r.cancelled };
+        }
+        if (!Object.keys(data).length) {
+          if (!Object.keys(optOutNote).length) return { result: JSON.stringify({ ok: false, error: "nada que cambiar" }), wrote: false };
+          return { result: JSON.stringify({ ok: true, ...optOutNote }), wrote: true };
+        }
         const u = await updateCustomer(companyId, ref.id, data);
-        return { result: JSON.stringify({ ok: true, cliente: { id: u.id, name: u.name, phone: u.phone, email: u.email } }), wrote: true };
+        return { result: JSON.stringify({ ok: true, cliente: { id: u.id, name: u.name, phone: u.phone, email: u.email }, ...optOutNote }), wrote: true };
       } catch (err) {
         return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo actualizar" }), wrote: false };
       }
@@ -3531,7 +3577,7 @@ const SYSTEM_GUIDE = [
   "MAPA DEL PANEL (menú lateral). El menú está agrupado por frecuencia de uso: OPERACIÓN (siempre visible: Dashboard, Conversaciones, Comprobantes y la página del rubro), VENTAS (CRM, Campañas, Embudo, Productos), AGENTE IA (Agente IA, Flujos, Recordatorios, Pruebas) y CONFIGURACIÓN (Empresa, Pagos, WhatsApp API, Chat Web, Integraciones, Mi plan) — estos dos últimos grupos aparecen COLAPSADOS por defecto: si el usuario 'no encuentra' una página, dile que despliegue el grupo tocando su título. Centro de ayuda está fijo al PIE del menú, y Activación desaparece del menú al completar el setup:",
   "- Activación (/activacion): checklist de puesta en marcha con % de avance y botón de capacitación 1:1 por WhatsApp. Desaparece del menú al llegar al 100%.",
   "- Dashboard (/dashboard): métricas del negocio.",
-  "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto).",
+  "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}.",
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar).",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 65–90s); en números nuevos recomienda tope diario 30-70. Flujo seguro OBLIGATORIO: crear borrador → mostrar total de contactos + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible).",
   "- Campañas: además de mensajes, cada campaña puede llevar PASOS por contacto (esperar N segundos, etiquetar/quitar etiquetas, mover a una columna del CRM, pasar a modo humano) y etiquetas de contexto a cada alcanzado (crear_campana pasos / etiquetasContexto, actualizar_campana en borrador, eliminar_campana tras confirmación). Las respuestas rápidas también ejecutan ACCIONES al enviarse: mover al CRM, etiquetar/quitar etiquetas, marcar entregado y fijar el producto presentado (crear/actualizar_respuesta_rapida acciones por nombres).",

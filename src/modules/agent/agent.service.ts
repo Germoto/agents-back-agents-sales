@@ -30,6 +30,7 @@ import {
   applyReaction,
   resolveQuotedPreview,
   type ConversationState,
+  setCustomerOptOut,
 } from "./conversation.service";
 import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type WhatsappSender } from "./outbound";
 import { readReceiptImage } from "./receipt-vision";
@@ -849,6 +850,9 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
 
   // Derivación a humano
   if (ctx.state.status === "ASESOR_HUMANO") {
+    // "No me escribas más": el cliente queda NO CONTACTAR (marca durable en su
+    // ficha), se cancelan TODOS sus recordatorios y el aviso al dueño es distinto.
+    const optOut = String(ctx.state.pendingAction ?? "").includes("[NO_CONTACTAR]");
     // Garantía: el cliente NUNCA queda sin respuesta al derivar. Si el modelo no
     // escribió nada en este turno (ni texto final ni outbox), enviamos una
     // despedida por el mismo canal (web o WhatsApp) antes de pausar.
@@ -858,11 +862,24 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
         await deliver(
           sender,
           customerPhone,
-          { kind: "text", text: "Un asesor humano continuará esta conversación en breve 🙌. Cuéntanos tu consulta y te respondemos apenas estemos disponibles." },
+          {
+            kind: "text",
+            text: optOut
+              ? "Entendido, no te escribiremos más. ¡Gracias por tu tiempo! 🙏"
+              : "Un asesor humano continuará esta conversación en breve 🙌. Cuéntanos tu consulta y te respondemos apenas estemos disponibles.",
+          },
           ctx,
         );
       } catch {
         /* best-effort */
+      }
+    }
+    let cancelled = 0;
+    if (optOut) {
+      try {
+        ({ cancelled } = await setCustomerOptOut(companyId, customerId, true));
+      } catch (err) {
+        console.warn("[agent] no se pudo marcar no-contactar:", err instanceof Error ? err.message : err);
       }
     }
     // El motivo viaja en el socket para que el panel muestre el aviso (clave en
@@ -870,7 +887,7 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     await setBotPaused(companyId, conversationId, true, {
       reason: humanReasonOf(ctx.state, true),
     });
-    if (waSender) await notifyAdmin(waSender, config, customerPhone, ctx.state.pendingAction);
+    if (waSender) await notifyAdmin(waSender, config, customerPhone, ctx.state.pendingAction, { optOut, cancelled });
   }
 }
 
@@ -1413,6 +1430,10 @@ async function scheduleAutoReminders(
   // Estados terminales/humano/entregado: no programar seguimiento (el post-venta lo
   // cubren los mensajes adicionales tras la entrega del Paso 5).
   if (["ENTREGADO", "PEDIDO_REGISTRADO", "RESERVA_SOLICITADA", "ASESOR_HUMANO"].includes(status)) return;
+  // Cliente que pidió no ser contactado: nunca programar seguimientos (aunque el
+  // dueño haya reactivado el bot y el cliente vuelva a escribir).
+  const optOut = await prisma.customer.findFirst({ where: { id: customerId, companyId }, select: { optOutAt: true } });
+  if (optOut?.optOutAt) return;
 
   // Abandono de carrito y dejado en visto son EXCLUYENTES: un mismo silencio no debe
   // disparar dos secuencias que se encimarían (parece spam). Si hay carrito/compra
@@ -1456,14 +1477,32 @@ async function notifyAdmin(
   config: Awaited<ReturnType<typeof buildBotConfig>>,
   customerPhone: string,
   reason: unknown,
+  opts: { optOut?: boolean; cancelled?: number } = {},
 ): Promise<void> {
   const adminPhone = config.payment.notification?.whatsappPhone || config.business.adminPhone;
   if (!adminPhone) return;
   const to = adminPhone.replace(/\D/g, "");
   const num = customerPhone.replace(/\D/g, "");
+  const reasonText = String(reason ?? "—");
+  // "No me escribas más": aviso propio (no hay nada que atender; sí que respetar).
+  if (opts.optOut) {
+    const n = opts.cancelled ?? 0;
+    try {
+      await sendText(
+        sender,
+        to,
+        `🚫 El cliente (${customerPhone}) pidió que NO le escriban más.\n` +
+          `Motivo: ${reasonText.replace(/^HUMAN(\[[A-Z_]+\])?:\s*/, "") || "—"}\n\n` +
+          `Se pausó el bot, se cancelaron ${n} recordatorio${n === 1 ? "" : "s"} pendiente${n === 1 ? "" : "s"} y queda EXCLUIDO de campañas y seguimientos automáticos (aunque reactives el bot).\n` +
+          `Si fue un malentendido, quítale la marca "No contactar" en Conversaciones.`,
+      );
+    } catch {
+      /* best-effort */
+    }
+    return;
+  }
   // Negociación de precio: encabezado propio para que el dueño sepa que hay
   // una venta que cerrar (no un problema que resolver).
-  const reasonText = String(reason ?? "—");
   const isNegotiation = reasonText.includes("[NEGOCIACION]");
   const header = isNegotiation
     ? `💬 Negociación de precio: el cliente (${customerPhone}) pide una rebaja.`
@@ -1473,7 +1512,7 @@ async function notifyAdmin(
       sender,
       to,
       `${header}\n` +
-        `Motivo: ${reasonText.replace(/^HUMAN(\[[A-Z]+\])?:\s*/, "")}\n\n` +
+        `Motivo: ${reasonText.replace(/^HUMAN(\[[A-Z_]+\])?:\s*/, "")}\n\n` +
         `El bot quedó pausado para este cliente. Para atenderlo tú:\n` +
         `• Responder: *${num} tu mensaje*\n` +
         `• Reactivar el bot: *BOT ${num}*\n` +

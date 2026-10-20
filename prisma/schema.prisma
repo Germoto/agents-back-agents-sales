@@ -774,6 +774,9 @@ model Customer {
   name              String?
   email             String?
   status            String
+  // El cliente pidió que NO le escriban más (opt-out de WhatsApp): campañas y
+  // recordatorios automáticos lo excluyen aunque se reactive el bot. null = contactable.
+  optOutAt          DateTime?
   // Identidad de WhatsApp (API lead de SMS Tools): contacto username con
   // número oculto (LID) y foto de perfil persistida en /uploads/avatars.
   // El detalle (pushName, isBusiness, about, pictureId…) vive en metadata.waContact.
@@ -818,6 +821,7 @@ model Customer {
   @@unique([companyId, phone])
   @@index([companyId, lastInteractionAt])
   @@index([companyId, adSourceId])
+  @@index([companyId, optOutAt])
 }
 
 // Catálogo de anuncios del tenant: mapea uno o VARIOS identificadores del
@@ -897,6 +901,8 @@ model Conversation {
   state         Json                  @default("{}")
   lastInboundId String? // id del último mensaje de SMS Tools (idempotencia)
   botPaused     Boolean               @default(false)
+  // Chat fijado en el panel de Conversaciones (orden: fijado más reciente primero).
+  pinnedAt      DateTime?
   openedAt      DateTime              @default(now())
   lastMessageAt DateTime              @default(now())
   closedAt      DateTime?
@@ -909,6 +915,7 @@ model Conversation {
 
   @@unique([companyId, customerId, channel])
   @@index([companyId, lastMessageAt])
+  @@index([companyId, pinnedAt])
 }
 
 // Categoría de respuestas rápidas (estilo etiquetas de Google Keep, por tenant).

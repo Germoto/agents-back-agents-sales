@@ -57,7 +57,8 @@ export async function cancelPendingReminders(
   companyId: string,
   customerId: string,
   types?: ScheduledMessageType[],
-): Promise<void> {
+  opts: { includeManual?: boolean; reason?: string } = {},
+): Promise<number> {
   const rows = await prisma.scheduledMessage.findMany({
     where: {
       companyId,
@@ -69,12 +70,13 @@ export async function cancelPendingReminders(
   });
   const isManual = (m: unknown) =>
     !!m && typeof m === "object" && !Array.isArray(m) && (m as Record<string, unknown>).manual === true;
-  const ids = rows.filter((r) => !isManual(r.metadata)).map((r) => r.id);
-  if (!ids.length) return;
+  const ids = rows.filter((r) => opts.includeManual || !isManual(r.metadata)).map((r) => r.id);
+  if (!ids.length) return 0;
   await prisma.scheduledMessage.updateMany({
     where: { id: { in: ids } },
-    data: { status: ScheduledMessageStatus.CANCELLED },
+    data: { status: ScheduledMessageStatus.CANCELLED, ...(opts.reason ? { failureReason: opts.reason } : {}) },
   });
+  return ids.length;
 }
 
 /**
