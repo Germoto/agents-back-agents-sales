@@ -64,6 +64,11 @@ export interface ConversationState {
   mpAmount?: number | null;
   /** Última entrega del acceso por correo (entregar_por_correo). */
   lastEmailDeliveryAt?: string | null;
+  /** Correo al que se hizo la última entrega (evita re-detectar el mismo correo del historial como pedido nuevo). */
+  lastEmailDeliveredTo?: string | null;
+  /** Correo que el cliente escribió para recibir su acceso y que aún no se envió
+   *  (p. ej. lo mandó junto al comprobante y el pago se aprobó en 2º plano). */
+  pendingDeliveryEmail?: string | null;
   [key: string]: unknown;
 }
 

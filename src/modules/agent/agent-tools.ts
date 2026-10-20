@@ -2151,13 +2151,26 @@ export async function executeTool(
           if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
           return JSON.stringify({ ok: true, approved: true, note: "El pago ya estaba confirmado. NO vuelvas a entregar ni a validar. Ya le avisé al cliente; deja tu texto final vacío." });
         }
-        return JSON.stringify({ ok: true, approved: true, note: "Pago aprobado. Ahora entrega el producto con entregar_producto." });
+        return JSON.stringify({
+          ok: true,
+          approved: true,
+          note: ctx.state.pendingDeliveryEmail
+            ? `Pago aprobado. Entrega el producto con entregar_producto y LUEGO llama entregar_por_correo con email "${ctx.state.pendingDeliveryEmail}" (el cliente pidió recibirlo también por correo).`
+            : "Pago aprobado. Ahora entrega el producto con entregar_producto.",
+        });
       }
 
       // TIMING (hay un dato pero el comprobante aún no entró): reintento en 2º plano
       // a +60s; si no aparece, el worker deriva a un asesor. Mensaje tranquilizador.
       if (result.kind === "timing") {
-        if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
+        if (result.customerMessage) {
+          // Si dejó su correo, que sepa que también le llegará ahí apenas se confirme.
+          const pendingEmail = ctx.state.pendingDeliveryEmail;
+          ctx.outbox.push({
+            kind: "text",
+            text: pendingEmail ? `${result.customerMessage} Apenas lo confirme, te envío el acceso también a ${pendingEmail} ✉️` : result.customerMessage,
+          });
+        }
         const recheckedRecently =
           ctx.state.pendingRecheckAt &&
           Date.now() - new Date(ctx.state.pendingRecheckAt).getTime() < 3 * 60 * 1000;
@@ -2342,7 +2355,8 @@ export async function executeTool(
         });
       }
       const rawEmail = typeof args.email === "string" ? args.email.trim() : "";
-      let email = rawEmail;
+      // Prioridad: lo que escribió el cliente ahora > correo pendiente del estado > ficha.
+      let email = rawEmail || (ctx.state.pendingDeliveryEmail ?? "");
       if (!email) {
         const customer = await prisma.customer.findFirst({
           where: { id: ctx.customerId, companyId: ctx.companyId },
@@ -2373,6 +2387,8 @@ export async function executeTool(
           trigger: "agent",
         });
         ctx.state.lastEmailDeliveryAt = new Date().toISOString();
+        ctx.state.lastEmailDeliveredTo = r.email;
+        ctx.state.pendingDeliveryEmail = null;
         return JSON.stringify({
           ok: true,
           email: r.email,
@@ -2395,6 +2411,9 @@ export async function executeTool(
             ALREADY_SENT: "Ese correo ya se envió hace un momento: dile que revise la bandeja y spam; NO lo reenvíes.",
             SEND_FAILED: "Falló el envío del correo: dile que hubo un inconveniente con el correo y que su acceso está disponible aquí en WhatsApp (ya avisé al equipo).",
           };
+          if (err.code === "ALREADY_SENT" || err.code === "NO_ELIGIBLE" || err.code === "INVALID_EMAIL" || err.code === "LIMIT") {
+            ctx.state.pendingDeliveryEmail = null;
+          }
           return JSON.stringify({ ok: false, error: err.code, ...err.extra, nota: notes[err.code] });
         }
         throw err;

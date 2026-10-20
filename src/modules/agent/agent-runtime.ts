@@ -7,8 +7,10 @@
 import { chatCompletion, type ChatMessage } from "../../lib/openai";
 import { buildSystemPrompt } from "./agent-prompt";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
-import { toolDefinitionsFor, executeTool, type TurnContext } from "./agent-tools";
+import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
+import { extractEmail } from "../../lib/email";
+import { prisma } from "../../lib/prisma";
 
 const MAX_ITERATIONS = 6;
 const FALLBACK_TEXT =
@@ -88,6 +90,49 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     );
   }
 
+  // Entrega por correo determinista: si el cliente escribió un correo (solo o
+  // junto al comprobante: "Enviar a: juan@gmail.com"), eso ES pedir el acceso
+  // por email. No puede depender del modelo (pasó en prod: el correo llegó con
+  // la captura, el pago se aprobó en 2º plano y el correo nunca salió). Se
+  // guarda en el estado (pendingDeliveryEmail) y en la ficha del cliente; si el
+  // pago YA está aprobado se fuerza entregar_por_correo en la 1ª iteración; si
+  // el comprobante viene en el mismo lote, el pendiente lo cumple la aprobación.
+  let forceEmailDelivery = false;
+  const inboundEmail = inboundText && emailDeliveryAvailable(ctx.config) ? extractEmail(inboundText) : null;
+  // El historial "trailing" puede seguir incluyendo el mensaje del correo si el
+  // bot cerró el turno sin texto: si ya se entregó a ese correo y no hay un
+  // comprobante nuevo desde entonces, no es un pedido nuevo.
+  const emailAlreadyServed =
+    !!inboundEmail &&
+    ctx.state.lastEmailDeliveredTo === inboundEmail &&
+    !!ctx.state.lastEmailDeliveryAt &&
+    !(ctx.state.lastReceipt?.at && ctx.state.lastReceipt.at > ctx.state.lastEmailDeliveryAt);
+  if (inboundEmail && !emailAlreadyServed) {
+    ctx.state.pendingDeliveryEmail = inboundEmail;
+    if (!ctx.simulate) {
+      await prisma.customer
+        .updateMany({ where: { id: ctx.customerId, companyId: ctx.companyId }, data: { email: inboundEmail } })
+        .catch(() => null);
+    }
+    const paid =
+      ctx.state.status === "PAGADO" ||
+      ctx.state.status === "ENTREGADO" ||
+      (Array.isArray(ctx.state.purchasedProductIds) && ctx.state.purchasedProductIds.length > 0);
+    if (paid && !forceValidation && !forcePresentation) {
+      forceEmailDelivery = true;
+      console.log(`[agent] forzando entregar_por_correo (correo ${inboundEmail} con pago aprobado) convo=${ctx.conversationId}`);
+    } else {
+      messages.push({
+        role: "system",
+        content:
+          `El cliente escribió su correo (${inboundEmail}) para recibir el acceso: el sistema lo guardó como correo pendiente. ` +
+          (forceValidation
+            ? `Tras validar y entregar en este turno, llama entregar_por_correo con email "${inboundEmail}". Si el pago queda en validación, dile en UNA línea que apenas se confirme le llega también a ese correo (el sistema lo envía solo).`
+            : `Si su pago ya está aprobado, llama entregar_por_correo con email "${inboundEmail}". Si aún no pagó, NO envíes nada: dile que apenas confirmes su pago se lo envías también a ese correo y sigue el flujo de pago normal.`),
+      });
+    }
+  }
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await chatCompletion({
       apiKey,
@@ -101,7 +146,9 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
           ? { type: "function", function: { name: "validar_pago" } }
           : i === 0 && forcePresentation
             ? { type: "function", function: { name: "enviar_ficha" } }
-            : "auto",
+            : i === 0 && forceEmailDelivery
+              ? { type: "function", function: { name: "entregar_por_correo" } }
+              : "auto",
     });
 
     if (res.toolCalls.length) {

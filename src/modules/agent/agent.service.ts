@@ -33,6 +33,7 @@ import {
 } from "./conversation.service";
 import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type WhatsappSender } from "./outbound";
 import { readReceiptImage } from "./receipt-vision";
+import { fulfillPendingDeliveryEmail } from "./email-delivery";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
 import { alertAiProviderFailure, notifyAiProviderRecovered } from "./ai-alerts";
@@ -972,6 +973,8 @@ export async function recheckPayment(msg: {
         },
         gapMsFor(config.business),
       );
+      // Correo pendiente (el cliente lo dejó junto al comprobante): cumplirlo ahora.
+      const emailNote = await fulfillPendingEmailAndNotify(sender, to, { companyId: msg.companyId, customerId: msg.customerId, state });
       await saveState(conversationId, state as ConversationState);
       // Aviso al dueño por cada venta automática (entrega por inventario).
       if (result.autoSales?.length && waSender) {
@@ -1001,7 +1004,17 @@ export async function recheckPayment(msg: {
               ` El chat quedó en atención humana (Agente IA → Atención humana).`
             : `✅ Venta entregada a ${md.customerPhone ?? to}. Pasé el chat a atención humana automáticamente (configurado en el producto). Lo ves en Agente IA → Atención humana.`;
           try {
-            await sendText(waSender!, adminPhone, adminMsg);
+            await sendText(waSender!, adminPhone, adminMsg + emailNote);
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+      if (emailNote && !result.shouldPauseHuman && waSender) {
+        const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
+        if (adminPhone) {
+          try {
+            await sendText(waSender, adminPhone, `✉️ Venta de ${md.customerPhone ?? to}:${emailNote}`);
           } catch {
             /* best-effort */
           }
@@ -1037,7 +1050,8 @@ export async function recheckPayment(msg: {
     if (adminPhone) {
       const caption =
         `🔔 Pago por validar de ${md.customerPhone ?? to}. No se encontró el comprobante automáticamente tras 1 min. ` +
-        `Revísalo y confírmalo desde Comprobantes/Conversaciones. El bot quedó en atención humana para este cliente.`;
+        `Revísalo y confírmalo desde Comprobantes/Conversaciones. El bot quedó en atención humana para este cliente.` +
+        (state.pendingDeliveryEmail ? ` El cliente pidió recibir el acceso también por correo (${state.pendingDeliveryEmail}): al aprobar, envíaselo desde Comprobantes.` : "");
       try {
         if (md.receiptMediaUrl) await sendMedia(waSender!, adminPhone, "image", md.receiptMediaUrl, caption);
         else await sendText(waSender!, adminPhone, caption);
@@ -1126,12 +1140,15 @@ export async function handleExternalPaymentApproved(opts: {
         gapMsFor(config.business),
       );
     }
+    const delivered = "delivered" in result ? result.delivered : undefined;
+    const emailNote = delivered?.length
+      ? await fulfillPendingEmailAndNotify(sender, to, { companyId: opts.companyId, customerId: convo.customerId, state })
+      : "";
     await saveState(opts.conversationId, state as ConversationState);
 
     const adminPhone = waSender
       ? (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "")
       : "";
-    const delivered = "delivered" in result ? result.delivered : undefined;
     if (adminPhone) {
       try {
         await sendText(
@@ -1139,7 +1156,8 @@ export async function handleExternalPaymentApproved(opts: {
           adminPhone,
           `💳 Pago por ${provider} confirmado: *${opts.amountText}* de ${isWeb ? "un cliente del chat web" : convo.customer.phone}` +
             (opts.payerName ? ` (${opts.payerName})` : "") +
-            (delivered?.length ? `. Producto entregado automáticamente ✅` : ". Coordina la entrega con el cliente."),
+            (delivered?.length ? `. Producto entregado automáticamente ✅` : ". Coordina la entrega con el cliente.") +
+            emailNote,
         );
       } catch {
         /* best-effort */
@@ -1405,6 +1423,32 @@ async function scheduleAutoReminders(
   } else {
     await scheduleSeq("leftOnRead", ScheduledMessageType.LEFT_ON_READ);
   }
+}
+
+/**
+ * Tras una entrega automática fuera del turno del modelo: si el cliente dejó
+ * un correo pendiente, se lo envía y le avisa por el chat. Devuelve una nota
+ * corta para anexar al aviso del dueño ("" si no había correo pendiente).
+ */
+async function fulfillPendingEmailAndNotify(
+  sender: WhatsappSender,
+  to: string,
+  opts: { companyId: string; customerId: string; state: ConversationState },
+): Promise<string> {
+  if (!opts.state.pendingDeliveryEmail) return "";
+  const r = await fulfillPendingDeliveryEmail(opts);
+  if (r.sent) {
+    if (to) {
+      try {
+        await sendText(sender, to, `También te envié el acceso a tu correo ${r.email} ✉️ Si no lo ves, revisa spam o promociones.`);
+      } catch {
+        /* best-effort */
+      }
+    }
+    return ` Acceso enviado también al correo ${r.email} ✉️`;
+  }
+  if (r.code === "ALREADY_SENT") return "";
+  return ` ⚠️ Pidió el acceso también al correo ${r.email ?? "—"} y no se pudo enviar (${r.code ?? "error"}): envíaselo desde Comprobantes.`;
 }
 
 async function notifyAdmin(

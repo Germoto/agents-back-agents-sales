@@ -109,6 +109,37 @@ export async function findEmailDeliverableReceipt(companyId: string, customerId:
   return { receipt, eligible, skipped };
 }
 
+/**
+ * Cumple el correo PENDIENTE del estado (state.pendingDeliveryEmail) tras una
+ * aprobación fuera del turno del modelo (recheck en 2º plano, webhook de
+ * Mercado Pago). Best-effort: nunca lanza. Si envía, limpia el pendiente y
+ * marca lastEmailDeliveryAt; si falla, deja el pendiente (el agente lo
+ * reintenta cuando el cliente vuelva a escribir) y devuelve el código.
+ */
+export async function fulfillPendingDeliveryEmail(opts: {
+  companyId: string;
+  customerId: string;
+  state: { pendingDeliveryEmail?: string | null; lastEmailDeliveryAt?: string | null; lastEmailDeliveredTo?: string | null; [key: string]: unknown };
+}): Promise<{ sent: true; email: string; products: string[] } | { sent: false; email: string | null; code: string | null }> {
+  const email = normalizeEmail(opts.state.pendingDeliveryEmail);
+  if (!email) return { sent: false, email: null, code: null };
+  try {
+    const r = await sendDigitalDeliveryEmail({ companyId: opts.companyId, customerId: opts.customerId, email, trigger: "agent" });
+    opts.state.pendingDeliveryEmail = null;
+    opts.state.lastEmailDeliveryAt = new Date().toISOString();
+    opts.state.lastEmailDeliveredTo = r.email;
+    return { sent: true, email: r.email, products: r.products };
+  } catch (err) {
+    const code = err instanceof EmailDeliveryError ? err.code : "SEND_FAILED";
+    // Ya enviado / sin producto elegible: no tiene sentido mantener el pendiente.
+    if (code === "ALREADY_SENT" || code === "NO_ELIGIBLE" || code === "INVALID_EMAIL" || code === "LIMIT") {
+      opts.state.pendingDeliveryEmail = null;
+    }
+    console.warn(`[email-delivery] correo pendiente no enviado (${code}) customer=${opts.customerId}`);
+    return { sent: false, email, code };
+  }
+}
+
 export async function sendDigitalDeliveryEmail(input: SendDigitalDeliveryEmailInput): Promise<SendDigitalDeliveryEmailResult> {
   const email = normalizeEmail(input.email);
   if (!email) throw new EmailDeliveryError("INVALID_EMAIL", "El correo no tiene un formato válido.");

@@ -17,6 +17,23 @@ export function isValidEmail(value: unknown): boolean {
   return normalizeEmail(value) !== null;
 }
 
+const EMAIL_IN_TEXT_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+
+/**
+ * Extrae el PRIMER correo que aparezca dentro de un texto libre (ej. "Enviar a:
+ * juan@gmail.com", "mi correo es juan@gmail.com porfa"). Devuelve null si no hay.
+ */
+export function extractEmail(text: unknown): string | null {
+  if (typeof text !== "string" || !text) return null;
+  const m = text.match(EMAIL_IN_TEXT_RE);
+  if (!m) return null;
+  for (const cand of m) {
+    const n = normalizeEmail(cand.replace(/[.,;:)]+$/, ""));
+    if (n) return n;
+  }
+  return null;
+}
+
 /** Enmascara para logs: "juan.perez@gmail.com" → "j***@gmail.com". */
 export function maskEmail(email: string): string {
   const at = email.indexOf("@");
