@@ -496,12 +496,13 @@ export async function assignAndBuildDelivery(
 
   // Invitación a la tienda (por producto): el PRIMER producto a entregar que la tenga
   // activa define el texto. Solo si la tienda está viva; si no, cierre de siempre.
-  // Con invitación, NO se ofrece cross-sell ni catálogo (un solo cierre).
+  // Con invitación, NO se ofrece cross-sell ni catálogo (un solo cierre). Se envía
+  // AUNQUE el producto pase a humano tras la venta (es solo un link, no abre diálogo).
   const storeInviteProduct = productIds
     .map((id) => find(id))
     .find((p) => p && p.productType === "digital" && p.digitalDelivery?.storeInviteEnabled && (p.digitalDelivery as { assignmentMode?: string }).assignmentMode !== "MANUAL");
   let storeInviteUrl: string | null = null;
-  if (storeInviteProduct && !shouldPauseHuman) {
+  if (storeInviteProduct) {
     storeInviteUrl = await publicStoreUrlIfLive(opts.companyId, { source: "whatsapp", campaign: "entrega" }).catch(() => null);
     if (!storeInviteUrl) {
       console.warn(`[agent] invitación a la tienda activa en "${storeInviteProduct.name}" pero la tienda no está publicada (slug/activación/plan): se omite`);
@@ -603,7 +604,7 @@ export async function assignAndBuildDelivery(
   }
 
   // Invitación a la tienda: ÚLTIMO mensaje (el caller la envía después de todo lo demás).
-  if (storeInviteUrl && delivered.length && !shouldPauseHuman) {
+  if (storeInviteUrl && delivered.length) {
     const tpl = (storeInviteProduct?.digitalDelivery?.storeInviteText ?? "").trim() || DEFAULT_STORE_INVITE_TEXT;
     const text = tpl.includes("{tienda}") ? tpl.split("{tienda}").join(storeInviteUrl) : `${tpl}\n${storeInviteUrl}`;
     storeInvite = { kind: "text", text };
@@ -2368,7 +2369,8 @@ export async function executeTool(
       const notaEntrega = needsHandoff
         ? "Le confirmé el pago y avisé que un asesor le enviará el acceso pendiente en breve. El chat pasa a atención humana: NO ofrezcas nada más ni agregues cierre. Deja tu texto final VACÍO."
         : shouldPauseHuman
-        ? "Ya entregué el acceso y los mensajes configurados. Este producto pasa a atención humana tras la venta: NO ofrezcas más productos ni el catálogo, NO agregues cierre ni 'gracias por tu compra'. Deja tu texto final VACÍO; un asesor humano continúa desde aquí."
+        ? (offeredStore ? "Ya entregué el acceso y los mensajes configurados, y como ÚLTIMO mensaje invité al cliente a visitar la tienda web con su link. " : "Ya entregué el acceso y los mensajes configurados. ") +
+          "Este producto pasa a atención humana tras la venta: NO ofrezcas más productos ni el catálogo, NO repitas ni inventes el link, NO agregues cierre ni 'gracias por tu compra'. Deja tu texto final VACÍO; un asesor humano continúa desde aquí."
         : offeredCrossSell
         ? "Ya entregué el acceso, los mensajes adicionales y al final ofrecí otro producto con una pregunta abierta ('¿Te cuento más?'). NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO para que la conversación quede ABIERTA en esa oferta y el cliente pueda responder."
         : offeredStore
