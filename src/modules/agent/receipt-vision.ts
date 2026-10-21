@@ -6,7 +6,8 @@
  * (suele aparecer como "código: 123"). No se infiere el nombre del pagador.
  */
 
-import { parseJsonLoose, prepareImageUrl } from "../../lib/ai-providers";
+import { chatBodyParams, parseJsonLoose, prepareImageUrl } from "../../lib/ai-providers";
+import { postChatCompletions } from "../../lib/openai";
 
 export interface ReceiptData {
   amountText: string | null;
@@ -73,14 +74,11 @@ export async function readReceiptImage(
     // Inline SIEMPRE (data-URI): el comprobante es un upload nuestro y dejar que
     // el proveedor lo descargue por HTTP causa "Timeout while downloading".
     const finalUrl = await prepareImageUrl(imageUrl, { inlineImages: true });
-    const base = (ai.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
-    const response = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${ai.apiKey}` },
-      body: JSON.stringify({
+    const response = await postChatCompletions(ai.baseUrl, ai.apiKey, {
         model: ai.model,
-        temperature: 0,
-        max_tokens: 300,
+        // temperature/max_tokens/thinking según el modelo (Claude 5.x no admite
+        // temperature y piensa por defecto); OpenAI/Gemini: { temperature: 0, max_tokens: 300 }.
+        ...chatBodyParams(ai.baseUrl, ai.model, { temperature: 0, maxTokens: 300 }),
         ...(useJsonSchema ? { response_format: SCHEMA } : {}),
         messages: [
           {
@@ -97,7 +95,6 @@ export async function readReceiptImage(
             ],
           },
         ],
-      }),
     });
     if (!response.ok) {
       console.warn(`[receipt-vision] proveedor IA ${response.status}`);

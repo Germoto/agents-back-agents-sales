@@ -33,7 +33,7 @@ export async function flowAiSuggestController(req: Request, res: Response) {
   const companyId = req.user!.companyId;
 
   const [agentConfig, company] = await Promise.all([
-    prisma.agentConfig.findUnique({ where: { companyId }, select: { openaiApiKey: true, openaiModel: true } }),
+    prisma.agentConfig.findUnique({ where: { companyId }, select: { aiProvider: true, openaiApiKey: true, openaiModel: true } }),
     prisma.company.findUnique({ where: { id: companyId }, select: { name: true, vertical: true } }),
   ]);
   if (!agentConfig?.openaiApiKey) {

@@ -11,6 +11,11 @@
  * - inlineImages: si las imágenes deben inlinearse como data-URI base64 (no
  *   todos descargan URLs públicas).
  * - maxTemperature: Anthropic acepta máximo 1 (OpenAI/Gemini llegan a 2).
+ * Además, los modelos Claude 4.7+ (Haiku/Sonnet/Opus 5.5…) tienen reglas propias
+ * en esa capa (ver claudeModelCaps): rechazan temperature ≠ 1, algunos rechazan
+ * tool_choice forzado y traen el pensamiento activo por defecto. Esas reglas se
+ * aplican SOLO cuando la base URL es la de Anthropic y el modelo es 4.7+: para
+ * OpenAI, Gemini y los Claude anteriores el cuerpo de la petición no cambia.
  *
  * Nota de columnas: AgentConfig.openaiModel/openaiApiKey guardan el modelo y
  * la key DEL PROVEEDOR ELEGIDO (nombre legado, sin rename de columnas).
@@ -50,9 +55,9 @@ export const AI_PROVIDERS: Record<AiProviderId, AiProviderInfo> = {
     label: "Anthropic (Claude)",
     baseUrl: "https://api.anthropic.com/v1",
     models: [
-      { id: "claude-haiku-4-5", hint: "Rápido y económico" },
-      { id: "claude-sonnet-4-5", hint: "Alta calidad para ventas" },
-      { id: "claude-sonnet-5", hint: "Máxima calidad (última generación)" },
+      { id: "claude-haiku-5-5", hint: "Rápido y económico (recomendado)" },
+      { id: "claude-sonnet-5-5", hint: "Alta calidad para ventas" },
+      { id: "claude-opus-5-5", hint: "Máxima calidad: más caro y lento" },
     ],
     caps: { jsonSchema: false, inlineImages: true, maxTemperature: 1 },
   },
@@ -68,6 +73,60 @@ export const AI_PROVIDERS: Record<AiProviderId, AiProviderInfo> = {
     caps: { jsonSchema: true, inlineImages: true, maxTemperature: 2 },
   },
 };
+
+/** Particularidades por modelo en la capa OpenAI-compatible de Anthropic. */
+export interface ClaudeModelCaps {
+  /** false = el modelo devuelve 400 con temperature/top_p distintos del default (Claude 4.7+). */
+  sampling: boolean;
+  /** false = tool_choice forzado devuelve 400 (Opus 5.5, Sonnet 5.5, Fable, Mythos). */
+  forcedToolChoice: boolean;
+  /** Cómo apagar el pensamiento (activo por defecto en Claude 5.x); null = no se manda nada. */
+  thinkingOff: "disabled" | "between_tools" | null;
+}
+
+const NO_MODEL_CHANGES: ClaudeModelCaps = { sampling: true, forcedToolChoice: true, thinkingOff: null };
+
+/** Con el pensamiento activo (no se puede apagar) el thinking consume max_tokens
+ *  y la capa compatible no lo devuelve: piso para que no se coma la respuesta. */
+export const THINKING_MAX_TOKENS_FLOOR = 8000;
+
+/**
+ * Reglas de la capa OpenAI-compatible de Anthropic según el modelo. Para
+ * cualquier base URL que no sea la de Anthropic, o para Claude 3.x / 4.0-4.6
+ * (aceptan temperature y forzado, y no piensan por defecto), devuelve "sin
+ * cambios". Un ID desconocido bajo Anthropic se trata como modelo nuevo.
+ */
+export function claudeModelCaps(baseUrl: string | null | undefined, model: string): ClaudeModelCaps {
+  if (!baseUrl || !baseUrl.includes("api.anthropic.com")) return NO_MODEL_CHANGES;
+  const id = (model ?? "").trim().toLowerCase();
+  if (/^claude-(2|3)/.test(id) || /^claude-(haiku|sonnet|opus)-4-[0-6](\D|$)/.test(id)) return NO_MODEL_CHANGES;
+  const noForced = /^claude-(opus-5-5|sonnet-5-5|fable|mythos)/.test(id);
+  const thinkingOff: ClaudeModelCaps["thinkingOff"] = /^claude-sonnet-5-5/.test(id)
+    ? "between_tools"
+    : /^claude-(opus-5-5|fable|mythos)/.test(id)
+      ? null
+      : "disabled";
+  return { sampling: false, forcedToolChoice: !noForced, thinkingOff };
+}
+
+/**
+ * Fragmento del cuerpo chat/completions (temperature, max_tokens, thinking)
+ * ajustado al modelo. Para OpenAI/Gemini/Claude legacy devuelve exactamente
+ * `{ temperature, max_tokens }` como hasta ahora.
+ */
+export function chatBodyParams(
+  baseUrl: string | null | undefined,
+  model: string,
+  p: { temperature: number; maxTokens: number },
+): { temperature?: number; max_tokens: number; thinking?: { type: "disabled" | "between_tools" } } {
+  const caps = claudeModelCaps(baseUrl, model);
+  const thinkingOn = !caps.sampling && caps.thinkingOff === null;
+  return {
+    ...(caps.sampling ? { temperature: p.temperature } : {}),
+    max_tokens: thinkingOn ? Math.max(p.maxTokens, THINKING_MAX_TOKENS_FLOOR) : p.maxTokens,
+    ...(caps.thinkingOff ? { thinking: { type: caps.thinkingOff } } : {}),
+  };
+}
 
 export function providerOf(id: string | null | undefined): AiProviderInfo {
   return AI_PROVIDERS[(id ?? "OPENAI") as AiProviderId] ?? AI_PROVIDERS.OPENAI;

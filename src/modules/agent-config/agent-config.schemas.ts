@@ -78,7 +78,7 @@ export const coreAgentConfigSchema = z.object({
   openaiModel: z.string().min(1).default("gpt-4o-mini"),
   // Opcional: vacío/ausente conserva la key ya guardada (nunca se reenvía desde el panel).
   openaiApiKey: z.string().trim().max(200).optional(),
-  // Key de OpenAI SOLO para audios (Whisper) cuando aiProvider != OPENAI. Misma semántica.
+  // Key de OpenAI para audios (Whisper) e imágenes (gpt-image) cuando aiProvider != OPENAI. Misma semántica.
   transcriptionApiKey: z.string().trim().max(200).optional(),
   temperature: z.coerce.number().min(0).max(2).default(0.25),
   basePrompt: z.string().min(1),

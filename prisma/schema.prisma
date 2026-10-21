@@ -272,8 +272,8 @@ model AgentConfig {
   aiProvider           String   @default("OPENAI")
   openaiModel          String   @default("gpt-4o-mini")
   openaiApiKey         String?
-  // Key de OpenAI SOLO para transcribir notas de voz (Whisper) cuando
-  // aiProvider != OPENAI. Cifrada como openaiApiKey.
+  // Key de OpenAI para transcribir notas de voz (Whisper) y generar imágenes
+  // del copiloto (gpt-image) cuando aiProvider != OPENAI. Cifrada como openaiApiKey.
   transcriptionApiKey  String?
   temperature          Decimal  @default(0.25) @db.Decimal(4, 2)
   basePrompt           String

@@ -2,7 +2,8 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
-import { parseJsonLoose, resolveAiSettings } from "../../lib/ai-providers";
+import { chatBodyParams, parseJsonLoose, resolveAiSettings } from "../../lib/ai-providers";
+import { postChatCompletions } from "../../lib/openai";
 
 export const aiSuggestBodySchema = z.object({
   field: z.enum([
@@ -170,17 +171,11 @@ async function callOpenAI(opts: {
   schemaName: string;
 }): Promise<unknown> {
   const useJsonSchema = opts.jsonSchema !== false;
-  const base = (opts.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
-  const response = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${opts.apiKey}`,
-    },
-    body: JSON.stringify({
+  const response = await postChatCompletions(opts.baseUrl, opts.apiKey, {
       model: opts.model,
-      temperature: 0.7,
-      max_tokens: 800,
+      // Según el modelo (Claude 5.x sin temperature y con margen para el
+      // pensamiento); OpenAI/Gemini: { temperature: 0.7, max_tokens: 800 }.
+      ...chatBodyParams(opts.baseUrl, opts.model, { temperature: 0.7, maxTokens: 800 }),
       messages: [
         {
           role: "system",
@@ -202,7 +197,6 @@ async function callOpenAI(opts: {
             },
           }
         : {}),
-    }),
   });
 
   if (!response.ok) {
