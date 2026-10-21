@@ -120,6 +120,8 @@ export const productBodySchema = z.object({
     emailEnabled: z.boolean().optional().default(false),
     emailSubject: z.string().trim().max(200).nullable().optional(),
     emailBody: z.string().trim().max(8000).nullable().optional(),
+    storeInviteEnabled: z.boolean().optional().default(false),
+    storeInviteText: z.string().trim().max(600).optional().default(""),
     // Acciones al cerrar la venta: mover al cliente a una pestaña del CRM y/o etiquetar.
     onSaleCrmId: z.string().uuid().nullable().optional(),
     onSaleCrmColumnId: z.string().uuid().nullable().optional(),

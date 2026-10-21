@@ -65,6 +65,8 @@ type ProductPayload = {
     emailEnabled?: boolean;
     emailSubject?: string | null;
     emailBody?: string | null;
+    storeInviteEnabled?: boolean;
+    storeInviteText?: string;
     followupMessages?: { message?: string; mediaUrl?: string; mediaType?: string }[];
     followupMessage?: string;
     followupMediaUrl?: string;
@@ -315,6 +317,8 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
       emailEnabled: payload.digitalDelivery.emailEnabled ?? false,
       emailSubject: payload.digitalDelivery.emailSubject?.trim() || null,
       emailBody: payload.digitalDelivery.emailBody?.trim() || null,
+      storeInviteEnabled: payload.digitalDelivery.storeInviteEnabled ?? false,
+      storeInviteText: payload.digitalDelivery.storeInviteText?.trim() ?? "",
       onSaleCrmId: payload.digitalDelivery.onSaleCrmId ?? null,
       onSaleCrmColumnId: payload.digitalDelivery.onSaleCrmColumnId ?? null,
       onSaleTagIds: payload.digitalDelivery.onSaleTagIds ?? [],

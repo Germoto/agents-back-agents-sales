@@ -29,6 +29,7 @@ import { decryptCredential } from "../../lib/credentials-crypto";
 import { composePaymentMethodsMessage } from "./payment-methods";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
+import { publicStoreUrlIfLive } from "../storefront/storefront-public-url";
 import {
   matchPayments,
   claimPayment,
@@ -452,8 +453,14 @@ export interface AssignedDeliveryResult {
   autoSales: AutoSaleInfo[];  // ventas entregadas por inventario (POOL_AUTO real) → aviso al dueño
   offeredCrossSellId: string | null;
   offeredCatalog: boolean;
+  /** Invitación a la tienda web (último mensaje): va APARTE del outbox para que cada
+   *  caller la mande al final de todo (tras el aviso de correo, etc.). */
+  storeInvite: OutboxMessage | null;
+  offeredStore: boolean;
   shouldPauseHuman: boolean;
 }
+
+export const DEFAULT_STORE_INVITE_TEXT = "🛍️ Tenemos más productos que te pueden interesar. Visita nuestra tienda: {tienda}";
 
 /**
  * Arma la entrega de los productos pagados según el modo por producto:
@@ -483,7 +490,24 @@ export async function assignAndBuildDelivery(
   const autoSales: AutoSaleInfo[] = [];
   let offeredCrossSellId: string | null = null;
   let offeredCatalog = false;
+  let storeInvite: OutboxMessage | null = null;
+  let offeredStore = false;
   const shouldPauseHuman = productIds.some((id) => (find(id) as { pauseHumanAfterSale?: boolean } | undefined)?.pauseHumanAfterSale === true);
+
+  // Invitación a la tienda (por producto): el PRIMER producto a entregar que la tenga
+  // activa define el texto. Solo si la tienda está viva; si no, cierre de siempre.
+  // Con invitación, NO se ofrece cross-sell ni catálogo (un solo cierre).
+  const storeInviteProduct = productIds
+    .map((id) => find(id))
+    .find((p) => p && p.productType === "digital" && p.digitalDelivery?.storeInviteEnabled && (p.digitalDelivery as { assignmentMode?: string }).assignmentMode !== "MANUAL");
+  let storeInviteUrl: string | null = null;
+  if (storeInviteProduct && !shouldPauseHuman) {
+    storeInviteUrl = await publicStoreUrlIfLive(opts.companyId, { source: "whatsapp", campaign: "entrega" }).catch(() => null);
+    if (!storeInviteUrl) {
+      console.warn(`[agent] invitación a la tienda activa en "${storeInviteProduct.name}" pero la tienda no está publicada (slug/activación/plan): se omite`);
+    }
+  }
+  const skipCrossSell = shouldPauseHuman || Boolean(storeInviteUrl);
 
   for (const id of productIds) {
     const p = find(id);
@@ -519,7 +543,7 @@ export async function assignAndBuildDelivery(
       }
       outbox.push({ kind: "text", text: renderCredentialDelivery(dd.instructions ?? "", cred) });
       pushFollowups(outbox, dd);
-      const crossId = pushCrossSell(outbox, p, dd, find, shouldPauseHuman);
+      const crossId = pushCrossSell(outbox, p, dd, find, skipCrossSell);
       if (crossId) offeredCrossSellId = crossId;
       delivered.push(p.name);
       deliveredIds.push(p.id);
@@ -540,7 +564,7 @@ export async function assignAndBuildDelivery(
     if (!dd.instructions?.trim()) continue;
     outbox.push({ kind: "text", text: dd.instructions.trim() });
     pushFollowups(outbox, dd);
-    const crossId = pushCrossSell(outbox, p, dd, find, shouldPauseHuman);
+    const crossId = pushCrossSell(outbox, p, dd, find, skipCrossSell);
     if (crossId) offeredCrossSellId = crossId;
     delivered.push(p.name);
     deliveredIds.push(p.id);
@@ -548,7 +572,7 @@ export async function assignAndBuildDelivery(
 
   // Invitación al resto del catálogo (solo si hubo entrega automática, sin cross-sell,
   // sin handoff pendiente y sin pasar a humano).
-  if (delivered.length && !offeredCrossSellId && !shouldPauseHuman && !manualNeeded.length) {
+  if (delivered.length && !offeredCrossSellId && !storeInviteUrl && !shouldPauseHuman && !manualNeeded.length) {
     const deliveredIds = new Set(productIds);
     const remaining = catalogProducts(config.products).filter(
       (p) => !deliveredIds.has(p.id) && !deliveredIds.has(p.slug),
@@ -578,6 +602,14 @@ export async function assignAndBuildDelivery(
     outbox.push({ kind: "text", text: manualText });
   }
 
+  // Invitación a la tienda: ÚLTIMO mensaje (el caller la envía después de todo lo demás).
+  if (storeInviteUrl && delivered.length && !shouldPauseHuman) {
+    const tpl = (storeInviteProduct?.digitalDelivery?.storeInviteText ?? "").trim() || DEFAULT_STORE_INVITE_TEXT;
+    const text = tpl.includes("{tienda}") ? tpl.split("{tienda}").join(storeInviteUrl) : `${tpl}\n${storeInviteUrl}`;
+    storeInvite = { kind: "text", text };
+    offeredStore = true;
+  }
+
   // Acciones de venta configuradas por producto (mover en CRM / etiquetar / quitar
   // etiquetas): aquí cubren TODOS los caminos de entrega — tool entregar_producto,
   // auto-validación de comprobantes, recheck y webhook de Mercado Pago. Best-effort.
@@ -602,7 +634,7 @@ export async function assignAndBuildDelivery(
     }
   }
 
-  return { outbox, delivered, manualNeeded, outOfStock, autoSales, offeredCrossSellId, offeredCatalog, shouldPauseHuman };
+  return { outbox, delivered, manualNeeded, outOfStock, autoSales, offeredCrossSellId, offeredCatalog, storeInvite, offeredStore, shouldPauseHuman };
 }
 
 /** Formatea el aviso al dueño de una venta automática (entrega por inventario). */
@@ -627,6 +659,8 @@ export interface ApprovePaymentResult {
   customerMessage?: string;
   /** Mensajes de entrega (solo cuando deliver=true y se aprobó un digital). */
   deliveryOutbox?: OutboxMessage[];
+  /** Invitación a la tienda: enviar al FINAL, después del outbox y de cualquier aviso. */
+  deliveryStoreInvite?: OutboxMessage | null;
   delivered?: string[];
   offeredCrossSellId?: string | null;
   /** El producto entregado tiene pauseHumanAfterSale=ON → el caller debe pasar a humano. */
@@ -756,6 +790,7 @@ export async function approveExternalPayment(opts: {
     return {
       approved: true,
       deliveryOutbox: del.outbox,
+      deliveryStoreInvite: del.storeInvite,
       delivered: del.delivered,
       offeredCrossSellId: del.offeredCrossSellId,
       shouldPauseHuman: del.shouldPauseHuman || del.manualNeeded.length > 0,
@@ -899,6 +934,7 @@ export async function tryApprovePayment(opts: {
         return {
           approved: true,
           deliveryOutbox: del.outbox,
+          deliveryStoreInvite: del.storeInvite,
           delivered: del.delivered,
           offeredCrossSellId: del.offeredCrossSellId,
           shouldPauseHuman: del.shouldPauseHuman || needsHandoff,
@@ -2260,8 +2296,10 @@ export async function executeTool(
         planByProduct: planByProductFromCart(cartForPlan),
         simulate: ctx.simulate,
       });
-      const { delivered, offeredCatalog, shouldPauseHuman, manualNeeded, outOfStock } = del;
+      const { delivered, offeredCatalog, offeredStore, shouldPauseHuman, manualNeeded, outOfStock } = del;
       ctx.outbox.push(...del.outbox);
+      // La invitación a la tienda cierra la secuencia (el modelo deja su texto vacío).
+      if (del.storeInvite) ctx.outbox.push(del.storeInvite);
       // Aclaración en el simulador: la credencial mostrada es una vista previa real del
       // inventario, pero NO se consumió stock (en real sí se asigna y baja el stock).
       if (
@@ -2322,7 +2360,7 @@ export async function executeTool(
         if (shouldPauseHuman) {
           ctx.adminNotices.push("🔇 (Simulación) Aquí el chat pasaría a atención humana porque el producto tiene activado “pasar a humano tras vender”. En real el bot dejaría de responder a este cliente.");
         }
-      } else if (shouldPauseHuman || !offeredCrossSell) {
+      } else if (shouldPauseHuman || (!offeredCrossSell && !offeredStore)) {
         await maybeMuteAfterSale(ctx, { forced: shouldPauseHuman });
       }
 
@@ -2333,6 +2371,8 @@ export async function executeTool(
         ? "Ya entregué el acceso y los mensajes configurados. Este producto pasa a atención humana tras la venta: NO ofrezcas más productos ni el catálogo, NO agregues cierre ni 'gracias por tu compra'. Deja tu texto final VACÍO; un asesor humano continúa desde aquí."
         : offeredCrossSell
         ? "Ya entregué el acceso, los mensajes adicionales y al final ofrecí otro producto con una pregunta abierta ('¿Te cuento más?'). NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO para que la conversación quede ABIERTA en esa oferta y el cliente pueda responder."
+        : offeredStore
+        ? "Ya entregué el acceso y los mensajes adicionales, y como ÚLTIMO mensaje invité al cliente a visitar la tienda web con su link. NO agregues ningún cierre, NO repitas ni inventes el link y NO ofrezcas catálogo: deja tu texto final VACÍO. Si el cliente pregunta por la tienda, dile que el link está en el mensaje anterior."
         : offeredCatalog
         ? "Ya entregué el acceso y los mensajes adicionales, y al final invité al cliente a ver el resto del catálogo. NO agregues ningún cierre ni 'gracias por tu compra': deja tu texto final VACÍO. Si el cliente acepta ('sí', 'muéstrame'), usa enviar_catalogo en el siguiente turno."
         : "Ya entregué el acceso y los mensajes adicionales configurados (suelen incluir el saludo/agradecimiento). NO repitas el link ni vuelvas a agradecer; deja tu texto final VACÍO. Mantente disponible, no cierres la conversación.";
@@ -2342,6 +2382,7 @@ export async function executeTool(
         manualNeeded,
         offeredCrossSell,
         offeredCatalog,
+        offeredStore,
         nota: notaEntrega,
       });
     }

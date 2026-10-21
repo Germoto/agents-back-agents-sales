@@ -402,6 +402,8 @@ export async function confirmImport(companyId: string, token: string) {
               emailEnabled: dd.emailEnabled === true,
               emailSubject: dd.emailSubject ? String(dd.emailSubject) : null,
               emailBody: dd.emailBody ? String(dd.emailBody) : null,
+              storeInviteEnabled: dd.storeInviteEnabled === true,
+              storeInviteText: String(dd.storeInviteText ?? ""),
               // Referencias de OTRA empresa: crossSell se remapea después por slug;
               // ids de CRM/columnas/tags se limpian SIEMPRE.
               crossSellProductId: null,

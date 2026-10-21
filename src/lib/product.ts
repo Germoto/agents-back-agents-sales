@@ -282,6 +282,8 @@ export function mapBotProduct(
               Boolean(product.digitalDelivery?.emailEnabled),
             emailSubject: product.digitalDelivery?.emailSubject ?? null,
             emailBody: product.digitalDelivery?.emailBody ?? null,
+            storeInviteEnabled: Boolean(product.digitalDelivery?.storeInviteEnabled),
+            storeInviteText: product.digitalDelivery?.storeInviteText ?? "",
             followupMessages: normalizeFollowups(product.digitalDelivery),
             crossSellProductId: product.digitalDelivery?.crossSellProductId ?? null,
             crossSellPitch: product.digitalDelivery?.crossSellPitch ?? null,

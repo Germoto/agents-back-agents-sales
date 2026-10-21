@@ -992,6 +992,10 @@ export async function recheckPayment(msg: {
       );
       // Correo pendiente (el cliente lo dejó junto al comprobante): cumplirlo ahora.
       const emailNote = await fulfillPendingEmailAndNotify(sender, to, { companyId: msg.companyId, customerId: msg.customerId, state });
+      // Invitación a la tienda: SIEMPRE el último mensaje de la entrega.
+      if (result.deliveryStoreInvite) {
+        await flushOutbox(sender, to, [result.deliveryStoreInvite], { companyId: msg.companyId, customerId: msg.customerId, conversationId }, gapMsFor(config.business));
+      }
       await saveState(conversationId, state as ConversationState);
       // Aviso al dueño por cada venta automática (entrega por inventario).
       if (result.autoSales?.length && waSender) {
@@ -1161,6 +1165,11 @@ export async function handleExternalPaymentApproved(opts: {
     const emailNote = delivered?.length
       ? await fulfillPendingEmailAndNotify(sender, to, { companyId: opts.companyId, customerId: convo.customerId, state })
       : "";
+    // Invitación a la tienda: SIEMPRE el último mensaje de la entrega.
+    const storeInvite = "deliveryStoreInvite" in result ? result.deliveryStoreInvite : null;
+    if (storeInvite) {
+      await flushOutbox(sender, to, [storeInvite], { companyId: opts.companyId, customerId: convo.customerId, conversationId: opts.conversationId }, gapMsFor(config.business));
+    }
     await saveState(opts.conversationId, state as ConversationState);
 
     const adminPhone = waSender

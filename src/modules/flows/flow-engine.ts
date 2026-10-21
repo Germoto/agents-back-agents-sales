@@ -1174,6 +1174,10 @@ async function resumePaymentAwaiting(flow: LoadedFlow, node: FlowNode, io: FlowI
       await pause(io);
       await io.emit(msg);
     }
+    if (result.deliveryStoreInvite) {
+      await pause(io);
+      await io.emit(result.deliveryStoreInvite);
+    }
     if (result.manualNeeded?.length) {
       await io.notifyOwner(
         `📦 Pago aprobado de ${io.customerPhone}: hay productos con entrega MANUAL pendiente. Revisa Comprobantes.`,
@@ -1403,6 +1407,7 @@ export async function recheckFlowPayment(msg: ScheduledMessage, state: Conversat
     if (result.approved) {
       if (result.customerMessage) await io.emit({ kind: "text", text: result.customerMessage });
       for (const m of result.deliveryOutbox ?? []) await io.emit(m);
+      if (result.deliveryStoreInvite) await io.emit(result.deliveryStoreInvite);
       await continueByHandle(flow, node, io, "approved");
     } else {
       await goPaymentReview(flow, node, io);

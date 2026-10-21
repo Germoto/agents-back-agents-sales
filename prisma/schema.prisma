@@ -649,6 +649,11 @@ model DigitalDelivery {
   emailEnabled               Boolean                @default(false)
   emailSubject               String?
   emailBody                  String?
+  // Invitación a la TIENDA WEB como ÚLTIMO mensaje de la entrega: si está activa
+  // reemplaza al cross-sell y a la frase genérica del catálogo. Texto con {tienda}
+  // (vacío => texto por defecto). Solo se envía si la tienda está activa y publicada.
+  storeInviteEnabled         Boolean                @default(false)
+  storeInviteText            String                 @default("")
   // Acciones al cerrar la venta (entrega del producto): mover al cliente a una pestaña
   // del CRM y/o asignarle etiquetas. Sin FK formal: si el CRM/columna/tag se borra, se ignora.
   onSaleCrmId                String?                @db.Uuid
