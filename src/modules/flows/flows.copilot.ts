@@ -16,6 +16,8 @@ import { resolveAiSettings } from "../../lib/ai-providers";
 import { chatCompletion, type ChatMessage, type ToolDefinition } from "../../lib/openai";
 import { flowNodeSchema, flowEdgeSchema, flowTriggerSchema } from "./flows.schemas";
 import { validateFlow } from "./flow-validation";
+import { knownFlowIds } from "./flows.service";
+import { NODE_DOCS, HARD_RULES, buildBusinessContext, checkFlowReferences } from "./flow-authoring";
 import { DEFAULT_TRIGGER, type FlowEdge, type FlowNode, type FlowTrigger } from "./flow-types";
 
 const MAX_ATTEMPTS = 3;
@@ -100,96 +102,8 @@ const PROPOSE_FLOW_TOOL: ToolDefinition = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// Documentación compacta de los bloques (espejo de flow-types.ts). Mantener en
-// sincronía si se agregan tipos de nodo.
-// ---------------------------------------------------------------------------
-const NODE_DOCS = `BLOQUES DISPONIBLES (type → data → handles de salida para edges):
-- start: data {} → salida "next". SIEMPRE debe existir exactamente UN nodo start (id "start").
-- send-text: {text, saveVariable?} → "next" (sigue de inmediato) y "reply" (espera respuesta del cliente). El texto soporta {{variables}}.
-- send-image | send-video | send-audio | send-document: {mediaUrl, fileName?, caption?} → "next" y "reply". Solo úsalos si el usuario tiene la URL del archivo; si no, sugiere que suba el archivo y prefiere send-text.
-- answers: {message, options:[{id,label,detectText,detectMode:"contains"|"equals"|"starts_with"|"ends_with"}] (máx 15), repeatOnNoMatch, noMatchMessage?, timeoutMinutes?} → un handle "opt:<id de cada opción>" y "timeout" (solo si timeoutMinutes>0). Menú de botones sugeridos; detectText = lo que escribe el cliente (ej. "1", "sí", "precio").
-- list: {title?, body, footer?, sections:[{id,title,options:[{id,label,description?}]}], repeatOnNoMatch, noMatchMessage?, timeoutMinutes?} → "opt:<id de cada opción>" y "timeout". Menú numerado largo (el cliente responde con el número).
-- question: {message, varType:"text"|"number"|"email"|"phone", saveVariable, invalidMessage?, timeoutMinutes?} → "next" (y "timeout" si timeoutMinutes>0). Pide un dato, lo valida y lo guarda en {{saveVariable}} (snake_case).
-- condition: {source:"variable"|"tag"|"purchased", variable?, operator?:"equals"|"contains"|"not_empty"|"empty", value?, tagId?} → "yes" y "no". source=variable exige variable+operator; source=tag exige tagId.
-- wait: {seconds} (1-120) → "next". Pausa corta entre mensajes.
-- reminder: {steps:[{id,minutes,message}]} (máx 5, delays ACUMULATIVOS desde que el cliente deja de responder) → "next". Se cancela solo si el cliente responde.
-- validate-payment: {amountMode:"fixed"|"product", amount? (si fixed), productId? (si product), instructions?, retryMessage?, reviewMessage?, timeoutMinutes? (default 60)} → "approved", "rejected", "review" y "timeout". Cobra (Yape/Plin/Mercado Pago según lo configurado) y valida el comprobante automáticamente.
-- book-appointment: {productId? (servicio con agenda), introMessage?, noSlotsMessage?, saveVariable?, timeoutMinutes? (default 30)} → "booked", "no-slots" y "timeout". Ofrece horarios REALES de la agenda y agenda la cita; deja {{cita_fecha}} y {{cita_codigo}}.
-- crm-move: {crmId, crmColumnId, crmColumnName?} → "next". Mueve al cliente a una columna del CRM.
-- crm-add-tags | crm-remove-tags: {tagIds:[uuid]} → "next". Asigna/quita etiquetas.
-- handoff: {clientText?, notifyText?} → SIN salidas (terminal). Pausa el bot y avisa a un asesor humano.
-- flow-control: {action:"restart"|"transfer", targetFlowId? (si transfer)} → SIN salidas (terminal). Reinicia este flujo o transfiere a otro.
-
-VARIABLES: en cualquier texto puedes usar {{nombre}}, {{telefono}} y las guardadas con saveVariable (ej. {{correo}}).`;
-
-const HARD_RULES = `REGLAS OBLIGATORIAS al proponer un flujo:
-1. Exactamente UN nodo start (id "start", data {}); su edge sale por "next" hacia el primer bloque.
-2. IDs únicos con formato <tipo>-<sufijo de 6 caracteres> (ej. "send-text-k3f9a2", "answers-x81mq0"). Conserva los IDs de los nodos existentes que no cambies. IDs de opciones: "opt-<6 chars>".
-3. Cada edge: {id:"e-<6 chars>", source:<id nodo>, sourceHandle:<handle VÁLIDO del nodo origen según su tipo y data>, target:<id nodo>}. Un handle solo puede tener UN edge.
-4. Todo nodo debe ser alcanzable desde start. No dejes ramas de answers/list sin conectar (cada opción con su edge "opt:<id>").
-5. Textos al cliente: español cálido y claro, emojis con moderación. Nada de datos inventados (precios, links).
-6. LAYOUT: start en x=80. Cada paso avanza x en +300. Ramas paralelas se separan en y de a 160 (y base 240). Sin superposiciones.
-7. Si el usuario pide modificar, parte del ESTADO ACTUAL del lienzo y conserva todo lo que no pidió cambiar (incluidas posiciones).
-8. Usa SOLO los IDs reales del negocio listados abajo para productId, crmId, crmColumnId y tagIds. Si el dato que necesitas no existe (ej. no hay productos o no hay pagos configurados), NO inventes IDs: explícalo en el resumen y usa una alternativa (ej. handoff).
-9. En el trigger: si el usuario no especifica cómo se dispara, usa keywords razonables según el tema del flujo y menciónalo en el resumen.`;
-
-// ---------------------------------------------------------------------------
-// Contexto del negocio (selects mínimos)
-// ---------------------------------------------------------------------------
-async function buildBusinessContext(companyId: string): Promise<string> {
-  const [company, products, crms, tags, paymentMethods, flows] = await Promise.all([
-    prisma.company.findUnique({ where: { id: companyId }, select: { name: true, vertical: true } }),
-    prisma.product.findMany({
-      where: { companyId, active: true },
-      select: { id: true, name: true, price: true, productType: true, durationMin: true },
-      take: 30,
-      orderBy: { createdAt: "desc" },
-    }),
-    prisma.crm.findMany({
-      where: { companyId },
-      select: { id: true, name: true, columns: { select: { id: true, name: true }, orderBy: { sortOrder: "asc" } } },
-      take: 5,
-    }),
-    prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true }, take: 30 }),
-    prisma.paymentMethod.count({ where: { paymentConfig: { companyId } } }),
-    prisma.chatFlow.findMany({ where: { companyId }, select: { id: true, name: true }, take: 20 }),
-  ]);
-
-  const lines: string[] = [`Negocio: ${company?.name ?? "—"} (rubro ${company?.vertical ?? "OTHER"}).`];
-  if (products.length) {
-    lines.push(
-      "Productos (para productId): " +
-        products
-          .map((p) => `${p.name} (id=${p.id}, ${p.price ?? "sin precio"}, ${p.productType}${p.durationMin ? `, agenda ${p.durationMin}min` : ""})`)
-          .join("; "),
-    );
-  } else {
-    lines.push("No hay productos configurados (no uses validate-payment con amountMode=product ni book-appointment con productId).");
-  }
-  if (crms.length) {
-    lines.push(
-      "CRMs (para crm-move): " +
-        crms.map((c) => `${c.name} (crmId=${c.id}) columnas: ${c.columns.map((col) => `${col.name}=${col.id}`).join(", ")}`).join(" | "),
-    );
-  } else {
-    lines.push("No hay CRM configurado (no propongas bloques crm-move).");
-  }
-  if (tags.length) {
-    lines.push("Etiquetas (para tagIds): " + tags.map((t) => `${t.name}=${t.id}`).join(", "));
-  } else {
-    lines.push("No hay etiquetas creadas (no propongas bloques de etiquetas).");
-  }
-  lines.push(
-    paymentMethods > 0
-      ? "El negocio SÍ tiene métodos de pago configurados (puedes usar validate-payment)."
-      : "El negocio NO tiene métodos de pago configurados: NO propongas validate-payment (sugiere configurarlos en Pagos).",
-  );
-  if (flows.length > 1) {
-    lines.push("Otros flujos (para flow-control transfer): " + flows.map((f) => `${f.name}=${f.id}`).join(", "));
-  }
-  return lines.join("\n");
-}
+// NODE_DOCS, HARD_RULES y buildBusinessContext viven en flow-authoring.ts
+// (compartidos con crear_flujo / editar_flujo del copiloto del panel y el MCP).
 
 function buildSystemPrompt(businessContext: string, flowState: CopilotBody["flow"], flowName: string): string {
   const isEmpty =
@@ -224,7 +138,7 @@ interface ParsedProposal {
   resumen: string;
 }
 
-function validateProposal(raw: unknown): { proposal?: ParsedProposal; errors: string[]; warnings: string[] } {
+async function validateProposal(companyId: string, raw: unknown): Promise<{ proposal?: ParsedProposal; errors: string[]; warnings: string[] }> {
   const errors: string[] = [];
   const obj = (raw ?? {}) as Record<string, unknown>;
 
@@ -265,13 +179,16 @@ function validateProposal(raw: unknown): { proposal?: ParsedProposal; errors: st
 
   if (errors.length) return { errors, warnings: [] };
 
-  const result = validateFlow(nodes, edges);
+  const result = validateFlow(nodes, edges, { knownFlowIds: await knownFlowIds(companyId) });
   if (result.errors.length) {
     return {
       errors: result.errors.map((i) => `${i.nodeId ? `nodo ${i.nodeId}: ` : ""}${i.message}`),
       warnings: [],
     };
   }
+  // Ids de CRM/etiquetas/productos ajenos: solo aviso (el editor sigue
+  // aplicando la propuesta al lienzo y el usuario decide).
+  const refWarnings = await checkFlowReferences(companyId, nodes);
   return {
     proposal: {
       trigger,
@@ -280,7 +197,7 @@ function validateProposal(raw: unknown): { proposal?: ParsedProposal; errors: st
       resumen: typeof obj.resumen === "string" && obj.resumen.trim() ? obj.resumen.trim() : "Listo, apliqué los cambios al flujo.",
     },
     errors: [],
-    warnings: result.warnings.map((i) => i.message),
+    warnings: [...result.warnings.map((i) => i.message), ...refWarnings],
   };
 }
 
@@ -341,7 +258,7 @@ export async function copilotFlowController(req: Request, res: Response) {
           : "El JSON de la tool no es válido. Vuelve a llamar proponer_flujo con JSON bien formado.";
     }
 
-    const check = parseError ? { errors: [parseError], warnings: [] as string[] } : validateProposal(args);
+    const check = parseError ? { errors: [parseError], warnings: [] as string[] } : await validateProposal(companyId, args);
     if (!parseError && check.proposal) {
       return res.json({
         reply: check.proposal.resumen,

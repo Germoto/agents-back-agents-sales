@@ -34,7 +34,7 @@ function edgesOf(flow: { edges: unknown }): FlowEdge[] {
   return (flow.edges as unknown as FlowEdge[]) ?? [];
 }
 
-async function knownFlowIds(companyId: string): Promise<string[]> {
+export async function knownFlowIds(companyId: string): Promise<string[]> {
   const rows = await prisma.chatFlow.findMany({ where: { companyId }, select: { id: true } });
   return rows.map((r) => r.id);
 }

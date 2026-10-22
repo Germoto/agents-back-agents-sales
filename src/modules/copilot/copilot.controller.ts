@@ -60,7 +60,10 @@ import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } fr
 import { createSubscription, listSubscriptions, markCancelled, markRenewed } from "../subscriptions/subscriptions.service";
 import { createCredentials, credentialStats, deleteCredential, listCredentials, updateCredential } from "../streaming-inventory/streaming-inventory.service";
 import { getReportConfig, sendReport, updateReportConfig } from "../reports/reports.service";
-import { listFlows, toggleFlow } from "../flows/flows.service";
+import { createFlow, getFlow, listFlows, toggleFlow, updateFlow } from "../flows/flows.service";
+import { AUTHORING_HINTS, HARD_RULES, NODE_DOCS, buildBusinessContext, describeFlow, describeTrigger, normalizeFlowDraft } from "../flows/flow-authoring";
+import { getEntitlements } from "../billing/entitlements";
+import type { FlowEdge, FlowNode, FlowTrigger } from "../flows/flow-types";
 import { getMetaCapiConfig, updateMetaCapiConfig } from "../meta-capi/meta-capi.service";
 import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
 import { approveStoreOrder, createCoupon, deleteStoreOrder, getStorefrontConfig, listCoupons, listStoreOrders, rejectStoreOrder, storeMetrics, updateCoupon, updateStorefrontConfig } from "../storefront/storefront.service";
@@ -1149,15 +1152,76 @@ export const TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "listar_flujos",
-      description: "Lista los FLUJOS de chatbot (nombre, activo, disparador, nº de pasos). Los flujos se diseñan en el editor visual (/flujos) con su propio copiloto; aquí solo se listan y se activan/desactivan.",
+      description: "Lista los FLUJOS de chatbot (id, nombre, activo, disparador, nº de bloques, link al editor). Para ver los bloques de uno usa ver_flujo; para crear o cambiar, ver_bloques_flujo → crear_flujo / editar_flujo.",
       parameters: { type: "object", additionalProperties: false, properties: {} },
     },
   },
   {
     type: "function",
     function: {
+      name: "ver_bloques_flujo",
+      description:
+        "LEE antes de diseñar un flujo: devuelve los BLOQUES disponibles (tipos, campos de data y salidas), las reglas obligatorias del grafo, las facilidades de crear_flujo (nombres en vez de ids, posiciones automáticas) y los DATOS REALES del negocio (tableros y columnas del CRM, etiquetas, servicios con agenda, otros flujos) con sus ids. Sin esto NO sabes qué bloques existen ni qué ids usar.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_flujo",
+      description: "Muestra un flujo existente {flowId (id o nombre)}: resumen legible bloque por bloque (con nombres de columnas/etiquetas) y el JSON completo {trigger, nodes, edges} para editarlo con editar_flujo partiendo del estado real.",
+      parameters: { type: "object", additionalProperties: false, required: ["flowId"], properties: { flowId: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "crear_flujo",
+      description:
+        "CREA un flujo de chatbot completo {nombre*, descripcion?, trigger, nodes*, edges*, soloValidar?, activar?}. trigger = {onAnyMessage, keywords[], onFirstMessageOfDay, onFirstMessageEver, reactivationMinutes}. nodes/edges siguen EXACTAMENTE los bloques y reglas de ver_bloques_flujo (llámala primero). Facilidades: position opcional (se ordena solo), ids de edge opcionales, y referencias POR NOMBRE: crm-move {tablero, columna}; crm-add-tags/crm-remove-tags {etiquetas:[nombres]}; book-appointment/validate-payment {producto}; condition {etiqueta}; flow-control {flujo}. El servidor valida todo (zod + grafo + que los ids existan) y devuelve errores concretos: corrígelos y vuelve a llamar. soloValidar=true comprueba y devuelve el resumen SIN guardar (úsalo antes de guardar). El flujo se guarda INACTIVO (link /flujos/<id> para revisarlo); activar=true lo enciende en la misma llamada SOLO si el usuario lo pidió explícitamente. Llámala tras confirmación del usuario.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["nombre", "nodes", "edges"],
+        properties: {
+          nombre: { type: "string", description: "Nombre único del flujo (máx 60)" },
+          descripcion: { type: "string" },
+          trigger: { type: "object", description: "Disparador {onAnyMessage, keywords[], onFirstMessageOfDay, onFirstMessageEver, reactivationMinutes}" },
+          nodes: { type: "array", items: { type: "object" }, description: "Nodos {id, type, data, position?} (ver ver_bloques_flujo)" },
+          edges: { type: "array", items: { type: "object" }, description: "Aristas {id?, source, sourceHandle, target}" },
+          soloValidar: { type: "boolean", description: "true = validar y resumir sin guardar" },
+          activar: { type: "boolean", description: "true = activar tras crear (solo si el usuario lo pidió)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "editar_flujo",
+      description:
+        "EDITA un flujo existente {flowId* (id o nombre), nombre?, descripcion?, trigger?, nodes?, edges?, soloValidar?}. Si mandas nodes/edges REEMPLAZAN el grafo COMPLETO (lo que no incluyas desaparece): primero ver_flujo, parte de su JSON y conserva ids y posiciones de lo que no cambie. Mismas facilidades y validación que crear_flujo. Si el flujo estaba ACTIVO y queda con errores, se desactiva solo y se te informa. Sin nodes/edges solo cambia nombre/descripción/disparador. Llámala tras confirmación del usuario.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["flowId"],
+        properties: {
+          flowId: { type: "string" },
+          nombre: { type: "string" },
+          descripcion: { type: "string" },
+          trigger: { type: "object" },
+          nodes: { type: "array", items: { type: "object" } },
+          edges: { type: "array", items: { type: "object" } },
+          soloValidar: { type: "boolean" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "activar_flujo",
-      description: "Activa o desactiva un flujo de chatbot {flowId, activo}. Llámala tras confirmación.",
+      description: "Activa o desactiva un flujo de chatbot {flowId (id o nombre), activo}. Al activar se valida: si tiene errores NO se activa y se devuelven para corregirlos con editar_flujo. Recuerda: los flujos solo corren con el bot en modo FLOW (configurar_empresa botMode). Llámala tras confirmación.",
       parameters: { type: "object", additionalProperties: false, required: ["flowId", "activo"], properties: { flowId: { type: "string" }, activo: { type: "boolean" } } },
     },
   },
@@ -1258,7 +1322,7 @@ function rubroGuide(vertical: string | undefined): string {
     case "PHYSICAL_GOODS":
       return `Rubro COMERCIAL (productos físicos: ropa, ferretería, licorería...). ${COMMON_FIELDS} Además: stock (número, si controla inventario); variants = [{name, options: string[], sortOrder}] para Talla/Color (las opciones NO cambian el precio); physicalDelivery = {requiresAddress: true, deliveryCost?, deliveryTime?, pickupAvailable, deliveryAreas: string[]} (zonas de entrega — pregunta las zonas si va a crear el primero).`;
     case "SERVICE":
-      return `Rubro SERVICIOS (cada producto = un servicio, con cita opcional). ${COMMON_FIELDS} Además: durationMin (minutos de la cita — con esto el agente agenda con horarios reales), slotCapacity (citas simultáneas, default 1), bookingLeadMinutes, bookingHorizonDays; deliveryMethod/support como texto libre si aplica.`;
+      return `Rubro SERVICIOS (cada producto = un servicio, con cita opcional). ${COMMON_FIELDS} Además: durationMin (minutos de la cita — con esto el agente agenda con horarios reales), slotCapacity (citas simultáneas, default 1), bookingLeadMinutes, bookingHorizonDays; deliveryMethod/support como texto libre si aplica. Para captar LEADS de servicios sin venta directa (desarrollo, consultoría, proyectos), lo habitual es un flujo de calificación (ver_bloques_flujo → crear_flujo) con preguntas de botones, etiquetas y columnas del CRM y derivación a humano con aviso por WhatsApp.`;
     case "REAL_ESTATE":
       return `Rubro INMOBILIARIA (cada producto = un inmueble). ${COMMON_FIELDS} Además: verticalData con la ficha: {operation ('venta'|'alquiler'), propertyType, areaM2, bedrooms, bathrooms, parking, location, maintenance, antiquity}; durationMin para la duración de la visita (agenda).`;
     case "STREAMER":
@@ -1741,6 +1805,32 @@ async function resolveQuickReplyActions(
   const out = { tagIds, removeTagIds, crmId, crmColumnId, markDelivered, presentProductId };
   const empty = !tagIds.length && !removeTagIds.length && !crmId && !markDelivered && !presentProductId;
   return empty ? null : out;
+}
+
+/** Flujo por id o por nombre (trim + case-insensitive). */
+async function findFlowRef(companyId: string, ref: string | undefined) {
+  const r = (ref ?? "").trim();
+  if (!r) throw new AppError("Indica el flujo (id o nombre)", 400);
+  const byId = await prisma.chatFlow.findFirst({ where: { id: r, companyId }, select: { id: true } }).catch(() => null);
+  if (byId) return getFlow(companyId, byId.id);
+  const all = await prisma.chatFlow.findMany({ where: { companyId }, select: { id: true, name: true } });
+  const hit = all.find((f) => f.name.trim().toLowerCase() === r.toLowerCase());
+  if (!hit) throw new AppError(`El flujo «${r}» no existe (listar_flujos)`, 404);
+  return getFlow(companyId, hit.id);
+}
+
+/** El MCP no pasa por billingGuard: el módulo Flujos se verifica aquí. */
+async function assertFlowsAllowedByPlan(companyId: string) {
+  const ent = await getEntitlements(companyId);
+  if (!ent.legacy && !ent.modules.includes("FLOWS")) {
+    throw new AppError("Tu paquete no incluye Flujos guiados. Mejora tu plan para activarlo.", 403, { code: "MODULE_NOT_AVAILABLE" });
+  }
+}
+
+function flowErrorDetails(err: unknown): string {
+  if (!(err instanceof AppError) || err.code !== "FLOW_INVALID") return "";
+  const errs = (err.details as { errors?: { message: string }[] } | undefined)?.errors ?? [];
+  return errs.length ? ` — ${errs.map((e) => e.message).join("; ")}` : "";
 }
 
 /** Acciones de una respuesta rápida con nombres (para ver_respuestas_rapidas). */
@@ -3433,15 +3523,164 @@ export async function runCopilotTool(
     }
 
     case "listar_flujos": {
-      return { result: JSON.stringify({ flujos: await listFlows(companyId), nota: "Los flujos se editan en /flujos (editor visual con copiloto propio)." }), wrote: false };
+      const flujos = (await listFlows(companyId)).map((f) => ({
+        id: f.id,
+        nombre: f.name,
+        descripcion: f.description,
+        activo: f.isActive,
+        disparador: describeTrigger(f.trigger),
+        bloques: f.nodeCount,
+        link: `/flujos/${f.id}`,
+      }));
+      return { result: JSON.stringify({ flujos, nota: "ver_flujo muestra los bloques de uno; crear_flujo / editar_flujo los crean o cambian (nacen inactivos); activar_flujo los enciende." }), wrote: false };
+    }
+
+    case "ver_bloques_flujo": {
+      const [contexto, company] = await Promise.all([
+        buildBusinessContext(companyId),
+        prisma.company.findUnique({ where: { id: companyId }, select: { botMode: true } }),
+      ]);
+      return {
+        result: [
+          NODE_DOCS,
+          "",
+          HARD_RULES,
+          "",
+          AUTHORING_HINTS,
+          "",
+          `DATOS REALES DEL NEGOCIO:\n${contexto}`,
+          "",
+          `MODO DEL BOT: ${company?.botMode ?? "AI"}${company?.botMode === "FLOW" ? "" : " (los flujos NO corren hasta pasar a FLOW con configurar_empresa botMode)"}.`,
+        ].join("\n"),
+        wrote: false,
+      };
+    }
+
+    case "ver_flujo": {
+      try {
+        const flow = await findFlowRef(companyId, asStr(args.flowId));
+        const resumen = await describeFlow(companyId, flow);
+        return {
+          result: JSON.stringify({ ok: true, resumen, flujo: { id: flow.id, nombre: flow.name, descripcion: flow.description, activo: flow.isActive, trigger: flow.trigger, nodes: flow.nodes, edges: flow.edges }, link: `/flujos/${flow.id}` }),
+          wrote: false,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo leer" }), wrote: false };
+      }
+    }
+
+    case "crear_flujo": {
+      try {
+        await assertFlowsAllowedByPlan(companyId);
+        const nombre = (asStr(args.nombre) ?? "").trim();
+        if (!nombre) return { result: JSON.stringify({ ok: false, error: "Falta el nombre del flujo" }), wrote: false };
+        const draft = await normalizeFlowDraft(companyId, { trigger: args.trigger, nodes: args.nodes, edges: args.edges });
+        if (!draft.ok) return { result: JSON.stringify({ ok: false, errores: draft.errors, nota: "Corrige los errores y vuelve a llamar crear_flujo con el flujo completo." }), wrote: false };
+        const company = await prisma.company.findUnique({ where: { id: companyId }, select: { botMode: true } });
+        const avisoModo = company?.botMode === "FLOW" ? undefined : "El bot está en modo AI: los flujos no corren hasta cambiar botMode a FLOW con configurar_empresa.";
+        if (args.soloValidar === true) {
+          const preview = await describeFlow(companyId, { id: "(sin guardar)", name: nombre, isActive: false, trigger: draft.trigger, nodes: draft.nodes, edges: draft.edges });
+          return { result: JSON.stringify({ ok: true, validado: true, guardado: false, resumen: preview, warnings: draft.warnings, avisoModo }), wrote: false };
+        }
+        const created = await createFlow(companyId, { name: nombre, description: asStr(args.descripcion)?.trim() || undefined });
+        const saved = await updateFlow(companyId, created.id, { trigger: draft.trigger, nodes: draft.nodes, edges: draft.edges });
+        let activo = saved.flow.isActive;
+        const warnings = [...draft.warnings];
+        let activacion: string | undefined;
+        if (args.activar === true) {
+          try {
+            const t = await toggleFlow(companyId, created.id, true);
+            activo = t.flow.isActive;
+            warnings.push(...t.warnings.map((w) => w.message));
+          } catch (err) {
+            activacion = `No se activó: ${err instanceof Error ? err.message : "error"}${flowErrorDetails(err)}`;
+          }
+        }
+        const resumen = await describeFlow(companyId, { ...saved.flow, trigger: saved.flow.trigger, nodes: saved.flow.nodes, edges: saved.flow.edges });
+        return {
+          result: JSON.stringify({
+            ok: true,
+            flowId: created.id,
+            nombre: saved.flow.name,
+            activo,
+            resumen,
+            warnings,
+            link: `/flujos/${created.id}`,
+            avisoModo,
+            activacion,
+            nota: activo ? "Flujo creado y ACTIVO." : "Flujo creado INACTIVO: pídele al dueño que lo revise en el link y actívalo con activar_flujo cuando confirme.",
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "no se pudo crear";
+        const dup = err instanceof AppError && err.statusCode === 409;
+        return { result: JSON.stringify({ ok: false, error: msg, nota: dup ? "Usa otro nombre o modifica el existente con editar_flujo." : undefined }), wrote: false };
+      }
+    }
+
+    case "editar_flujo": {
+      try {
+        await assertFlowsAllowedByPlan(companyId);
+        const flow = await findFlowRef(companyId, asStr(args.flowId));
+        const hasGraph = args.nodes !== undefined || args.edges !== undefined;
+        const patch: { name?: string; description?: string; trigger?: FlowTrigger; nodes?: FlowNode[]; edges?: FlowEdge[] } = {};
+        if (typeof args.nombre === "string" && args.nombre.trim()) patch.name = args.nombre.trim();
+        if (typeof args.descripcion === "string") patch.description = args.descripcion.trim();
+        let warnings: string[] = [];
+        if (hasGraph) {
+          const draft = await normalizeFlowDraft(companyId, {
+            trigger: args.trigger ?? flow.trigger,
+            nodes: args.nodes ?? flow.nodes,
+            edges: args.edges ?? flow.edges,
+          });
+          if (!draft.ok) return { result: JSON.stringify({ ok: false, errores: draft.errors, nota: "Corrige los errores y vuelve a llamar editar_flujo con el flujo completo." }), wrote: false };
+          patch.trigger = draft.trigger;
+          patch.nodes = draft.nodes;
+          patch.edges = draft.edges;
+          warnings = draft.warnings;
+        } else if (args.trigger !== undefined) {
+          const draft = await normalizeFlowDraft(companyId, { trigger: args.trigger, nodes: flow.nodes, edges: flow.edges });
+          if (!draft.ok) return { result: JSON.stringify({ ok: false, errores: draft.errors }), wrote: false };
+          patch.trigger = draft.trigger;
+        }
+        if (args.soloValidar === true) {
+          const preview = await describeFlow(companyId, { id: flow.id, name: patch.name ?? flow.name, isActive: flow.isActive, trigger: patch.trigger ?? flow.trigger, nodes: patch.nodes ?? flow.nodes, edges: patch.edges ?? flow.edges });
+          return { result: JSON.stringify({ ok: true, validado: true, guardado: false, resumen: preview, warnings }), wrote: false };
+        }
+        if (!Object.keys(patch).length) return { result: JSON.stringify({ ok: false, error: "No enviaste nada que cambiar (nombre, descripcion, trigger, nodes/edges)" }), wrote: false };
+        const saved = await updateFlow(companyId, flow.id, patch);
+        const resumen = await describeFlow(companyId, saved.flow);
+        return {
+          result: JSON.stringify({
+            ok: true,
+            flowId: flow.id,
+            nombre: saved.flow.name,
+            activo: saved.flow.isActive,
+            desactivado: saved.deactivated || undefined,
+            erroresQueLoDesactivaron: saved.deactivated ? saved.errors.map((e) => e.message) : undefined,
+            resumen,
+            warnings,
+            link: `/flujos/${flow.id}`,
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo editar" }), wrote: false };
+      }
     }
 
     case "activar_flujo": {
       try {
-        const f = await toggleFlow(companyId, asStr(args.flowId) ?? "", args.activo === true);
-        return { result: JSON.stringify({ ok: true, flujo: { id: (f as { id?: string }).id, activo: (f as { isActive?: boolean }).isActive } }), wrote: true };
+        const flow = await findFlowRef(companyId, asStr(args.flowId));
+        const f = await toggleFlow(companyId, flow.id, args.activo === true);
+        return {
+          result: JSON.stringify({ ok: true, flujo: { id: f.flow.id, nombre: f.flow.name, activo: f.flow.isActive }, warnings: f.warnings.map((w) => w.message), link: `/flujos/${f.flow.id}` }),
+          wrote: true,
+        };
       } catch (err) {
-        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo cambiar" }), wrote: false };
+        const details = err instanceof AppError && err.code === "FLOW_INVALID" ? (err.details as { errors?: { message: string }[] } | undefined)?.errors?.map((e) => e.message) : undefined;
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo cambiar", errores: details, nota: details ? "Corrige con editar_flujo y vuelve a activar." : undefined }), wrote: false };
       }
     }
 
@@ -3581,6 +3820,7 @@ const SYSTEM_GUIDE = [
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}.",
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar).",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 65–90s); en números nuevos recomienda tope diario 30-70. Flujo seguro OBLIGATORIO: crear borrador → mostrar total de contactos + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible).",
+  "- FLUJOS — secuencia OBLIGATORIA: (1) ver_bloques_flujo y ver_crm ANTES de diseñar (nunca inventes ids: usa nombres o los ids reales); (2) propón al dueño el flujo en lenguaje llano — qué pregunta, qué botones, qué etiqueta/columna pone cada rama, cuándo avisa al dueño, si agenda cita — y espera su confirmación; (3) crear_flujo con soloValidar=true para comprobar, luego sin él; (4) muéstrale el link /flujos/<id> y las warnings; (5) activar_flujo SOLO tras confirmación explícita, avisando que en modo FLOW el bot calla si ningún flujo se dispara y que el modo se cambia con configurar_empresa botMode; (6) para modificar uno existente, ver_flujo primero y devuelve el grafo COMPLETO conservando ids y posiciones. GOTCHAS: etiquetas según rango (presupuesto, tipo de cliente) requieren un bloque answers (botones) con una rama por opción, no question libre; las variables guardadas (saveVariable) solo llegan al dueño si el notifyText del handoff las incluye con {{variable}}; book-appointment necesita un servicio con durationMin; un flujo de captación típico: answers (qué necesita) → crm-add-tags → crm-move → answers (tipo/presupuesto) → crm-add-tags → question (descripción) → handoff con aviso que incluya {{nombre}} {{telefono}} y las variables.",
   "- Campañas: además de mensajes, cada campaña puede llevar PASOS por contacto (esperar N segundos, etiquetar/quitar etiquetas, mover a una columna del CRM, pasar a modo humano) y etiquetas de contexto a cada alcanzado (crear_campana pasos / etiquetasContexto, actualizar_campana en borrador, eliminar_campana tras confirmación). Las respuestas rápidas también ejecutan ACCIONES al enviarse: mover al CRM, etiquetar/quitar etiquetas, marcar entregado y fijar el producto presentado (crear/actualizar_respuesta_rapida acciones por nombres).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación. Por chat: listar_comprobantes (con id) y, tras confirmación explícita, aprobar_comprobante (cuenta como venta y entrega), rechazar_comprobante, ignorar_comprobante y asociar_comprobante (producto/teléfono). Desde la ficha del cliente (Conversaciones → pestaña Contacto) el asesor también puede reenviar el acceso de una compra aprobada POR CORREO (si el producto tiene entrega por correo activa).",
@@ -3589,7 +3829,7 @@ const SYSTEM_GUIDE = [
   "- Empresa (/empresa): nombre, rubro, zona horaria, MONEDA del negocio (soles S/ por defecto o dólares $ — todo el embudo la usa: fichas, carrito, cobro, validación, reportes), horario de atención, delivery, firma. Incluye el tab Anuncios: catálogo de anuncios Meta (mapea IDs/títulos de anuncios a descripciones amigables para los leads y el reporte por anuncio).",
   "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
   "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Modelos Claude disponibles: claude-haiku-5-5 (rápido y económico, recomendado), claude-sonnet-5-5 (alta calidad) y claude-opus-5-5 (máxima calidad, más caro); en los Claude 5.x la temperatura no aplica (el panel la deshabilita). Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper) y las imágenes del copiloto se generan con OpenAI: si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI para audios e imágenes — sin ella los audios no se transcriben ni se generan imágenes; el resto (agente, comprobantes, copiloto) corre con el proveedor elegido.",
-  "- Flujos de chatbot (/flujos): flujos guiados visuales con su propio copiloto IA (módulo Flujos). Por chat solo listar_flujos y activar_flujo. REPORTES programados (correo/WhatsApp, diario/semanal/mensual): configurar_reportes (ver, cambiar, enviar prueba). SUSCRIPCIONES (STREAMER): gestionar_suscripcion (crear/renovar/cancelar) y el INVENTARIO de cuentas con ver_inventario_streaming / actualizar_inventario_streaming (agregar, editar, eliminar credenciales). PÍXEL de la tienda: configurar_pixel_tienda enciende/apaga el píxel si CAPI ya está configurado en Integraciones (tokens solo desde el panel).",
+  "- Flujos de chatbot (/flujos): flujos guiados por bloques (módulo Flujos) que corren cuando el bot está en modo FLOW. Puedes CREARLOS y EDITARLOS por chat: ver_bloques_flujo (bloques, reglas y datos reales) → diseña → crear_flujo / editar_flujo (nacen INACTIVOS, link /flujos/<id>) → activar_flujo. El editor visual del panel sigue disponible para retocarlos. REPORTES programados (correo/WhatsApp, diario/semanal/mensual): configurar_reportes (ver, cambiar, enviar prueba). SUSCRIPCIONES (STREAMER): gestionar_suscripcion (crear/renovar/cancelar) y el INVENTARIO de cuentas con ver_inventario_streaming / actualizar_inventario_streaming (agregar, editar, eliminar credenciales). PÍXEL de la tienda: configurar_pixel_tienda enciende/apaga el píxel si CAPI ya está configurado en Integraciones (tokens solo desde el panel).",
   "- Recordatorios (/recordatorios): mensajes programados (carrito abandonado, dejado en visto, recordatorios de cita, renovaciones). ANTI-BLOQUEO (pestaña Horario): lo que cae fuera de horario NO sale todo a la hora de apertura — se dispersa al azar en los primeros minutos (spreadMinutes, default 90) y los recordatorios de la empresa salen espaciados (pacing 25-70 s al azar, tope 60/hora; si hay una campaña enviando, el ritmo se duplica). Los mensajes admiten SPINTAX {Hola|Buenas|Qué tal} para variar el texto entre clientes. Si el usuario sufrió un bloqueo de WhatsApp: recomienda ritmo 60-120 s, tope 20-30/h y dispersión 120 min la primera semana, textos con spintax y {nombre}, y no programar campañas en la misma franja que los recordatorios.",
   "- Pagos (/pagos): métodos de pago manuales que el bot ofrece (Yape/Plin/cuentas), modo de cobro y WhatsApp de avisos.",
   "- WhatsApp API (/whatsapp): conexión del canal (ver arriba).",
@@ -3637,7 +3877,7 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.",
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
     "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto: usa la URL EXACTA que aparece en la línea [Adjuntos de este mensaje: …] del mensaje del usuario (NUNCA un data:URI ni una URL inventada). Si el usuario ya adjuntó la imagen, NO le pidas re-adjuntarla. Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
-    "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
+    "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención, firma), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido), los FLUJOS de chatbot (ver_bloques_flujo, ver_flujo, crear_flujo, editar_flujo, activar_flujo) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
     "- ATRIBUCIÓN DE ANUNCIOS META: los leads que llegan desde un anuncio (CTWA) quedan marcados con el anuncio de origen; ver_metricas trae rendimientoPorAnuncio (leads, ventas, ingresos y conversión POR ANUNCIO — así se sabe qué anuncio cierra ventas de verdad). El catálogo de anuncios (ver_catalogo_anuncios/configurar_anuncio, o en Empresa → Anuncios) mapea IDs/títulos crudos a descripciones amigables; varios identificadores pueden apuntar a la misma descripción, y cada anuncio puede VINCULARSE A UN PRODUCTO: el lead que llega por ese anuncio entra con ese producto como PRODUCTO EN FOCO y el agente lo PRESENTA DE INMEDIATO en su primer mensaje (presentación forzada de forma determinista: aunque el lead solo diga 'Hola', recibe la ficha completa sin que se le pregunte qué busca).",
     "- ANALISTA DEL NEGOCIO: puedes leer métricas, ventas, comprobantes, pedidos, conversaciones (incluidos los MENSAJES reales con leer_conversacion), citas, campañas, suscripciones y recordatorios con ver_metricas/listar_*. Para preguntas de números usa PRIMERO ver_metricas (trae el periodo comparado con el anterior) y detalla después con listar_*. TODO número que cites debe salir de un resultado de tool de ESTE turno — NUNCA estimes ni 'recuerdes' cifras. Con los datos puedes proponer mejoras accionables (FAQs/objeciones a partir de chats reales, ofertas escalonadas para carritos abandonados, ajustes de prompt o recordatorios) y, SOLO si el usuario confirma, aplicarlas con las tools de escritura. Con previsualizar_ficha ves EXACTAMENTE cómo el agente presenta un producto al cliente (secuencia real de mensajes, multimedia y modo de presentación, en cualquier rubro) — úsala antes de proponer mejoras de copy o de estructura de la ficha. BLOQUEOS DE WHATSAPP: si el usuario reporta un bloqueo o te pide revisar el riesgo, (1) lee ver_configuracion.recordatorios (dispersión, ritmo, tope efectivos), (2) analiza los envíos reales con listar_recordatorios_programados estado=SENT (resumen: envíos por hora y separación mínima entre consecutivos — < 20 s o decenas en la misma hora = ráfaga) y las campañas recientes con listar_campanas, y (3) propón valores concretos (tras un bloqueo: dispersión 120, pausa 60-120 s, tope 20-30/h; sin bloqueo: 90 · 25-70 · 60) y mensajes con spintax; aplícalos con configurar_recordatorios SOLO tras confirmación. RESPUESTAS QUE SUENAN A BOT: si el usuario reporta mensajes repetitivos o que ignoran lo que pidió el cliente, lee el chat con leer_conversacion, identifica el patrón (texto redundante tras una herramienta, duda sin responder, cierre repetido) y propón reglas concretas para el agente (configurar_agente rules) — el sistema ya descarta el texto redundante tras enviar los métodos de pago y espera 8 s para juntar mensajes seguidos del cliente.",
     "- DIAGNÓSTICO: si el dueño reporta que el bot responde a todos 'Disculpa, estoy teniendo un inconveniente', casi siempre es el PROVEEDOR DE IA fallando: sin créditos/saldo (recargar en la cuenta del proveedor, ej. OpenAI → Billing) o API key inválida — se revisa/corrige en el panel (Agente IA). El sistema avisa al dueño por WhatsApp al primer fallo accionable y de nuevo al recuperarse; el agente revive solo al corregir la causa, sin reiniciar nada.",
