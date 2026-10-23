@@ -85,6 +85,11 @@ const handoffData = z.object({
   notifyText: z.string().max(1000).optional(),
 });
 
+const toAgentData = z.object({
+  clientText: z.string().max(2000).optional(),
+  note: z.string().max(1500).optional(),
+});
+
 // Retrocompatible: forma nueva { steps[] } o legacy { minutes, message }.
 const reminderData = z.object({
   minutes: z.number().int().min(0).max(60 * 24 * 30).optional(),
@@ -183,6 +188,7 @@ export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("list"), position: positionSchema, data: listData }),
   z.object({ id: z.string().min(1), type: z.literal("flow-control"), position: positionSchema, data: flowControlData }),
   z.object({ id: z.string().min(1), type: z.literal("handoff"), position: positionSchema, data: handoffData }),
+  z.object({ id: z.string().min(1), type: z.literal("to-agent"), position: positionSchema, data: toAgentData }),
   z.object({ id: z.string().min(1), type: z.literal("reminder"), position: positionSchema, data: reminderData }),
   z.object({ id: z.string().min(1), type: z.literal("crm-move"), position: positionSchema, data: crmMoveData }),
   z.object({ id: z.string().min(1), type: z.literal("crm-add-tags"), position: positionSchema, data: crmTagsData }),

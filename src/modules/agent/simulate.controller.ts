@@ -6,7 +6,7 @@ import { simulateTurn, getSimMessages, resetSim, type SimMode } from "./agent-si
 /** Modo del simulador: "AI" (agente IA) o "FLOW" (flujos). Cada uno tiene su propia conversación. */
 function parseMode(value: unknown): SimMode | undefined {
   const v = String(value ?? "").toUpperCase();
-  return v === "AI" || v === "FLOW" ? (v as SimMode) : undefined;
+  return v === "AI" || v === "FLOW" || v === "HYBRID" ? (v as SimMode) : undefined;
 }
 
 export const simulateMessagesController = asyncHandler(async (req: Request, res: Response) => {

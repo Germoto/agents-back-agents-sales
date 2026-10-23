@@ -46,6 +46,8 @@ import {
   resumeFlowOnPaymentOutcome,
   recheckFlowPayment,
   type FlowSessionState,
+  getCustomerFlowVars,
+  type FlowTurnResult,
 } from "../flows/flow-engine";
 import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
@@ -586,7 +588,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   await cancelPendingReminders(companyId, convo.customerId, [
     ScheduledMessageType.LEFT_ON_READ,
     ScheduledMessageType.ABANDONED_CART,
-    ...((config as any).business?.botMode === "FLOW"
+    ...((config as any).business?.botMode === "FLOW" || (config as any).business?.botMode === "HYBRID"
       ? [ScheduledMessageType.FLOW_TIMEOUT, ScheduledMessageType.CUSTOM]
       : []),
   ]);
@@ -769,14 +771,24 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
 
   // Modo FLOW: corre el motor de flujos guiados en lugar del agente IA. El motor
   // envía todo por su propio IO (deliver) y deja el estado en ctx.state.
-  if (config.business.botMode === "FLOW") {
+  // Modo HYBRID: el flujo va primero; si no habló (ningún flujo se disparó, o
+  // terminó en «Pasar al agente IA» sin mensaje de transición) sigue el agente.
+  const botMode = config.business.botMode;
+  if (botMode === "FLOW" || botMode === "HYBRID") {
+    const takeover = botMode === "HYBRID" && Boolean((ctx.state.flow as { aiTakeover?: unknown } | undefined)?.aiTakeover);
+    let flowResult: FlowTurnResult | null = null;
     try {
-      await runFlowTurn(buildRealFlowIO(ctx, sender), trailingUserText(history), history);
+      flowResult = await runFlowTurn(buildRealFlowIO(ctx, sender), trailingUserText(history), history, { onlyExplicit: takeover });
     } catch (err) {
       console.error("[flows] runFlowTurn falló:", err instanceof Error ? err.message : err);
     }
-    await saveState(conversationId, ctx.state);
-    return;
+    const flowSpoke = Boolean(flowResult && (flowResult.paused || flowResult.awaiting || flowResult.emitted > 0));
+    if (botMode === "FLOW" || flowSpoke) {
+      await saveState(conversationId, ctx.state);
+      return;
+    }
+    // HYBRID → agente IA con lo que el flujo recogió (ficha del cliente).
+    ctx.customerFlowVars = await getCustomerFlowVars(customerId);
   }
 
   // "escribiendo…" mientras el agente piensa: hace la espera natural para el

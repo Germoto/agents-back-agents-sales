@@ -51,7 +51,13 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   }
 
   const messages: ChatMessage[] = [
-    { role: "system", content: buildSystemPrompt(ctx.config, ctx.state) },
+    {
+      role: "system",
+      content: buildSystemPrompt(ctx.config, ctx.state, {
+        flowVars: ctx.customerFlowVars ?? ((ctx.state.flow as { variables?: Record<string, string> } | undefined)?.variables ?? null),
+        flowNote: (ctx.state.flow as { aiTakeover?: { note?: string } } | undefined)?.aiTakeover?.note ?? null,
+      }),
+    },
     ...history,
   ];
 

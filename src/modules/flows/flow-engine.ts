@@ -33,6 +33,7 @@ import {
   type SendMediaData,
   type FlowControlData,
   type HandoffData,
+  type ToAgentData,
   type ReminderData,
   type CrmMoveData,
   type CrmTagsData,
@@ -68,6 +69,24 @@ export interface FlowSessionState {
   payment?: { attempts: number };
   /** Estado del bloque «Agendar cita» en espera (slots ofrecidos). */
   booking?: { productId: string; slots: Array<{ startsAt: string; label: string }>; attempts: number };
+  /** Modo HYBRID: el flujo pasó la conversación al agente IA (bloque to-agent).
+   *  Mientras exista, solo disparan flujos por keywords u onAdLead. */
+  aiTakeover?: { at: string; flowId: string; note?: string };
+}
+
+/** Qué pasó en el turno del motor (para el despacho híbrido y el simulador). */
+export interface FlowTurnResult {
+  triggered: boolean;
+  resumed: boolean;
+  emitted: number;
+  awaiting: boolean;
+  paused: boolean;
+  toAgent: boolean;
+}
+
+export interface FlowTurnOptions {
+  /** Solo disparadores explícitos (keywords / onAdLead): cliente bajo aiTakeover. */
+  onlyExplicit?: boolean;
 }
 
 function flowStateOf(state: ConversationState): FlowSessionState {
@@ -113,6 +132,41 @@ export interface FlowIO {
   trace?: FlowTraceEntry[];
   /** Pausa (ms) entre bloques encadenados; default OUTBOX_GAP_MS. */
   gapMs?: number;
+  /** Acumulador del turno (lo inicializa runFlowTurn). */
+  outcome?: FlowTurnResult;
+}
+
+/**
+ * Persiste las variables del flujo en Customer.metadata.flowVars (merge; no pisa
+ * waContact ni otras claves). Así la ficha, el CRM y el agente IA las ven aunque
+ * el estado de la conversación se resetee. No-op en simulación.
+ */
+async function persistFlowVars(io: FlowIO): Promise<void> {
+  if (io.simulate) return;
+  const vars = flowStateOf(io.state).variables;
+  if (!vars || !Object.keys(vars).length) return;
+  try {
+    const c = await prisma.customer.findUnique({ where: { id: io.customerId }, select: { metadata: true } });
+    const md = (c?.metadata && typeof c.metadata === "object" && !Array.isArray(c.metadata) ? c.metadata : {}) as Record<string, unknown>;
+    const prev = (md.flowVars && typeof md.flowVars === "object" ? md.flowVars : {}) as Record<string, string>;
+    await prisma.customer.update({
+      where: { id: io.customerId },
+      data: { metadata: { ...md, flowVars: { ...prev, ...vars, _updatedAt: new Date().toISOString() } } as unknown as Prisma.InputJsonValue },
+    });
+  } catch (err) {
+    console.error("[flows] flowVars no se guardaron:", err instanceof Error ? err.message : err);
+  }
+}
+
+/** Variables del flujo guardadas en la ficha del cliente (sin claves internas `_`). */
+export async function getCustomerFlowVars(customerId: string): Promise<Record<string, string> | null> {
+  const c = await prisma.customer.findUnique({ where: { id: customerId }, select: { metadata: true } }).catch(() => null);
+  const md = (c?.metadata && typeof c.metadata === "object" ? c.metadata : {}) as Record<string, unknown>;
+  const raw = md.flowVars && typeof md.flowVars === "object" ? (md.flowVars as Record<string, unknown>) : null;
+  if (!raw) return null;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) if (!k.startsWith("_") && typeof v === "string" && v.trim()) out[k] = v;
+  return Object.keys(out).length ? out : null;
 }
 
 const MAX_CHAIN_PER_TURN = 10;
@@ -332,7 +386,38 @@ function pushTrace(io: FlowIO, node: FlowNode | { id: string; type: string }, ev
 // Núcleo
 // ---------------------------------------------------------------------------
 
-export async function runFlowTurn(io: FlowIO, inboundText: string, history?: ChatMessage[]): Promise<void> {
+export async function runFlowTurn(
+  io: FlowIO,
+  inboundText: string,
+  history?: ChatMessage[],
+  opts: FlowTurnOptions = {},
+): Promise<FlowTurnResult> {
+  const outcome: FlowTurnResult = { triggered: false, resumed: false, emitted: 0, awaiting: false, paused: false, toAgent: false };
+  io.outcome = outcome;
+  // Contar lo que el flujo le dice al cliente / si pausó: así el modo HÍBRIDO
+  // sabe si debe seguir con el agente IA (sin depender del trace, que en
+  // producción no existe).
+  const baseEmit = io.emit.bind(io);
+  const basePause = io.pauseBot.bind(io);
+  io.emit = async (msg) => {
+    outcome.emitted++;
+    return baseEmit(msg);
+  };
+  io.pauseBot = async () => {
+    outcome.paused = true;
+    return basePause();
+  };
+  try {
+    await runFlowTurnInner(io, inboundText, history, opts);
+  } finally {
+    io.emit = baseEmit;
+    io.pauseBot = basePause;
+    outcome.awaiting = Boolean(flowStateOf(io.state).awaitingNodeId);
+  }
+  return outcome;
+}
+
+async function runFlowTurnInner(io: FlowIO, inboundText: string, history: ChatMessage[] | undefined, opts: FlowTurnOptions): Promise<void> {
   const fs = flowStateOf(io.state);
 
   // Nombre del cliente (para {{nombre}}) si el caller no lo resolvió
@@ -343,6 +428,7 @@ export async function runFlowTurn(io: FlowIO, inboundText: string, history?: Cha
 
   // (a) RESUME: hay una sesión esperando respuesta del cliente
   if (fs.awaitingNodeId && fs.sessionFlowId) {
+    if (io.outcome) io.outcome.resumed = true;
     const row = await prisma.chatFlow.findFirst({
       where: { id: fs.sessionFlowId, companyId: io.companyId },
       select: flowSelect,
@@ -379,6 +465,7 @@ export async function runFlowTurn(io: FlowIO, inboundText: string, history?: Cha
         }
         if (qdata.saveVariable?.trim()) {
           fs.variables = { ...(fs.variables ?? {}), [qdata.saveVariable.trim()]: value };
+          await persistFlowVars(io);
         }
         fs.awaitingNodeId = undefined;
         fs.awaitingKind = undefined;
@@ -415,6 +502,7 @@ export async function runFlowTurn(io: FlowIO, inboundText: string, history?: Cha
       const saveVariable = (node.data as { saveVariable?: string }).saveVariable;
       if (saveVariable?.trim() && inboundText.trim()) {
         fs.variables = { ...(fs.variables ?? {}), [saveVariable.trim()]: inboundText.trim() };
+        await persistFlowVars(io);
       }
 
       fs.awaitingNodeId = undefined;
@@ -443,11 +531,14 @@ export async function runFlowTurn(io: FlowIO, inboundText: string, history?: Cha
   if (!rows.length) return;
   const flows = rows.map(mapFlow);
 
-  const winner = await pickTriggeredFlow(flows, inboundText, io, history);
+  const winner = await pickTriggeredFlow(flows, inboundText, io, history, opts.onlyExplicit === true);
   // El "lead de anuncio" dispara UNA sola vez: consumido tras evaluar (haya match o no).
   if (io.state.adLead?.pending) io.state.adLead.pending = false;
-  if (!winner) return; // sin match → silencio
+  if (!winner) return; // sin match → silencio (en HYBRID responde el agente)
 
+  if (io.outcome) io.outcome.triggered = true;
+  // Un flujo nuevo retoma el control aunque el agente IA lo tuviera (HYBRID).
+  delete fs.aiTakeover;
   fs.lastTriggeredAt = { ...(fs.lastTriggeredAt ?? {}), [winner.id]: new Date().toISOString() };
   fs.sessionFlowId = winner.id;
   pushTrace(io, { id: "start", type: "start" }, `triggered:${winner.name}`);
@@ -482,6 +573,7 @@ async function pickTriggeredFlow(
   inboundText: string,
   io: FlowIO,
   history?: ChatMessage[],
+  onlyExplicit = false,
 ): Promise<LoadedFlow | null> {
   const fs = flowStateOf(io.state);
   const input = normalize(inboundText);
@@ -533,6 +625,7 @@ async function pickTriggeredFlow(
       (!(t.adEntryIds ?? []).length || (!!adLead.entryId && (t.adEntryIds ?? []).includes(adLead.entryId)));
     if (adMatch) bucket = 0;
     else if (keywords.length && input && keywords.some((k) => input.includes(k))) bucket = 1;
+    else if (onlyExplicit) bucket = null; // bajo aiTakeover: ni "cualquier mensaje" ni "primer mensaje"
     else if (t.onFirstMessageEver && firstEver) bucket = 2;
     else if (t.onFirstMessageOfDay && firstOfDay) bucket = 3;
     else if (t.onAnyMessage) bucket = 4;
@@ -795,6 +888,27 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
         await io.pauseBot();
         clearSession(fs);
         pushTrace(io, node, "handoff");
+        return;
+      }
+
+      case "to-agent": {
+        // Modo HYBRID: el agente IA continúa. NO pausa el bot. Con clientText el
+        // agente entra con el siguiente mensaje; sin él, el despacho híbrido lo
+        // llama en este mismo turno (emitted === 0).
+        const data = node.data as ToAgentData;
+        if (data.clientText?.trim()) {
+          if (emitted > 0) await pause(io);
+          await io.emit({ kind: "text", text: renderTemplate(data.clientText.trim(), io) });
+          emitted++;
+        }
+        fs.aiTakeover = {
+          at: new Date().toISOString(),
+          flowId: activeFlow.id,
+          ...(data.note?.trim() ? { note: renderTemplate(data.note.trim(), io) } : {}),
+        };
+        if (io.outcome) io.outcome.toAgent = true;
+        clearSession(fs);
+        pushTrace(io, node, "to-agent");
         return;
       }
 
@@ -1492,6 +1606,7 @@ async function resumeBookingAwaiting(flow: LoadedFlow, node: FlowNode, io: FlowI
       cita_codigo: created.bookingCode ?? "",
       ...(data.saveVariable?.trim() ? { [data.saveVariable.trim()]: when } : {}),
     };
+    await persistFlowVars(io);
     io.state.status = "RESERVA_SOLICITADA";
     await io.notifyOwner(
       `📅 Nueva CITA (${io.customerPhone}): ${created.product?.name ?? "servicio"} — ${when}` +

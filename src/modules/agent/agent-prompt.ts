@@ -298,7 +298,20 @@ function verticalGuidance(
   }
 }
 
-export function buildSystemPrompt(config: BotConfig, state: ConversationState): string {
+export interface PromptExtras {
+  /** Variables del chatbot de flujos (respuestas del cliente): modo HYBRID. */
+  flowVars?: Record<string, string> | null;
+  /** Instrucción del bloque «Pasar al agente IA» para este cliente. */
+  flowNote?: string | null;
+}
+
+export function buildSystemPrompt(config: BotConfig, state: ConversationState, extra?: PromptExtras): string {
+  const flowVarsText = extra?.flowVars
+    ? Object.entries(extra.flowVars)
+        .filter(([k, v]) => !k.startsWith("_") && typeof v === "string" && v.trim())
+        .map(([k, v]) => `${k}: ${String(v).trim().slice(0, 300)}`)
+        .join(" · ")
+    : "";
   const rules = Array.isArray(config.agent.rules) ? config.agent.rules : [];
   const paymentMode = config.payment.paymentMode; // before_delivery | cash_on_delivery | manual
   const vertical = (config.business as { vertical?: string }).vertical;
@@ -430,6 +443,15 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState): 
           } a ${state.activeOffer.priceText}. Este precio MANDA sobre el del catálogo para este cliente: ofrécelo, cóbralo (enviar_metodos_pago) y valida el pago con ESTE monto. Si pregunta el precio, es este.`,
           "",
         ]
+      : []),
+    ...(flowVarsText
+      ? [
+          `DATOS QUE EL CLIENTE YA DIO EN EL CHATBOT DE FLUJOS (NO los vuelvas a preguntar; úsalos para personalizar y avanzar): ${flowVarsText}.`,
+          "",
+        ]
+      : []),
+    ...(extra?.flowNote?.trim()
+      ? [`INSTRUCCIÓN DEL FLUJO PARA ESTE CLIENTE (el chatbot te lo pasó con esta indicación): ${extra.flowNote.trim()}`, ""]
       : []),
     `Estado actual de la conversación: ${JSON.stringify({
       status: state.status ?? "NUEVO",

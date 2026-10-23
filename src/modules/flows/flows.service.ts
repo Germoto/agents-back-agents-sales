@@ -39,6 +39,19 @@ export async function knownFlowIds(companyId: string): Promise<string[]> {
   return rows.map((r) => r.id);
 }
 
+export type BotMode = "AI" | "FLOW" | "HYBRID";
+
+export async function companyBotMode(companyId: string): Promise<BotMode> {
+  const c = await prisma.company.findUnique({ where: { id: companyId }, select: { botMode: true } });
+  return c?.botMode === "FLOW" ? "FLOW" : c?.botMode === "HYBRID" ? "HYBRID" : "AI";
+}
+
+/** Opciones estándar de validación de la empresa (flujos conocidos + modo del bot). */
+export async function validationOptions(companyId: string) {
+  const [ids, botMode] = await Promise.all([knownFlowIds(companyId), companyBotMode(companyId)]);
+  return { knownFlowIds: ids, botMode };
+}
+
 export async function listFlows(companyId: string) {
   const flows = await prisma.chatFlow.findMany({
     where: { companyId },
@@ -119,7 +132,7 @@ export async function updateFlow(
     let deactivated = false;
     let validation: ValidationResult | null = null;
     if (existing.isActive && (data.nodes !== undefined || data.edges !== undefined)) {
-      validation = validateFlow(nodesOf(flow), edgesOf(flow), { knownFlowIds: await knownFlowIds(companyId) });
+      validation = validateFlow(nodesOf(flow), edgesOf(flow), await validationOptions(companyId));
       if (validation.errors.length) {
         flow = await prisma.chatFlow.update({ where: { id }, data: { isActive: false }, select: flowSelect });
         deactivated = true;
@@ -166,9 +179,7 @@ export async function toggleFlow(companyId: string, id: string, isActive: boolea
 
   let warnings: ValidationResult["warnings"] = [];
   if (isActive) {
-    const validation = validateFlow(nodesOf(flow), edgesOf(flow), {
-      knownFlowIds: await knownFlowIds(companyId),
-    });
+    const validation = validateFlow(nodesOf(flow), edgesOf(flow), await validationOptions(companyId));
     if (validation.errors.length) {
       throw new AppError("El flujo tiene errores y no se puede activar", 422, {
         code: "FLOW_INVALID",
@@ -183,7 +194,7 @@ export async function toggleFlow(companyId: string, id: string, isActive: boolea
 }
 
 export async function validateFlowDraft(companyId: string, nodes: FlowNode[], edges: FlowEdge[]) {
-  return validateFlow(nodes, edges, { knownFlowIds: await knownFlowIds(companyId) });
+  return validateFlow(nodes, edges, await validationOptions(companyId));
 }
 
 export async function deleteFlow(companyId: string, id: string) {

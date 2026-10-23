@@ -97,7 +97,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
 
   // En modo FLOW (chatbot de flujos guiados) no se usa OpenAI ni el catálogo
   // del agente: no exigimos apiKey ni configuración de entrega por producto.
-  const botMode = (whatsappConfig.company.botMode as "AI" | "FLOW") ?? "AI";
+  // HYBRID (flujo califica → agente continúa) exige lo mismo que AI.
+  const botMode = (whatsappConfig.company.botMode as "AI" | "FLOW" | "HYBRID") ?? "AI";
 
   if (!agentConfig.openaiApiKey && botMode !== "FLOW") {
     throw new AppError("Falta openaiApiKey para esta empresa", 422);

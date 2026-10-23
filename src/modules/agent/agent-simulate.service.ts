@@ -10,7 +10,7 @@ import { prisma } from "../../lib/prisma";
 import { buildBotConfig } from "../bot/bot.service";
 import { runAgentTurn } from "./agent-runtime";
 import { buildHistory, saveState, resetConversation, type ConversationState } from "./conversation.service";
-import { runFlowTurn, trailingUserText, type FlowIO, type FlowTraceEntry } from "../flows/flow-engine";
+import { runFlowTurn, trailingUserText, getCustomerFlowVars, type FlowIO, type FlowTraceEntry, type FlowTurnResult } from "../flows/flow-engine";
 import { shouldDropFinalTextAfterPayment, type TurnContext, type OutboxMessage } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveReminderSequence, applySpintax, type ReminderType } from "./reminder-templates";
@@ -23,10 +23,10 @@ const SIM_PHONE = "SIMULADOR"; // identidad del "cliente" de simulación (no es 
  * sin importar el botMode de la empresa. Cada modo usa su propia conversación
  * (canal "sim" vs "sim-flow") para que no se mezclen historial ni estado.
  */
-export type SimMode = "AI" | "FLOW";
+export type SimMode = "AI" | "FLOW" | "HYBRID";
 
 function simChannel(mode: SimMode): string {
-  return mode === "FLOW" ? "sim-flow" : "sim";
+  return mode === "FLOW" ? "sim-flow" : mode === "HYBRID" ? "sim-hybrid" : "sim";
 }
 
 export interface SimMessage {
@@ -34,6 +34,8 @@ export interface SimMessage {
   text: string;
   mediaUrl?: string | null;
   mediaKind?: string | null;
+  /** Quién respondió (modo HYBRID): el flujo o el agente IA. */
+  source?: "flow" | "agent";
 }
 
 export interface SimReminderPreview {
@@ -125,7 +127,7 @@ export async function simulateTurn(
   opts?: { adSourceId?: string },
 ): Promise<{ replies: SimMessage[]; reminders: SimReminderPreview[]; trace?: FlowTraceEntry[]; notices?: string[] }> {
   const config = await buildBotConfig(companyId);
-  const mode: SimMode = modeParam ?? (config.business.botMode === "FLOW" ? "FLOW" : "AI");
+  const mode: SimMode = modeParam ?? (config.business.botMode === "FLOW" ? "FLOW" : config.business.botMode === "HYBRID" ? "HYBRID" : "AI");
   const sim = await loadSimConversation(companyId, mode);
 
   // "Llega desde un anuncio": simular el primer mensaje atribuido (señal para
@@ -152,7 +154,10 @@ export async function simulateTurn(
 
   // Modo FLOW: el simulador corre el motor de flujos real, sin enviar por
   // WhatsApp ni programar timeouts/recordatorios (se anotan en el trace).
-  if (mode === "FLOW") {
+  // Modo HYBRID: igual que producción, si el flujo no habló sigue el agente IA.
+  let hybridTrace: FlowTraceEntry[] | undefined;
+  let customerFlowVars: Record<string, string> | null = null;
+  if (mode === "FLOW" || mode === "HYBRID") {
     const replies: SimMessage[] = [];
     const trace: FlowTraceEntry[] = [...adNotes];
     const persistReply = async (m: OutboxMessage) => {
@@ -168,7 +173,7 @@ export async function simulateTurn(
           mediaType: m.kind === "media" ? m.mediaKind ?? "image" : null,
         },
       });
-      replies.push({ role: "assistant", text, mediaUrl: m.mediaUrl ?? null, mediaKind: m.mediaKind ?? null });
+      replies.push({ role: "assistant", text, mediaUrl: m.mediaUrl ?? null, mediaKind: m.mediaKind ?? null, source: "flow" });
     };
     const io: FlowIO = {
       companyId,
@@ -195,13 +200,25 @@ export async function simulateTurn(
       simulate: true,
       trace,
     };
+    const takeover = mode === "HYBRID" && Boolean((sim.state.flow as { aiTakeover?: unknown } | undefined)?.aiTakeover);
+    let r: FlowTurnResult | null = null;
     try {
-      await runFlowTurn(io, trailingUserText(history), history);
+      r = await runFlowTurn(io, trailingUserText(history), history, { onlyExplicit: takeover });
     } catch (err) {
       console.error("[simulate] runFlowTurn falló:", err instanceof Error ? err.message : err);
     }
     await saveState(sim.conversationId, io.state);
-    return { replies, reminders: [], trace };
+    const flowSpoke = Boolean(r && (r.paused || r.awaiting || r.emitted > 0));
+    if (mode === "FLOW" || flowSpoke) return { replies, reminders: [], trace };
+    trace.push({
+      nodeId: "-",
+      type: "to-agent",
+      event: r?.toAgent ? "el flujo pasó la conversación al agente IA" : "ningún flujo respondió: responde el agente IA",
+    });
+    hybridTrace = trace;
+    // En simulación las variables no se persisten en la ficha: usar las del estado.
+    const vars = (sim.state.flow as { variables?: Record<string, string> } | undefined)?.variables ?? null;
+    customerFlowVars = vars && Object.keys(vars).length ? vars : await getCustomerFlowVars(sim.customerId);
   }
   const ctx: TurnContext = {
     companyId,
@@ -214,6 +231,7 @@ export async function simulateTurn(
     reminders: [],
     adminNotices: [],
     simulate: true,
+    customerFlowVars,
   };
 
   let finalText = "";
@@ -239,20 +257,20 @@ export async function simulateTurn(
         mediaUrl: m.mediaUrl ?? null,
       },
     });
-    replies.push({ role: "assistant", text, mediaUrl: m.mediaUrl ?? null, mediaKind: m.mediaKind ?? null });
+    replies.push({ role: "assistant", text, mediaUrl: m.mediaUrl ?? null, mediaKind: m.mediaKind ?? null, source: "agent" });
   }
   if (finalText) {
     await prisma.conversationMessage.create({
       data: { companyId, customerId: sim.customerId, conversationId: sim.conversationId, role: "ASSISTANT", message: finalText },
     });
-    replies.push({ role: "assistant", text: finalText });
+    replies.push({ role: "assistant", text: finalText, source: "agent" });
   }
 
   await saveState(sim.conversationId, ctx.state);
   const reminders = await previewReminders(companyId, sim.customerId, ctx.state, config);
   // Notas de sistema (p. ej. "pasaría a atención humana"): el simulador no ejecuta
   // los efectos reales pero deja constancia de lo que ocurriría en producción.
-  return { replies, reminders, notices: ctx.adminNotices };
+  return { replies, reminders, notices: ctx.adminNotices, ...(hybridTrace ? { trace: hybridTrace } : {}) };
 }
 
 /** Mensajes actuales de la conversación de simulación (para cargar el chat al abrir). */

@@ -49,7 +49,8 @@ export type FlowNodeType =
   | "wait"
   | "question"
   | "validate-payment"
-  | "book-appointment";
+  | "book-appointment"
+  | "to-agent";
 
 export type DetectMode = "contains" | "equals" | "starts_with" | "ends_with";
 
@@ -121,6 +122,18 @@ export interface HandoffData {
   clientText?: string;
   /** Aviso al dueño; default genérico. */
   notifyText?: string;
+}
+
+/**
+ * Bloque final «Pasar al agente IA» (solo con Company.botMode = HYBRID): el
+ * agente continúa la conversación con las variables del flujo como contexto.
+ * Con clientText, ese mensaje cierra el turno y el agente entra con el siguiente
+ * mensaje del cliente; sin clientText, el agente responde de inmediato.
+ */
+export interface ToAgentData {
+  clientText?: string;
+  /** Instrucción para el agente sobre este cliente (soporta {{variables}}). */
+  note?: string;
 }
 
 export interface ReminderStep {
@@ -228,6 +241,7 @@ export type FlowNodeData =
   | ListData
   | FlowControlData
   | HandoffData
+  | ToAgentData
   | ReminderData
   | CrmMoveData
   | CrmTagsData
@@ -266,7 +280,7 @@ export const SEND_NODE_TYPES: FlowNodeType[] = [
   "send-document",
 ];
 
-export const TERMINAL_NODE_TYPES: FlowNodeType[] = ["flow-control", "handoff"];
+export const TERMINAL_NODE_TYPES: FlowNodeType[] = ["flow-control", "handoff", "to-agent"];
 
 export function isSendNode(type: string): boolean {
   return SEND_NODE_TYPES.includes(type as FlowNodeType);
@@ -317,6 +331,7 @@ export function outputHandlesFor(node: FlowNode): string[] {
     }
     case "flow-control":
     case "handoff":
+    case "to-agent":
       return [];
     default:
       return [];

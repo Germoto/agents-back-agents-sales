@@ -143,6 +143,8 @@ export interface TurnContext {
   /** Nombres de las tools ejecutadas en ESTE turno (en orden). Lo llena el runtime;
    *  permite guardas deterministas sobre el texto final (p. ej. tras enviar_metodos_pago). */
   toolsCalled?: string[];
+  /** Modo HYBRID: respuestas que el cliente dio en el chatbot de flujos (ficha del cliente). */
+  customerFlowVars?: Record<string, string> | null;
 }
 
 /**

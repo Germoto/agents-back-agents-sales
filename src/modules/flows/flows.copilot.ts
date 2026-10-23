@@ -16,7 +16,7 @@ import { resolveAiSettings } from "../../lib/ai-providers";
 import { chatCompletion, type ChatMessage, type ToolDefinition } from "../../lib/openai";
 import { flowNodeSchema, flowEdgeSchema, flowTriggerSchema } from "./flows.schemas";
 import { validateFlow } from "./flow-validation";
-import { knownFlowIds } from "./flows.service";
+import { validationOptions } from "./flows.service";
 import { NODE_DOCS, HARD_RULES, buildBusinessContext, checkFlowReferences } from "./flow-authoring";
 import { DEFAULT_TRIGGER, type FlowEdge, type FlowNode, type FlowTrigger } from "./flow-types";
 
@@ -72,7 +72,7 @@ const PROPOSE_FLOW_TOOL: ToolDefinition = {
                   "start", "send-text", "send-image", "send-video", "send-audio", "send-document",
                   "answers", "list", "flow-control", "handoff", "reminder", "crm-move",
                   "crm-add-tags", "crm-remove-tags", "condition", "wait", "question",
-                  "validate-payment", "book-appointment",
+                  "validate-payment", "book-appointment", "to-agent",
                 ],
               },
               position: {
@@ -181,7 +181,7 @@ async function validateProposal(companyId: string, raw: unknown): Promise<{ prop
 
   if (errors.length) return { errors, warnings: [] };
 
-  const result = validateFlow(nodes, edges, { knownFlowIds: await knownFlowIds(companyId) });
+  const result = validateFlow(nodes, edges, await validationOptions(companyId));
   if (result.errors.length) {
     return {
       errors: result.errors.map((i) => `${i.nodeId ? `nodo ${i.nodeId}: ` : ""}${i.message}`),

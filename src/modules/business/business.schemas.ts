@@ -29,8 +29,9 @@ export const updateBusinessSchema = z.object({
   timezone: z.string().min(1).default("America/Lima"),
   // Moneda del negocio: todo el embudo la usa. Opcional (no enviada = no cambia).
   currency: z.enum(["PEN", "USD"]).optional(),
-  // Modo de operación del bot: agente IA abierto o chatbot de flujos guiados.
-  botMode: z.enum(["AI", "FLOW"]).default("AI"),
+  // Modo de operación del bot: agente IA abierto, chatbot de flujos guiados o
+  // HÍBRIDO (el flujo recibe/califica y el agente IA continúa).
+  botMode: z.enum(["AI", "FLOW", "HYBRID"]).default("AI"),
   isActive: z.boolean().default(true),
   deliveryConfig: deliveryConfigSchema,
   // Horario de atención para la agenda de citas (rubro SERVICE).

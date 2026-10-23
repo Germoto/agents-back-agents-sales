@@ -41,6 +41,8 @@ export interface ValidationResult {
 export interface ValidateFlowOptions {
   /** Ids de flujos válidos de la empresa (para validar transfer). Si se omite, no se valida el destino. */
   knownFlowIds?: string[];
+  /** Modo del bot de la empresa (AI | FLOW | HYBRID). Si se pasa, «Pasar al agente IA» exige HYBRID. */
+  botMode?: string;
 }
 
 const NODE_LABEL: Record<string, string> = {
@@ -54,6 +56,7 @@ const NODE_LABEL: Record<string, string> = {
   "list": "Enviar Lista",
   "flow-control": "Control de Flujo",
   "handoff": "Derivar a humano",
+  "to-agent": "Pasar al agente IA",
   "reminder": "Recordatorio",
   "crm-move": "Mover en CRM",
   "crm-add-tags": "Asignar etiquetas",
@@ -158,6 +161,16 @@ export function validateFlow(
   // --- Contenido por nodo ---
   for (const node of nodes) {
     switch (node.type) {
+      case "to-agent": {
+        if (opts.botMode && opts.botMode !== "HYBRID") {
+          errors.push({
+            code: "TO_AGENT_REQUIRES_HYBRID",
+            message: "«Pasar al agente IA» solo funciona con la empresa en modo Híbrido (Empresa → Modo de operación).",
+            nodeId: node.id,
+          });
+        }
+        break;
+      }
       case "send-text": {
         const data = node.data as SendTextData;
         if (!data.text?.trim()) {

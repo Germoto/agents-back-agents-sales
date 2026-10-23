@@ -25,7 +25,7 @@ export interface SetupStep {
 export interface SetupStatus {
   complete: boolean;
   percent: number;
-  botMode: "AI" | "FLOW";
+  botMode: "AI" | "FLOW" | "HYBRID";
   steps: SetupStep[];
 }
 
@@ -35,7 +35,8 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
     select: { botMode: true },
   });
 
-  const botMode: "AI" | "FLOW" = company?.botMode === "FLOW" ? "FLOW" : "AI";
+  const botMode: "AI" | "FLOW" | "HYBRID" =
+    company?.botMode === "FLOW" ? "FLOW" : company?.botMode === "HYBRID" ? "HYBRID" : "AI";
 
   const [productCount, agentConfig, whatsapp, payment, activeFlows, conversationCount] =
     await Promise.all([
@@ -91,8 +92,8 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
     icon: "box",
   });
 
-  // 3. Configurar el cerebro del bot — ramifica por modo.
-  if (botMode === "FLOW") {
+  // 3. Configurar el cerebro del bot — ramifica por modo (HÍBRIDO pide ambos).
+  if (botMode === "FLOW" || botMode === "HYBRID") {
     steps.push({
       key: "flow",
       title: "Crea y activa tu flujo de chatbot",
@@ -104,7 +105,8 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
       ctaPath: "/flujos",
       icon: "flow",
     });
-  } else {
+  }
+  if (botMode !== "FLOW") {
     const agentDone = !!agentConfig?.openaiApiKey && !!agentConfig?.basePrompt?.trim();
     steps.push({
       key: "agent",

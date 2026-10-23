@@ -195,6 +195,17 @@ export interface CrmBoardCard {
   tags: Array<{ id: string; name: string; color: string }>;
   totalValue: number;
   sortOrder: number | null;
+  /** Respuestas que el cliente dio en el chatbot de flujos (Customer.metadata.flowVars). */
+  flowVars?: Record<string, string>;
+}
+
+function flowVarsOf(metadata: unknown): Record<string, string> | undefined {
+  const md = metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : null;
+  const raw = md?.flowVars && typeof md.flowVars === "object" ? (md.flowVars as Record<string, unknown>) : null;
+  if (!raw) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) if (!k.startsWith("_") && typeof v === "string" && v.trim()) out[k] = v;
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** Fila del último mensaje por conversación (raw DISTINCT ON). */
@@ -225,7 +236,7 @@ export async function getBoard(companyId: string, crmId: string) {
               select: {
                 customerId: true,
                 sortOrder: true,
-                customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true, adSourceId: true, adTitle: true } },
+                customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true, adSourceId: true, adTitle: true, metadata: true } },
               },
             },
           },
@@ -241,7 +252,7 @@ export async function getBoard(companyId: string, crmId: string) {
         botPaused: true,
         lastMessageAt: true,
         openedAt: true,
-        customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true, adSourceId: true, adTitle: true } },
+        customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true, adSourceId: true, adTitle: true, metadata: true } },
       },
     }),
   ]);
@@ -323,12 +334,14 @@ export async function getBoard(companyId: string, crmId: string) {
       phone: string;
       adSourceId?: string | null;
       adTitle?: string | null;
+      metadata?: unknown;
     },
     sortOrder: number | null,
   ): CrmBoardCard {
     const convo = convoByCustomer.get(customer.id) ?? null;
     const last = convo ? lastMessageByConvo.get(convo.id) ?? null : null;
-    const { adSourceId, adTitle, ...customerRest } = customer;
+    const { adSourceId, adTitle, metadata, ...customerRest } = customer;
+    const flowVars = flowVarsOf(metadata);
     return {
       customerId: customer.id,
       customer: { ...customerRest, ad: adInfoFor(adMap, adSourceId, adTitle) },
@@ -342,6 +355,7 @@ export async function getBoard(companyId: string, crmId: string) {
       totalValue:
         (receiptsByCustomer.get(customer.id) ?? 0) + (dealsByCustomer.get(customer.id) ?? 0),
       sortOrder,
+      ...(flowVars ? { flowVars } : {}),
     };
   }
 

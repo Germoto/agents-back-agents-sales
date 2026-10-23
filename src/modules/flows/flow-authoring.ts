@@ -12,7 +12,7 @@
 import { prisma } from "../../lib/prisma";
 import { flowNodeSchema, flowEdgeSchema, flowTriggerSchema } from "./flows.schemas";
 import { validateFlow, type ValidationIssue } from "./flow-validation";
-import { knownFlowIds } from "./flows.service";
+import { validationOptions } from "./flows.service";
 import {
   DEFAULT_TRIGGER,
   type AnswersData,
@@ -28,6 +28,7 @@ import {
   type ListData,
   type QuestionData,
   type SendTextData,
+  type ToAgentData,
   type ValidatePaymentData,
 } from "./flow-types";
 
@@ -50,6 +51,7 @@ export const NODE_DOCS = `BLOQUES DISPONIBLES (type → data → handles de sali
 - crm-move: {crmId, crmColumnId, crmColumnName?} → "next". Mueve al cliente a una columna del CRM.
 - crm-add-tags | crm-remove-tags: {tagIds:[uuid]} → "next". Asigna/quita etiquetas.
 - handoff: {clientText?, notifyText?} → SIN salidas (terminal). Pausa el bot y avisa a un asesor humano.
+- to-agent: {clientText?, note?} → SIN salidas (terminal; SOLO con la empresa en modo HYBRID). El agente IA continúa la conversación con las variables del flujo como contexto; note = instrucción para el agente sobre este cliente (ej. "ya eligió servicio y presupuesto: presenta la ficha y ofrece la llamada"). Con clientText el agente entra con el siguiente mensaje del cliente; sin clientText responde de inmediato (si el bloque se alcanza por timeout, pon clientText).
 - flow-control: {action:"restart"|"transfer", targetFlowId? (si transfer)} → SIN salidas (terminal). Reinicia este flujo o transfiere a otro.
 
 VARIABLES: en cualquier texto puedes usar {{nombre}}, {{telefono}} y las guardadas con saveVariable (ej. {{correo}}).
@@ -489,7 +491,7 @@ export async function normalizeFlowDraft(companyId: string, raw: FlowDraftInput)
   });
   if (errors.length) return { ok: false, errors: errors.slice(0, MAX_ERRORS) };
 
-  const result = validateFlow(nodes, edges, { knownFlowIds: await knownFlowIds(companyId) });
+  const result = validateFlow(nodes, edges, await validationOptions(companyId));
   if (result.errors.length) return { ok: false, errors: result.errors.map(issueText).slice(0, MAX_ERRORS) };
 
   const refErrors = await checkFlowReferences(companyId, nodes, catalog, trigger);
@@ -605,6 +607,10 @@ export async function describeFlow(
       case "flow-control": {
         const f = n.data as FlowControlData;
         return f.action === "transfer" ? `Transferir al flujo «${nameOf(cat.flows, f.targetFlowId)}»` : "Reiniciar este flujo";
+      }
+      case "to-agent": {
+        const t = n.data as ToAgentData;
+        return `Pasar al agente IA${t.clientText ? ` · transición: «${short(t.clientText)}»` : " (responde de inmediato)"}${t.note ? ` · instrucción: «${short(t.note)}»` : ""}`;
       }
       default:
         return n.type;
