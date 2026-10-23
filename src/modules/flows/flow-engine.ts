@@ -356,6 +356,85 @@ function candidateInputs(inbound: string): string[] {
   return [...new Set([whole, ...lines])].filter(Boolean);
 }
 
+// ---------------------------------------------------------------------------
+// Coincidencia por PALABRAS del nombre de la opción ("ia" → "Agente IA",
+// "auto" → "Automatización", "automatisacion" → "Automatización"). Solo decide
+// cuando una opción gana sin empate; si la respuesta toca varias → null.
+// ---------------------------------------------------------------------------
+const STOPWORDS = new Set(["a", "de", "del", "la", "el", "los", "las", "y", "o", "u", "un", "una", "unos", "unas", "para", "por", "con", "sin", "en", "mi", "tu", "su", "que", "es", "al", "lo", "me", "te", "se"]);
+
+function wordTokens(text: string): string[] {
+  return normalize(text)
+    .split(/[^a-z0-9ñ]+/)
+    .filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  const m = a.length;
+  const n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+/** ¿La palabra escrita coincide con la palabra del nombre de la opción? */
+function tokenMatches(input: string, optTok: string, shortInput: boolean): boolean {
+  if (input === optTok) return optTok.length > 2 || shortInput;
+  if (optTok.length <= 2) return false; // "ia", "no", "si": solo exactas
+  if (input.length >= 4 && optTok.startsWith(input)) return true; // prefijo: "auto"
+  if (optTok.length >= 5 && input.length >= 4) {
+    const max = optTok.length >= 8 ? 2 : 1;
+    if (Math.abs(optTok.length - input.length) <= max && levenshtein(input, optTok) <= max) return true; // tipeo
+  }
+  return false;
+}
+
+export function matchByWords(options: Array<{ id: string; label?: string }>, candidates: string[]): string | null {
+  const opts = options.map((o) => ({ id: o.id, tokens: [...new Set(wordTokens(o.label ?? ""))] })).filter((o) => o.tokens.length);
+  if (!opts.length) return null;
+  // Tokens compartidos por varias opciones no identifican por sí solos.
+  const owners = new Map<string, number>();
+  for (const o of opts) for (const t of o.tokens) owners.set(t, (owners.get(t) ?? 0) + 1);
+  for (const candidate of candidates) {
+    const inputs = [...new Set(wordTokens(candidate))];
+    if (!inputs.length) continue;
+    // Palabras de 2 letras del label ("ia", "no", "si") solo cuentan en respuestas
+    // de hasta 3 palabras ("ia", "sí dale", "ia o web"), no en frases ("no sé qué elegir").
+    const shortInput = normalize(candidate).split(/[^a-z0-9ñ]+/).filter(Boolean).length <= 3;
+    let best: { id: string; score: number } | null = null;
+    let tie = false;
+    for (const o of opts) {
+      let distinct = 0;
+      let shared = 0;
+      for (const t of o.tokens) {
+        if (!inputs.some((inp) => tokenMatches(inp, t, shortInput))) continue;
+        if ((owners.get(t) ?? 0) > 1) shared++;
+        else distinct++;
+      }
+      const score = distinct > 0 ? distinct + shared : 0;
+      if (score === 0) continue;
+      if (!best || score > best.score) {
+        best = { id: o.id, score };
+        tie = false;
+      } else if (score === best.score) {
+        tie = true;
+      }
+    }
+    if (best && !tie) return best.id;
+    if (best && tie) return null; // ambiguo: no adivinar
+  }
+  return null;
+}
+
 function matchAnswersOption(data: AnswersData, inbound: string): string | null {
   const candidates = candidateInputs(inbound);
   if (!candidates.length) return null;
@@ -376,7 +455,10 @@ function matchAnswersOption(data: AnswersData, inbound: string): string | null {
       if (label.length >= 3 && input.includes(label)) return opt.id;
     }
   }
-  // 3) por texto a detectar (sinónimos extra) con su modo
+  // 3) por una palabra del nombre ("ia" → Agente IA), solo si es inequívoca
+  const byWords = matchByWords(options, candidates);
+  if (byWords) return byWords;
+  // 4) por texto a detectar (sinónimos extra) con su modo
   for (const opt of options) {
     const target = normalize(opt.detectText ?? "");
     if (!target) continue;
@@ -417,7 +499,8 @@ function matchListOption(data: ListData, inbound: string): string | null {
       if (label.length >= 3 && input.includes(label)) return opt.id;
     }
   }
-  return null;
+  // 3) por una palabra del label (solo si identifica una única opción)
+  return matchByWords(flat, candidates);
 }
 
 function edgeFrom(flow: LoadedFlow, nodeId: string, handle: string): FlowEdge | undefined {
