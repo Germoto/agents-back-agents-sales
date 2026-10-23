@@ -51,6 +51,8 @@ import { getDashboardStats } from "../dashboard/dashboard.service";
 import { approveReceipt, associateReceiptProduct, ignoreReceipt, listReceipts, rejectReceipt } from "../receipts/receipts.service";
 import { listOrders, updateOrderStatus } from "../orders/orders.service";
 import { createNote, deleteCustomer, getCustomer, listNotes, updateCustomer } from "../customers/customers.service";
+import { listCrmStructure } from "../crm/crm.service";
+import { crmToolConfigSchema } from "../agent-config/agent-config.schemas";
 import { listConversations, listConversationMessages, setConversationPinned, setCustomerOptOut } from "../agent/conversation.service";
 import { createBooking, createScheduleBlock, deleteScheduleBlock, listBookings, listScheduleBlocks, rescheduleBooking, updateBookingStatus } from "../bookings/bookings.service";
 import type { OrderStatus, ServiceBookingStatus } from "@prisma/client";
@@ -283,7 +285,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_agente",
       description:
-        "Actualiza el AGENTE IA. `data` es PARCIAL: {basePrompt?, salesStyle? (cercano|profesional|directo|entusiasta|consultivo), rules?: string[] (se AGREGAN a las existentes; para quitar una usa reemplazarReglas=true con la lista final), negotiationHandoff?, catalogMode? (preguntar|resumen_humano|primeros_n), keywordMode? (detalle_y_preguntar|agregar_directo|auto), trackStock?, catalogMediaMode? (text|media|both)}. NUNCA gestiona la API key, el proveedor ni el modelo. Llámala SOLO tras confirmación.",
+        "Actualiza el AGENTE IA. `data` es PARCIAL: {basePrompt?, salesStyle? (cercano|profesional|directo|entusiasta|consultivo), rules?: string[] (se AGREGAN a las existentes; para quitar una usa reemplazarReglas=true con la lista final), negotiationHandoff?, catalogMode? (preguntar|resumen_humano|primeros_n), keywordMode? (detalle_y_preguntar|agregar_directo|auto), trackStock?, catalogMediaMode? (text|media|both), crmTool?}. crmTool = HERRAMIENTA DE CRM DEL AGENTE (apagada por defecto): {enabled, tablero (nombre), columnas: [{columna, cuando}], etiquetas: [{etiqueta, cuando}], quitarEtiquetas: [nombres], soloAvanzar? (default true), maxPorTurno? (1-3, default 1), avisarDueno? (default true)}; null la apaga. CADA columna/etiqueta permitida necesita su regla 'cuando' (mín. 10 caracteres, p. ej. 'Propuesta enviada: cuando el cliente pide la cotización por escrito'): sin ella se rechaza. Recomienda dejar las columnas de entrada al flujo/anuncio y las de pago a la validación de comprobantes. NUNCA gestiona la API key, el proveedor ni el modelo. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1325,7 +1327,7 @@ function rubroGuide(vertical: string | undefined): string {
     case "PHYSICAL_GOODS":
       return `Rubro COMERCIAL (productos físicos: ropa, ferretería, licorería...). ${COMMON_FIELDS} Además: stock (número, si controla inventario); variants = [{name, options: string[], sortOrder}] para Talla/Color (las opciones NO cambian el precio); physicalDelivery = {requiresAddress: true, deliveryCost?, deliveryTime?, pickupAvailable, deliveryAreas: string[]} (zonas de entrega — pregunta las zonas si va a crear el primero).`;
     case "SERVICE":
-      return `Rubro SERVICIOS (cada producto = un servicio, con cita opcional). ${COMMON_FIELDS} Además: durationMin (minutos de la cita — con esto el agente agenda con horarios reales), slotCapacity (citas simultáneas, default 1), bookingLeadMinutes, bookingHorizonDays; deliveryMethod/support como texto libre si aplica. Para captar LEADS de servicios sin venta directa (desarrollo, consultoría, proyectos), lo habitual es un flujo de calificación (ver_bloques_flujo → crear_flujo) con preguntas de botones, etiquetas y columnas del CRM y derivación a humano con aviso por WhatsApp; si los leads vienen de Meta Ads, el anuncio del catálogo pone la etiqueta de origen y la columna de entrada (configurar_anuncio) y el flujo se dispara con onAdLead. Si quiere que tras calificar el AGENTE converse (dudas, agendar la llamada), recomienda botMode HYBRID: el flujo termina en to-agent y el catálogo debe tener un servicio por línea de negocio (precio como texto 'desde…' o 'según cotización', FAQs y objeciones) más un servicio 'Llamada de diagnóstico' con durationMin para agendar.`;
+      return `Rubro SERVICIOS (cada producto = un servicio, con cita opcional). ${COMMON_FIELDS} Además: durationMin (minutos de la cita — con esto el agente agenda con horarios reales), slotCapacity (citas simultáneas, default 1), bookingLeadMinutes, bookingHorizonDays; deliveryMethod/support como texto libre si aplica. Para captar LEADS de servicios sin venta directa (desarrollo, consultoría, proyectos), lo habitual es un flujo de calificación (ver_bloques_flujo → crear_flujo) con preguntas de botones, etiquetas y columnas del CRM y derivación a humano con aviso por WhatsApp; si los leads vienen de Meta Ads, el anuncio del catálogo pone la etiqueta de origen y la columna de entrada (configurar_anuncio) y el flujo se dispara con onAdLead. Si quiere que tras calificar el AGENTE converse (dudas, agendar la llamada), recomienda botMode HYBRID: el flujo termina en to-agent y el catálogo debe tener un servicio por línea de negocio (precio como texto 'desde…' o 'según cotización', FAQs y objeciones) más un servicio 'Llamada de diagnóstico' con durationMin para agendar. Si quiere que el agente mueva el tablero solo, configurar_agente crmTool con lista blanca: «Reunión agendada» (cuando la cita quedó confirmada), «Propuesta enviada» (cuando pide la propuesta por escrito), «Perdido / En pausa» (cuando dice que no le interesa) y etiqueta «🔥 Caliente» (pide precio, fecha o propuesta), cada una con su 'cuando'.`;
     case "REAL_ESTATE":
       return `Rubro INMOBILIARIA (cada producto = un inmueble). ${COMMON_FIELDS} Además: verticalData con la ficha: {operation ('venta'|'alquiler'), propertyType, areaM2, bedrooms, bathrooms, parking, location, maintenance, antiquity}; durationMin para la duración de la visita (agenda).`;
     case "STREAMER":
@@ -1376,6 +1378,80 @@ type AdminProduct = Awaited<ReturnType<typeof getProduct>>;
 const norm = (s: string) => s.trim().toLowerCase();
 
 /** Unión de listas de strings sin duplicados (case-insensitive), conservando el orden existente. */
+/**
+ * crmTool por NOMBRES (copiloto/MCP) → crmToolConfig por ids, validado con el
+ * mismo zod del panel (cada columna/etiqueta permitida exige su regla "cuando").
+ */
+async function resolveCrmToolConfig(companyId: string, raw: unknown): Promise<Record<string, unknown> | null> {
+  if (raw === null || raw === false) return null;
+  const r = (raw && typeof raw === "object" ? raw : {}) as LooseData;
+  const { boards, tags } = await listCrmStructure(companyId);
+  const norm = (v: unknown) => String(v ?? "").trim().toLowerCase();
+  const boardRef = asStr(r.tablero) ?? asStr(r.crmId);
+  const board = boardRef ? boards.find((b) => b.id === boardRef || norm(b.name) === norm(boardRef)) : boards.length === 1 ? boards[0] : undefined;
+  if (r.enabled !== false && !board) throw new AppError(`Indica el tablero (ver_crm lista: ${boards.map((b) => `«${b.name}»`).join(", ") || "ninguno"})`, 400);
+  const columns = (Array.isArray(r.columnas) ? r.columnas : []).map((c) => {
+    const o = (c && typeof c === "object" ? c : { columna: c }) as LooseData;
+    const ref = asStr(o.columna) ?? asStr(o.columnId) ?? "";
+    const col = board?.columns.find((x) => x.id === ref || norm(x.name) === norm(ref));
+    if (!col) throw new AppError(`La columna «${ref}» no existe en el tablero «${board?.name ?? "?"}» (ver_crm)`, 400);
+    return { columnId: col.id, when: String(o.cuando ?? o.when ?? "").trim() };
+  });
+  const addTags = (Array.isArray(r.etiquetas) ? r.etiquetas : []).map((t) => {
+    const o = (t && typeof t === "object" ? t : { etiqueta: t }) as LooseData;
+    const ref = asStr(o.etiqueta) ?? asStr(o.tagId) ?? "";
+    const tag = tags.find((x) => x.id === ref || norm(x.name) === norm(ref));
+    if (!tag) throw new AppError(`La etiqueta «${ref}» no existe (créala con crear_etiqueta)`, 400);
+    return { tagId: tag.id, when: String(o.cuando ?? o.when ?? "").trim() };
+  });
+  const removeTagIds = (asStrList(r.quitarEtiquetas) ?? []).map((ref) => {
+    const tag = tags.find((x) => x.id === ref || norm(x.name) === norm(ref));
+    if (!tag) throw new AppError(`La etiqueta «${ref}» no existe (créala con crear_etiqueta)`, 400);
+    return tag.id;
+  });
+  const candidate = {
+    enabled: r.enabled !== false,
+    crmId: board?.id ?? null,
+    columns,
+    addTags,
+    removeTagIds,
+    onlyForward: typeof r.soloAvanzar === "boolean" ? r.soloAvanzar : true,
+    maxPerTurn: Number(r.maxPorTurno) || 1,
+    notifyOwner: typeof r.avisarDueno === "boolean" ? r.avisarDueno : true,
+  };
+  const parsed = crmToolConfigSchema.safeParse(candidate);
+  if (!parsed.success) {
+    const msgs = parsed.error.issues.map((i) => {
+      const path = i.path.join(".");
+      const idx = typeof i.path[1] === "number" ? i.path[1] : -1;
+      const who = i.path[0] === "columns" && idx >= 0 ? `columna «${board?.columns.find((c) => c.id === columns[idx]?.columnId)?.name ?? "?"}»` : i.path[0] === "addTags" && idx >= 0 ? `etiqueta «${tags.find((t) => t.id === addTags[idx]?.tagId)?.name ?? "?"}»` : path;
+      return `${who}: ${i.message}`;
+    });
+    throw new AppError(`Configuración de la herramienta de CRM inválida — ${msgs.join("; ")}. Cada columna/etiqueta permitida necesita su regla "cuando".`, 400);
+  }
+  return parsed.data as unknown as Record<string, unknown>;
+}
+
+/** crmToolConfig (ids) → vista con nombres para ver_configuracion. */
+async function describeCrmToolConfig(companyId: string, raw: unknown) {
+  const cfg = raw && typeof raw === "object" ? (raw as LooseData) : null;
+  if (!cfg) return { activa: false, nota: "Apagada: el agente no mueve ni etiqueta en el CRM por su cuenta (configurar_agente crmTool)." };
+  const { boards, tags } = await listCrmStructure(companyId);
+  const board = boards.find((b) => b.id === cfg.crmId);
+  const colName = (id: unknown) => board?.columns.find((c) => c.id === id)?.name ?? "(eliminada)";
+  const tagName = (id: unknown) => tags.find((t) => t.id === id)?.name ?? "(eliminada)";
+  return {
+    activa: cfg.enabled === true,
+    tablero: board?.name ?? "(eliminado)",
+    columnas: (Array.isArray(cfg.columns) ? cfg.columns : []).map((c) => ({ columna: colName((c as LooseData).columnId), cuando: (c as LooseData).when })),
+    etiquetas: (Array.isArray(cfg.addTags) ? cfg.addTags : []).map((t) => ({ etiqueta: tagName((t as LooseData).tagId), cuando: (t as LooseData).when })),
+    quitarEtiquetas: (Array.isArray(cfg.removeTagIds) ? cfg.removeTagIds : []).map(tagName),
+    soloAvanzar: cfg.onlyForward !== false,
+    maxPorTurno: Number(cfg.maxPerTurn) || 1,
+    avisarDueno: cfg.notifyOwner !== false,
+  };
+}
+
 function mergeStrList(existing: string[], incoming: string[]): string[] {
   const seen = new Set(existing.map(norm));
   return [...existing, ...incoming.filter((v) => v.trim() && !seen.has(norm(v)))];
@@ -2180,6 +2256,7 @@ export async function runCopilotTool(
             trackStock: true,
             catalogMediaMode: true,
             followupConfig: true,
+            crmToolConfig: true,
           },
         }),
         prisma.paymentConfig.findUnique({
@@ -2206,12 +2283,13 @@ export async function runCopilotTool(
         enabled: Boolean(s?.enabled),
         pasos: Array.isArray(s?.steps) ? s.steps.length : 0,
       });
-      const { followupConfig: _fu, ...agentRest } = agent ?? { followupConfig: null };
+      const { followupConfig: _fu, crmToolConfig: _crmTool, ...agentRest } = agent ?? { followupConfig: null, crmToolConfig: null };
+      const crmToolView = await describeCrmToolConfig(companyId, agent?.crmToolConfig);
       void _fu;
       return {
         result: JSON.stringify({
           empresa: company ? { ...company, productCount: company._count.products, _count: undefined } : null,
-          agente: agent ? agentRest : null,
+          agente: agent ? { ...agentRest, herramientaCrm: crmToolView } : null,
           recordatorios: {
             abandonedCart: seqInfo(fu?.abandonedCart),
             leftOnRead: seqInfo(fu?.leftOnRead),
@@ -2316,9 +2394,10 @@ export async function runCopilotTool(
         keywordMode: asStr(data.keywordMode) ?? (current.keywordMode as string),
         trackStock: typeof data.trackStock === "boolean" ? data.trackStock : (current.trackStock ?? true),
         catalogMediaMode: asStr(data.catalogMediaMode) ?? (current.catalogMediaMode as string),
+        ...(data.crmTool !== undefined ? { crmToolConfig: await resolveCrmToolConfig(companyId, data.crmTool) } : {}),
       });
       return {
-        result: JSON.stringify({ ok: true, nota: "Agente IA actualizado (la API key y el modelo no se tocaron)." }),
+        result: JSON.stringify({ ok: true, nota: "Agente IA actualizado (la API key y el modelo no se tocaron)." + (data.crmTool !== undefined ? " Herramienta de CRM del agente guardada; ver_configuracion la muestra con nombres." : "") }),
         wrote: true,
       };
     }
@@ -3893,7 +3972,7 @@ const SYSTEM_GUIDE = [
   "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat). Los productos digitales pueden tener ENTREGA POR CORREO a pedido del cliente (editar producto → paso 'Entrega del acceso' → pestaña '📧 Correo', o digitalDelivery.emailEnabled por chat): si el cliente que ya pagó pide el acceso por email, el agente se lo envía y guarda su correo. También pueden tener INVITACIÓN A LA TIENDA (pestaña '🛍️ Tienda' o digitalDelivery.storeInviteEnabled): el último mensaje tras entregar invita a visitar la tienda web con su link (reemplaza al cross-sell y al catálogo; requiere tienda publicada). Cada producto puede tener OFERTA con vigencia (precio de oferta + desde/hasta): vigente, el agente la presenta, cobra y valida ese precio y el normal sale tachado como 'antes'. Además hay OFERTAS ESCALONADAS en los recordatorios: cada paso puede llevar su precio (si el cliente no compra, el recordatorio 1 ofrece un precio y el 2 uno mejor — solo para ese cliente).",
   "- Empresa (/empresa): nombre, rubro, zona horaria, MONEDA del negocio (soles S/ por defecto o dólares $ — todo el embudo la usa: fichas, carrito, cobro, validación, reportes), horario de atención, delivery, firma. Incluye el tab Anuncios: catálogo de anuncios Meta (mapea IDs/títulos de anuncios a descripciones amigables para los leads y el reporte por anuncio).",
   "- Mi plan (/mi-plan): plan actual, leads del mes, renovar/cambiar plan pagando con Mercado Pago (1 o 12 meses), recargar créditos y canjear vales.",
-  "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Modelos Claude disponibles: claude-haiku-5-5 (rápido y económico, recomendado), claude-sonnet-5-5 (alta calidad) y claude-opus-5-5 (máxima calidad, más caro); en los Claude 5.x la temperatura no aplica (el panel la deshabilita). Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper) y las imágenes del copiloto se generan con OpenAI: si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI para audios e imágenes — sin ella los audios no se transcriben ni se generan imágenes; el resto (agente, comprobantes, copiloto) corre con el proveedor elegido.",
+  "- Agente IA (/agente): prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Modelos Claude disponibles: claude-haiku-5-5 (rápido y económico, recomendado), claude-sonnet-5-5 (alta calidad) y claude-opus-5-5 (máxima calidad, más caro); en los Claude 5.x la temperatura no aplica (el panel la deshabilita). Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper) y las imágenes del copiloto se generan con OpenAI: si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI para audios e imágenes — sin ella los audios no se transcriben ni se generan imágenes; el resto (agente, comprobantes, copiloto) corre con el proveedor elegido. HERRAMIENTA DE CRM DEL AGENTE (Agente IA → Comportamiento → «CRM automático del agente»; por chat configurar_agente crmTool): APAGADA por defecto; cuando se activa, el agente puede mover al cliente SOLO a las columnas permitidas y poner/quitar SOLO las etiquetas permitidas de UN tablero, y SOLO cuando se cumple la regla 'cuando' escrita para cada una (obligatoria); además 'solo avanzar' (no retrocede columnas), tope de acciones por turno (default 1), rastro en Notas del cliente y aviso por WhatsApp al dueño en cada cambio. Buenas prácticas al proponerla: columnas de hitos conversacionales (p. ej. «Propuesta enviada» cuando pide la cotización por escrito, «Reunión agendada» cuando la cita quedó confirmada, «Perdido / En pausa» cuando dice explícitamente que no le interesa) y etiquetas de temperatura (p. ej. «🔥 Caliente» cuando pide precio/fecha/propuesta); NO permitir columnas de entrada (las maneja el flujo/anuncio) ni de pago/ganado (las maneja la validación de comprobantes). Propón las reglas por escrito y actívala SOLO tras confirmación.",
   "- MODOS DEL BOT (Empresa → Modo de operación; configurar_empresa botMode): AI = el agente IA conversa libre con el catálogo (recomendado para vender); FLOW = solo flujos guiados por bloques (predecible; si ningún flujo se dispara el bot calla; handoff pausa para humano); HYBRID = el flujo recibe y califica (botones, etiquetas, columnas, origen por anuncio) y luego el agente IA continúa con esas respuestas como contexto (bloque to-agent) — si ningún flujo se dispara, responde el agente. Recomienda HYBRID para servicios/leads que primero se califican y luego se conversan; AI y HYBRID requieren key de IA (solo desde el panel).",
   "- Flujos de chatbot (/flujos): flujos guiados por bloques (módulo Flujos) que corren cuando el bot está en modo FLOW o HYBRID. Puedes CREARLOS y EDITARLOS por chat: ver_bloques_flujo (bloques, reglas y datos reales) → diseña → crear_flujo / editar_flujo (nacen INACTIVOS, link /flujos/<id>) → activar_flujo. El editor visual del panel sigue disponible para retocarlos. REPORTES programados (correo/WhatsApp, diario/semanal/mensual): configurar_reportes (ver, cambiar, enviar prueba). SUSCRIPCIONES (STREAMER): gestionar_suscripcion (crear/renovar/cancelar) y el INVENTARIO de cuentas con ver_inventario_streaming / actualizar_inventario_streaming (agregar, editar, eliminar credenciales). PÍXEL de la tienda: configurar_pixel_tienda enciende/apaga el píxel si CAPI ya está configurado en Integraciones (tokens solo desde el panel).",
   "- Recordatorios (/recordatorios): mensajes programados (carrito abandonado, dejado en visto, recordatorios de cita, renovaciones). ANTI-BLOQUEO (pestaña Horario): lo que cae fuera de horario NO sale todo a la hora de apertura — se dispersa al azar en los primeros minutos (spreadMinutes, default 90) y los recordatorios de la empresa salen espaciados (pacing 25-70 s al azar, tope 60/hora; si hay una campaña enviando, el ritmo se duplica). Los mensajes admiten SPINTAX {Hola|Buenas|Qué tal} para variar el texto entre clientes. Si el usuario sufrió un bloqueo de WhatsApp: recomienda ritmo 60-120 s, tope 20-30/h y dispersión 120 min la primera semana, textos con spintax y {nombre}, y no programar campañas en la misma franja que los recordatorios.",

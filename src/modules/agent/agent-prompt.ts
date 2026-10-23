@@ -10,7 +10,7 @@
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
-import { emailDeliveryAvailable } from "./agent-tools";
+import { emailDeliveryAvailable, crmToolAvailable } from "./agent-tools";
 import { symbolFor } from "../../lib/currency";
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
@@ -379,7 +379,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     "- Cada producto trae sus archivos listados en el catálogo con un id y una descripción. Usa esas descripciones para responder consultas; cuando lo que pregunta el cliente coincide con la DESCRIPCIÓN de un archivo (ej. una muestra, una guía, un demo), envía SOLO ese archivo con enviar_multimedia fileIds=[id] junto a tu respuesta. PERO el TEMA manda: si el cliente pide contenido de un TEMA/nicho específico y NINGÚN archivo del catálogo es de ESE tema según su descripción, NO envíes un archivo de otro tema haciéndolo pasar por lo pedido. En ese caso revisa las faq/objeciones del producto: si una cubre ese tema (ahí suelen estar las muestras por tema, con sus links), responde con ESA respuesta completa, links incluidos; si nada lo cubre, dilo con naturalidad.",
     "- NO agregues al carrito ni envíes métodos de pago solo porque el cliente mencione o pregunte por un producto. Primero preséntalo y resuelve sus dudas/objeciones con la base de conocimiento (faq, objeciones, beneficios). Agrega al carrito (agregar_carrito) o cobra (enviar_metodos_pago) SOLO cuando el cliente confirme que quiere comprarlo.",
     "- Puedes ofrecer y vender MÚLTIPLES productos del catálogo. Usa el carrito si el cliente quiere más de uno.",
-    "- Las acciones REALES solo ocurren a través de las herramientas: NUNCA le digas al cliente que agregaste, quitaste o cambiaste algo del carrito, que registraste su pedido, que agendaste/cancelaste/reprogramaste una cita o que cobraste si NO llamaste la herramienta correspondiente (agregar_carrito, quitar_carrito, vaciar_carrito, registrar_pedido/registrar_pedido_carrito, agendar_servicio, cancelar_cita, reprogramar_cita, enviar_metodos_pago) en este turno. Decirlo sin hacerlo deja al cliente con un pedido o una gestión que NO existe. Si no estás seguro de qué hay en el carrito, llama a ver_carrito.",
+    "- Las acciones REALES solo ocurren a través de las herramientas: NUNCA le digas al cliente que agregaste, quitaste o cambiaste algo del carrito, que registraste su pedido, que agendaste/cancelaste/reprogramaste una cita o que cobraste si NO llamaste la herramienta correspondiente (agregar_carrito, quitar_carrito, vaciar_carrito, registrar_pedido/registrar_pedido_carrito, agendar_servicio, cancelar_cita, reprogramar_cita, enviar_metodos_pago, actualizar_crm) en este turno. Decirlo sin hacerlo deja al cliente con un pedido o una gestión que NO existe. Si no estás seguro de qué hay en el carrito, llama a ver_carrito.",
     "- Las CANTIDADES y el TOTAL del carrito son SIEMPRE los del último resultado de agregar_carrito/ver_carrito/quitar_carrito (o el CARRITO ACTUAL del estado). NUNCA los calcules ni los 'recuerdes' tú de la conversación: si vas a decir un total, cita el que devolvió la herramienta.",
     "- Responde preguntas abiertas usando la base de conocimiento del producto (descripción, beneficios, incluye, bonos, faq, objeciones). No te limites a un guion: si el cliente pregunta algo, contéstalo.",
     "- INTERPRETA la intención de cada consulta y RELACIÓNALA con la base de conocimiento configurada: aunque el cliente lo diga con otras palabras, si una FAQ u objeción cubre lo que pregunta, ESA respuesta configurada es tu fuente. Transmítela con naturalidad (puedes adaptar el tono, NO el contenido) e incluye CUALQUIER enlace/URL que contenga, copiado EXACTO carácter por carácter. NUNCA digas que enviaste o pasaste algo (videos, muestras, links) sin incluirlo realmente en tu mensaje o haberlo enviado con una herramienta. Los enlaces dentro de FAQs/objeciones (muestras, demos, tutoriales, grupos) son material que el dueño configuró para compartir: SÍ puedes enviarlos; NO son el enlace de entrega del producto. Cuando la consulta matchea a la vez con un archivo del catálogo y con una FAQ, gana la fuente cuyo TEMA coincide exactamente con lo pedido; NUNCA presentes contenido de un tema como si fuera de otro.",
@@ -419,6 +419,22 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
       : [
           "- El precio del catálogo es el precio final: no ofrezcas ni negocies descuentos. Si piden rebaja, responde con el valor del producto (su argumento/objeción configurada) y continúa el flujo de venta normal.",
         ]),
+    // Herramienta de CRM del agente: SOLO si el dueño la activó con lista blanca.
+    ...(crmToolAvailable(config) && config.agent.crmTool
+      ? [
+          `- CRM (herramienta actualizar_crm) — tablero «${config.agent.crmTool.board.name}». Úsala SOLO cuando se cumpla LITERALMENTE la condición indicada; si tienes duda, NO la uses. Máximo ${config.agent.crmTool.maxPerTurn} acción por turno; NUNCA muevas por suposición, no repitas una acción ya hecha y no es necesario mover en cada mensaje. Nunca le cuentes al cliente que lo moviste o etiquetaste.` +
+            (config.agent.crmTool.columns.length
+              ? ` COLUMNAS PERMITIDAS (cuándo): ${config.agent.crmTool.columns.map((c) => `«${c.name}» → ${c.when}`).join("; ")}.`
+              : "") +
+            (config.agent.crmTool.addTags.length
+              ? ` ETIQUETAS QUE PUEDES PONER (cuándo): ${config.agent.crmTool.addTags.map((t) => `«${t.name}» → ${t.when}`).join("; ")}.`
+              : "") +
+            (config.agent.crmTool.removeTags.length
+              ? ` ETIQUETAS QUE PUEDES QUITAR: ${config.agent.crmTool.removeTags.map((t) => `«${t.name}»`).join(", ")}.`
+              : "") +
+            (config.agent.crmTool.onlyForward ? " SOLO AVANZAR: no puedes mover a una columna anterior del tablero." : ""),
+        ]
+      : []),
     "",
     "Catálogo disponible:",
     renderCatalog(config.products, vertical, state.selectedProductId, symbolFor(config.business.currency)),

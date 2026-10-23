@@ -520,6 +520,23 @@ export async function applyCrmAndTagActions(
 
 const tagSelect = { id: true, name: true, color: true } satisfies Prisma.CustomerTagSelect;
 
+/**
+ * Estructura liviana del CRM (tableros → columnas en orden, y etiquetas) para
+ * resolver nombres sin cargar tarjetas. La usan el agente (actualizar_crm) y
+ * el copiloto.
+ */
+export async function listCrmStructure(companyId: string) {
+  const [boards, tags] = await Promise.all([
+    prisma.crm.findMany({
+      where: { companyId },
+      select: { id: true, name: true, columns: { select: { id: true, name: true, sortOrder: true }, orderBy: { sortOrder: "asc" } } },
+      orderBy: { sortOrder: "asc" },
+    }),
+    prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true, color: true } }),
+  ]);
+  return { boards, tags };
+}
+
 export async function listTags(companyId: string) {
   return prisma.customerTag.findMany({
     where: { companyId },

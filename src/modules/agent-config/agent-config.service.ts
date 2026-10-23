@@ -29,6 +29,7 @@ function mapAgentConfig(config: {
   mutedNumbers?: unknown;
   muteAfterSale?: boolean;
   negotiationHandoff?: boolean;
+  crmToolConfig?: unknown;
   createdAt: Date;
   updatedAt: Date;
 } | null) {
@@ -56,6 +57,7 @@ function mapAgentConfig(config: {
       : [],
     muteAfterSale: config.muteAfterSale ?? true,
     negotiationHandoff: config.negotiationHandoff ?? false,
+    crmToolConfig: config.crmToolConfig ?? null,
   };
 }
 
@@ -83,6 +85,8 @@ export async function upsertAgentConfig(companyId: string, data: {
   catalogMediaUrl?: string | null;
   catalogMediaType?: string | null;
   catalogMediaFileName?: string | null;
+  /** undefined = no tocar; null = apagar la herramienta de CRM del agente. */
+  crmToolConfig?: Record<string, unknown> | null;
 }) {
   const aiProvider = data.aiProvider ?? "OPENAI";
   const typedKey = Boolean(data.openaiApiKey && data.openaiApiKey.trim());
@@ -123,6 +127,9 @@ export async function upsertAgentConfig(companyId: string, data: {
     ...(data.catalogMediaUrl !== undefined ? { catalogMediaUrl: data.catalogMediaUrl || null } : {}),
     ...(data.catalogMediaType !== undefined ? { catalogMediaType: data.catalogMediaType || null } : {}),
     ...(data.catalogMediaFileName !== undefined ? { catalogMediaFileName: data.catalogMediaFileName || null } : {}),
+    ...(data.crmToolConfig !== undefined
+      ? { crmToolConfig: data.crmToolConfig === null ? Prisma.JsonNull : (data.crmToolConfig as Prisma.InputJsonValue) }
+      : {}),
   };
   const config = await prisma.agentConfig.upsert({
     where: { companyId },

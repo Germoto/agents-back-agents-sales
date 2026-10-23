@@ -13,6 +13,7 @@ import { symbolFor } from "../../lib/currency";
 import type { ConversationState } from "./conversation.service";
 import { setBotPaused } from "./conversation.service";
 import { applyCrmAndTagActions } from "../crm/crm.service";
+import { createNote } from "../customers/customers.service";
 import { mediaKindFor } from "./outbound";
 import {
   addToCart,
@@ -104,10 +105,17 @@ export function emailDeliveryAvailable(config: BotConfig): boolean {
   );
 }
 
+/** Herramienta de CRM del agente: solo si el dueño la activó con una lista blanca (bot.service la resuelve). */
+export function crmToolAvailable(config: BotConfig): boolean {
+  const t = config.agent.crmTool;
+  return !!t?.enabled && (t.columns.length > 0 || t.addTags.length > 0);
+}
+
 /** Nombres de las tools que se ocultan al modelo cuando no aplican al negocio. */
 export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
   const hidden = new Set<string>();
   if (!emailDeliveryAvailable(config)) hidden.add("entregar_por_correo");
+  if (!crmToolAvailable(config)) hidden.add("actualizar_crm");
   return hidden.size ? TOOL_DEFINITIONS.filter((t) => !hidden.has(t.function.name)) : TOOL_DEFINITIONS;
 }
 
@@ -145,6 +153,8 @@ export interface TurnContext {
   toolsCalled?: string[];
   /** Modo HYBRID: respuestas que el cliente dio en el chatbot de flujos (ficha del cliente). */
   customerFlowVars?: Record<string, string> | null;
+  /** Acciones de CRM ya hechas por actualizar_crm en ESTE turno (tope configurable). */
+  crmActionsThisTurn?: number;
 }
 
 /**
@@ -1619,6 +1629,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "actualizar_crm",
+      description:
+        "Mueve al cliente a una columna PERMITIDA del CRM y/o le pone/quita etiquetas PERMITIDAS. Úsala SOLO cuando se cumpla LITERALMENTE la condición configurada para esa columna/etiqueta (sección CRM del prompt); si dudas, NO la uses. Nunca por suposición, nunca en cada mensaje. `motivo` = cita breve de lo que dijo el cliente que cumple la condición.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["motivo"],
+        properties: {
+          columna: { type: "string", description: "Nombre EXACTO de una columna permitida" },
+          agregarEtiquetas: { type: "array", items: { type: "string" }, description: "Nombres de etiquetas permitidas a poner" },
+          quitarEtiquetas: { type: "array", items: { type: "string" }, description: "Nombres de etiquetas permitidas a quitar" },
+          motivo: { type: "string", description: "Qué dijo el cliente (cita breve)" },
+        },
+      },
+    },
+  },
 ];
 
 // --------------------------------------------------------------------------
@@ -2800,6 +2829,91 @@ export async function executeTool(
         });
       }
       return JSON.stringify({ ok: true, note: "Conversación marcada para asesor humano. Despídete amablemente indicando que un asesor continuará." });
+    }
+
+    case "actualizar_crm": {
+      // Salvaguardas en servidor (no dependen del prompt): lista blanca estricta,
+      // tope por turno, no repetir, solo avanzar, auditoría y aviso al dueño.
+      const tool = ctx.config.agent.crmTool;
+      if (!tool || !crmToolAvailable(ctx.config)) return JSON.stringify({ ok: false, error: "La herramienta de CRM no está activada para este negocio." });
+      const norm = (v: unknown) => String(v ?? "").trim().toLowerCase();
+      const allowedCols = tool.columns.map((c) => `«${c.name}»`).join(", ") || "ninguna";
+      const allowedAdd = tool.addTags.map((t) => `«${t.name}»`).join(", ") || "ninguna";
+      const allowedRemove = tool.removeTags.map((t) => `«${t.name}»`).join(", ") || "ninguna";
+      const motivo = String(args.motivo ?? "").trim().slice(0, 200);
+      if (!motivo) return JSON.stringify({ ok: false, error: "Indica en motivo qué dijo el cliente que cumple la condición." });
+      if ((ctx.crmActionsThisTurn ?? 0) >= tool.maxPerTurn) {
+        return JSON.stringify({ ok: false, error: `Ya hiciste ${tool.maxPerTurn} acción(es) de CRM en este turno; no hagas más.` });
+      }
+      const wantCol = norm(args.columna);
+      const target = wantCol ? tool.columns.find((c) => norm(c.name) === wantCol) : null;
+      if (wantCol && !target) {
+        return JSON.stringify({ ok: false, error: `La columna «${String(args.columna)}» NO está permitida. Columnas permitidas: ${allowedCols}.` });
+      }
+      const addNames = Array.isArray(args.agregarEtiquetas) ? (args.agregarEtiquetas as unknown[]).map(norm).filter(Boolean) : [];
+      const removeNames = Array.isArray(args.quitarEtiquetas) ? (args.quitarEtiquetas as unknown[]).map(norm).filter(Boolean) : [];
+      const addTags = addNames.map((n) => tool.addTags.find((t) => norm(t.name) === n) ?? null);
+      const removeTags = removeNames.map((n) => tool.removeTags.find((t) => norm(t.name) === n) ?? null);
+      const badAdd = addNames.filter((_, i) => !addTags[i]);
+      const badRemove = removeNames.filter((_, i) => !removeTags[i]);
+      if (badAdd.length || badRemove.length) {
+        return JSON.stringify({
+          ok: false,
+          error: `Etiqueta(s) NO permitida(s): ${[...badAdd, ...badRemove].map((n) => `«${n}»`).join(", ")}. Puedes poner: ${allowedAdd}. Puedes quitar: ${allowedRemove}.`,
+        });
+      }
+      if (!target && !addTags.length && !removeTags.length) {
+        return JSON.stringify({ ok: false, error: `Indica una columna permitida (${allowedCols}) o etiquetas permitidas.` });
+      }
+      // Columna actual del cliente en el tablero (para no repetir ni retroceder).
+      let current: { id: string; name: string; sortOrder: number } | null = null;
+      if (target) {
+        const card = await prisma.crmCard
+          .findUnique({ where: { crmId_customerId: { crmId: tool.board.id, customerId: ctx.customerId } }, select: { column: { select: { id: true, name: true, sortOrder: true } } } })
+          .catch(() => null);
+        current = card?.column ?? null;
+      }
+      const sameColumn = !!target && !!current && current.id === target.id;
+      if (target && current && !sameColumn && tool.onlyForward && target.sortOrder < current.sortOrder) {
+        return JSON.stringify({
+          ok: false,
+          error: `No puedes retroceder: el cliente está en «${current.name}» y «${target.name}» es una columna anterior. Solo avanza o no lo muevas.`,
+        });
+      }
+      const moveTo = target && !sameColumn ? target : null;
+      const tagIds = addTags.filter((t): t is NonNullable<typeof t> => !!t).map((t) => t.id);
+      const removeTagIds = removeTags.filter((t): t is NonNullable<typeof t> => !!t).map((t) => t.id);
+      if (!moveTo && !tagIds.length && !removeTagIds.length) {
+        return JSON.stringify({ ok: true, unchanged: true, note: `El cliente ya está en «${target!.name}»; no hay nada que cambiar. No lo menciones al cliente.` });
+      }
+      const resumen =
+        (moveTo ? `movido a «${moveTo.name}»${current ? ` (antes «${current.name}»)` : ""}` : "") +
+        (tagIds.length ? `${moveTo ? " · " : ""}etiquetas +${addTags.map((t) => t!.name).join(", ")}` : "") +
+        (removeTagIds.length ? ` · etiquetas −${removeTags.map((t) => t!.name).join(", ")}` : "");
+      ctx.crmActionsThisTurn = (ctx.crmActionsThisTurn ?? 0) + 1;
+      if (ctx.simulate) {
+        ctx.adminNotices.push(`🗂️ (Simulación) El agente habría actualizado el CRM: ${resumen}. Motivo: “${motivo}”.`);
+        return JSON.stringify({ ok: true, simulado: true, resumen, note: "Listo (simulación). NO le digas al cliente que lo moviste/etiquetaste." });
+      }
+      try {
+        await applyCrmAndTagActions(ctx.companyId, ctx.customerId, {
+          ...(moveTo ? { crmId: tool.board.id, crmColumnId: moveTo.id } : {}),
+          ...(tagIds.length ? { tagIds } : {}),
+          ...(removeTagIds.length ? { removeTagIds } : {}),
+        });
+      } catch (err) {
+        console.error("[agent] actualizar_crm falló:", err instanceof Error ? err.message : err);
+        return JSON.stringify({ ok: false, error: "No se pudo actualizar el CRM ahora; sigue la conversación normalmente." });
+      }
+      // Rastro auditable en Notas del cliente.
+      await createNote(ctx.companyId, ctx.customerId, {
+        conversationId: ctx.conversationId,
+        text: `🤖 Agente IA (CRM «${tool.board.name}»): ${resumen}. Motivo: “${motivo}”.`,
+      }).catch((err) => console.error("[agent] nota de actualizar_crm falló:", err instanceof Error ? err.message : err));
+      if (tool.notifyOwner) {
+        ctx.adminNotices.push(`🗂️ El agente actualizó el CRM de ${ctx.customerPhone}: ${resumen}. Motivo: “${motivo}”. Si no corresponde, corrígelo desde el CRM.`);
+      }
+      return JSON.stringify({ ok: true, resumen, note: "Listo. NO le digas al cliente que lo moviste o etiquetaste; sigue la conversación con naturalidad." });
     }
 
     default:

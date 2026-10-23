@@ -4,6 +4,63 @@ import { resolveAiSettings } from "../../lib/ai-providers";
 import { mapBotProduct, productRelations } from "../../lib/product";
 import { symbolFor } from "../../lib/currency";
 import { isPlatformSalesCompanyId, getLivePlansPromptSection } from "../admin-console/sales-agent.service";
+import { listCrmStructure } from "../crm/crm.service";
+import { getEntitlements } from "../billing/entitlements";
+import type { CrmToolConfig } from "../agent-config/agent-config.schemas";
+
+/** Herramienta de CRM del agente resuelta con NOMBRES (lo que lee el prompt y la tool). */
+export interface AgentCrmTool {
+  enabled: boolean;
+  board: { id: string; name: string };
+  columns: Array<{ id: string; name: string; sortOrder: number; when: string }>;
+  addTags: Array<{ id: string; name: string; when: string }>;
+  removeTags: Array<{ id: string; name: string }>;
+  onlyForward: boolean;
+  maxPerTurn: number;
+  notifyOwner: boolean;
+}
+
+/**
+ * Resuelve crmToolConfig (ids) → nombres reales, descartando columnas/etiquetas
+ * que ya no existen. Devuelve null si está apagada, sin módulo CRM o sin nada
+ * permitido (así la tool no se expone y el prompt no cambia).
+ */
+async function resolveAgentCrmTool(companyId: string, raw: unknown): Promise<AgentCrmTool | null> {
+  const cfg = raw && typeof raw === "object" ? (raw as Partial<CrmToolConfig>) : null;
+  if (!cfg?.enabled || !cfg.crmId) return null;
+  const ent = await getEntitlements(companyId);
+  if (!ent.legacy && !ent.modules.includes("CRM")) return null;
+  const { boards, tags } = await listCrmStructure(companyId);
+  const board = boards.find((b) => b.id === cfg.crmId);
+  if (!board) return null;
+  const columns = (cfg.columns ?? [])
+    .map((c) => {
+      const col = board.columns.find((x) => x.id === c.columnId);
+      return col ? { id: col.id, name: col.name, sortOrder: col.sortOrder, when: c.when } : null;
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x);
+  const addTags = (cfg.addTags ?? [])
+    .map((t) => {
+      const tag = tags.find((x) => x.id === t.tagId);
+      return tag ? { id: tag.id, name: tag.name, when: t.when } : null;
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x);
+  const removeTags = (cfg.removeTagIds ?? [])
+    .map((id) => tags.find((x) => x.id === id))
+    .filter((x): x is NonNullable<typeof x> => !!x)
+    .map((t) => ({ id: t.id, name: t.name }));
+  if (!columns.length && !addTags.length) return null;
+  return {
+    enabled: true,
+    board: { id: board.id, name: board.name },
+    columns,
+    addTags,
+    removeTags,
+    onlyForward: cfg.onlyForward !== false,
+    maxPerTurn: Math.min(3, Math.max(1, Number(cfg.maxPerTurn) || 1)),
+    notifyOwner: cfg.notifyOwner !== false,
+  };
+}
 
 function normalizePhone(value: string) {
   return value.replace(/\D/g, "");
@@ -214,6 +271,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
       catalogMediaUrl: agentConfig.catalogMediaUrl ?? null,
       catalogMediaType: agentConfig.catalogMediaType ?? null,
       catalogMediaFileName: agentConfig.catalogMediaFileName ?? null,
+      // Herramienta de CRM del agente (null = apagada: cero consultas extra).
+      crmTool: await resolveAgentCrmTool(whatsappConfig.companyId, agentConfig.crmToolConfig),
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
     products: products.map((p) =>

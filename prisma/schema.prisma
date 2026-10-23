@@ -307,6 +307,10 @@ model AgentConfig {
   catalogMediaUrl      String?
   catalogMediaType     String?
   catalogMediaFileName String?
+  // Herramienta de CRM del agente (actualizar_crm): lista blanca de columnas y
+  // etiquetas con su regla "cuándo", solo avanzar, máximo por turno y aviso al
+  // dueño. null = APAGADA (default): el agente no toca el CRM por su cuenta.
+  crmToolConfig        Json?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
   company              Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

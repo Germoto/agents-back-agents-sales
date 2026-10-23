@@ -70,6 +70,30 @@ export const followupConfigSchema = z
   .nullable()
   .optional();
 
+// Herramienta de CRM del agente (actualizar_crm). Cada columna/etiqueta
+// permitida lleva su regla "cuándo" (va al prompt y es obligatoria): sin ella
+// el agente no tiene criterio y haría cambios mal.
+const whenRule = z.string().trim().min(10, "Escribe cuándo debe hacerlo (mínimo 10 caracteres)").max(300);
+export const crmToolConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    crmId: z.string().uuid().nullable().optional(),
+    columns: z.array(z.object({ columnId: z.string().uuid(), when: whenRule })).max(10).default([]),
+    addTags: z.array(z.object({ tagId: z.string().uuid(), when: whenRule })).max(15).default([]),
+    removeTagIds: z.array(z.string().uuid()).max(15).default([]),
+    onlyForward: z.boolean().default(true),
+    maxPerTurn: z.number().int().min(1).max(3).default(1),
+    notifyOwner: z.boolean().default(true),
+  })
+  .superRefine((v, ctx) => {
+    if (!v.enabled) return;
+    if (!v.crmId) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["crmId"], message: "Elige el tablero sobre el que puede actuar" });
+    if (!v.columns.length && !v.addTags.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["columns"], message: "Permite al menos una columna o una etiqueta" });
+    }
+  });
+export type CrmToolConfig = z.infer<typeof crmToolConfigSchema>;
+
 // Núcleo de Agente IA (modelo + prompt). Recordatorios y modo de respuesta se
 // guardan por separado (módulos Recordatorios y Pruebas) para no pisarlos.
 export const coreAgentConfigSchema = z.object({
@@ -96,6 +120,8 @@ export const coreAgentConfigSchema = z.object({
   catalogMediaUrl: z.string().trim().max(2000).nullable().optional(),
   catalogMediaType: z.string().trim().max(40).nullable().optional(),
   catalogMediaFileName: z.string().trim().max(255).nullable().optional(),
+  // Herramienta de CRM del agente: undefined = no tocar; null = apagar.
+  crmToolConfig: crmToolConfigSchema.nullable().optional(),
 });
 
 // PUT /agent-config/reminders — solo followupConfig.
