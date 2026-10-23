@@ -14,6 +14,10 @@ export interface FlowTrigger {
   onFirstMessageEver: boolean;
   /** El mismo flujo no se re-dispara para el mismo cliente antes de este intervalo. 0 = sin restricción. */
   reactivationMinutes: number;
+  /** Lead que llega desde un anuncio de Meta (CTWA): se dispara con su PRIMER mensaje atribuido. */
+  onAdLead?: boolean;
+  /** Solo estos anuncios del catálogo (ids de AdCatalogEntry); vacío = cualquier anuncio. */
+  adEntryIds?: string[];
 }
 
 export const DEFAULT_TRIGGER: FlowTrigger = {
@@ -22,6 +26,8 @@ export const DEFAULT_TRIGGER: FlowTrigger = {
   onFirstMessageOfDay: false,
   onFirstMessageEver: false,
   reactivationMinutes: 0,
+  onAdLead: false,
+  adEntryIds: [],
 };
 
 export type FlowNodeType =

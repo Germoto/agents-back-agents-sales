@@ -52,7 +52,9 @@ export const NODE_DOCS = `BLOQUES DISPONIBLES (type → data → handles de sali
 - handoff: {clientText?, notifyText?} → SIN salidas (terminal). Pausa el bot y avisa a un asesor humano.
 - flow-control: {action:"restart"|"transfer", targetFlowId? (si transfer)} → SIN salidas (terminal). Reinicia este flujo o transfiere a otro.
 
-VARIABLES: en cualquier texto puedes usar {{nombre}}, {{telefono}} y las guardadas con saveVariable (ej. {{correo}}).`;
+VARIABLES: en cualquier texto puedes usar {{nombre}}, {{telefono}} y las guardadas con saveVariable (ej. {{correo}}).
+
+DISPARADOR (trigger): {onAnyMessage, keywords[], onFirstMessageOfDay, onFirstMessageEver, reactivationMinutes, onAdLead, adEntryIds[]}. onAdLead = lead que llega desde un ANUNCIO de Meta (se dispara con su primer mensaje atribuido, tiene prioridad sobre keywords); adEntryIds restringe a anuncios del catálogo (vacío = cualquiera). Prioridad al competir: anuncio > keywords > primer mensaje de la vida > primer mensaje del día > cualquier mensaje.`;
 
 export const HARD_RULES = `REGLAS OBLIGATORIAS al proponer un flujo:
 1. Exactamente UN nodo start (id "start", data {}); su edge sale por "next" hacia el primer bloque.
@@ -71,13 +73,14 @@ export const AUTHORING_HINTS = `FACILIDADES al usar crear_flujo / editar_flujo:
 - Los ids de edge son opcionales (se generan) y sourceHandle vacío equivale a "next".
 - Puedes referirte a datos del negocio POR NOMBRE (o por id): en crm-move usa {tablero, columna}; en crm-add-tags / crm-remove-tags usa {etiquetas:[nombres]}; en book-appointment y validate-payment usa {producto}; en condition con source "tag" usa {etiqueta}; en flow-control transfer usa {flujo}. El servidor los convierte a ids y rechaza con un error claro los que no existan (créalos antes con crear_etiqueta / crear_columna / crear_producto).
 - Variables de question/answers (saveVariable) viven solo en el flujo: para que el dueño las reciba, inclúyelas en el notifyText del handoff con {{variable}}.
+- En el trigger puedes usar "anuncios": [descripciones o ids del catálogo de anuncios] en vez de adEntryIds (se convierten a ids; ver_catalogo_anuncios los lista). Si el dueño capta leads por Meta Ads, prefiere onAdLead a keywords.
 - El flujo se guarda INACTIVO y el dueño puede revisarlo en /flujos/<id>; se enciende con activar_flujo.`;
 
 // ---------------------------------------------------------------------------
 // Contexto del negocio (selects mínimos)
 // ---------------------------------------------------------------------------
 export async function buildBusinessContext(companyId: string): Promise<string> {
-  const [company, products, crms, tags, paymentMethods, flows] = await Promise.all([
+  const [company, products, crms, tags, paymentMethods, flows, ads] = await Promise.all([
     prisma.company.findUnique({ where: { id: companyId }, select: { name: true, vertical: true } }),
     prisma.product.findMany({
       where: { companyId, active: true },
@@ -93,9 +96,13 @@ export async function buildBusinessContext(companyId: string): Promise<string> {
     prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true }, take: 30 }),
     prisma.paymentMethod.count({ where: { paymentConfig: { companyId } } }),
     prisma.chatFlow.findMany({ where: { companyId }, select: { id: true, name: true }, take: 20 }),
+    prisma.adCatalogEntry.findMany({ where: { companyId }, select: { id: true, description: true }, take: 30, orderBy: { sortOrder: "asc" } }),
   ]);
 
   const lines: string[] = [`Negocio: ${company?.name ?? "—"} (rubro ${company?.vertical ?? "OTHER"}).`];
+  if (ads.length) {
+    lines.push("Anuncios del catálogo (para adEntryIds del trigger onAdLead): " + ads.map((a) => `${a.description}=${a.id}`).join(", "));
+  }
   if (products.length) {
     lines.push(
       "Productos (para productId): " +
@@ -144,17 +151,20 @@ interface RefCatalog {
   columns: Array<Named & { crmId: string }>;
   products: Array<Named & { durationMin: number | null }>;
   flows: Named[];
+  /** Anuncios del catálogo: `name` = descripción. */
+  ads: Named[];
 }
 
 async function loadRefCatalog(companyId: string): Promise<RefCatalog> {
-  const [tags, boards, columns, products, flows] = await Promise.all([
+  const [tags, boards, columns, products, flows, adRows] = await Promise.all([
     prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true } }),
     prisma.crm.findMany({ where: { companyId }, select: { id: true, name: true } }),
     prisma.crmColumn.findMany({ where: { crm: { companyId } }, select: { id: true, name: true, crmId: true } }),
     prisma.product.findMany({ where: { companyId }, select: { id: true, name: true, durationMin: true } }),
     prisma.chatFlow.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    prisma.adCatalogEntry.findMany({ where: { companyId }, select: { id: true, description: true } }),
   ]);
-  return { tags, boards, columns, products, flows };
+  return { tags, boards, columns, products, flows, ads: adRows.map((a) => ({ id: a.id, name: a.description })) };
 }
 
 const norm = (v: string) => v.trim().toLowerCase();
@@ -270,9 +280,17 @@ function resolveFlowReferences(rawNodes: LooseNode[], cat: RefCatalog): { nodes:
  * destino) EXISTAN en la empresa. Ni zod ni validateFlow lo hacen (solo exigen
  * UUID), y un id ajeno dejaría un bloque que falla en silencio al ejecutarse.
  */
-export async function checkFlowReferences(companyId: string, nodes: FlowNode[], catalog?: RefCatalog): Promise<string[]> {
+export async function checkFlowReferences(
+  companyId: string,
+  nodes: FlowNode[],
+  catalog?: RefCatalog,
+  trigger?: Partial<FlowTrigger> | null,
+): Promise<string[]> {
   const cat = catalog ?? (await loadRefCatalog(companyId));
   const errors: string[] = [];
+  for (const id of trigger?.adEntryIds ?? []) {
+    if (!cat.ads.some((a) => a.id === id)) errors.push(`trigger: el anuncio ${id} no está en el catálogo de este negocio (ver_catalogo_anuncios)`);
+  }
   for (const n of nodes) {
     const label = `nodo ${n.id} (${n.type})`;
     switch (n.type) {
@@ -406,8 +424,22 @@ function issueText(i: ValidationIssue): string {
  */
 export async function normalizeFlowDraft(companyId: string, raw: FlowDraftInput): Promise<NormalizedFlowDraft> {
   const errors: string[] = [];
+  const catalog = await loadRefCatalog(companyId);
 
-  const trigResult = flowTriggerSchema.safeParse(raw.trigger ?? {});
+  // Trigger: "anuncios" (descripciones o ids del catálogo) → adEntryIds.
+  const rawTrigger: Record<string, unknown> = { ...((raw.trigger && typeof raw.trigger === "object" ? raw.trigger : {}) as Record<string, unknown>) };
+  if (Array.isArray(rawTrigger.anuncios)) {
+    const ids = new Set<string>(Array.isArray(rawTrigger.adEntryIds) ? (rawTrigger.adEntryIds as unknown[]).filter((x): x is string => typeof x === "string") : []);
+    for (const ref of rawTrigger.anuncios as unknown[]) {
+      const a = findNamed(catalog.ads, ref);
+      if (!a) errors.push(`trigger: el anuncio «${String(ref)}» no está en el catálogo (ver_catalogo_anuncios / configurar_anuncio)`);
+      else ids.add(a.id);
+    }
+    rawTrigger.adEntryIds = [...ids];
+    if (ids.size && rawTrigger.onAdLead === undefined) rawTrigger.onAdLead = true;
+  }
+  delete rawTrigger.anuncios;
+  const trigResult = flowTriggerSchema.safeParse(rawTrigger);
   const trigger = trigResult.success ? trigResult.data : DEFAULT_TRIGGER;
   if (!trigResult.success) {
     errors.push("trigger inválido: " + trigResult.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
@@ -421,7 +453,6 @@ export async function normalizeFlowDraft(companyId: string, raw: FlowDraftInput)
   if (errors.length) return { ok: false, errors };
 
   // Nombres → ids (tablero/columna/etiquetas/producto/flujo).
-  const catalog = await loadRefCatalog(companyId);
   const resolved = resolveFlowReferences(rawNodes, catalog);
   errors.push(...resolved.errors);
 
@@ -461,7 +492,7 @@ export async function normalizeFlowDraft(companyId: string, raw: FlowDraftInput)
   const result = validateFlow(nodes, edges, { knownFlowIds: await knownFlowIds(companyId) });
   if (result.errors.length) return { ok: false, errors: result.errors.map(issueText).slice(0, MAX_ERRORS) };
 
-  const refErrors = await checkFlowReferences(companyId, nodes, catalog);
+  const refErrors = await checkFlowReferences(companyId, nodes, catalog, trigger);
   if (refErrors.length) return { ok: false, errors: refErrors.slice(0, MAX_ERRORS) };
 
   return { ok: true, trigger, nodes, edges, warnings: result.warnings.map(issueText) };
@@ -477,6 +508,7 @@ export function describeTrigger(trigger: unknown): string {
   if (t.keywords?.length) parts.push(`palabras clave: ${t.keywords.map((k) => `«${k}»`).join(", ")}`);
   if (t.onFirstMessageOfDay) parts.push("primer mensaje del día");
   if (t.onFirstMessageEver) parts.push("primer mensaje de un cliente nuevo");
+  if (t.onAdLead) parts.push(`lead que llega desde un anuncio de Meta (primer mensaje)${t.adEntryIds?.length ? ` · solo ${t.adEntryIds.length} anuncio(s) del catálogo` : ""}`);
   if (!parts.length) parts.push("SIN disparador (no se activará solo)");
   if (t.reactivationMinutes) parts.push(`no se repite antes de ${t.reactivationMinutes} min`);
   return parts.join(" · ");

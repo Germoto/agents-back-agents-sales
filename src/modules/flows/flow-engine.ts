@@ -444,6 +444,8 @@ export async function runFlowTurn(io: FlowIO, inboundText: string, history?: Cha
   const flows = rows.map(mapFlow);
 
   const winner = await pickTriggeredFlow(flows, inboundText, io, history);
+  // El "lead de anuncio" dispara UNA sola vez: consumido tras evaluar (haya match o no).
+  if (io.state.adLead?.pending) io.state.adLead.pending = false;
   if (!winner) return; // sin match → silencio
 
   fs.lastTriggeredAt = { ...(fs.lastTriggeredAt ?? {}), [winner.id]: new Date().toISOString() };
@@ -522,10 +524,18 @@ async function pickTriggeredFlow(
 
     let bucket: number | null = null;
     const keywords = (t.keywords ?? []).map(normalize).filter(Boolean);
-    if (keywords.length && input && keywords.some((k) => input.includes(k))) bucket = 0;
-    else if (t.onFirstMessageEver && firstEver) bucket = 1;
-    else if (t.onFirstMessageOfDay && firstOfDay) bucket = 2;
-    else if (t.onAnyMessage) bucket = 3;
+    // Lead de anuncio (primer mensaje atribuido): prioridad máxima — el texto
+    // del anuncio suele coincidir con palabras clave genéricas de otros flujos.
+    const adLead = io.state.adLead;
+    const adMatch =
+      !!t.onAdLead &&
+      !!adLead?.pending &&
+      (!(t.adEntryIds ?? []).length || (!!adLead.entryId && (t.adEntryIds ?? []).includes(adLead.entryId)));
+    if (adMatch) bucket = 0;
+    else if (keywords.length && input && keywords.some((k) => input.includes(k))) bucket = 1;
+    else if (t.onFirstMessageEver && firstEver) bucket = 2;
+    else if (t.onFirstMessageOfDay && firstOfDay) bucket = 3;
+    else if (t.onAnyMessage) bucket = 4;
 
     if (bucket === null) continue;
     if (!winner || bucket < winner.bucket) winner = { flow, bucket };

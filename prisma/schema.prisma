@@ -840,6 +840,12 @@ model AdCatalogEntry {
   // Producto relacionado (opcional): el lead que llega por este anuncio entra
   // con este producto como interés (selectedProductId, solo si estaba vacío).
   productId   String?  @db.Uuid
+  // Acciones CRM al llegar el PRIMER mensaje atribuido a este anuncio:
+  // etiquetas a asignar y columna a la que mover al lead. Sin FK formal: si
+  // el CRM/columna/tag se borra, se ignora (igual que en productos).
+  tagIds      String[] @default([]) @db.Uuid
+  crmId       String?  @db.Uuid
+  crmColumnId String?  @db.Uuid
   sortOrder   Int      @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

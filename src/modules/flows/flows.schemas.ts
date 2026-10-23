@@ -6,6 +6,8 @@ export const flowTriggerSchema = z.object({
   onFirstMessageOfDay: z.boolean().default(false),
   onFirstMessageEver: z.boolean().default(false),
   reactivationMinutes: z.number().int().min(0).max(60 * 24 * 30).default(0),
+  onAdLead: z.boolean().default(false),
+  adEntryIds: z.array(z.string().uuid()).max(30).default([]),
 });
 
 const detectModeSchema = z.enum(["contains", "equals", "starts_with", "ends_with"]);

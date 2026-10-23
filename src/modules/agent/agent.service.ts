@@ -64,6 +64,7 @@ import { transcribeAudio } from "./audio-transcribe";
 import { extractInboundUsername } from "./inbound-username";
 import { enrichCustomerFromWhatsapp } from "../customers/lead-enrich.service";
 import { resolveAdCatalog, adCatalogEntryFor } from "../ad-catalog/ad-catalog.service";
+import { applyCrmAndTagActions } from "../crm/crm.service";
 
 interface FollowupConfig {
   abandonedCartHours?: number;
@@ -405,7 +406,10 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   // los campos vacíos y no tocan nada. ctwaClid se guarda ÍNTEGRO (futura
   // Meta Conversions API).
   if (inbound.adSourceId) {
-    await prisma.customer
+    // `count > 0` = la atribución se fijó AHORA (primer mensaje atribuido). Es la
+    // señal para las acciones por anuncio y para el disparador onAdLead de los
+    // flujos; un webhook repetido da count=0 y no duplica nada.
+    const { count } = await prisma.customer
       .updateMany({
         where: { id: convo.customerId, adSourceId: null },
         data: {
@@ -415,11 +419,39 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
           adSourceUrl: inbound.adSourceUrl,
         },
       })
-      .catch(() => undefined);
+      .catch(() => ({ count: 0 }));
+    const firstAttribution = count > 0;
     // Si el catálogo vincula este anuncio a un PRODUCTO, el lead entra con ese
     // producto como interés (solo si aún no tiene uno — no pisa elecciones).
     try {
       const entry = adCatalogEntryFor(await resolveAdCatalog(companyId), inbound.adSourceId, inbound.adTitle);
+      let stateDirty = false;
+      if (firstAttribution) {
+        // Acciones CRM del anuncio (etiquetas / columna), solo con módulo CRM.
+        if (entry && (entry.tagIds.length || entry.crmColumnId)) {
+          const ent = await getEntitlements(companyId);
+          if (ent.legacy || ent.modules.includes("CRM")) {
+            try {
+              await applyCrmAndTagActions(companyId, convo.customerId, {
+                tagIds: entry.tagIds,
+                crmId: entry.crmId,
+                crmColumnId: entry.crmColumnId,
+              });
+            } catch (err) {
+              console.error("[ads] acciones CRM del anuncio fallaron:", err instanceof Error ? err.message : err);
+            }
+          }
+        }
+        // Señal para el disparador onAdLead (la consume el motor de flujos).
+        convo.state.adLead = {
+          adSourceId: inbound.adSourceId,
+          adTitle: inbound.adTitle ?? null,
+          entryId: entry?.id ?? null,
+          pending: true,
+          at: new Date().toISOString(),
+        };
+        stateDirty = true;
+      }
       if (entry?.productId) {
         await prisma.customer.updateMany({
           where: { id: convo.customerId, selectedProductId: null },
@@ -431,9 +463,10 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
         // igual que hacen las campañas con contextProductId.
         if (!convo.state.selectedProductId) {
           convo.state.selectedProductId = entry.productId;
-          await saveState(convo.conversationId, convo.state);
+          stateDirty = true;
         }
       }
+      if (stateDirty) await saveState(convo.conversationId, convo.state);
     } catch {
       /* best-effort */
     }

@@ -17,7 +17,8 @@ export const simulateMessagesController = asyncHandler(async (req: Request, res:
 export const simulateTurnController = asyncHandler(async (req: Request, res: Response) => {
   const message = String(req.body?.message ?? "").trim();
   if (!message) throw new AppError("El mensaje no puede estar vacío", 400);
-  const result = await simulateTurn(req.user!.companyId, message, parseMode(req.body?.mode));
+  const adSourceId = String(req.body?.adSourceId ?? "").trim() || undefined;
+  const result = await simulateTurn(req.user!.companyId, message, parseMode(req.body?.mode), { adSourceId });
   res.json({ success: true, data: result });
 });
 

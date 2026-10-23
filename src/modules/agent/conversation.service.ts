@@ -22,6 +22,9 @@ import type { ChatMessage } from "../../lib/openai";
 export interface ConversationState {
   status?: string;            // NUEVO, INTERESADO, ESPERANDO_PAGO, ENTREGADO, etc.
   selectedProductId?: string | null;
+  /** Lead que acaba de llegar desde un anuncio (primer mensaje atribuido). `pending`
+   *  lo consume el motor de flujos al evaluar disparadores (onAdLead) una sola vez. */
+  adLead?: { adSourceId: string; adTitle: string | null; entryId: string | null; pending: boolean; at: string } | null;
   /** Pedido pendiente de pago recién registrado (para marcarlo PAGADO al aprobar el pago). */
   pendingOrderId?: string | null;
   /** Resumen del carrito REAL, refrescado en cada turno (rubros de carrito). */

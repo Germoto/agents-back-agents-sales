@@ -14,6 +14,7 @@ import { runFlowTurn, trailingUserText, type FlowIO, type FlowTraceEntry } from 
 import { shouldDropFinalTextAfterPayment, type TurnContext, type OutboxMessage } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { resolveReminderSequence, applySpintax, type ReminderType } from "./reminder-templates";
+import { resolveAdCatalog, adCatalogEntryFor } from "../ad-catalog/ad-catalog.service";
 
 const SIM_PHONE = "SIMULADOR"; // identidad del "cliente" de simulación (no es un número real)
 
@@ -121,10 +122,26 @@ export async function simulateTurn(
   companyId: string,
   message: string,
   modeParam?: SimMode,
+  opts?: { adSourceId?: string },
 ): Promise<{ replies: SimMessage[]; reminders: SimReminderPreview[]; trace?: FlowTraceEntry[]; notices?: string[] }> {
   const config = await buildBotConfig(companyId);
   const mode: SimMode = modeParam ?? (config.business.botMode === "FLOW" ? "FLOW" : "AI");
   const sim = await loadSimConversation(companyId, mode);
+
+  // "Llega desde un anuncio": simular el primer mensaje atribuido (señal para
+  // el disparador onAdLead). Las acciones CRM del anuncio solo se anotan.
+  const adNotes: FlowTraceEntry[] = [];
+  if (opts?.adSourceId) {
+    const entry = adCatalogEntryFor(await resolveAdCatalog(companyId), opts.adSourceId, opts.adSourceId);
+    sim.state.adLead = { adSourceId: opts.adSourceId, adTitle: opts.adSourceId, entryId: entry?.id ?? null, pending: true, at: new Date().toISOString() };
+    adNotes.push({
+      nodeId: "-",
+      type: "start",
+      event: entry
+        ? `lead de anuncio «${entry.description}»${entry.tagIds.length || entry.crmColumnId ? " — se aplicarían sus etiquetas/columna del CRM (simulado)" : ""}`
+        : `lead de anuncio «${opts.adSourceId}» (no está en el catálogo)`,
+    });
+  }
 
   // Persistir el mensaje del cliente (para el historial del turno).
   await prisma.conversationMessage.create({
@@ -137,7 +154,7 @@ export async function simulateTurn(
   // WhatsApp ni programar timeouts/recordatorios (se anotan en el trace).
   if (mode === "FLOW") {
     const replies: SimMessage[] = [];
-    const trace: FlowTraceEntry[] = [];
+    const trace: FlowTraceEntry[] = [...adNotes];
     const persistReply = async (m: OutboxMessage) => {
       const text = outboxText(m);
       await prisma.conversationMessage.create({

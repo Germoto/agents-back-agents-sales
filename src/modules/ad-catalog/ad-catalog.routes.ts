@@ -18,6 +18,10 @@ const upsertSchema = z.object({
   matchers: z.array(z.string().trim().min(1).max(300)).min(1).max(30),
   // Producto relacionado (opcional): null lo quita.
   productId: z.string().uuid().nullable().optional(),
+  // Acciones CRM al llegar el lead (opcionales): etiquetas y tablero+columna.
+  tagIds: z.array(z.string().uuid()).max(20).optional(),
+  crmId: z.string().uuid().nullable().optional(),
+  crmColumnId: z.string().uuid().nullable().optional(),
 });
 
 const router = Router();
