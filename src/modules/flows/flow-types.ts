@@ -72,7 +72,7 @@ export interface AnswersOption {
   id: string;
   /** Etiqueta visible en el editor (y texto sugerido al cliente). */
   label: string;
-  /** Texto a detectar en la respuesta del cliente. */
+  /** Sinónimos extra a detectar (opcional): el número y el label ya se aceptan solos. */
   detectText: string;
   detectMode: DetectMode;
 }
@@ -80,6 +80,8 @@ export interface AnswersOption {
 export interface AnswersData {
   message: string;
   options: AnswersOption[];
+  /** Agrega las opciones numeradas al mensaje si el autor no las escribió (default true). */
+  showOptions?: boolean;
   /** Si la respuesta no matchea ninguna opción, repetir la pregunta. */
   repeatOnNoMatch: boolean;
   noMatchMessage?: string;

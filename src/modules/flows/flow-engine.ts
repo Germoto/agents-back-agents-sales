@@ -28,6 +28,7 @@ import {
   type FlowEdge,
   type FlowTrigger,
   type AnswersData,
+  type AnswersOption,
   type ListData,
   type SendTextData,
   type SendMediaData,
@@ -276,6 +277,45 @@ function startOfTodayInTz(tz: string): Date {
   }
 }
 
+/** Pie que invita a responder con el número (answers y list). */
+const OPTIONS_FOOTER = "Responde con el número de tu opción 👆";
+
+/**
+ * ¿El autor ya escribió las opciones dentro del mensaje? Sí cuando el texto
+ * menciona el nombre de TODAS las opciones (≥2 chars) o tiene al menos tantas
+ * líneas numeradas como opciones. En ese caso no se vuelve a listar.
+ */
+export function messageListsOptions(message: string, options: AnswersOption[]): boolean {
+  const msg = normalize(message ?? "");
+  if (!msg) return false;
+  const labels = (options ?? []).map((o) => normalize(o.label ?? "")).filter((l) => l.length >= 2);
+  if (labels.length && labels.every((l) => msg.includes(l))) return true;
+  const numbered = (message ?? "").split(/\n/).filter((l) => /^\s*\d{1,2}\s*[).:\-]/.test(l)).length;
+  return numbered > 0 && numbered >= (options ?? []).length;
+}
+
+/**
+ * Texto del bloque «Respuestas»: la pregunta y, salvo que showOptions sea false
+ * o el autor ya las haya escrito, las opciones numeradas "1. label" + pie.
+ */
+export function renderAnswersMenu(data: AnswersData, io: FlowIO): string {
+  const message = renderTemplate((data.message ?? "").trim(), io);
+  const options = data.options ?? [];
+  if (data.showOptions === false || !options.length || messageListsOptions(data.message ?? "", options)) {
+    return message;
+  }
+  const lines: string[] = [];
+  let n = 0;
+  for (const opt of options) {
+    const label = (opt.label?.trim() || opt.detectText?.trim() || "");
+    n += 1;
+    if (!label) continue;
+    lines.push(`${n}. ${renderTemplate(label, io)}`);
+  }
+  if (!lines.length) return message;
+  return [message, "", ...lines, "", OPTIONS_FOOTER].join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function renderListMenu(data: ListData, io: FlowIO): string {
   const lines: string[] = [];
   if (data.title?.trim()) lines.push(`*${renderTemplate(data.title.trim(), io)}*`);
@@ -298,7 +338,7 @@ function renderListMenu(data: ListData, io: FlowIO): string {
     }
   }
   lines.push("");
-  lines.push(data.footer?.trim() ? renderTemplate(data.footer.trim(), io) : "Responde con el número de tu opción 👆");
+  lines.push(data.footer?.trim() ? renderTemplate(data.footer.trim(), io) : OPTIONS_FOOTER);
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
@@ -319,7 +359,25 @@ function candidateInputs(inbound: string): string[] {
 function matchAnswersOption(data: AnswersData, inbound: string): string | null {
   const candidates = candidateInputs(inbound);
   if (!candidates.length) return null;
-  for (const opt of data.options ?? []) {
+  const options = data.options ?? [];
+  // 1) por número de la opción ("2", "2.", "opción 2", "2 por favor")
+  for (const input of candidates) {
+    const numMatch = input.match(/^(?:opcion\s*)?(\d{1,2})\.?(?:\s|$)/);
+    if (!numMatch) continue;
+    const n = Number(numMatch[1]);
+    if (n >= 1 && n <= options.length) return options[n - 1].id;
+  }
+  // 2) por nombre de la opción (igual, o contenido si es significativo)
+  for (const opt of options) {
+    const label = normalize(opt.label ?? "");
+    if (!label) continue;
+    for (const input of candidates) {
+      if (input === label) return opt.id;
+      if (label.length >= 3 && input.includes(label)) return opt.id;
+    }
+  }
+  // 3) por texto a detectar (sinónimos extra) con su modo
+  for (const opt of options) {
     const target = normalize(opt.detectText ?? "");
     if (!target) continue;
     const mode = opt.detectMode ?? "contains";
@@ -498,10 +556,22 @@ async function runFlowTurnInner(io: FlowIO, inboundText: string, history: ChatMe
         return; // silencio; el próximo mensaje re-evalúa disparadores
       }
 
-      // Guardar variable con la respuesta cruda
+      // Guardar variable: el NOMBRE de la opción elegida (si el cliente respondió
+      // con número o sinónimo) o, en bloques sin opciones, la respuesta cruda.
       const saveVariable = (node.data as { saveVariable?: string }).saveVariable;
       if (saveVariable?.trim() && inboundText.trim()) {
-        fs.variables = { ...(fs.variables ?? {}), [saveVariable.trim()]: inboundText.trim() };
+        let value = inboundText.trim();
+        if (resolved.handle.startsWith("opt:")) {
+          const optId = resolved.handle.slice(4);
+          const chosen =
+            node.type === "answers"
+              ? ((node.data as AnswersData).options ?? []).find((o) => o.id === optId)
+              : node.type === "list"
+                ? flattenListOptions(node.data as ListData).find((o) => o.id === optId)
+                : undefined;
+          if (chosen?.label?.trim()) value = chosen.label.trim();
+        }
+        fs.variables = { ...(fs.variables ?? {}), [saveVariable.trim()]: value };
         await persistFlowVars(io);
       }
 
@@ -638,10 +708,8 @@ async function pickTriggeredFlow(
 
 async function emitQuestion(node: FlowNode, io: FlowIO): Promise<void> {
   if (node.type === "answers") {
-    const data = node.data as AnswersData;
-    if (data.message?.trim()) {
-      await io.emit({ kind: "text", text: renderTemplate(data.message.trim(), io) });
-    }
+    const text = renderAnswersMenu(node.data as AnswersData, io);
+    if (text) await io.emit({ kind: "text", text });
     return;
   }
   if (node.type === "list") {

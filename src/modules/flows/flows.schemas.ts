@@ -40,6 +40,7 @@ const answersData = z.object({
     )
     .max(15)
     .default([]),
+  showOptions: z.boolean().optional(),
   repeatOnNoMatch: z.boolean().default(false),
   noMatchMessage: z.string().max(2000).optional(),
   saveVariable: z.string().trim().max(40).optional(),

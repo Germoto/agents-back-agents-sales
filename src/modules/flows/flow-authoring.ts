@@ -40,8 +40,8 @@ export const NODE_DOCS = `BLOQUES DISPONIBLES (type → data → handles de sali
 - start: data {} → salida "next". SIEMPRE debe existir exactamente UN nodo start (id "start").
 - send-text: {text, saveVariable?} → "next" (sigue de inmediato) y "reply" (espera respuesta del cliente). El texto soporta {{variables}}.
 - send-image | send-video | send-audio | send-document: {mediaUrl, fileName?, caption?} → "next" y "reply". Solo úsalos si el usuario tiene la URL del archivo; si no, sugiere que suba el archivo y prefiere send-text.
-- answers: {message, options:[{id,label,detectText,detectMode:"contains"|"equals"|"starts_with"|"ends_with"}] (máx 15), repeatOnNoMatch, noMatchMessage?, timeoutMinutes?} → un handle "opt:<id de cada opción>" y "timeout" (solo si timeoutMinutes>0). Menú de botones sugeridos; detectText = lo que escribe el cliente (ej. "1", "sí", "precio").
-- list: {title?, body, footer?, sections:[{id,title,options:[{id,label,description?}]}], repeatOnNoMatch, noMatchMessage?, timeoutMinutes?} → "opt:<id de cada opción>" y "timeout". Menú numerado largo (el cliente responde con el número).
+- answers: {message, options:[{id,label,detectText?,detectMode?:"contains"|"equals"|"starts_with"|"ends_with"}] (máx 15), showOptions? (default true), repeatOnNoMatch, noMatchMessage?, saveVariable?, timeoutMinutes?} → un handle "opt:<id de cada opción>" y "timeout" (solo si timeoutMinutes>0). QUÉ VE EL CLIENTE: el message (la pregunta sola) y DEBAJO, agregadas automáticamente, las opciones numeradas "1. <label>" + "Responde con el número de tu opción". NO escribas la lista dentro del message ni crees opciones para los números ("1","2"): se duplicarían. QUÉ ACEPTA como respuesta: el número de la opción, su label (igual o contenido) y, si lo pones, detectText (sinónimos extra, opcional; ej. label "Página web", detectText "web"). saveVariable guarda el LABEL elegido (no el número). Una opción = una rama = un edge "opt:<id>". Máx 5-6 opciones por pregunta; para menús largos usa list. NO se envían botones de WhatsApp (es texto). showOptions:false solo si el message ya explica cómo responder (ej. "Responde SÍ o NO").
+- list: {title?, body, footer?, sections:[{id,title,options:[{id,label,description?}]}], repeatOnNoMatch, noMatchMessage?, timeoutMinutes?} → "opt:<id de cada opción>" y "timeout". Menú numerado largo con secciones (el cliente ve *título*, body, "1. label — description" y el footer); acepta el número o el label. Úsalo para 7+ opciones o cuando cada opción necesita descripción; para 2-6 opciones usa answers.
 - question: {message, varType:"text"|"number"|"email"|"phone", saveVariable, invalidMessage?, timeoutMinutes?} → "next" (y "timeout" si timeoutMinutes>0). Pide un dato, lo valida y lo guarda en {{saveVariable}} (snake_case).
 - condition: {source:"variable"|"tag"|"purchased", variable?, operator?:"equals"|"contains"|"not_empty"|"empty", value?, tagId?} → "yes" y "no". source=variable exige variable+operator; source=tag exige tagId.
 - wait: {seconds} (1-120) → "next". Pausa corta entre mensajes.
@@ -67,16 +67,63 @@ export const HARD_RULES = `REGLAS OBLIGATORIAS al proponer un flujo:
 6. LAYOUT: start en x=80. Cada paso avanza x en +300. Ramas paralelas se separan en y de a 160 (y base 240). Sin superposiciones.
 7. Si el usuario pide modificar, parte del ESTADO ACTUAL del lienzo y conserva todo lo que no pidió cambiar (incluidas posiciones).
 8. Usa SOLO los IDs reales del negocio listados abajo para productId, crmId, crmColumnId y tagIds. Si el dato que necesitas no existe (ej. no hay productos o no hay pagos configurados), NO inventes IDs: explícalo en el resumen y usa una alternativa (ej. handoff).
-9. En el trigger: si el usuario no especifica cómo se dispara, usa keywords razonables según el tema del flujo y menciónalo en el resumen.`;
+9. En el trigger: si el usuario no especifica cómo se dispara, usa keywords razonables según el tema del flujo y menciónalo en el resumen.
+10. answers/list: UNA opción por rama, con label corto (≤ 25 caracteres) y legible porque el cliente lo ve numerado. NUNCA dupliques una opción para aceptar el número y la palabra (el número ya se acepta solo); detectText solo para sinónimos; el message es la pregunta sola, sin la lista de opciones.`;
 
 /** Facilidades SOLO para crear_flujo / editar_flujo (chat y MCP). */
 export const AUTHORING_HINTS = `FACILIDADES al usar crear_flujo / editar_flujo:
 - "position" es OPCIONAL: si algún nodo no la trae, el servidor ordena todo el flujo automáticamente (BFS desde start). Si todos los nodos la traen, se respeta.
 - Los ids de edge son opcionales (se generan) y sourceHandle vacío equivale a "next".
 - Puedes referirte a datos del negocio POR NOMBRE (o por id): en crm-move usa {tablero, columna}; en crm-add-tags / crm-remove-tags usa {etiquetas:[nombres]}; en book-appointment y validate-payment usa {producto}; en condition con source "tag" usa {etiqueta}; en flow-control transfer usa {flujo}. El servidor los convierte a ids y rechaza con un error claro los que no existan (créalos antes con crear_etiqueta / crear_columna / crear_producto).
-- Variables de question/answers (saveVariable) viven solo en el flujo: para que el dueño las reciba, inclúyelas en el notifyText del handoff con {{variable}}.
+- En answers/list puedes omitir el id de cada opción (se genera "opt-xxxxxx"); si lo omites, en los edges usa sourceHandle "opt:<label exacto>" o "opt:<posición 1..n>" y el servidor los convierte a "opt:<id>". detectText es opcional.
+- Variables de question/answers (saveVariable) quedan en la ficha del cliente y, en HYBRID, el agente IA las recibe; para que el dueño las reciba por WhatsApp, inclúyelas en el notifyText del handoff con {{variable}}.
 - En el trigger puedes usar "anuncios": [descripciones o ids del catálogo de anuncios] en vez de adEntryIds (se convierten a ids; ver_catalogo_anuncios los lista). Si el dueño capta leads por Meta Ads, prefiere onAdLead a keywords.
 - El flujo se guarda INACTIVO y el dueño puede revisarlo en /flujos/<id>; se enciende con activar_flujo.`;
+
+/** Ejemplo completo y válido (forma exacta que espera crear_flujo). */
+export const AUTHORING_EXAMPLE = `EJEMPLO COMPLETO (flujo de calificación de leads de anuncio, modo HYBRID; sin positions: se ordena solo):
+{
+  "nombre": "Calificación de leads Meta",
+  "trigger": { "onAdLead": true },
+  "nodes": [
+    { "id": "start", "type": "start", "data": {} },
+    { "id": "answers-serv01", "type": "answers", "data": {
+        "message": "¡Hola {{nombre}}! 👋 Gracias por escribir. Para ayudarte mejor, ¿qué necesitas?",
+        "options": [
+          { "id": "opt-web001", "label": "Página web", "detectText": "web" },
+          { "id": "opt-app001", "label": "App móvil", "detectText": "app" },
+          { "id": "opt-bot001", "label": "Agente IA", "detectText": "bot" }
+        ],
+        "repeatOnNoMatch": true, "noMatchMessage": "No te entendí 🙈", "saveVariable": "servicio", "timeoutMinutes": 60 } },
+    { "id": "crm-add-tags-web01", "type": "crm-add-tags", "data": { "etiquetas": ["Desarrollo web"] } },
+    { "id": "crm-add-tags-app01", "type": "crm-add-tags", "data": { "etiquetas": ["App móvil"] } },
+    { "id": "crm-add-tags-bot01", "type": "crm-add-tags", "data": { "etiquetas": ["Agente IA"] } },
+    { "id": "question-proy01", "type": "question", "data": { "message": "Cuéntame en dos líneas qué quieres lograr 🙌", "varType": "text", "saveVariable": "proyecto" } },
+    { "id": "crm-move-calif01", "type": "crm-move", "data": { "tablero": "Ventas", "columna": "Calificando" } },
+    { "id": "to-agent-fin01", "type": "to-agent", "data": { "note": "Ya eligió {{servicio}} y describió su proyecto: no lo vuelvas a preguntar; resuelve dudas y ofrece agendar la Llamada de diagnóstico." } }
+  ],
+  "edges": [
+    { "source": "start", "sourceHandle": "next", "target": "answers-serv01" },
+    { "source": "answers-serv01", "sourceHandle": "opt:opt-web001", "target": "crm-add-tags-web01" },
+    { "source": "answers-serv01", "sourceHandle": "opt:opt-app001", "target": "crm-add-tags-app01" },
+    { "source": "answers-serv01", "sourceHandle": "opt:opt-bot001", "target": "crm-add-tags-bot01" },
+    { "source": "answers-serv01", "sourceHandle": "timeout", "target": "to-agent-fin01" },
+    { "source": "crm-add-tags-web01", "sourceHandle": "next", "target": "question-proy01" },
+    { "source": "crm-add-tags-app01", "sourceHandle": "next", "target": "question-proy01" },
+    { "source": "crm-add-tags-bot01", "sourceHandle": "next", "target": "question-proy01" },
+    { "source": "question-proy01", "sourceHandle": "next", "target": "crm-move-calif01" },
+    { "source": "crm-move-calif01", "sourceHandle": "next", "target": "to-agent-fin01" }
+  ]
+}
+Lo que recibe el cliente en el bloque answers (la lista la agrega el sistema):
+"¡Hola Ana! 👋 Gracias por escribir. Para ayudarte mejor, ¿qué necesitas?
+
+1. Página web
+2. App móvil
+3. Agente IA
+
+Responde con el número de tu opción 👆"
+Si responde "2", "App móvil" o "quiero una app" entra por opt-app001 y {{servicio}} = "App móvil".`;
 
 // ---------------------------------------------------------------------------
 // Contexto del negocio (selects mínimos)
@@ -464,6 +511,42 @@ export async function normalizeFlowDraft(companyId: string, raw: FlowDraftInput)
     .filter((e) => typeof e.source === "string" && typeof e.target === "string")
     .map((e) => ({ source: e.source as string, target: e.target as string }));
   const withIds = resolved.nodes.map((n) => ({ ...n, id: typeof n.id === "string" && n.id ? n.id : `${String(n.type ?? "node")}-${randomSuffix()}` }));
+  // Opciones de answers/list sin id → "opt-xxxxxx"; los edges que apunten a
+  // "opt:<label>" u "opt:<posición>" se convierten a "opt:<id>".
+  const handleRemap = new Map<string, Map<string, string>>(); // nodeId → (alias → handle real)
+  for (const n of withIds) {
+    const data = (n as { data?: Record<string, unknown> }).data;
+    if (!data || (n.type !== "answers" && n.type !== "list")) continue;
+    const aliases = new Map<string, string>();
+    let pos = 0;
+    const fix = (opt: Record<string, unknown>) => {
+      pos += 1;
+      if (typeof opt.id !== "string" || !opt.id) opt.id = `opt-${randomSuffix()}`;
+      const id = opt.id as string;
+      aliases.set(`opt:${pos}`, `opt:${id}`);
+      if (typeof opt.label === "string" && opt.label.trim()) aliases.set(`opt:${opt.label.trim().toLowerCase()}`, `opt:${id}`);
+    };
+    if (n.type === "answers" && Array.isArray(data.options)) {
+      for (const o of data.options as unknown[]) if (o && typeof o === "object") fix(o as Record<string, unknown>);
+    }
+    if (n.type === "list" && Array.isArray(data.sections)) {
+      for (const sec of data.sections as unknown[]) {
+        const sd = sec as Record<string, unknown> | null;
+        if (sd && typeof sd === "object") {
+          if (typeof sd.id !== "string" || !sd.id) sd.id = `sec-${randomSuffix()}`;
+          if (Array.isArray(sd.options)) for (const o of sd.options as unknown[]) if (o && typeof o === "object") fix(o as Record<string, unknown>);
+        }
+      }
+    }
+    if (aliases.size) handleRemap.set(n.id as string, aliases);
+  }
+  for (const e of rawEdges) {
+    const h = typeof e.sourceHandle === "string" ? e.sourceHandle : "";
+    const map = typeof e.source === "string" ? handleRemap.get(e.source) : undefined;
+    if (!map || !h.startsWith("opt:")) continue;
+    const real = map.get(h) ?? map.get(h.toLowerCase());
+    if (real) e.sourceHandle = real;
+  }
   const allPositioned = withIds.every(hasPosition);
   const positioned = allPositioned ? withIds : autoLayoutFlow(withIds as Array<{ id: string; type?: unknown; position?: unknown }>, edgesForLayout);
 
@@ -561,11 +644,12 @@ export async function describeFlow(
         return `Multimedia (${n.type.replace("send-", "")})${d.caption ? `: «${short(d.caption)}»` : ""}`;
       case "answers": {
         const a = n.data as AnswersData;
-        const opts = (a.options ?? []).map((o) => {
+        const opts = (a.options ?? []).map((o, i) => {
           const e = (out.get(n.id) ?? []).find((x) => x.sourceHandle === `opt:${o.id}`);
-          return `${o.label} → ${e ? e.target : "SIN RAMA"}`;
+          return `${i + 1}) ${o.label || o.detectText} → ${e ? e.target : "SIN RAMA"}`;
         });
-        return `Pregunta con botones: «${short(a.message)}» · opciones: ${opts.join(" | ")}`;
+        const shown = a.showOptions === false ? " (opciones NO se listan: el mensaje debe decir cómo responder)" : " (el cliente las ve numeradas y responde con número o nombre)";
+        return `Pregunta con opciones${shown}: «${short(a.message)}» · ${opts.join(" | ")}`;
       }
       case "list": {
         const l = n.data as ListData;

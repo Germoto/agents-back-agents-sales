@@ -201,25 +201,46 @@ export function validateFlow(
         if (!options.length) {
           errors.push({ code: "ANSWERS_NO_OPTIONS", message: "«Respuestas» sin opciones.", nodeId: node.id });
         }
-        const seen = new Set<string>();
+        const seenDetect = new Set<string>();
+        const seenLabel = new Set<string>();
+        const isNumeric = (v: string | undefined) => /^\d{1,2}$/.test((v ?? "").trim());
+        const hasNonNumeric = options.some((o) => !isNumeric(o.label) || (!!o.detectText?.trim() && !isNumeric(o.detectText)));
+        let numericWarned = false;
         for (const opt of options) {
-          if (!opt.detectText?.trim()) {
+          const label = (opt.label ?? "").trim();
+          const detect = (opt.detectText ?? "").trim();
+          if (!label && !detect) {
             errors.push({
               code: "ANSWERS_NO_OPTIONS",
-              message: "«Respuestas» tiene una opción sin texto a detectar.",
+              message: "«Respuestas» tiene una opción sin nombre (el cliente responde con el número o el nombre; el texto a detectar es opcional).",
               nodeId: node.id,
             });
             break;
           }
-          const k = opt.detectText.trim().toLowerCase();
-          if (seen.has(k)) {
-            errors.push({
-              code: "DUPLICATE_OPTION",
-              message: `«Respuestas» tiene opciones duplicadas («${opt.detectText}»).`,
+          if (label) {
+            const kl = label.toLowerCase();
+            if (seenLabel.has(kl)) {
+              errors.push({ code: "DUPLICATE_OPTION", message: `«Respuestas» tiene dos opciones llamadas «${label}».`, nodeId: node.id });
+            }
+            seenLabel.add(kl);
+          }
+          if (detect) {
+            const kd = detect.toLowerCase();
+            if (seenDetect.has(kd)) {
+              errors.push({ code: "DUPLICATE_OPTION", message: `«Respuestas» tiene opciones duplicadas («${detect}»).`, nodeId: node.id });
+            }
+            seenDetect.add(kd);
+          }
+          // Opción que solo es un número («1», «2»…) junto a opciones con nombre: sobra,
+          // el cliente ya puede responder con el número de cada opción.
+          if (!numericWarned && hasNonNumeric && isNumeric(label || detect) && (!label || isNumeric(label)) && (!detect || isNumeric(detect))) {
+            warnings.push({
+              code: "ANSWERS_NUMERIC_DUPLICATE",
+              message: `«Respuestas»: la opción «${label || detect}» sobra; el cliente ya puede responder con el número de cada opción (1, 2, 3…). Deja una opción por rama con su nombre.`,
               nodeId: node.id,
             });
+            numericWarned = true;
           }
-          seen.add(k);
         }
         validateTimeout(node, data.timeoutMinutes, edgeFrom, errors, warnings);
         break;
