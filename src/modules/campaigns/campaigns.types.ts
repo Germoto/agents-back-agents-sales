@@ -70,19 +70,28 @@ export interface CampaignAudience {
   recipients: AudienceRecipient[];
 }
 
+/**
+ * Config inicial de una campaña NUEVA (panel y copiloto). Conservadora a
+ * propósito: rango 45–90 s entre contactos, pausa de 3–5 min cada 10, tope de
+ * 60 por día y horario 09:00–21:00. Las campañas ya guardadas no cambian:
+ * parseSendConfig completa las claves faltantes con los valores históricos.
+ */
 export const DEFAULT_SEND_CONFIG: CampaignSendConfig = {
-  intervalSec: 10,
-  intervalMaxSec: 0,
+  intervalSec: 45,
+  intervalMaxSec: 90,
   pauseEvery: 10,
-  pauseSec: 60,
-  pauseMaxSec: 0,
+  pauseSec: 180,
+  pauseMaxSec: 300,
   randomize: true,
-  dailyLimit: 0,
-  sendFrom: null,
-  sendUntil: null,
+  dailyLimit: 60,
+  sendFrom: "09:00",
+  sendUntil: "21:00",
   excludeMuted: true,
   metaTemplate: null,
 };
+
+/** Umbral de fallos SEGUIDOS a partir del cual el driver pausa la campaña sola. */
+export const AUTO_PAUSE_AFTER_FAILURES = 5;
 
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -113,19 +122,22 @@ export function parseSendConfig(raw: unknown): CampaignSendConfig {
   const from = parseHHmm(o.sendFrom);
   const until = parseHHmm(o.sendUntil);
   const windowOk = from !== null && until !== null && from !== until;
-  const intervalSec = num(o.intervalSec, DEFAULT_SEND_CONFIG.intervalSec, 0);
-  const pauseSec = num(o.pauseSec, DEFAULT_SEND_CONFIG.pauseSec, 0);
+  // Claves faltantes (campañas guardadas antes de que existieran) → valores
+  // HISTÓRICOS, no los nuevos defaults: una campaña en curso no debe cambiar de
+  // ritmo por un deploy.
+  const intervalSec = num(o.intervalSec, 10, 0);
+  const pauseSec = num(o.pauseSec, 60, 0);
   // Tope del rango solo válido si supera al mínimo; si no, se ignora (fijo).
   const intervalMaxSec = num(o.intervalMaxSec, 0, 0);
   const pauseMaxSec = num(o.pauseMaxSec, 0, 0);
   return {
     intervalSec,
     intervalMaxSec: intervalMaxSec > intervalSec ? intervalMaxSec : 0,
-    pauseEvery: num(o.pauseEvery, DEFAULT_SEND_CONFIG.pauseEvery, 0),
+    pauseEvery: num(o.pauseEvery, 10, 0),
     pauseSec,
     pauseMaxSec: pauseMaxSec > pauseSec ? pauseMaxSec : 0,
-    randomize: o.randomize === undefined ? DEFAULT_SEND_CONFIG.randomize : Boolean(o.randomize),
-    dailyLimit: num(o.dailyLimit, DEFAULT_SEND_CONFIG.dailyLimit, 0),
+    randomize: o.randomize === undefined ? true : Boolean(o.randomize),
+    dailyLimit: num(o.dailyLimit, 0, 0),
     sendFrom: windowOk ? from : null,
     sendUntil: windowOk ? until : null,
     excludeMuted: o.excludeMuted === undefined ? DEFAULT_SEND_CONFIG.excludeMuted : Boolean(o.excludeMuted),

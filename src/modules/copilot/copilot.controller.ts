@@ -56,9 +56,9 @@ import { crmToolConfigSchema } from "../agent-config/agent-config.schemas";
 import { listConversations, listConversationMessages, setConversationPinned, setCustomerOptOut } from "../agent/conversation.service";
 import { createBooking, createScheduleBlock, deleteScheduleBlock, listBookings, listScheduleBlocks, rescheduleBooking, updateBookingStatus } from "../bookings/bookings.service";
 import type { OrderStatus, ServiceBookingStatus } from "@prisma/client";
-import { listCampaigns, createCampaign, updateCampaign, deleteCampaign, startCampaign, testCampaign } from "../campaigns/campaigns.service";
+import { listCampaigns, getCampaign, listRecipients, createCampaign, updateCampaign, deleteCampaign, startCampaign, pauseCampaign, resumeCampaign, cancelCampaign, testCampaign, buildExclusionSets, filterAudience } from "../campaigns/campaigns.service";
 import type { CampaignAction } from "../campaigns/campaigns.types";
-import { parseSendConfig, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
+import { parseSendConfig, DEFAULT_SEND_CONFIG, AUTO_PAUSE_AFTER_FAILURES, type CampaignSendConfig, type CampaignMessageItem } from "../campaigns/campaigns.types";
 import { createSubscription, listSubscriptions, markCancelled, markRenewed } from "../subscriptions/subscriptions.service";
 import { createCredentials, credentialStats, deleteCredential, listCredentials, updateCredential } from "../streaming-inventory/streaming-inventory.service";
 import { getReportConfig, sendReport, updateReportConfig } from "../reports/reports.service";
@@ -986,7 +986,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "crear_campana",
       description:
-        "Crea una campaña de envío masivo de WhatsApp EN BORRADOR (no envía nada). La audiencia se arma con filtros combinables (tagIds del CRM, funnelStatus NUEVO|INTERESADO|ESPERANDO_PAGO|PAGADO|ENTREGADO, adSourceId del catálogo de anuncios) y/o phones explícitos. sendConfig controla el ritmo anti-ban: intervalSec/intervalMaxSec (RANGO aleatorio en segundos entre contactos, definido por el usuario), pauseEvery + pauseSec/pauseMaxSec (pausa larga cada N), dailyLimit (tope diario; SIN sendFrom el tope reanuda a MEDIANOCHE — recomienda horario), sendFrom/sendUntil (HH:mm), excludeMuted (no molestar a quienes están en atención humana, default true). PASOS (opcional, `pasos`): secuencia por contacto en orden: {tipo:'mensaje', mensajes:[...]} | {tipo:'esperar', segundos} | {tipo:'etiquetar', agregar:[nombres], quitar:[nombres]} | {tipo:'mover_crm', tablero, columna} | {tipo:'modo_humano', avisarDueno?}; si no mandas pasos, se usa un único paso de mensaje con `mensajes`. etiquetasContexto / quitarEtiquetasContexto (nombres) se aplican a cada contacto alcanzado. Devuelve el total de contactos y un resumen interpretado del plan de envío: MUÉSTRASELO al usuario. Flujo seguro: crear borrador → enviar_prueba_campana al número del dueño → confirmación explícita → iniciar_campana. Llámala tras confirmación.",
+        "Crea una campaña de envío masivo de WhatsApp EN BORRADOR (no envía nada). La audiencia se arma con filtros combinables (tagIds del CRM, funnelStatus NUEVO|INTERESADO|ESPERANDO_PAGO|PAGADO|ENTREGADO, adSourceId del catálogo de anuncios) y/o phones explícitos. sendConfig controla el ritmo anti-ban y es PARCIAL (lo que no mandes toma el default seguro: 45–90 s entre contactos, pausa 180–300 s cada 10, tope 60/día, horario 09:00–21:00): intervalSec/intervalMaxSec (RANGO aleatorio en segundos entre contactos), pauseEvery + pauseSec/pauseMaxSec (pausa larga cada N), dailyLimit (tope diario que cuenta TODAS las campañas del negocio; con 0 no hay tope), sendFrom/sendUntil (HH:mm; SIN horario el tope reanuda a MEDIANOCHE), excludeMuted (no molestar a quienes están en atención humana, default true). Antes de crear, usa previsualizar_audiencia_campana para saber cuántos contactos reales saldrán. PASOS (opcional, `pasos`): secuencia por contacto en orden: {tipo:'mensaje', mensajes:[...]} | {tipo:'esperar', segundos} | {tipo:'etiquetar', agregar:[nombres], quitar:[nombres]} | {tipo:'mover_crm', tablero, columna} | {tipo:'modo_humano', avisarDueno?}; si no mandas pasos, se usa un único paso de mensaje con `mensajes`. etiquetasContexto / quitarEtiquetasContexto (nombres) se aplican a cada contacto alcanzado. Devuelve el total de contactos y un resumen interpretado del plan de envío: MUÉSTRASELO al usuario. Flujo seguro: previsualizar_audiencia_campana → crear borrador → enviar_prueba_campana al número del dueño → confirmación explícita → iniciar_campana → ver_campana para el seguimiento. Llámala tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1109,13 +1109,65 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "iniciar_campana",
       description:
-        "LANZA una campaña en borrador: comienza el envío masivo REAL e IRREVERSIBLE a toda la audiencia. Llámala ÚNICAMENTE después de mostrarle al usuario el total de contactos + el resumen del plan de envío Y de que él confirme explícitamente el lanzamiento. Ante la duda, NO la llames.",
+        "LANZA una campaña en borrador: comienza el envío masivo REAL e IRREVERSIBLE a toda la audiencia. Llámala ÚNICAMENTE después de mostrarle al usuario el total de contactos + el resumen del plan de envío Y de que él confirme explícitamente el lanzamiento. Ante la duda, NO la llames. Solo puede haber UNA campaña en curso por negocio (mismo número de WhatsApp): si otra está corriendo, devuelve error con su nombre.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["campaignId"],
         properties: { campaignId: { type: "string" } },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "previsualizar_audiencia_campana",
+      description:
+        "Cuenta cuántos contactos recibirían una campaña de WhatsApp con esa audiencia (misma forma que crear_campana.audiencia: tagIds, funnelStatus, adSourceId, phones) aplicando las MISMAS exclusiones del lanzamiento (no contactar, atención humana si excludeMuted, duplicados, números inválidos) y devuelve una muestra. Úsala ANTES de crear_campana para que el dueño sepa el total real. No escribe nada.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["audiencia"],
+        properties: {
+          audiencia: { type: "object", description: "{tagIds?, funnelStatus?, adSourceId?, phones?}" },
+          excludeMuted: { type: "boolean", description: "default true (igual que la campaña)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_campana",
+      description:
+        "Detalle y SEGUIMIENTO de una campaña de WhatsApp (listar_campanas → id): estado, plan de envío interpretado, pasos en texto, ritmo (sendConfig), progreso (enviados/fallidos/pendientes), cuándo sale el próximo contacto y POR QUÉ espera (pausa entre lotes, tope diario, fuera de horario, pausada por fallos seguidos) y los últimos fallidos con su motivo. Úsala cuando el dueño pregunte cómo va, por qué está detenida o cuántos faltan.",
+      parameters: { type: "object", additionalProperties: false, required: ["campaignId"], properties: { campaignId: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pausar_campana",
+      description: "Pausa una campaña EN CURSO (deja de tomar contactos; lo enviado no se deshace). Reversible con reanudar_campana. Llámala cuando el dueño lo pida.",
+      parameters: { type: "object", additionalProperties: false, required: ["campaignId"], properties: { campaignId: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "reanudar_campana",
+      description:
+        "Continúa una campaña PAUSADA (manual o automática por fallos) desde donde quedó, con el mismo ritmo. Si se pausó por fallos seguidos, pide al dueño que confirme que su WhatsApp sigue conectado antes. Falla si otra campaña del negocio ya está en curso.",
+      parameters: { type: "object", additionalProperties: false, required: ["campaignId"], properties: { campaignId: { type: "string" } } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "cancelar_campana",
+      description:
+        "CANCELA definitivamente una campaña en curso o pausada: los pendientes NO se enviarán y no se puede reanudar (lo ya enviado queda). Irreversible: SOLO tras confirmación explícita con el nombre de la campaña. Para una pausa temporal usa pausar_campana.",
+      parameters: { type: "object", additionalProperties: false, required: ["campaignId"], properties: { campaignId: { type: "string" } } },
     },
   },
   {
@@ -1674,8 +1726,14 @@ function fmtDurHuman(sec: number): string {
   return rest ? `${h} h ${rest} min` : `${h} h`;
 }
 
-/** Resumen interpretado del plan de envío (mismo espíritu que el wizard del panel). */
-function describeSendPlan(cfg: CampaignSendConfig, total: number): string {
+/** ¿Algún mensaje de texto de la campaña usa spintax {a|b|c}? (variantes anti-ban) */
+function campaignHasSpintax(actions: CampaignAction[]): boolean {
+  const re = /\{[^{}]*\|[^{}]*\}/;
+  return actions.some((a) => a.type === "send-message" && a.messages.some((m) => re.test(m.text ?? "")));
+}
+
+/** Resumen interpretado del plan de envío (mismo espíritu que el wizard del panel) + avisos anti-ban. */
+function describeSendPlan(cfg: CampaignSendConfig, total: number, actions?: CampaignAction[]): string {
   const avgInterval = cfg.intervalMaxSec > cfg.intervalSec ? (cfg.intervalSec + cfg.intervalMaxSec) / 2 : cfg.intervalSec;
   const avgPause = cfg.pauseMaxSec > cfg.pauseSec ? (cfg.pauseSec + cfg.pauseMaxSec) / 2 : cfg.pauseSec;
   const durationFor = (count: number) => {
@@ -1709,7 +1767,58 @@ function describeSendPlan(cfg: CampaignSendConfig, total: number): string {
   }
   if (cfg.sendFrom && cfg.sendUntil) parts.push(`Horario de envío: ${cfg.sendFrom}–${cfg.sendUntil}.`);
   if (!cfg.excludeMuted) parts.push("⚠️ excludeMuted apagado: también recibirán la campaña los contactos en atención humana.");
+  if (avgInterval < 30) parts.push(`⚠️ Intervalo medio de ${Math.round(avgInterval)} s: muy rápido para un número normal (riesgo de bloqueo); recomienda 45–120 s.`);
+  if (cfg.dailyLimit <= 0 && total > 60) parts.push("⚠️ Sin tope diario: saldrían todos el mismo día; en números nuevos recomienda 30–60/día.");
+  if (actions && actions.some((a) => a.type === "send-message") && !campaignHasSpintax(actions)) {
+    parts.push("⚠️ Ningún mensaje usa variantes {Hola|Buenas|Qué tal}: todos recibirán el MISMO texto (patrón de spam); recomienda ≥3 variantes en saludo, verbo y cierre.");
+  }
+  parts.push(`Si ${AUTO_PAUSE_AFTER_FAILURES} envíos seguidos fallan, la campaña se pausa sola y avisa al dueño.`);
   return parts.join(" ");
+}
+
+/** Motivo de espera/pausa de una campaña en palabras para el dueño. */
+function describePauseReason(status: string, reason: string | null, nextSendAt: Date | null): string | null {
+  const when = nextSendAt ? ` (próximo contacto: ${nextSendAt.toLocaleString("es-PE", { timeZone: "America/Lima" })})` : "";
+  if (status === "PAUSED") {
+    return reason === "failures"
+      ? `Pausada AUTOMÁTICAMENTE: ${AUTO_PAUSE_AFTER_FAILURES} envíos seguidos fallaron (revisar la conexión de WhatsApp antes de reanudar_campana)`
+      : "Pausada manualmente (reanudar_campana para continuar)";
+  }
+  if (status !== "RUNNING") return null;
+  switch (reason) {
+    case "auto": return `Pausa automática entre lotes${when}`;
+    case "daily-limit": return `Tope diario alcanzado${when}`;
+    case "schedule": return `Fuera del horario de envío${when}`;
+    default: return nextSendAt ? `Enviando${when}` : "Enviando";
+  }
+}
+
+/** Pasos de una campaña en texto (ids de etiquetas/columnas → nombres). */
+async function describeCampaignSteps(companyId: string, actions: CampaignAction[]): Promise<string[]> {
+  const [tags, columns] = await Promise.all([
+    prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    prisma.crmColumn.findMany({ where: { crm: { companyId } }, select: { id: true, name: true, crm: { select: { name: true } } } }),
+  ]);
+  const tagName = (id: string) => tags.find((t) => t.id === id)?.name ?? "(eliminada)";
+  return actions.map((a, i) => {
+    const n = `${i + 1}) `;
+    if (a.type === "send-message") {
+      const msgs = a.messages.map((m) => (m.type === "text" ? `«${(m.text ?? "").slice(0, 160)}${(m.text ?? "").length > 160 ? "…" : ""}»` : `[${m.type}]${m.text ? ` «${m.text.slice(0, 80)}»` : ""}`));
+      return `${n}Mensaje: ${msgs.join(" + ")}`;
+    }
+    if (a.type === "wait") return `${n}Esperar ${a.seconds} s`;
+    if (a.type === "tag") {
+      const add = (a.addTagIds ?? []).map(tagName);
+      const rem = (a.removeTagIds ?? []).map(tagName);
+      return `${n}Etiquetar${add.length ? ` +${add.join(", ")}` : ""}${rem.length ? ` −${rem.join(", ")}` : ""}`;
+    }
+    if (a.type === "crm-move") {
+      const c = columns.find((x) => x.id === a.columnId);
+      return `${n}Mover al CRM: ${c ? `${c.crm.name} → ${c.name}` : "(columna eliminada)"}`;
+    }
+    if (a.type === "handoff") return `${n}Pasar a atención humana${a.notifyOwner ? " y avisar al dueño" : ""}`;
+    return `${n}${(a as { type: string }).type}`;
+  });
 }
 
 /** Audiencia de campaña por filtros combinables (tags/etapa/anuncio) y/o phones explícitos. */
@@ -3419,7 +3528,7 @@ export async function runCopilotTool(
           wrote: false,
         };
       }
-      const cfg = parseSendConfig(args.sendConfig ?? {});
+      const cfg = parseSendConfig({ ...DEFAULT_SEND_CONFIG, ...((args.sendConfig && typeof args.sendConfig === "object" ? args.sendConfig : {}) as Record<string, unknown>) });
       try {
         const actions: CampaignAction[] = Array.isArray(args.pasos) && args.pasos.length
           ? await resolveCampaignSteps(companyId, args.pasos, messages)
@@ -3441,7 +3550,7 @@ export async function runCopilotTool(
             campaignId: created.id,
             estado: "BORRADOR",
             totalContactos: recipients.length,
-            resumenDeEnvio: describeSendPlan(cfg, recipients.length),
+            resumenDeEnvio: describeSendPlan(cfg, recipients.length, actions),
             nota:
               "Campaña creada EN BORRADOR: aún NO envía nada. Muéstrale al usuario el total de contactos y el resumen; recomiéndale una prueba con enviar_prueba_campana a su propio número, y lanza con iniciar_campana SOLO cuando él confirme explícitamente.",
           }),
@@ -3555,6 +3664,75 @@ export async function runCopilotTool(
       } catch (err) {
         const message = err instanceof Error ? err.message : "no se pudo iniciar la campaña";
         return { result: JSON.stringify({ ok: false, error: message }), wrote: false };
+      }
+    }
+
+    case "previsualizar_audiencia_campana": {
+      const audiencia = (args.audiencia && typeof args.audiencia === "object" ? args.audiencia : {}) as Record<string, unknown>;
+      const excludeMuted = typeof args.excludeMuted === "boolean" ? args.excludeMuted : true;
+      const raw = await resolveCampaignAudience(companyId, audiencia);
+      const { recipients, excluded } = filterAudience(raw, await buildExclusionSets(companyId, excludeMuted));
+      return {
+        result: JSON.stringify({
+          totalSeleccionados: raw.length,
+          totalQueRecibiran: recipients.length,
+          excluidos: { noContactar: excluded.optOut, atencionHumana: excluded.muted, duplicados: excluded.duplicates, invalidos: excluded.invalid },
+          muestra: recipients.slice(0, 10).map((r) => ({ phone: r.phone, name: r.name ?? null })),
+          nota: recipients.length ? "Muestra el total al dueño antes de crear_campana." : "Nadie recibiría la campaña: revisa los filtros.",
+        }),
+        wrote: false,
+      };
+    }
+
+    case "ver_campana": {
+      const campaignId = asStr(args.campaignId) ?? "";
+      if (!campaignId) return { result: JSON.stringify({ ok: false, error: "falta campaignId" }), wrote: false };
+      try {
+        const c = await getCampaign(companyId, campaignId);
+        const recipients = await listRecipients(companyId, campaignId);
+        const pending = recipients.filter((r) => r.status === "PENDING" || r.status === "SENDING").length;
+        const failed = recipients.filter((r) => r.status === "FAILED").slice(-10).map((r) => ({ phone: r.phone, motivo: r.error }));
+        const sent24h = recipients.filter((r) => r.status === "SENT" && r.sentAt && Date.now() - new Date(r.sentAt).getTime() < 86_400_000).length;
+        return {
+          result: JSON.stringify({
+            campaignId: c.id,
+            nombre: c.name,
+            estado: c.status,
+            situacion: describePauseReason(c.status, c.pauseReason, c.nextSendAt),
+            progreso: { total: c.totalCount, enviados: c.sentCount, fallidos: c.failedCount, pendientes: pending, enviadosUltimas24h: sent24h },
+            pasos: await describeCampaignSteps(companyId, c.actions),
+            ritmo: c.sendConfig,
+            resumenDeEnvio: describeSendPlan(c.sendConfig, c.status === "DRAFT" ? c.audience.recipients.length : pending, c.actions),
+            contactosEnBorrador: c.status === "DRAFT" ? c.audience.recipients.length : undefined,
+            ultimosFallidos: failed,
+            inicio: c.startedAt,
+            fin: c.completedAt,
+          }),
+          wrote: false,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo leer la campaña" }), wrote: false };
+      }
+    }
+
+    case "pausar_campana":
+    case "reanudar_campana":
+    case "cancelar_campana": {
+      const campaignId = asStr(args.campaignId) ?? "";
+      if (!campaignId) return { result: JSON.stringify({ ok: false, error: "falta campaignId" }), wrote: false };
+      try {
+        const c =
+          name === "pausar_campana" ? await pauseCampaign(companyId, campaignId)
+          : name === "reanudar_campana" ? await resumeCampaign(companyId, campaignId)
+          : await cancelCampaign(companyId, campaignId);
+        const pending = Math.max(0, c.totalCount - c.sentCount - c.failedCount);
+        const nota =
+          name === "pausar_campana" ? `Campaña pausada: quedan ${pending} contacto(s) sin enviar. reanudar_campana para continuar.`
+          : name === "reanudar_campana" ? `Campaña reanudada: continúa con ${pending} contacto(s) pendiente(s). ${describeSendPlan(c.sendConfig, pending, c.actions)}`
+          : `Campaña cancelada: ${pending} contacto(s) NO recibirán el mensaje; lo enviado (${c.sentCount}) queda.`;
+        return { result: JSON.stringify({ ok: true, estado: c.status, enviados: c.sentCount, fallidos: c.failedCount, pendientes: pending, nota }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo cambiar el estado" }), wrote: false };
       }
     }
 
@@ -3965,7 +4143,7 @@ const SYSTEM_GUIDE = [
   "- Dashboard (/dashboard): métricas del negocio.",
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}.",
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar).",
-  "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 65–90s); en números nuevos recomienda tope diario 30-70. Flujo seguro OBLIGATORIO: crear borrador → mostrar total de contactos + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible).",
+  "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. DEFAULTS SEGUROS si no se indica otra cosa: 45–90 s entre contactos, pausa 180–300 s cada 10, tope 60/día (cuenta todas las campañas del negocio), horario 09:00–21:00. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 60–120 s); en números nuevos recomienda tope diario 30–50 y subirlo de a poco; sin spintax todos reciben el mismo texto (pide ≥3 variantes en saludo, verbo y cierre; nunca en precios ni links). PROTECCIONES AUTOMÁTICAS: solo UNA campaña en curso por negocio; si 5 envíos seguidos fallan se pausa sola (pauseReason failures) y avisa al dueño por WhatsApp. Flujo seguro OBLIGATORIO: previsualizar_audiencia_campana (total real tras exclusiones) → crear borrador → mostrar total + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible) → ver_campana para el seguimiento (cómo va, por qué espera, fallidos) → pausar_campana / reanudar_campana (reversibles) o cancelar_campana (irreversible, confirmación con el nombre).",
   "- FLUJOS — secuencia OBLIGATORIA: (1) ver_bloques_flujo y ver_crm ANTES de diseñar (nunca inventes ids: usa nombres o los ids reales); (2) propón al dueño el flujo en lenguaje llano — qué pregunta y qué opciones numeradas verá el cliente (muéstrale el texto tal cual le llegará), qué etiqueta/columna pone cada rama, cuándo avisa al dueño, si agenda cita — y espera su confirmación; (3) crear_flujo con soloValidar=true para comprobar, luego sin él; (4) muéstrale el link /flujos/<id> y las warnings; (5) activar_flujo SOLO tras confirmación explícita, avisando que en modo FLOW el bot calla si ningún flujo se dispara (en HYBRID responde el agente) y que el modo se cambia con configurar_empresa botMode; (6) para modificar uno existente, ver_flujo primero y devuelve el grafo COMPLETO conservando ids y posiciones. GOTCHAS: en HYBRID termina el flujo de calificación con to-agent (clientText opcional + note con lo que el agente debe hacer) en vez de handoff, salvo que el dueño quiera atender él; las respuestas del flujo (saveVariable) quedan en la ficha del cliente (Conversaciones → Contacto, tarjeta del CRM, ver_cliente/leer_conversacion) y el agente las recibe como contexto; si el dueño capta leads por Meta Ads, propón trigger onAdLead (no keywords) y acciones CRM en el anuncio (configurar_anuncio); etiquetas según rango (presupuesto, tipo de cliente) requieren un bloque answers (opciones numeradas; el cliente responde con el número o el nombre) con una rama por opción, no question libre; en answers el message es SOLO la pregunta: la lista «1. … 2. …» la agrega el sistema y NUNCA se crean opciones separadas para «1»,«2»… (duplicarían ramas); para menús de 7+ opciones usa list; no existen botones de WhatsApp, todo es texto; las variables guardadas (saveVariable) solo llegan al dueño si el notifyText del handoff las incluye con {{variable}}; book-appointment necesita un servicio con durationMin; un flujo de captación típico: answers (qué necesita, una opción por servicio) → crm-add-tags → crm-move → answers (tipo/presupuesto) → crm-add-tags → question (descripción) → to-agent (HYBRID) o handoff con aviso que incluya {{nombre}} {{telefono}} y las variables (ver_bloques_flujo trae un EJEMPLO completo).",
   "- Campañas: además de mensajes, cada campaña puede llevar PASOS por contacto (esperar N segundos, etiquetar/quitar etiquetas, mover a una columna del CRM, pasar a modo humano) y etiquetas de contexto a cada alcanzado (crear_campana pasos / etiquetasContexto, actualizar_campana en borrador, eliminar_campana tras confirmación). Las respuestas rápidas también ejecutan ACCIONES al enviarse: mover al CRM, etiquetar/quitar etiquetas, marcar entregado y fijar el producto presentado (crear/actualizar_respuesta_rapida acciones por nombres).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",

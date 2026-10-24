@@ -196,34 +196,77 @@ export async function deleteCampaign(companyId: string, id: string) {
 // Control de ejecución
 // ---------------------------------------------------------------------------
 
+/** Dígitos excluidos por motivo (para contar y explicar en la previsualización). */
+export interface ExclusionSets {
+  /** Pidieron no ser contactados (Customer.optOutAt): se excluyen SIEMPRE. */
+  optOut: Set<string>;
+  /** En atención humana (mutedNumbers / botPaused): solo cuando excludeMuted. */
+  muted: Set<string>;
+}
+
 /**
- * Construye el set de dígitos a excluir. Los clientes que pidieron NO ser
- * contactados (Customer.optOutAt) se excluyen SIEMPRE; los de atención humana
- * (mutedNumbers / botPaused) solo cuando excludeMuted.
+ * Construye los dígitos a excluir. Los clientes que pidieron NO ser contactados
+ * se excluyen SIEMPRE; los de atención humana solo cuando excludeMuted.
  */
-async function buildExclusionSet(companyId: string, excludeMuted: boolean): Promise<Set<string>> {
-  const set = new Set<string>();
+export async function buildExclusionSets(companyId: string, excludeMuted: boolean): Promise<ExclusionSets> {
+  const optOut = new Set<string>();
+  const muted = new Set<string>();
   const optedOut = await prisma.customer.findMany({
     where: { companyId, optOutAt: { not: null } },
     select: { phone: true },
   });
-  for (const c of optedOut) set.add(digitsOf(c.phone));
-  if (!excludeMuted) return set;
+  for (const c of optedOut) optOut.add(digitsOf(c.phone));
+  if (!excludeMuted) return { optOut, muted };
   const cfg = await prisma.agentConfig.findUnique({
     where: { companyId },
     select: { mutedNumbers: true },
   });
   if (Array.isArray(cfg?.mutedNumbers)) {
     for (const n of cfg!.mutedNumbers as unknown[]) {
-      if (typeof n === "string") set.add(digitsOf(n));
+      if (typeof n === "string") muted.add(digitsOf(n));
     }
   }
   const paused = await prisma.conversation.findMany({
     where: { companyId, botPaused: true, channel: "whatsapp" },
     select: { customer: { select: { phone: true } } },
   });
-  for (const p of paused) set.add(digitsOf(p.customer.phone));
-  return set;
+  for (const p of paused) muted.add(digitsOf(p.customer.phone));
+  return { optOut, muted };
+}
+
+/**
+ * Aplica dedupe por dígitos + exclusiones a una audiencia y cuenta cuántos se
+ * quedaron fuera y por qué. Compartido por startCampaign y la previsualización
+ * del copiloto, así los dos ven exactamente la misma lista final.
+ */
+export function filterAudience(
+  recipients: AudienceRecipient[],
+  exclusions: ExclusionSets,
+): { recipients: AudienceRecipient[]; excluded: { optOut: number; muted: number; duplicates: number; invalid: number } } {
+  const seen = new Set<string>();
+  const out: AudienceRecipient[] = [];
+  const excluded = { optOut: 0, muted: 0, duplicates: 0, invalid: 0 };
+  for (const r of recipients) {
+    const d = String(r.phone ?? "").startsWith("web:") ? "" : digitsOf(r.phone); // visitante web sin WhatsApp
+    if (d.length < 8) { excluded.invalid++; continue; }
+    if (seen.has(d)) { excluded.duplicates++; continue; }
+    seen.add(d);
+    if (exclusions.optOut.has(d)) { excluded.optOut++; continue; }
+    if (exclusions.muted.has(d)) { excluded.muted++; continue; }
+    out.push(r);
+  }
+  return { recipients: out, excluded };
+}
+
+/**
+ * Una sola campaña en curso por negocio: es el mismo número de WhatsApp y dos
+ * drivers a la vez duplican el ritmo configurado. Devuelve la que corre (si hay).
+ */
+async function findOtherRunning(companyId: string, exceptId: string) {
+  return prisma.campaign.findFirst({
+    where: { companyId, status: "RUNNING", NOT: { id: exceptId } },
+    select: { id: true, name: true },
+  });
 }
 
 export async function startCampaign(companyId: string, id: string) {
@@ -237,21 +280,16 @@ export async function startCampaign(companyId: string, id: string) {
   const audience = parseAudience(campaign.audience);
   if (!audience.recipients.length) throw new AppError("Selecciona al menos un destinatario", 400);
 
-  const cfg = parseSendConfig(campaign.sendConfig);
-  const exclude = await buildExclusionSet(companyId, cfg.excludeMuted);
-
-  // Dedup por dígitos + filtro de exclusión.
-  const seen = new Set<string>();
-  const finalRecipients: AudienceRecipient[] = [];
-  for (const r of audience.recipients) {
-    if (String(r.phone ?? "").startsWith("web:")) continue; // visitante web sin WhatsApp
-    const d = digitsOf(r.phone);
-    if (d.length < 8) continue;
-    if (seen.has(d)) continue;
-    if (exclude.has(d)) continue;
-    seen.add(d);
-    finalRecipients.push(r);
+  const other = await findOtherRunning(companyId, id);
+  if (other) {
+    throw new AppError(`Ya hay una campaña en curso («${other.name}»). Espera a que termine o pásala a pausa antes de lanzar otra`, 409);
   }
+
+  const cfg = parseSendConfig(campaign.sendConfig);
+  const { recipients: finalRecipients } = filterAudience(
+    audience.recipients,
+    await buildExclusionSets(companyId, cfg.excludeMuted),
+  );
   if (!finalRecipients.length) {
     throw new AppError("No quedaron destinatarios válidos tras aplicar los filtros", 400);
   }
@@ -299,12 +337,16 @@ export async function pauseCampaign(companyId: string, id: string) {
 export async function resumeCampaign(companyId: string, id: string) {
   const campaign = await ensureCampaign(companyId, id);
   if (campaign.status !== "PAUSED") throw new AppError("La campaña no está pausada", 409);
+  const other = await findOtherRunning(companyId, id);
+  if (other) {
+    throw new AppError(`Ya hay una campaña en curso («${other.name}»). Espera a que termine o pásala a pausa antes de continuar esta`, 409);
+  }
   // Recupera destinatarios que quedaron a medias (SENDING) → PENDING.
   await prisma.campaignRecipient.updateMany({
     where: { campaignId: id, status: "SENDING" },
     data: { status: "PENDING" },
   });
-  await prisma.campaign.update({ where: { id }, data: { status: "RUNNING" } });
+  await prisma.campaign.update({ where: { id }, data: { status: "RUNNING", pauseReason: null } });
   startDriver(companyId, id);
   return getCampaign(companyId, id);
 }

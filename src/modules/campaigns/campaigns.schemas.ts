@@ -46,10 +46,16 @@ const campaignMetaTemplateSchema = z.object({
   params: z.array(z.string().max(300)).max(10).default([]),
 });
 
+// Defaults alineados con DEFAULT_SEND_CONFIG (campaigns.types.ts). Los topes de
+// rango (intervalMaxSec / pauseMaxSec) DEBEN estar declarados: validate() reemplaza
+// req.body por lo parseado y zod descarta las claves desconocidas (bug histórico:
+// el panel guardaba el rango y la API lo perdía).
 const sendConfigSchema = z.object({
-  intervalSec: z.coerce.number().int().min(0).max(3600).default(10),
+  intervalSec: z.coerce.number().int().min(0).max(3600).default(45),
+  intervalMaxSec: z.coerce.number().int().min(0).max(3600).default(0),
   pauseEvery: z.coerce.number().int().min(0).max(10000).default(10),
-  pauseSec: z.coerce.number().int().min(0).max(86400).default(60),
+  pauseSec: z.coerce.number().int().min(0).max(86400).default(180),
+  pauseMaxSec: z.coerce.number().int().min(0).max(86400).default(0),
   randomize: z.boolean().default(true),
   dailyLimit: z.coerce.number().int().min(0).max(100000).default(0),
   sendFrom: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),

@@ -9,18 +9,24 @@
 
 import { prisma } from "../../lib/prisma";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
-import { parseSendConfig, type CampaignSendConfig } from "./campaigns.types";
+import { parseSendConfig, AUTO_PAUSE_AFTER_FAILURES, type CampaignSendConfig } from "./campaigns.types";
 import { runRecipientActions } from "./campaign-runner";
+import { notifyOwner } from "../agent/conversation.service";
 
 interface DriverState {
   stopped: boolean;
   timer?: ReturnType<typeof setTimeout>;
+  /** Envíos fallidos seguidos (un OK lo resetea). Al llegar al umbral, la campaña se pausa sola. */
+  consecutiveFailures: number;
 }
 
 const drivers = new Map<string, DriverState>();
 
-/** Motivo de la espera actual (se persiste en Campaign.pauseReason y va en el socket). */
-type PauseReason = "auto" | "daily-limit" | "schedule";
+/**
+ * Motivo de la espera actual (se persiste en Campaign.pauseReason y va en el socket).
+ * "failures" acompaña a status PAUSED: el driver se detuvo tras N fallos seguidos.
+ */
+export type PauseReason = "auto" | "daily-limit" | "schedule" | "failures";
 
 function emitProgress(
   companyId: string,
@@ -75,9 +81,11 @@ function todayAtInTz(tz: string, hhmm: string): Date {
 /**
  * Gates anti-ban: horario de envío y límite diario. Se evalúan antes de tomar
  * el siguiente destinatario; si bloquean, la campaña espera hasta `resumeAt`.
+ * El tope diario cuenta los envíos de TODAS las campañas del negocio (es el mismo
+ * número de WhatsApp): dos campañas de 50/día no pueden sumar 100.
  */
 async function checkSendGate(
-  campaignId: string,
+  companyId: string,
   cfg: CampaignSendConfig,
   tz: string,
 ): Promise<{ allowed: true } | { allowed: false; resumeAt: Date; reason: PauseReason }> {
@@ -97,7 +105,7 @@ async function checkSendGate(
 
   if (cfg.dailyLimit > 0) {
     const sentToday = await prisma.campaignRecipient.count({
-      where: { campaignId, status: "SENT", sentAt: { gte: startOfTodayInTz(tz) } },
+      where: { companyId, status: "SENT", sentAt: { gte: startOfTodayInTz(tz) } },
     });
     if (sentToday >= cfg.dailyLimit) {
       const midnight = startOfTodayInTz(tz).getTime() + DAY_MS;
@@ -120,9 +128,38 @@ export function isDriverRunning(campaignId: string): boolean {
 /** Arranca (o re-arranca) el driver de una campaña en estado RUNNING. */
 export function startDriver(companyId: string, campaignId: string): void {
   if (drivers.has(campaignId)) return;
-  const state: DriverState = { stopped: false };
+  const state: DriverState = { stopped: false, consecutiveFailures: 0 };
   drivers.set(campaignId, state);
   void tick(companyId, campaignId);
+}
+
+/**
+ * Pausa automática por fallos seguidos: el gateway está rechazando envíos (sesión
+ * caída, número bloqueado…) y seguir insistiendo solo empeora el riesgo de baneo.
+ * Deja la campaña PAUSED con pauseReason "failures" y avisa al dueño.
+ */
+async function pauseForFailures(companyId: string, campaignId: string, campaignName: string): Promise<void> {
+  stopDriver(campaignId);
+  await prisma.campaign
+    .updateMany({ where: { id: campaignId, status: "RUNNING" }, data: { status: "PAUSED", nextSendAt: null, pauseReason: "failures" } })
+    .catch(() => undefined);
+  const fresh = await prisma.campaign
+    .findUnique({ where: { id: campaignId }, select: { status: true, totalCount: true, sentCount: true, failedCount: true } })
+    .catch(() => null);
+  if (fresh) {
+    emitProgress(companyId, campaignId, {
+      status: fresh.status,
+      totalCount: fresh.totalCount,
+      sentCount: fresh.sentCount,
+      failedCount: fresh.failedCount,
+      pauseReason: "failures",
+    });
+  }
+  console.warn(`[campaign] ${campaignId} pausada: ${AUTO_PAUSE_AFTER_FAILURES} fallos seguidos`);
+  await notifyOwner(
+    companyId,
+    `⚠️ Campaña "${campaignName}" pausada automáticamente: ${AUTO_PAUSE_AFTER_FAILURES} envíos seguidos fallaron. Revisa que tu WhatsApp siga conectado antes de continuarla desde el panel (Campañas).`,
+  ).catch(() => undefined);
 }
 
 /** Detiene el driver (pausa/cancelación). No toca el estado en BD. */
@@ -192,7 +229,7 @@ async function tick(companyId: string, campaignId: string): Promise<void> {
     const company = await prisma.company
       .findUnique({ where: { id: companyId }, select: { timezone: true } })
       .catch(() => null);
-    const gate = await checkSendGate(campaignId, cfg, company?.timezone ?? "America/Lima");
+    const gate = await checkSendGate(companyId, cfg, company?.timezone ?? "America/Lima");
     if (!gate.allowed) {
       await prisma.campaign
         .update({ where: { id: campaignId }, data: { nextSendAt: gate.resumeAt, pauseReason: gate.reason } })
@@ -248,12 +285,19 @@ async function tick(companyId: string, campaignId: string): Promise<void> {
   }
 
   if (ok) {
+    state.consecutiveFailures = 0;
     await prisma.campaignRecipient
       .update({ where: { id: next.id }, data: { status: "SENT", sentAt: new Date() } })
       .catch(() => undefined);
     await prisma.campaign
       .update({ where: { id: campaignId }, data: { sentCount: { increment: 1 } } })
       .catch(() => undefined);
+  } else {
+    state.consecutiveFailures += 1;
+    if (state.consecutiveFailures >= AUTO_PAUSE_AFTER_FAILURES) {
+      await pauseForFailures(companyId, campaignId, campaign.name);
+      return;
+    }
   }
 
   const fresh = await prisma.campaign.findUnique({
