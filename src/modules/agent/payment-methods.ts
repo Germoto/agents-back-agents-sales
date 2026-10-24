@@ -79,8 +79,8 @@ export async function composePaymentMethodsMessage(opts: {
       });
       mpLine =
         mpCfg.feeMode === "CUSTOMER" && linkAmount > opts.amountNum
-          ? `\n\n💳 O paga con tarjeta u otros medios por Mercado Pago (total ${symbolFor(opts.currency)} ${linkAmount.toFixed(2)}, incluye la comisión de la pasarela):\n${pref.init_point}`
-          : `\n\n💳 También puedes pagar con tarjeta u otros medios aquí:\n${pref.init_point}`;
+          ? `\n\n💳 O con tarjeta por Mercado Pago (total ${symbolFor(opts.currency)} ${linkAmount.toFixed(2)}, incluye la comisión):\n${pref.init_point}`
+          : `\n\n💳 O con tarjeta y otros medios por aquí:\n${pref.init_point}`;
       opts.state.mpPreferenceId = pref.id;
       opts.state.mpAmount = linkAmount;
     } catch (err) {
@@ -91,13 +91,17 @@ export async function composePaymentMethodsMessage(opts: {
     }
   }
 
+  // Texto corto y natural: monto → cuenta(s) → qué mandar para validar. Se
+  // conservan las dos vías (captura o nombre del titular) y la aclaración de que
+  // el nombre es el de SU cuenta: ambas evitan validaciones fallidas reales.
+  const bullet = opts.payment.methods.length > 1 ? "• " : "";
   const methods = opts.payment.methods
-    .map((m) => `• ${m.method}: *${m.number}* (titular: ${m.holder})`)
+    .map((m) => `${bullet}${m.method}: *${m.number}* (${m.holder})`)
     .join("\n");
   const manualBlock = methods
-    ? `Puedes pagar con:\n${methods}\n\n` +
-      `Cuando pagues, mándame la *captura del comprobante* o el *nombre del titular* de tu Yape/Plin (la cuenta DESDE donde pagaste) y validamos tu pago al instante ✅`
-    : `Paga de forma segura con el link de abajo; en cuanto se confirme el pago te llega tu pedido automáticamente ✅`;
-  const text = `El monto a pagar es: *${opts.amountText}*\n\n` + manualBlock + mpLine;
+    ? `${methods}\n\n` +
+      `Cuando pagues, envíame la *captura* o el *nombre del titular* de tu Yape/Plin (desde donde pagaste) y te confirmo al instante ✅`
+    : `Paga con el link de abajo y, en cuanto se confirme, te llega tu pedido ✅`;
+  const text = `Son *${opts.amountText}* 😊\n\n` + manualBlock + mpLine;
   return { text, mpLinkIncluded: Boolean(mpLine) };
 }
