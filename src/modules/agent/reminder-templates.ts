@@ -107,7 +107,7 @@ export function substituteVars(text: string, vars: ReminderVars): string {
  * y la vieja (un solo recordatorio: {delayMinutes, message, mediaUrl}). Devuelve
  * null si no hay nada usable. Descarta steps sin texto ni multimedia.
  */
-function stepsFrom(cfg: Record<string, unknown>): ReminderStep[] | null {
+export function stepsFrom(cfg: Record<string, unknown>): ReminderStep[] | null {
   const raw = cfg.steps;
   if (Array.isArray(raw)) {
     const steps: ReminderStep[] = [];
