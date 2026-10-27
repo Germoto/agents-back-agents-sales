@@ -1713,8 +1713,12 @@ const CALENDAR_SIM_TEXT = "📅 (simulación) Aquí el cliente recibe los enlace
 
 /** Encola, para después del texto final, el mensaje con los enlaces de calendario de la cita. */
 function queueCalendarLinks(ctx: TurnContext, links: CalendarLinks | null | undefined) {
-  (ctx.outboxAfter ??= []).push({ kind: "text", text: ctx.simulate ? CALENDAR_SIM_TEXT : links ? calendarLinksMessage(links) : "" });
-  if (!ctx.simulate && !links) ctx.outboxAfter.pop();
+  const text = ctx.simulate ? CALENDAR_SIM_TEXT : links ? calendarLinksMessage(links) : "";
+  if (!text) return;
+  ctx.outboxAfter ??= [];
+  // Si el modelo agenda/reprograma dos veces en el mismo turno, el cliente recibe un solo mensaje.
+  if (ctx.outboxAfter.some((m) => m.kind === "text" && m.text === text)) return;
+  ctx.outboxAfter.push({ kind: "text", text });
 }
 
 /** Alternativas reales agrupadas por día (para reproponer cuando un horario falló). */
