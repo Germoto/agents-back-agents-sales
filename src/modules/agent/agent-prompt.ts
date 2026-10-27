@@ -16,6 +16,19 @@ import { symbolFor } from "../../lib/currency";
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
 type BotProduct = BotConfig["products"][number];
 
+const OFFERED_SLOTS_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Línea de prompt con los horarios de cita ya ofrecidos (vigentes < 24 h). */
+function offeredSlotsLine(state: ConversationState, config: BotConfig): string | null {
+  const o = state.offeredSlots;
+  if (!o?.slots?.length) return null;
+  const at = o.at ? new Date(o.at).getTime() : 0;
+  if (!at || Date.now() - at > OFFERED_SLOTS_TTL_MS) return null;
+  const product = config.products.find((p) => p.id === o.productId);
+  const list = o.slots.map((s) => `${s.label} → startsAt ${s.startsAt}`).join("; ");
+  return `HORARIOS QUE YA LE OFRECISTE AL CLIENTE (${product?.name ?? "servicio"}): ${list}. Si el cliente elige uno de estos (por la hora, 'el primero', 'ese', etc.), agenda DIRECTO con agendar_servicio usando ese startsAt, SIN volver a consultar. Si pide otro día u otra franja, consulta de nuevo con consultar_disponibilidad (fecha/horaDesde/horaHasta).`;
+}
+
 function parsePriceNum(value: unknown): number {
   if (value == null) return 0;
   const n = Number(String(value).replace(/[^0-9.]/g, ""));
@@ -249,16 +262,18 @@ function verticalGuidance(
         "Cobra y, tras validar el pago, entrega el acceso (flujo digital). Haz upsell del plan superior y ofrece renovación cuando esté por vencer.";
     case "SERVICE":
       return "Rubro SERVICIOS: vendes servicios con CITA (asesorías, consultas, sesiones). Explica alcance, duración, modalidad (presencial/online) y requisitos. " +
-        "AGENDA: cuando el cliente quiera reservar, usa SIEMPRE consultar_disponibilidad para ver los horarios libres REALES y ofrécele 2-3 opciones en lenguaje natural ('tengo el martes 10:00 o 16:00, ¿cuál te queda mejor?'). NUNCA inventes horarios ni prometas uno sin consultar. " +
-        "Cuando elija, agenda con agendar_servicio pasando el startsAt EXACTO que te dio la herramienta; la cita queda CONFIRMADA. Confírmasela al cliente con día y hora completos y dile que le enviaremos un recordatorio antes. " +
+        "AGENDA: cuando el cliente quiera reservar, usa SIEMPRE consultar_disponibilidad pasando el día y la franja que mencionó (fecha 'YYYY-MM-DD', horaDesde/horaHasta 'HH:mm': 'mañana a partir de las 2' → fecha de mañana + horaDesde '14:00'; 'en la mañana' → horaHasta '12:00'); devuelve los huecos REALES agrupados por día y el horario de atención. Ofrécele 2-3 opciones de ESE día/franja en lenguaje natural ('mañana tengo 14:00, 14:30 o 15:00, ¿cuál te queda mejor?'). " +
+        "Si responde que no hay huecos en lo pedido, dilo con honestidad (indica el horario de atención si ayuda) y ofrece sus 'alternativas'. NUNCA inventes horarios, NUNCA afirmes que un día o franja está lleno si no lo consultaste, y si 'hayMas' es true NO digas que esos son los únicos. " +
+        "Cuando elija un horario que ya le ofreciste (ver HORARIOS QUE YA LE OFRECISTE), agenda DE INMEDIATO con agendar_servicio pasando ese startsAt EXACTO, sin volver a consultar; la cita queda CONFIRMADA. Confírmasela al cliente con día y hora completos y dile que le enviaremos un recordatorio antes. " +
         "Si la herramienta responde que el horario ya no está libre, discúlpate brevemente y ofrece las alternativas que te devuelve. " +
         "Si el cliente no quiere fijar hora todavía, agenda con requestedText (queda SOLICITADA para que un asesor coordine). " +
         "Si el cliente quiere CANCELAR o MOVER su cita, usa cancelar_cita / reprogramar_cita (para mover, primero consultar_disponibilidad). NUNCA digas que cancelaste o cambiaste una cita sin haber llamado la herramienta. " +
         "Si hay seña/depósito configurado, cóbralo con enviar_metodos_pago + validar_pago antes de confirmar la cita.";
     case "REAL_ESTATE":
       return "Rubro INMOBILIARIA: el catálogo son INMUEBLES en venta o alquiler. Conoces la ficha completa de cada propiedad (operación, tipo, m², dormitorios, baños, cocheras, ubicación/zona, mantenimiento, antigüedad): responde con esos datos concretos y resalta lo más atractivo de cada inmueble. Si preguntan por algo que la ficha no indica, dilo con honestidad y ofrece averiguarlo. Si el cliente pide fotos, planos o video de una propiedad, envíalos con enviar_multimedia. " +
-        "VISITAS: tu objetivo es agendar una VISITA al inmueble. Cuando el cliente quiera verlo, usa SIEMPRE consultar_disponibilidad para ver los horarios libres REALES y ofrécele 2-3 opciones en lenguaje natural ('puedo mostrártelo el martes 10:00 o el jueves 16:00, ¿cuál te queda mejor?'). NUNCA inventes horarios ni prometas uno sin consultar. " +
-        "Cuando elija, agenda con agendar_servicio pasando el startsAt EXACTO que te dio la herramienta; la visita queda CONFIRMADA. Confírmasela al cliente con día y hora completos y dile que le enviaremos un recordatorio antes. " +
+        "VISITAS: tu objetivo es agendar una VISITA al inmueble. Cuando el cliente quiera verlo, usa SIEMPRE consultar_disponibilidad pasando el día y la franja que mencionó (fecha 'YYYY-MM-DD', horaDesde/horaHasta 'HH:mm'); devuelve los huecos REALES agrupados por día y el horario de atención. Ofrécele 2-3 opciones de ESE día/franja en lenguaje natural ('puedo mostrártelo el jueves a las 16:00 o 16:30, ¿cuál te queda mejor?'). " +
+        "Si responde que no hay huecos en lo pedido, dilo con honestidad y ofrece sus 'alternativas'. NUNCA inventes horarios, NUNCA afirmes que un día o franja está lleno si no lo consultaste, y si 'hayMas' es true NO digas que esos son los únicos. " +
+        "Cuando elija un horario que ya le ofreciste (ver HORARIOS QUE YA LE OFRECISTE), agenda DE INMEDIATO con agendar_servicio pasando ese startsAt EXACTO, sin volver a consultar; la visita queda CONFIRMADA. Confírmasela al cliente con día y hora completos y dile que le enviaremos un recordatorio antes. " +
         "Si la herramienta responde que el horario ya no está libre, discúlpate brevemente y ofrece las alternativas que te devuelve. " +
         "Si el cliente no quiere fijar hora todavía, agenda con requestedText (queda SOLICITADA para que un asesor coordine). " +
         "Si el cliente quiere CANCELAR o MOVER su visita, usa cancelar_cita / reprogramar_cita (para mover, primero consultar_disponibilidad). NUNCA digas que cancelaste o cambiaste una visita sin haber llamado la herramienta. " +
@@ -442,6 +457,9 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     "Métodos de pago configurados:",
     renderPaymentMethods(config.payment),
     "",
+    // Agenda: horarios que el agente ya ofreció (los resultados de tools no sobreviven
+    // entre turnos; sin esto el modelo reconsulta y se contradice).
+    ...(offeredSlotsLine(state, config) ? [offeredSlotsLine(state, config)!, ""] : []),
     // Rubros de carrito: estado REAL del carrito al inicio de este turno.
     ...(state.cartText
       ? [

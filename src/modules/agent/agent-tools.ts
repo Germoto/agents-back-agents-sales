@@ -45,7 +45,7 @@ import {
   updateBookingStatus,
   rescheduleBooking,
 } from "../bookings/bookings.service";
-import { getAvailableSlots, formatSlotLabel, isSlotAvailable } from "../bookings/availability.service";
+import { getAvailabilityByDay, formatSlotLabel, isSlotAvailable, localDateKey, type AvailabilityDay } from "../bookings/availability.service";
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
 import { claimAvailableCredential, countAvailable, peekAvailableCredential } from "../streaming-inventory/streaming-inventory.service";
 import { createSubscriptionForSale, type RenewalReminderConfig } from "../subscriptions/subscriptions.service";
@@ -1575,16 +1575,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "consultar_disponibilidad",
       description:
-        "Devuelve los horarios LIBRES reales de un servicio para ofrecérselos al cliente. Úsalo SIEMPRE antes de agendar una cita. Nunca inventes horarios.",
+        "Devuelve los horarios LIBRES reales de un servicio AGRUPADOS POR DÍA, con el horario de atención del negocio. Pasa SIEMPRE el día y la franja que mencionó el cliente (fecha, horaDesde, horaHasta). Úsalo antes de agendar. Nunca inventes horarios ni digas que un día o franja está lleno sin haberlo consultado.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["productId"],
         properties: {
           productId: { type: "string", description: "id del servicio" },
+          fecha: {
+            type: "string",
+            description: "Día concreto que pidió el cliente, 'YYYY-MM-DD' en hora del negocio (calcúlalo con la fecha actual del contexto: 'mañana', 'el jueves'). Omítelo si no dijo día.",
+          },
+          horaDesde: {
+            type: "string",
+            description: "Franja: hora mínima 'HH:mm' del negocio. 'a partir de las 2 pm' → '14:00'; 'en la tarde' → '12:00'. Omítelo si no la mencionó.",
+          },
+          horaHasta: {
+            type: "string",
+            description: "Franja: hora máxima 'HH:mm' del negocio (exclusiva). 'en la mañana' → '12:00'; 'antes de las 5' → '17:00'.",
+          },
           desde: {
             type: "string",
-            description: "Opcional: fecha ISO desde la que buscar (ej. si el cliente dice 'la próxima semana')",
+            description: "Compatibilidad: fecha ISO desde la que buscar. Prefiere 'fecha'.",
           },
         },
       },
@@ -1649,6 +1661,57 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },
 ];
+
+// --------------------------------------------------------------------------
+// Agenda: memoria de los horarios ofrecidos (los resultados de tools no
+// sobreviven entre turnos; el cliente responde "a las 3" en el turno siguiente)
+// --------------------------------------------------------------------------
+const OFFERED_SLOTS_MAX = 18;
+
+function rememberOfferedSlots(ctx: TurnContext, productId: string, dias: AvailabilityDay[]) {
+  const tz = (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima";
+  const slots = dias
+    .flatMap((d) => d.horarios.map((h) => ({ startsAt: h.startsAt, label: formatSlotLabel(new Date(h.startsAt), tz) })))
+    .slice(0, OFFERED_SLOTS_MAX);
+  ctx.state.offeredSlots = slots.length ? { productId, at: new Date().toISOString(), slots } : null;
+}
+
+/**
+ * Si el modelo manda un startsAt que no es ISO ("15:00", "27/10 15:00", "mar 27 oct, 15:00"),
+ * lo resuelve contra los horarios ofrecidos en este chat. Devuelve el ISO exacto o el
+ * valor original (que fallará en la validación normal si no es válido).
+ */
+function resolveOfferedStart(ctx: TurnContext, raw: string): string {
+  if (!raw) return raw;
+  const offered = ctx.state.offeredSlots?.slots ?? [];
+  if (!offered.length) return raw;
+  if (offered.some((s) => s.startsAt === raw)) return raw;
+  const asDate = new Date(raw);
+  if (!isNaN(asDate.getTime()) && /\d{4}-\d{2}-\d{2}T/.test(raw)) {
+    const exact = offered.find((s) => new Date(s.startsAt).getTime() === asDate.getTime());
+    return exact ? exact.startsAt : raw;
+  }
+  const hm = /(\d{1,2}):(\d{2})/.exec(raw);
+  if (!hm) return raw;
+  const hour = `${hm[1].padStart(2, "0")}:${hm[2]}`;
+  const matches = offered.filter((s) => s.label.endsWith(hour) || s.label.includes(`${hour}`));
+  if (matches.length === 1) return matches[0].startsAt;
+  // Varias fechas con la misma hora: intenta por día numérico ("27") presente en el texto.
+  const dayNum = /\b(\d{1,2})\b(?!:)/.exec(raw.replace(hm[0], ""));
+  if (dayNum) {
+    const byDay = matches.filter((s) => new RegExp(`\\b${dayNum[1]}\\b`).test(s.label));
+    if (byDay.length === 1) return byDay[0].startsAt;
+  }
+  return matches[0]?.startsAt ?? raw;
+}
+
+/** Alternativas reales agrupadas por día (para reproponer cuando un horario falló). */
+async function alternativesFor(ctx: TurnContext, productId: string): Promise<AvailabilityDay[]> {
+  const res = await getAvailabilityByDay(ctx.companyId, productId, { maxDays: 2, perDay: 4 });
+  const dias = res.dias.length ? res.dias : (res.alternativas ?? []);
+  rememberOfferedSlots(ctx, productId, dias);
+  return dias;
+}
 
 // --------------------------------------------------------------------------
 // Ejecutor de herramientas
@@ -2596,28 +2659,75 @@ export async function executeTool(
       if (!product) return JSON.stringify({ ok: false, error: "servicio no encontrado" });
       // La consulta es de SOLO LECTURA: el simulador usa el motor real para que
       // el dueño vea exactamente los horarios que ofrecería en producción.
+      const tz = (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima";
+      let fecha = String(args.fecha ?? "").trim();
+      if (!fecha && args.desde) {
+        // Compatibilidad: 'desde' ISO → día en la TZ del negocio.
+        const d = new Date(String(args.desde));
+        if (!isNaN(d.getTime())) fecha = localDateKey(d, tz);
+      }
+      if (fecha && !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+        return JSON.stringify({ ok: false, error: "fecha inválida: usa 'YYYY-MM-DD' (hora del negocio)" });
+      }
+      const parseHour = (v: unknown, label: string): number | { error: string } | undefined => {
+        const raw = String(v ?? "").trim();
+        if (!raw) return undefined;
+        const m = /^(\d{1,2}):(\d{2})$/.exec(raw);
+        if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return { error: `${label} inválida: usa 'HH:mm' (ej. '14:00')` };
+        return Number(m[1]) * 60 + Number(m[2]);
+      };
+      const hFrom = parseHour(args.horaDesde, "horaDesde");
+      const hTo = parseHour(args.horaHasta, "horaHasta");
+      if (typeof hFrom === "object") return JSON.stringify({ ok: false, error: hFrom.error });
+      if (typeof hTo === "object") return JSON.stringify({ ok: false, error: hTo.error });
       try {
-        const desde = args.desde ? new Date(String(args.desde)) : undefined;
-        const { slots, timezone, configured, durationMin } = await getAvailableSlots(ctx.companyId, product.id, {
-          from: desde && !isNaN(desde.getTime()) ? desde : undefined,
-          limit: 8,
+        const res = await getAvailabilityByDay(ctx.companyId, product.id, {
+          date: fecha || null,
+          minuteFrom: hFrom,
+          minuteTo: hTo,
+          maxDays: 3,
+          perDay: 6,
         });
-        if (!configured) {
+        if (!res.configured) {
           return JSON.stringify({
             ok: false,
             error: "el negocio aún no configuró su horario de atención",
             note: "No inventes horarios: pídele al cliente su preferencia y agenda con requestedText para que un asesor confirme.",
           });
         }
-        if (!slots.length) {
-          return JSON.stringify({ ok: true, slots: [], note: "No hay horarios libres en el rango. Ofrece buscar en otra fecha." });
+        const franja = hFrom !== undefined || hTo !== undefined ? ` en la franja ${args.horaDesde ?? "…"}–${args.horaHasta ?? "…"}` : "";
+        if (!res.dias.length) {
+          const motivoText: Record<string, string> = {
+            cerrado: "ese día el negocio no atiende",
+            "sin-huecos": "ese día no quedan huecos libres",
+            "fuera-de-franja": `ese día no hay huecos${franja} (sí hay en otras horas)`,
+            pasado: "esa fecha ya pasó",
+            "fuera-de-horizonte": "esa fecha está más allá del plazo máximo de reserva",
+          };
+          rememberOfferedSlots(ctx, product.id, res.alternativas ?? []);
+          return JSON.stringify({
+            ok: true,
+            timezone: res.timezone,
+            durationMin: res.durationMin,
+            atencion: res.atencion,
+            dias: [],
+            motivo: res.motivo,
+            alternativas: res.alternativas ?? [],
+            hayMas: res.hayMas,
+            note: `No hay horarios para lo que pidió el cliente (${motivoText[res.motivo ?? "sin-huecos"]}). Díselo con honestidad (el horario de atención es ${res.atencion}) y ofrécele 2-3 de 'alternativas' en lenguaje natural. NO inventes horarios.`,
+          });
         }
+        rememberOfferedSlots(ctx, product.id, res.dias);
         return JSON.stringify({
           ok: true,
-          timezone,
-          durationMin,
-          slots: slots.map((s) => ({ startsAt: s.startsAt, label: s.label })),
-          note: "Ofrece 2-3 de estos horarios en lenguaje natural. Para agendar usa agendar_servicio con el startsAt EXACTO.",
+          timezone: res.timezone,
+          durationMin: res.durationMin,
+          atencion: res.atencion,
+          dias: res.dias,
+          hayMas: res.hayMas,
+          note: `Ofrece 2-3 de estos horarios${fecha ? " del día pedido" : ""}${franja} en lenguaje natural.${
+            res.hayMas ? " Hay MÁS huecos además de estos: NO digas que son los únicos; si el cliente quiere otro día u hora, consulta de nuevo con fecha/horaDesde/horaHasta." : ""
+          } Para agendar usa agendar_servicio con el startsAt EXACTO.`,
         });
       } catch (err) {
         return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo consultar la agenda" });
@@ -2628,7 +2738,7 @@ export async function executeTool(
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "servicio no encontrado" });
       const requestedText = String(args.requestedText ?? "").trim();
-      const startsAtRaw = String(args.startsAt ?? "").trim();
+      const startsAtRaw = resolveOfferedStart(ctx, String(args.startsAt ?? "").trim());
       if (!requestedText && !startsAtRaw) {
         return JSON.stringify({ ok: false, error: "falta el horario: usa consultar_disponibilidad y pasa startsAt" });
       }
@@ -2644,16 +2754,17 @@ export async function executeTool(
           try {
             const check = await isSlotAvailable(ctx.companyId, product.id, parsed);
             if (!check.ok) {
-              const { slots } = await getAvailableSlots(ctx.companyId, product.id, { limit: 5 });
+              const alt = await alternativesFor(ctx, product.id);
               return JSON.stringify({
                 ok: false,
                 error: reasonMessage(check.reason),
-                alternativas: slots.map((s) => ({ startsAt: s.startsAt, label: s.label })),
-                note: "Ese horario no está disponible. Ofrece estas alternativas al cliente.",
+                alternativas: alt,
+                note: "Ese horario no está disponible. Ofrece estas alternativas al cliente (son reales).",
               });
             }
             ctx.state.status = "RESERVA_SOLICITADA";
             ctx.state.selectedProductId = product.id;
+            ctx.state.offeredSlots = null;
             const tz = (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima";
             return JSON.stringify({
               ok: true,
@@ -2685,6 +2796,7 @@ export async function executeTool(
         });
         ctx.state.status = "RESERVA_SOLICITADA";
         ctx.state.selectedProductId = product.id;
+        ctx.state.offeredSlots = null;
         const when = booking.startsAt
           ? formatSlotLabel(booking.startsAt, (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima")
           : requestedText;
@@ -2707,12 +2819,12 @@ export async function executeTool(
         // Slot ocupado / fuera de horario: devolver alternativas para reproponer.
         const message = err instanceof Error ? err.message : "no se pudo registrar la reserva";
         try {
-          const { slots } = await getAvailableSlots(ctx.companyId, product.id, { limit: 5 });
+          const alt = await alternativesFor(ctx, product.id);
           return JSON.stringify({
             ok: false,
             error: message,
-            alternativas: slots.map((s) => ({ startsAt: s.startsAt, label: s.label })),
-            note: "Ese horario ya no está disponible. Ofrece estas alternativas al cliente.",
+            alternativas: alt,
+            note: "Ese horario ya no está disponible. Ofrece estas alternativas al cliente (son reales).",
           });
         } catch {
           return JSON.stringify({ ok: false, error: message });
@@ -2760,7 +2872,7 @@ export async function executeTool(
       if (!booking) {
         return JSON.stringify({ ok: false, error: "el cliente no tiene citas vigentes para reprogramar" });
       }
-      const newStart = String(args.startsAt ?? "").trim();
+      const newStart = resolveOfferedStart(ctx, String(args.startsAt ?? "").trim());
       if (!newStart) return JSON.stringify({ ok: false, error: "falta startsAt (usa un horario de consultar_disponibilidad)" });
       if (ctx.simulate) {
         // Validación real de disponibilidad, sin persistir.
@@ -2770,6 +2882,7 @@ export async function executeTool(
         if (!check.ok) {
           return JSON.stringify({ ok: false, error: reasonMessage(check.reason), note: "Ofrece otro horario de consultar_disponibilidad." });
         }
+        ctx.state.offeredSlots = null;
         return JSON.stringify({
           ok: true,
           bookingCode: booking.bookingCode,
@@ -2779,6 +2892,7 @@ export async function executeTool(
       }
       try {
         const updated = await rescheduleBooking(ctx.companyId, booking.id, newStart);
+        ctx.state.offeredSlots = null;
         const when = updated.startsAt ? formatSlotLabel(updated.startsAt, ctx.config.business.timezone) : newStart;
         ctx.adminNotices.push(
           `🗓️ Cita REPROGRAMADA por el cliente: ${updated.bookingCode ?? updated.id} — ${updated.product?.name ?? "servicio"} → ${when} · ${ctx.customerPhone}`,
@@ -2792,12 +2906,12 @@ export async function executeTool(
       } catch (err) {
         const message = err instanceof Error ? err.message : "no se pudo reprogramar la cita";
         try {
-          const { slots } = await getAvailableSlots(ctx.companyId, booking.productId, { limit: 5 });
+          const alt = await alternativesFor(ctx, booking.productId);
           return JSON.stringify({
             ok: false,
             error: message,
-            alternativas: slots.map((s) => ({ startsAt: s.startsAt, label: s.label })),
-            note: "Ese horario no está disponible. Ofrece estas alternativas al cliente.",
+            alternativas: alt,
+            note: "Ese horario no está disponible. Ofrece estas alternativas al cliente (son reales).",
           });
         } catch {
           return JSON.stringify({ ok: false, error: message });

@@ -42,6 +42,9 @@ export interface ConversationState {
   mediaSentProductIds?: string[];
   /** Producto relacionado (cross-sell) ofrecido tras la última entrega; da contexto al agente. */
   offeredCrossSellProductId?: string | null;
+  /** Horarios de cita que el agente ya ofreció (consultar_disponibilidad): los resultados de
+   *  tools no sobreviven entre turnos y el cliente elige "a las 3" en el siguiente. Se limpia al agendar. */
+  offeredSlots?: { productId: string; at: string; slots: Array<{ startsAt: string; label: string }> } | null;
   /** Memoria durable: productos que el cliente YA compró y recibió (de comprobantes APROBADOS).
    *  Se recalcula cada turno; no depende del historial reciente (los últimos 16 mensajes). */
   purchasedProductIds?: string[];

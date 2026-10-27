@@ -87,6 +87,79 @@ export function formatSlotLabel(date: Date, tz: string): string {
   }
 }
 
+/** "martes 27 de octubre" en la TZ del negocio. */
+export function formatDayLabel(date: Date, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat("es-PE", { timeZone: tz, weekday: "long", day: "numeric", month: "long" }).format(date);
+  } catch {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
+/** "14:00" en la TZ del negocio. */
+export function formatHour(date: Date, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat("es-PE", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  } catch {
+    return date.toISOString().slice(11, 16);
+  }
+}
+
+/** "YYYY-MM-DD" de un instante en la TZ del negocio. */
+export function localDateKey(date: Date, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+  } catch {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
+/** Medianoche de una fecha "YYYY-MM-DD" en la TZ del negocio, como Date UTC. null si la fecha es inválida. */
+export function startOfDateInTz(tz: string, ymd: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd.trim());
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  const utcGuess = new Date(Date.UTC(y, mo - 1, d));
+  if (isNaN(utcGuess.getTime()) || utcGuess.getUTCMonth() !== mo - 1) return null;
+  try {
+    const tzDate = new Date(utcGuess.toLocaleString("en-US", { timeZone: tz }));
+    const offset = tzDate.getTime() - utcGuess.getTime();
+    return new Date(utcGuess.getTime() - offset);
+  } catch {
+    return utcGuess;
+  }
+}
+
+const DAY_SHORT = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+
+/** Resumen legible del horario de atención: "Lun–Vie 09:00–18:00 · Sáb 09:00–13:00". */
+export function describeBusinessHours(hours: BusinessHourRange[]): string {
+  if (!hours.length) return "sin horario configurado";
+  const byDay = new Map<number, string>();
+  for (let d = 0; d < 7; d++) {
+    const ranges = hours.filter((h) => h.day === d).sort((a, b) => minutesOf(a.from) - minutesOf(b.from));
+    if (ranges.length) byDay.set(d, ranges.map((r) => `${r.from}–${r.to}`).join(" y "));
+  }
+  // Agrupa días consecutivos (orden Lun…Dom) con la misma franja.
+  const order = [1, 2, 3, 4, 5, 6, 0];
+  const parts: string[] = [];
+  let i = 0;
+  while (i < order.length) {
+    const d = order[i];
+    const text = byDay.get(d);
+    if (!text) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j + 1 < order.length && byDay.get(order[j + 1]) === text) j++;
+    parts.push(`${j > i ? `${DAY_SHORT[d]}–${DAY_SHORT[order[j]]}` : DAY_SHORT[d]} ${text}`);
+    i = j + 1;
+  }
+  return parts.join(" · ");
+}
+
 /** Normaliza el JSON de horario de atención; vacío = negocio sin agenda configurada. */
 export function parseBusinessHours(value: unknown): BusinessHourRange[] {
   if (!Array.isArray(value)) return [];
@@ -211,7 +284,15 @@ function overlaps(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date): boolean {
 export async function getAvailableSlots(
   companyId: string,
   productId: string,
-  opts: { from?: Date; to?: Date; limit?: number } = {},
+  opts: {
+    from?: Date;
+    to?: Date;
+    limit?: number;
+    /** Franja horaria del día (minutos desde medianoche en la TZ del negocio): inicio ≥ minuteFrom. */
+    minuteFrom?: number;
+    /** Franja horaria del día: inicio < minuteTo. */
+    minuteTo?: number;
+  } = {},
 ): Promise<{ slots: Slot[]; timezone: string; durationMin: number; configured: boolean }> {
   const now = new Date();
   const from = opts.from && opts.from > now ? opts.from : now;
@@ -246,6 +327,9 @@ export async function getAvailableSlots(
         const slotStart = new Date(t);
         const slotEnd = new Date(t + durationMs);
         if (slotStart < earliest || slotStart < from || slotStart > to) continue;
+        const minuteOfDay = Math.round((t - dayStart.getTime()) / 60_000);
+        if (opts.minuteFrom !== undefined && minuteOfDay < opts.minuteFrom) continue;
+        if (opts.minuteTo !== undefined && minuteOfDay >= opts.minuteTo) continue;
         if (blocks.some((b) => overlaps(slotStart, slotEnd, b.startsAt, b.endsAt))) continue;
         const taken = busy.filter((b) => overlaps(slotStart, slotEnd, b.startsAt, b.endsAt)).length;
         if (taken >= settings.slotCapacity) continue;
@@ -259,6 +343,136 @@ export async function getAvailableSlots(
   }
 
   return { slots, timezone, durationMin: settings.durationMin, configured: true };
+}
+
+export interface AvailabilityDay {
+  /** "YYYY-MM-DD" en la TZ del negocio. */
+  fecha: string;
+  /** "martes 27 de octubre". */
+  etiqueta: string;
+  horarios: Array<{ startsAt: string; hora: string }>;
+  /** Huecos libres reales ese día (puede ser > horarios.length si se recortó). */
+  totalLibres: number;
+}
+
+export type AvailabilityMiss = "cerrado" | "sin-huecos" | "fuera-de-franja" | "pasado" | "fuera-de-horizonte";
+
+export interface AvailabilityByDay {
+  configured: boolean;
+  timezone: string;
+  durationMin: number;
+  /** Horario de atención legible ("Lun–Vie 09:00–18:00"). */
+  atencion: string;
+  dias: AvailabilityDay[];
+  /** Quedaron días u horarios fuera de maxDays/perDay. */
+  hayMas: boolean;
+  /** Solo cuando se pidió un día concreto sin huecos: por qué. */
+  motivo?: AvailabilityMiss;
+  /** Solo cuando se pidió un día concreto sin huecos: otros días reales para proponer. */
+  alternativas?: AvailabilityDay[];
+}
+
+export interface AvailabilityByDayOpts {
+  /** Día concreto "YYYY-MM-DD" (TZ del negocio). Sin él: desde ahora hasta el horizonte. */
+  date?: string | null;
+  minuteFrom?: number;
+  minuteTo?: number;
+  maxDays?: number;
+  perDay?: number;
+}
+
+function groupByDay(slots: Slot[], tz: string, maxDays: number, perDay: number): { dias: AvailabilityDay[]; hayMas: boolean } {
+  const map = new Map<string, { label: string; all: Slot[] }>();
+  for (const s of slots) {
+    const d = new Date(s.startsAt);
+    const key = localDateKey(d, tz);
+    const entry = map.get(key) ?? { label: formatDayLabel(d, tz), all: [] };
+    entry.all.push(s);
+    map.set(key, entry);
+  }
+  const keys = [...map.keys()];
+  let hayMas = keys.length > maxDays;
+  const dias = keys.slice(0, maxDays).map((fecha) => {
+    const { label, all } = map.get(fecha)!;
+    if (all.length > perDay) hayMas = true;
+    return {
+      fecha,
+      etiqueta: label,
+      horarios: all.slice(0, perDay).map((s) => ({ startsAt: s.startsAt, hora: formatHour(new Date(s.startsAt), tz) })),
+      totalLibres: all.length,
+    };
+  });
+  return { dias, hayMas };
+}
+
+/**
+ * Disponibilidad AGRUPADA POR DÍA para el agente: permite pedir un día concreto
+ * y/o una franja ("mañana a partir de las 14:00") y devuelve, además de los
+ * huecos, el horario de atención y si quedaron más. Si el día pedido no tiene
+ * huecos explica el motivo y propone alternativas reales (otros días).
+ */
+export async function getAvailabilityByDay(
+  companyId: string,
+  productId: string,
+  opts: AvailabilityByDayOpts = {},
+): Promise<AvailabilityByDay> {
+  const maxDays = Math.max(1, opts.maxDays ?? 3);
+  const perDay = Math.max(1, opts.perDay ?? 6);
+  const now = new Date();
+  const ctx = await loadContext(companyId, productId, now, new Date(now.getTime() + DAY_MS));
+  const { timezone, hours, settings } = ctx;
+  const base = {
+    configured: hours.length > 0,
+    timezone,
+    durationMin: settings.durationMin,
+    atencion: describeBusinessHours(hours),
+  };
+  if (!hours.length) return { ...base, dias: [], hayMas: false };
+
+  const window = { minuteFrom: opts.minuteFrom, minuteTo: opts.minuteTo };
+  const dayStart = opts.date ? startOfDateInTz(timezone, opts.date) : null;
+
+  if (!dayStart) {
+    const { slots } = await getAvailableSlots(companyId, productId, { ...window, limit: 400 });
+    return { ...base, ...groupByDay(slots, timezone, maxDays, perDay) };
+  }
+
+  // Día concreto.
+  const dayEnd = new Date(dayStart.getTime() + DAY_MS);
+  const todayStart = startOfDayInTz(timezone, 0, now);
+  const horizonEnd = new Date(startOfDayInTz(timezone, settings.horizonDays, now).getTime() + DAY_MS);
+  let motivo: AvailabilityMiss | null = null;
+  if (dayStart < todayStart) motivo = "pasado";
+  else if (dayStart >= horizonEnd) motivo = "fuera-de-horizonte";
+  else {
+    const weekday = weekdayInTz(new Date(dayStart.getTime() + 12 * 3_600_000), timezone);
+    if (!hours.some((h) => h.day === weekday)) motivo = "cerrado";
+  }
+  let dias: AvailabilityDay[] = [];
+  let hayMas = false;
+  if (!motivo) {
+    const { slots } = await getAvailableSlots(companyId, productId, { ...window, from: dayStart, to: dayEnd, limit: 400 });
+    ({ dias, hayMas } = groupByDay(slots, timezone, 1, perDay));
+    if (!dias.length) {
+      // ¿Había huecos ese día fuera de la franja pedida?
+      const hasWindow = opts.minuteFrom !== undefined || opts.minuteTo !== undefined;
+      if (hasWindow) {
+        const any = await getAvailableSlots(companyId, productId, { from: dayStart, to: dayEnd, limit: 1 });
+        motivo = any.slots.length ? "fuera-de-franja" : "sin-huecos";
+      } else {
+        motivo = "sin-huecos";
+      }
+    }
+  }
+  if (dias.length) return { ...base, dias, hayMas };
+
+  // Alternativas reales: misma franja desde ahora; si tampoco hay, sin franja.
+  let alt = await getAvailableSlots(companyId, productId, { ...window, limit: 400 });
+  if (!alt.slots.length && (opts.minuteFrom !== undefined || opts.minuteTo !== undefined)) {
+    alt = await getAvailableSlots(companyId, productId, { limit: 400 });
+  }
+  const grouped = groupByDay(alt.slots, timezone, maxDays, perDay);
+  return { ...base, dias: [], hayMas: grouped.hayMas, motivo: motivo ?? "sin-huecos", alternativas: grouped.dias };
 }
 
 /**
