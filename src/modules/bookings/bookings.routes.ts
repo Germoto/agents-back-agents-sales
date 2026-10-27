@@ -15,6 +15,9 @@ import {
   listBookingsController,
   rescheduleBookingController,
   updateBookingStatusController,
+  getCalendarFeedController,
+  regenerateCalendarFeedController,
+  setCalendarFeedController,
 } from "./bookings.controller";
 
 const router = Router();
@@ -24,6 +27,10 @@ router.use(requireAuth);
 router.get("/", listBookingsController);
 router.post("/", createBookingController);
 router.get("/availability", availabilityController);
+// Calendario suscrito (ICS) del dueño.
+router.get("/calendar-feed", getCalendarFeedController);
+router.post("/calendar-feed/regenerate", regenerateCalendarFeedController);
+router.put("/calendar-feed", setCalendarFeedController);
 router.post("/:id/status", updateBookingStatusController);
 router.put("/:id/reschedule", rescheduleBookingController);
 router.delete("/:id", deleteBookingController);

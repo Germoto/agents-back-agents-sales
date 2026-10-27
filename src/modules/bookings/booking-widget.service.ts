@@ -245,6 +245,7 @@ export async function bookFromWidget(input: WidgetBookInput) {
     when: booking.startsAt ? formatSlotLabel(booking.startsAt, tz) : "",
     service: booking.product?.name ?? "",
     successMessage: cfg.successMessage,
+    calendar: booking.calendar,
   };
 }
 

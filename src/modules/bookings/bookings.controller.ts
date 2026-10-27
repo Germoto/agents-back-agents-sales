@@ -13,6 +13,7 @@ import {
   rescheduleBooking,
   updateBookingStatus,
 } from "./bookings.service";
+import { getOrCreateCalendarFeed, regenerateCalendarFeed, setCalendarFeedEnabled } from "./calendar.service";
 
 const VALID_STATUSES: ServiceBookingStatus[] = ["SOLICITADA", "CONFIRMADA", "CANCELADA", "COMPLETADA"];
 
@@ -99,4 +100,19 @@ export const createBlockController = asyncHandler(async (req: Request, res: Resp
 export const deleteBlockController = asyncHandler(async (req: Request, res: Response) => {
   await deleteScheduleBlock(req.user!.companyId, String(req.params.id));
   res.status(204).send();
+});
+
+/** Calendario suscrito (ICS) del dueño: URL secreta por empresa, se crea al primer acceso. */
+export const getCalendarFeedController = asyncHandler(async (req: Request, res: Response) => {
+  res.json({ success: true, data: await getOrCreateCalendarFeed(req.user!.companyId) });
+});
+
+export const regenerateCalendarFeedController = asyncHandler(async (req: Request, res: Response) => {
+  res.json({ success: true, data: await regenerateCalendarFeed(req.user!.companyId) });
+});
+
+export const setCalendarFeedController = asyncHandler(async (req: Request, res: Response) => {
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== "boolean") throw new AppError("Falta 'enabled' (true/false)", 400);
+  res.json({ success: true, data: await setCalendarFeedEnabled(req.user!.companyId, enabled) });
 });

@@ -47,7 +47,7 @@ export const NODE_DOCS = `BLOQUES DISPONIBLES (type → data → handles de sali
 - wait: {seconds} (1-120) → "next". Pausa corta entre mensajes.
 - reminder: {steps:[{id,minutes,message}]} (máx 5, delays ACUMULATIVOS desde que el cliente deja de responder) → "next". Se cancela solo si el cliente responde.
 - validate-payment: {amountMode:"fixed"|"product", amount? (si fixed), productId? (si product), instructions?, retryMessage?, reviewMessage?, timeoutMinutes? (default 60)} → "approved", "rejected", "review" y "timeout". Cobra (Yape/Plin/Mercado Pago según lo configurado) y valida el comprobante automáticamente.
-- book-appointment: {productId? (servicio con agenda), introMessage?, noSlotsMessage?, saveVariable?, timeoutMinutes? (default 30)} → "booked", "no-slots" y "timeout". Ofrece horarios REALES de la agenda y agenda la cita; deja {{cita_fecha}} y {{cita_codigo}}.
+- book-appointment: {productId? (servicio con agenda), introMessage?, noSlotsMessage?, saveVariable?, timeoutMinutes? (default 30)} → "booked", "no-slots" y "timeout". Ofrece horarios REALES de la agenda y agenda la cita; deja {{cita_fecha}}, {{cita_codigo}}, {{cita_calendario_google}} y {{cita_calendario_ics}} (el sistema ya envía solo un mensaje con esos enlaces de calendario tras agendar).
 - crm-move: {crmId, crmColumnId, crmColumnName?} → "next". Mueve al cliente a una columna del CRM.
 - crm-add-tags | crm-remove-tags: {tagIds:[uuid]} → "next". Asigna/quita etiquetas.
 - handoff: {clientText?, notifyText?} → SIN salidas (terminal). Pausa el bot y avisa a un asesor humano.

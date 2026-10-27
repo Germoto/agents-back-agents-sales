@@ -46,6 +46,7 @@ import {
   rescheduleBooking,
 } from "../bookings/bookings.service";
 import { getAvailabilityByDay, formatSlotLabel, isSlotAvailable, localDateKey, type AvailabilityDay } from "../bookings/availability.service";
+import { calendarLinksMessage, type CalendarLinks } from "../bookings/calendar.service";
 import { schedulePaymentRecheck, cancelPendingReminders } from "../scheduler/scheduler.service";
 import { claimAvailableCredential, countAvailable, peekAvailableCredential } from "../streaming-inventory/streaming-inventory.service";
 import { createSubscriptionForSale, type RenewalReminderConfig } from "../subscriptions/subscriptions.service";
@@ -137,6 +138,8 @@ export interface TurnContext {
   config: BotConfig;
   state: ConversationState;
   outbox: OutboxMessage[];
+  /** Mensajes que salen DESPUÉS del texto final del modelo (p. ej. enlaces de calendario tras confirmar una cita). */
+  outboxAfter?: OutboxMessage[];
   /** recordatorios a crear al cerrar el turno: {type, minutes, body} */
   reminders: Array<{ type: string; minutes: number; body: string }>;
   /** avisos a enviar al admin al cerrar el turno (pedidos, handoff, etc.) */
@@ -1705,6 +1708,15 @@ function resolveOfferedStart(ctx: TurnContext, raw: string): string {
   return matches[0]?.startsAt ?? raw;
 }
 
+const CALENDAR_NOTE = " El sistema envía solo, DESPUÉS de tu mensaje, los enlaces para que el cliente agregue la cita a su calendario (Google/iPhone): NO los menciones ni inventes enlaces.";
+const CALENDAR_SIM_TEXT = "📅 (simulación) Aquí el cliente recibe los enlaces para agregar la cita a Google Calendar o al iPhone.";
+
+/** Encola, para después del texto final, el mensaje con los enlaces de calendario de la cita. */
+function queueCalendarLinks(ctx: TurnContext, links: CalendarLinks | null | undefined) {
+  (ctx.outboxAfter ??= []).push({ kind: "text", text: ctx.simulate ? CALENDAR_SIM_TEXT : links ? calendarLinksMessage(links) : "" });
+  if (!ctx.simulate && !links) ctx.outboxAfter.pop();
+}
+
 /** Alternativas reales agrupadas por día (para reproponer cuando un horario falló). */
 async function alternativesFor(ctx: TurnContext, productId: string): Promise<AvailabilityDay[]> {
   const res = await getAvailabilityByDay(ctx.companyId, productId, { maxDays: 2, perDay: 4 });
@@ -2766,11 +2778,12 @@ export async function executeTool(
             ctx.state.selectedProductId = product.id;
             ctx.state.offeredSlots = null;
             const tz = (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima";
+            queueCalendarLinks(ctx, null);
             return JSON.stringify({
               ok: true,
               bookingId: "SIM-0001",
               when: formatSlotLabel(parsed, tz),
-              note: `(simulación) Cita validada contra tu agenda real para ${formatSlotLabel(parsed, tz)}. Confírmasela al cliente. En producción se crearía la cita con código y recordatorios 24h/2h; en el simulador NO se guarda nada.`,
+              note: `(simulación) Cita validada contra tu agenda real para ${formatSlotLabel(parsed, tz)}. Confírmasela al cliente. En producción se crearía la cita con código y recordatorios 24h/2h; en el simulador NO se guarda nada.${CALENDAR_NOTE}`,
             });
           } catch {
             // Si la validación falla (p. ej. sin horario configurado), cae al flujo genérico.
@@ -2805,6 +2818,7 @@ export async function executeTool(
             args.modality ? ` · ${args.modality}` : ""
           }${booking.bookingCode ? ` · ${booking.bookingCode}` : ""}.`,
         );
+        if (booking.startsAt) queueCalendarLinks(ctx, booking.calendar);
         return JSON.stringify({
           ok: true,
           bookingId: booking.id,
@@ -2812,7 +2826,7 @@ export async function executeTool(
           startsAt: booking.startsAt,
           when,
           note: booking.startsAt
-            ? `Cita CONFIRMADA para ${when}. Confírmasela al cliente con día y hora, y dile que le recordaremos antes.`
+            ? `Cita CONFIRMADA para ${when}. Confírmasela al cliente con día y hora, y dile que le recordaremos antes.${booking.calendar ? CALENDAR_NOTE : ""}`
             : "Reserva registrada como SOLICITADA. Confirma al cliente que un asesor coordinará el horario exacto.",
         });
       } catch (err) {
@@ -2883,11 +2897,12 @@ export async function executeTool(
           return JSON.stringify({ ok: false, error: reasonMessage(check.reason), note: "Ofrece otro horario de consultar_disponibilidad." });
         }
         ctx.state.offeredSlots = null;
+        queueCalendarLinks(ctx, null);
         return JSON.stringify({
           ok: true,
           bookingCode: booking.bookingCode,
           startsAt: newStart,
-          note: `(simulación) Cita movida a ${formatSlotLabel(parsed, ctx.config.business.timezone)}; en real se reprograma de verdad. Confírmalo al cliente.`,
+          note: `(simulación) Cita movida a ${formatSlotLabel(parsed, ctx.config.business.timezone)}; en real se reprograma de verdad. Confírmalo al cliente.${CALENDAR_NOTE}`,
         });
       }
       try {
@@ -2897,11 +2912,12 @@ export async function executeTool(
         ctx.adminNotices.push(
           `🗓️ Cita REPROGRAMADA por el cliente: ${updated.bookingCode ?? updated.id} — ${updated.product?.name ?? "servicio"} → ${when} · ${ctx.customerPhone}`,
         );
+        queueCalendarLinks(ctx, updated.calendar);
         return JSON.stringify({
           ok: true,
           bookingCode: updated.bookingCode,
           startsAt: updated.startsAt,
-          note: `Cita reprogramada y CONFIRMADA para ${when} (recordatorios actualizados). Confírmasela al cliente con día y hora.`,
+          note: `Cita reprogramada y CONFIRMADA para ${when} (recordatorios actualizados). Confírmasela al cliente con día y hora.${updated.calendar ? CALENDAR_NOTE : ""}`,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : "no se pudo reprogramar la cita";

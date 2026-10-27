@@ -10,6 +10,7 @@ import productFilesRoutes from "../modules/product-files/product-files.routes";
 import customersRoutes from "../modules/customers/customers.routes";
 import ordersRoutes from "../modules/orders/orders.routes";
 import bookingsRoutes from "../modules/bookings/bookings.routes";
+import { calendarPublicRoutes } from "../modules/bookings/calendar.routes";
 import {
   bookingWidgetConfigRoutes,
   bookingWidgetPublicRoutes,
@@ -138,6 +139,8 @@ router.use("/public/plans", billingPublicRoutes);
 router.use("/training-resources", trainingRoutes);
 // Widget de reservas embebido en la web del tenant (sin auth: token + dominio).
 router.use("/public/booking", bookingWidgetPublicRoutes);
+// Calendario: .ics/Google por cita (token de la cita) y feed suscrito del dueño (token secreto).
+router.use("/public/calendar", calendarPublicRoutes);
 // Pre-registro público del landing (sin auth, con rate limiting propio).
 router.use("/public/registration", registrationRoutes);
 

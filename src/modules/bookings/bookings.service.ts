@@ -15,6 +15,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { isSlotAvailable, formatSlotLabel, getAvailableSlots } from "./availability.service";
+import { afterBookingChanged, bookingCalendarLinks } from "./calendar.service";
 
 /** Horas antes de la cita en que se avisa al cliente (config futura por tenant). */
 const REMINDER_HOURS = [24, 2];
@@ -26,7 +27,7 @@ function buildBookingCode(seed: number): string {
 }
 
 const bookingInclude = {
-  customer: { select: { id: true, phone: true, name: true, avatarUrl: true } },
+  customer: { select: { id: true, phone: true, name: true, avatarUrl: true, email: true } },
   product: { select: { id: true, name: true } },
 } as const;
 
@@ -188,7 +189,9 @@ export async function createBooking(input: CreateBookingInput) {
     service: booking.product?.name,
   });
 
-  return booking;
+  // Invitación por correo (si el cliente tiene email) + enlaces de calendario.
+  const calendar = startsAt ? await afterBookingChanged(booking.id, "created") : null;
+  return { ...booking, calendar };
 }
 
 export function reasonMessage(reason?: string): string {
@@ -238,7 +241,8 @@ export async function listBookings(companyId: string, filters: ListBookingsFilte
     orderBy: [{ startsAt: "asc" }, { createdAt: "desc" }],
     take: 500,
   });
-  return rows;
+  // Enlaces "agregar a mi calendario" del cliente (para copiarlos desde el panel).
+  return rows.map((r) => ({ ...r, calendar: bookingCalendarLinks(r) }));
 }
 
 /**
@@ -285,6 +289,7 @@ export async function updateBookingStatus(companyId: string, id: string, status:
     startsAt: updated.startsAt,
     service: updated.product?.name,
   });
+  if (status === "CANCELADA" && updated.startsAt) await afterBookingChanged(id, "cancelled");
   return updated;
 }
 
@@ -321,7 +326,8 @@ export async function rescheduleBooking(companyId: string, id: string, startsAtI
     startsAt: updated.startsAt,
     service: updated.product?.name,
   });
-  return updated;
+  const calendar = await afterBookingChanged(id, "rescheduled");
+  return { ...updated, calendar };
 }
 
 export async function deleteBooking(companyId: string, id: string) {

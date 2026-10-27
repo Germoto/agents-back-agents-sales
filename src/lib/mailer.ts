@@ -45,6 +45,8 @@ export async function sendMail(opts: {
   fromName?: string;
   replyTo?: string;
   attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>;
+  /** Invitación de calendario (nodemailer la envía como text/calendar; method=REQUEST|CANCEL). */
+  icalEvent?: { method: "REQUEST" | "CANCEL" | "PUBLISH"; content: string };
 }): Promise<{ skipped: boolean }> {
   if (!mailerEnabled()) return { skipped: true };
   const from = opts.fromName
@@ -58,6 +60,7 @@ export async function sendMail(opts: {
     text: opts.text,
     replyTo: opts.replyTo,
     attachments: opts.attachments,
+    icalEvent: opts.icalEvent ? { method: opts.icalEvent.method, content: opts.icalEvent.content } : undefined,
   });
   return { skipped: false };
 }

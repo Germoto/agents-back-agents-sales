@@ -181,6 +181,7 @@ model Company {
   scheduledMessages    ScheduledMessage[]
   serviceBookings      ServiceBooking[]
   scheduleBlocks       ScheduleBlock[]
+  calendarFeed         CompanyCalendarFeed?
   orders               Order[]
   digitalSales         DigitalSale[]
   paymentReceipts      PaymentReceipt[]
@@ -1207,6 +1208,18 @@ model ScheduleBlock {
   company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@index([companyId, startsAt])
+}
+
+/// Feed ICS secreto por empresa: el dueño lo suscribe en iPhone / Google Calendar /
+/// Outlook y ve sus citas y bloqueos (un solo sentido, FlowApp → calendario).
+model CompanyCalendarFeed {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String   @unique @db.Uuid
+  token     String   @unique
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 }
 
 model Order {

@@ -847,6 +847,13 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     await deliver(sender, customerPhone, { kind: "text", text: finalText }, ctx);
   }
 
+  // Mensajes que deben llegar DESPUÉS de la respuesta (p. ej. enlaces de calendario
+  // tras confirmar una cita).
+  if (ctx.outboxAfter?.length) {
+    if (finalText || ctx.outbox.length) await sleep(gapMs);
+    await flushOutbox(sender, customerPhone, ctx.outboxAfter, ctx, gapMs);
+  }
+
   await saveState(conversationId, ctx.state);
 
   // Reconciliación: los follow-ups de abandono y dejado-en-visto son EXCLUYENTES y

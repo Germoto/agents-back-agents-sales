@@ -265,6 +265,15 @@ export async function simulateTurn(
     });
     replies.push({ role: "assistant", text: finalText, source: "agent" });
   }
+  // Mensajes posteriores a la respuesta (p. ej. enlaces de calendario tras agendar).
+  for (const m of ctx.outboxAfter ?? []) {
+    const text = outboxText(m);
+    if (!text) continue;
+    await prisma.conversationMessage.create({
+      data: { companyId, customerId: sim.customerId, conversationId: sim.conversationId, role: "ASSISTANT", message: text },
+    });
+    replies.push({ role: "assistant", text, source: "agent" });
+  }
 
   await saveState(sim.conversationId, ctx.state);
   const reminders = await previewReminders(companyId, sim.customerId, ctx.state, config);

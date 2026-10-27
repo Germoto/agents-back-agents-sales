@@ -52,6 +52,7 @@ import { getEntitlements } from "../billing/entitlements";
 import { composePaymentMethodsMessage } from "../agent/payment-methods";
 import { schedulePaymentRecheck } from "../scheduler/scheduler.service";
 import { getAvailableSlots, isSlotAvailable, formatSlotLabel } from "../bookings/availability.service";
+import { calendarLinksMessage } from "../bookings/calendar.service";
 import { createBooking, reasonMessage } from "../bookings/bookings.service";
 import { symbolFor } from "../../lib/currency";
 
@@ -1755,9 +1756,15 @@ async function resumeBookingAwaiting(flow: LoadedFlow, node: FlowNode, io: FlowI
       ...(fs.variables ?? {}),
       cita_fecha: when,
       cita_codigo: created.bookingCode ?? "",
+      cita_calendario_google: created.calendar?.google ?? "",
+      cita_calendario_ics: created.calendar?.ics ?? "",
       ...(data.saveVariable?.trim() ? { [data.saveVariable.trim()]: when } : {}),
     };
     await persistFlowVars(io);
+    // Enlaces para que el cliente agregue la cita a su calendario (Google / iPhone).
+    if (created.calendar) {
+      await io.emit({ kind: "text", text: calendarLinksMessage(created.calendar) });
+    }
     io.state.status = "RESERVA_SOLICITADA";
     await io.notifyOwner(
       `📅 Nueva CITA (${io.customerPhone}): ${created.product?.name ?? "servicio"} — ${when}` +
