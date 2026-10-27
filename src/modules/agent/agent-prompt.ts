@@ -73,6 +73,7 @@ function renderVerticalData(vertical: string | undefined, vData: unknown, basePr
     return [
       show("duración", "duration"),
       show("modalidad", "modality"),
+      typeof v.meetingUrl === "string" && v.meetingUrl.trim() ? "videollamada: enlace configurado (el sistema se lo envía al cliente al confirmar la cita)" : "",
       show("requisitos", "requirements"),
       show("disponibilidad", "schedulingWindow"),
       show("seña", "deposit"),
@@ -247,7 +248,7 @@ function renderPaymentMethods(payment: BotConfig["payment"]): string {
 // Guía de comportamiento según el rubro del negocio (Company.vertical).
 function verticalGuidance(
   vertical: string | undefined,
-  opts?: { catalogMode?: string; keywordMode?: string; trackStock?: boolean },
+  opts?: { catalogMode?: string; keywordMode?: string; trackStock?: boolean; meetingUrl?: boolean },
 ): string {
   switch (vertical) {
     case "RESTAURANT":
@@ -265,6 +266,7 @@ function verticalGuidance(
         "AGENDA: cuando el cliente quiera reservar, usa SIEMPRE consultar_disponibilidad pasando el día y la franja que mencionó (fecha 'YYYY-MM-DD', horaDesde/horaHasta 'HH:mm': 'mañana a partir de las 2' → fecha de mañana + horaDesde '14:00'; 'en la mañana' → horaHasta '12:00'); devuelve los huecos REALES agrupados por día y el horario de atención. Ofrécele 2-3 opciones de ESE día/franja en lenguaje natural ('mañana tengo 14:00, 14:30 o 15:00, ¿cuál te queda mejor?'). " +
         "Si responde que no hay huecos en lo pedido, dilo con honestidad (indica el horario de atención si ayuda) y ofrece sus 'alternativas'. NUNCA inventes horarios, NUNCA afirmes que un día o franja está lleno si no lo consultaste, y si 'hayMas' es true NO digas que esos son los únicos. " +
         "Cuando elija un horario que ya le ofreciste (ver HORARIOS QUE YA LE OFRECISTE), agenda DE INMEDIATO con agendar_servicio pasando ese startsAt EXACTO, sin volver a consultar; la cita queda CONFIRMADA. Confírmasela al cliente con día y hora completos y dile que le enviaremos un recordatorio antes. Tras confirmar, el sistema manda solo los enlaces para agregar la cita a su calendario: NO los inventes ni los prometas tú. " +
+        "VIDEOLLAMADA: si el servicio es online y tiene enlace configurado" + (opts?.meetingUrl ? " (este negocio tiene un enlace por defecto para todos sus servicios)" : "") + ", el sistema envía el enlace de videollamada junto con los de calendario al confirmar y en los recordatorios: NO inventes enlaces ni digas que lo mandarás tú; si el cliente lo pide antes de agendar, dile que lo recibirá al confirmar la cita. Si el servicio es de modalidad 'ambas', pregunta si lo quiere presencial u online ANTES de agendar y pásalo en `modality` (presencial = recibe la dirección, online = recibe el enlace). " +
         "Si la herramienta responde que el horario ya no está libre, discúlpate brevemente y ofrece las alternativas que te devuelve. " +
         "Si el cliente no quiere fijar hora todavía, agenda con requestedText (queda SOLICITADA para que un asesor coordine). " +
         "Si el cliente quiere CANCELAR o MOVER su cita, usa cancelar_cita / reprogramar_cita (para mover, primero consultar_disponibilidad). NUNCA digas que cancelaste o cambiaste una cita sin haber llamado la herramienta. " +
@@ -375,6 +377,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
       catalogMode: (config.agent as { catalogMode?: string }).catalogMode,
       keywordMode: (config.agent as { keywordMode?: string }).keywordMode,
       trackStock: (config.agent as { trackStock?: boolean }).trackStock,
+      meetingUrl: !!(config.business as { meetingUrl?: string | null }).meetingUrl,
     })}`,
     ...(deliveryLine ? [deliveryLine] : []),
     "",

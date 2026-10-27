@@ -15,7 +15,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { isSlotAvailable, formatSlotLabel, getAvailableSlots } from "./availability.service";
-import { afterBookingChanged, bookingCalendarLinks } from "./calendar.service";
+import { afterBookingChanged, bookingCalendarLinks, meetingUrlOf } from "./calendar.service";
 
 /** Horas antes de la cita en que se avisa al cliente (config futura por tenant). */
 const REMINDER_HOURS = [24, 2];
@@ -28,7 +28,7 @@ function buildBookingCode(seed: number): string {
 
 const bookingInclude = {
   customer: { select: { id: true, phone: true, name: true, avatarUrl: true, email: true } },
-  product: { select: { id: true, name: true } },
+  product: { select: { id: true, name: true, verticalData: true } },
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ export async function scheduleBookingReminders(bookingId: string): Promise<void>
     where: { id: bookingId },
     include: {
       ...bookingInclude,
-      company: { select: { timezone: true, name: true } },
+      company: { select: { timezone: true, name: true, meetingUrl: true } },
       product: { select: { id: true, name: true, verticalData: true } },
     },
   });
@@ -56,9 +56,11 @@ export async function scheduleBookingReminders(bookingId: string): Promise<void>
   const tz = booking.company.timezone || "America/Lima";
   const when = formatSlotLabel(booking.startsAt, tz);
   // Lugar de la cita/visita (pack inmobiliario u otro rubro que lo configure).
+  // Cita online: va el enlace de videollamada en vez de la dirección.
   const vd = (booking.product.verticalData ?? {}) as Record<string, unknown>;
   const location = String(vd.location ?? vd.address ?? "").trim();
-  const locationLine = location ? `\n📍 ${location}` : "";
+  const meeting = meetingUrlOf(booking, booking.company);
+  const locationLine = meeting ? `\n🎥 Videollamada: ${meeting}` : location ? `\n📍 ${location}` : "";
   const conversation = await prisma.conversation.findFirst({
     where: { companyId: booking.companyId, customerId: booking.customerId, channel: { in: ["whatsapp", "web"] } },
     orderBy: { lastMessageAt: "desc" },
@@ -241,8 +243,12 @@ export async function listBookings(companyId: string, filters: ListBookingsFilte
     orderBy: [{ startsAt: "asc" }, { createdAt: "desc" }],
     take: 500,
   });
-  // Enlaces "agregar a mi calendario" del cliente (para copiarlos desde el panel).
-  return rows.map((r) => ({ ...r, calendar: bookingCalendarLinks(r) }));
+  // Enlaces "agregar a mi calendario" + videollamada del cliente (para copiarlos desde el panel).
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { meetingUrl: true } });
+  return rows.map((r) => {
+    const links = bookingCalendarLinks(r);
+    return { ...r, calendar: links ? { ...links, meetingUrl: meetingUrlOf(r, company ?? {}) } : null };
+  });
 }
 
 /**

@@ -40,11 +40,37 @@ export interface CalendarBooking {
 export interface CalendarCompany {
   name: string;
   timezone: string;
+  /** Enlace fijo de videollamada por defecto del negocio (citas online). */
+  meetingUrl?: string | null;
 }
 
 export interface CalendarLinks {
   google: string;
   ics: string;
+  /** Enlace de videollamada de ESTA cita (null si es presencial o no hay enlace). */
+  meetingUrl?: string | null;
+}
+
+const PRESENCIAL_RE = /presencial|f[ií]sic|local|oficina|consultorio|domicilio|en persona/i;
+
+function normalizeUrl(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return /^https?:\/\/\S+$/i.test(t) ? t : null;
+}
+
+/**
+ * Enlace de videollamada que corresponde a una cita: el del servicio
+ * (verticalData.meetingUrl) o, si no tiene, el del negocio. null cuando la cita
+ * quedó como presencial o no hay ningún enlace configurado.
+ */
+export function meetingUrlOf(
+  b: Pick<CalendarBooking, "modality" | "product">,
+  company: Pick<CalendarCompany, "meetingUrl">,
+): string | null {
+  if (b.modality && PRESENCIAL_RE.test(b.modality)) return null;
+  const v = (b.product?.verticalData ?? null) as Record<string, unknown> | null;
+  return normalizeUrl(v?.meetingUrl) ?? normalizeUrl(company.meetingUrl) ?? null;
 }
 
 const PRODID = "-//FlowApp//Citas//ES";
@@ -113,9 +139,11 @@ function summaryOf(b: CalendarBooking, company: CalendarCompany): string {
 }
 
 function descriptionOf(b: CalendarBooking, company: CalendarCompany): string {
+  const meeting = meetingUrlOf(b, company);
   const parts = [
     b.bookingCode ? `Código de cita: ${b.bookingCode}` : "",
     b.modality ? `Modalidad: ${b.modality}` : "",
+    meeting ? `Videollamada: ${meeting}` : "",
     b.notes ? `Notas: ${b.notes}` : "",
     `Agendado por WhatsApp con ${company.name}.`,
   ].filter(Boolean);
@@ -134,7 +162,8 @@ function bookingEvent(b: CalendarBooking, company: CalendarCompany, opts: { sequ
   if (!start || !end) return [];
   const cancelled = b.status === "CANCELADA";
   const uid = `${b.bookingCode ?? b.id}@${UID_DOMAIN}`;
-  const location = locationOf(b);
+  // Cita online: el enlace va como ubicación (Google/iPhone lo muestran clicable).
+  const location = meetingUrlOf(b, company) ?? locationOf(b);
   return [
     "BEGIN:VEVENT",
     `UID:${uid}`,
@@ -212,7 +241,7 @@ export function googleCalendarUrl(b: CalendarBooking, company: CalendarCompany):
     details: descriptionOf(b, company),
     ctz: company.timezone || "America/Lima",
   });
-  const location = locationOf(b);
+  const location = meetingUrlOf(b, company) ?? locationOf(b);
   if (location) params.set("location", location);
   return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
@@ -227,13 +256,14 @@ export function bookingCalendarLinks(b: Pick<CalendarBooking, "bookingCode" | "c
 
 /** Mensaje fijo que recibe el cliente tras confirmar la cita. */
 export function calendarLinksMessage(links: CalendarLinks): string {
-  return `📅 Agrega la cita a tu calendario:\nGoogle: ${links.google}\niPhone / otros: ${links.ics}`;
+  const meeting = links.meetingUrl ? `🎥 Enlace de la videollamada: ${links.meetingUrl}\n\n` : "";
+  return `${meeting}📅 Agrega la cita a tu calendario:\nGoogle: ${links.google}\niPhone / otros: ${links.ics}`;
 }
 
 const calendarInclude = {
   customer: { select: { name: true, phone: true, email: true } },
   product: { select: { name: true, verticalData: true } },
-  company: { select: { name: true, timezone: true } },
+  company: { select: { name: true, timezone: true, meetingUrl: true } },
 } as const;
 
 export async function loadBookingForCalendar(bookingId: string) {
@@ -291,7 +321,7 @@ export async function buildCompanyFeed(token: string): Promise<string | null> {
   if (!token) return null;
   const feed = await prisma.companyCalendarFeed.findUnique({
     where: { token },
-    include: { company: { select: { id: true, name: true, timezone: true } } },
+    include: { company: { select: { id: true, name: true, timezone: true, meetingUrl: true } } },
   });
   if (!feed || !feed.enabled) return null;
   const now = Date.now();
@@ -313,7 +343,7 @@ export async function buildCompanyFeed(token: string): Promise<string | null> {
       select: { id: true, startsAt: true, endsAt: true, reason: true },
     }),
   ]);
-  const company = { name: feed.company.name, timezone: feed.company.timezone || "America/Lima" };
+  const company = { name: feed.company.name, timezone: feed.company.timezone || "America/Lima", meetingUrl: feed.company.meetingUrl };
   // En el feed del dueño el título incluye al cliente.
   const withCustomer = bookings.map((b) => ({
     ...b,
@@ -336,8 +366,10 @@ export async function afterBookingChanged(bookingId: string, kind: BookingEventK
   try {
     const b = await loadBookingForCalendar(bookingId);
     if (!b || !b.startsAt) return null;
-    const company = { name: b.company.name, timezone: b.company.timezone || "America/Lima" };
-    const links = bookingCalendarLinks(b);
+    const company = { name: b.company.name, timezone: b.company.timezone || "America/Lima", meetingUrl: b.company.meetingUrl };
+    const meeting = meetingUrlOf(b, company);
+    const base = bookingCalendarLinks(b);
+    const links = base ? { ...base, meetingUrl: meeting } : null;
     const email = (b.customer?.email ?? "").trim();
     if (!email || !isValidEmail(email) || !mailerEnabled()) return links;
 
@@ -353,6 +385,7 @@ export async function afterBookingChanged(bookingId: string, kind: BookingEventK
       <div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.5;color:#111">
         <p>${intro}</p>
         ${b.bookingCode ? `<p>Código de cita: <b>${escapeHtml(b.bookingCode)}</b></p>` : ""}
+        ${kind !== "cancelled" && meeting ? `<p><a href="${meeting}" style="display:inline-block;padding:10px 16px;background:#1a73e8;color:#fff;border-radius:8px;text-decoration:none">Unirse a la videollamada</a><br><span style="font-size:13px;color:#555">${escapeHtml(meeting)}</span></p>` : ""}
         ${kind !== "cancelled" && links ? `<p><a href="${links.google}" style="display:inline-block;padding:10px 16px;background:#6d5dfc;color:#fff;border-radius:8px;text-decoration:none">Agregar a Google Calendar</a></p><p style="font-size:13px;color:#555">En iPhone u Outlook acepta la invitación adjunta o descarga el archivo: <a href="${links.ics}">${links.ics}</a></p>` : ""}
         <p style="font-size:12px;color:#777">Enviado por ${escapeHtml(company.name)} vía FlowApp.</p>
       </div>`;
@@ -362,7 +395,7 @@ export async function afterBookingChanged(bookingId: string, kind: BookingEventK
       fromName: `${company.name} vía FlowApp`,
       subject,
       html,
-      text: `${intro.replace(/<[^>]+>/g, "")}${links && kind !== "cancelled" ? `\nGoogle Calendar: ${links.google}\niPhone/otros: ${links.ics}` : ""}`,
+      text: `${intro.replace(/<[^>]+>/g, "")}${meeting && kind !== "cancelled" ? `\nVideollamada: ${meeting}` : ""}${links && kind !== "cancelled" ? `\nGoogle Calendar: ${links.google}\niPhone/otros: ${links.ics}` : ""}`,
       icalEvent: { method: kind === "cancelled" ? "CANCEL" : "REQUEST", content },
     });
     return links;

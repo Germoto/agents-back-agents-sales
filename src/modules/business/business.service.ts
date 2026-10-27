@@ -46,6 +46,7 @@ export async function updateBusinessProfile(companyId: string, data: {
   isActive: boolean;
   deliveryConfig?: DeliveryConfigInput | null;
   businessHours?: Array<{ day: number; from: string; to: string }> | null;
+  meetingUrl?: string | null;
   firmaEnabled?: boolean;
   firmaText?: string | null;
   messageGapEnabled?: boolean;

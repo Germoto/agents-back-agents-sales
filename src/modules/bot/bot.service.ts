@@ -206,6 +206,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
       vertical: whatsappConfig.company.vertical,
       deliveryConfig: (whatsappConfig.company.deliveryConfig ?? null) as Record<string, unknown> | null,
       timezone: whatsappConfig.company.timezone,
+      // Enlace fijo de videollamada por defecto (citas online); lo envía el sistema al confirmar.
+      meetingUrl: whatsappConfig.company.meetingUrl ?? null,
       // Moneda del negocio: todo texto de dinero del agente deriva su símbolo de aquí.
       currency: whatsappConfig.company.currency ?? "PEN",
       botMode,

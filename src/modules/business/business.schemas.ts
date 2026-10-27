@@ -46,6 +46,15 @@ export const updateBusinessSchema = z.object({
     .max(30)
     .nullable()
     .optional(),
+  // Enlace fijo de videollamada (Meet/Zoom) por defecto para citas online.
+  meetingUrl: z
+    .string()
+    .trim()
+    .max(500)
+    .transform((v) => (v ? v : null))
+    .refine((v) => v === null || /^https?:\/\/\S+$/i.test(v), "Enlace inválido (debe empezar con https://)")
+    .nullable()
+    .optional(),
   // Firma anexada a los mensajes automáticos (agente IA + flujos).
   firmaEnabled: z.boolean().default(false),
   firmaText: z.string().trim().max(60).nullable().optional(),

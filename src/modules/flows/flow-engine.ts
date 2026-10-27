@@ -1758,6 +1758,7 @@ async function resumeBookingAwaiting(flow: LoadedFlow, node: FlowNode, io: FlowI
       cita_codigo: created.bookingCode ?? "",
       cita_calendario_google: created.calendar?.google ?? "",
       cita_calendario_ics: created.calendar?.ics ?? "",
+      cita_videollamada: created.calendar?.meetingUrl ?? "",
       ...(data.saveVariable?.trim() ? { [data.saveVariable.trim()]: when } : {}),
     };
     await persistFlowVars(io);

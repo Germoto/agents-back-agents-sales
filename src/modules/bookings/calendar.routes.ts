@@ -30,7 +30,7 @@ calendarPublicRoutes.get(
   asyncHandler(async (req: Request, res: Response) => {
     const b = await loadPublicBooking(stripIcs(String(req.params.code)), String(req.query.t ?? ""));
     if (!b || !b.startsAt) throw new AppError("Cita no encontrada", 404);
-    const ics = bookingIcs(b, { name: b.company.name, timezone: b.company.timezone || "America/Lima" });
+    const ics = bookingIcs(b, { name: b.company.name, timezone: b.company.timezone || "America/Lima", meetingUrl: b.company.meetingUrl });
     res.setHeader("Content-Type", "text/calendar; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="cita-${b.bookingCode ?? "flowapp"}.ics"`);
     res.setHeader("Cache-Control", "private, no-store");
@@ -43,7 +43,7 @@ calendarPublicRoutes.get(
   asyncHandler(async (req: Request, res: Response) => {
     const b = await loadPublicBooking(String(req.params.code), String(req.query.t ?? ""));
     if (!b || !b.startsAt) throw new AppError("Cita no encontrada", 404);
-    res.redirect(302, googleCalendarUrl(b, { name: b.company.name, timezone: b.company.timezone || "America/Lima" }));
+    res.redirect(302, googleCalendarUrl(b, { name: b.company.name, timezone: b.company.timezone || "America/Lima", meetingUrl: b.company.meetingUrl }));
   }),
 );
 

@@ -1708,8 +1708,8 @@ function resolveOfferedStart(ctx: TurnContext, raw: string): string {
   return matches[0]?.startsAt ?? raw;
 }
 
-const CALENDAR_NOTE = " El sistema envía solo, DESPUÉS de tu mensaje, los enlaces para que el cliente agregue la cita a su calendario (Google/iPhone): NO los menciones ni inventes enlaces.";
-const CALENDAR_SIM_TEXT = "📅 (simulación) Aquí el cliente recibe los enlaces para agregar la cita a Google Calendar o al iPhone.";
+const CALENDAR_NOTE = " El sistema envía solo, DESPUÉS de tu mensaje, los enlaces para que el cliente agregue la cita a su calendario (Google/iPhone) y, si la cita es online con enlace configurado, el enlace de la videollamada: NO los menciones ni inventes enlaces.";
+const CALENDAR_SIM_TEXT = "📅 (simulación) Aquí el cliente recibe los enlaces para agregar la cita a Google Calendar o al iPhone (y el enlace de videollamada si el servicio es online y lo tiene configurado).";
 
 /** Encola, para después del texto final, el mensaje con los enlaces de calendario de la cita. */
 function queueCalendarLinks(ctx: TurnContext, links: CalendarLinks | null | undefined) {
@@ -2825,6 +2825,7 @@ export async function executeTool(
           bookingCode: booking.bookingCode,
           startsAt: booking.startsAt,
           when,
+          videollamada: booking.calendar?.meetingUrl ?? null,
           note: booking.startsAt
             ? `Cita CONFIRMADA para ${when}. Confírmasela al cliente con día y hora, y dile que le recordaremos antes.${booking.calendar ? CALENDAR_NOTE : ""}`
             : "Reserva registrada como SOLICITADA. Confirma al cliente que un asesor coordinará el horario exacto.",
@@ -2917,6 +2918,7 @@ export async function executeTool(
           ok: true,
           bookingCode: updated.bookingCode,
           startsAt: updated.startsAt,
+          videollamada: updated.calendar?.meetingUrl ?? null,
           note: `Cita reprogramada y CONFIRMADA para ${when} (recordatorios actualizados). Confírmasela al cliente con día y hora.${updated.calendar ? CALENDAR_NOTE : ""}`,
         });
       } catch (err) {

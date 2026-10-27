@@ -151,6 +151,9 @@ model Company {
   deliveryConfig       Json?
   // Horario de atención para la AGENDA de citas: [{ day: 0-6, from: "09:00", to: "18:00" }]
   businessHours        Json?
+  // Enlace fijo de videollamada (Meet/Zoom) por defecto para citas online;
+  // cada servicio puede traer el suyo en verticalData.meetingUrl.
+  meetingUrl           String?
   timezone             String                @default("America/Lima")
   // Moneda del negocio: TODO el embudo la usa (fichas, carrito, validación,
   // reportes, CAPI). "PEN" (S/) default; "USD" ($) opcional.
