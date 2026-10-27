@@ -1520,7 +1520,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "agendar_servicio",
       description:
-        "Agenda la CITA de un SERVICIO. Usa 'startsAt' con uno de los horarios EXACTOS que devolvió consultar_disponibilidad (la cita queda confirmada al instante). Solo si el cliente no quiere fijar hora, manda 'requestedText' con lo que dijo y un asesor coordinará.",
+        "Agenda la CITA de un SERVICIO. Usa 'startsAt' con uno de los horarios EXACTOS que devolvió consultar_disponibilidad (la cita queda confirmada al instante). Solo si el cliente no quiere fijar hora, manda 'requestedText' con lo que dijo y un asesor coordinará. Si el cliente YA tiene una cita vigente, esta herramienta NO crea otra: usa reprogramar_cita para moverla (o 'adicional':true solo si quiere una cita MÁS).",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1534,6 +1534,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           requestedText: { type: "string", description: "Solo si no hay hora exacta: lo que dijo el cliente (ej. 'sábado por la tarde')" },
           modality: { type: "string", description: "presencial | online (si aplica)" },
           notes: { type: "string", description: "Detalles o requisitos del cliente" },
+          adicional: { type: "boolean", description: "true SOLO si el cliente quiere una cita ADICIONAL además de la que ya tiene vigente" },
         },
       },
     },
@@ -1712,8 +1713,8 @@ const CALENDAR_NOTE = " El sistema envía solo, DESPUÉS de tu mensaje, los enla
 const CALENDAR_SIM_TEXT = "📅 (simulación) Aquí el cliente recibe los enlaces para agregar la cita a Google Calendar o al iPhone (y el enlace de videollamada si el servicio es online y lo tiene configurado).";
 
 /** Encola, para después del texto final, el mensaje con los enlaces de calendario de la cita. */
-function queueCalendarLinks(ctx: TurnContext, links: CalendarLinks | null | undefined) {
-  const text = ctx.simulate ? CALENDAR_SIM_TEXT : links ? calendarLinksMessage(links) : "";
+function queueCalendarLinks(ctx: TurnContext, links: CalendarLinks | null | undefined, opts: { rescheduled?: boolean } = {}) {
+  const text = ctx.simulate ? CALENDAR_SIM_TEXT : links ? calendarLinksMessage(links, opts) : "";
   if (!text) return;
   ctx.outboxAfter ??= [];
   // Si el modelo agenda/reprograma dos veces en el mismo turno, el cliente recibe un solo mensaje.
@@ -2758,6 +2759,81 @@ export async function executeTool(
       if (!requestedText && !startsAtRaw) {
         return JSON.stringify({ ok: false, error: "falta el horario: usa consultar_disponibilidad y pasa startsAt" });
       }
+      // Cita vigente: NO crear una segunda por accidente. Los resultados de tools no
+      // sobreviven entre turnos y el modelo tiende a "agendar" en vez de mover.
+      if (args.adicional !== true) {
+        let current: Awaited<ReturnType<typeof findUpcomingBookingForCustomer>> = null;
+        try {
+          current = await findUpcomingBookingForCustomer(ctx.companyId, ctx.customerId);
+        } catch {
+          current = null;
+        }
+        if (current) {
+          const tz = (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima";
+          const cuando = current.startsAt ? formatSlotLabel(current.startsAt, tz) : current.requestedText || "sin hora fijada";
+          const sameService = current.productId === product.id;
+          if (current.status === "SOLICITADA" && !current.startsAt && sameService && startsAtRaw) {
+            // La reserva pendiente (sin hora) del mismo servicio recibe hora: se confirma ESA.
+            const parsed = new Date(startsAtRaw);
+            if (isNaN(parsed.getTime())) {
+              return JSON.stringify({ ok: false, error: "fecha inválida: usa el startsAt EXACTO de consultar_disponibilidad" });
+            }
+            if (ctx.simulate) {
+              const check = await isSlotAvailable(ctx.companyId, product.id, parsed, { ignoreBookingId: current.id });
+              if (!check.ok) {
+                return JSON.stringify({ ok: false, error: reasonMessage(check.reason), alternativas: await alternativesFor(ctx, product.id) });
+              }
+              ctx.state.status = "RESERVA_SOLICITADA";
+              ctx.state.selectedProductId = product.id;
+              ctx.state.offeredSlots = null;
+              queueCalendarLinks(ctx, null);
+              return JSON.stringify({
+                ok: true,
+                reprogramada: true,
+                bookingCode: current.bookingCode,
+                when: formatSlotLabel(parsed, tz),
+                note: `(simulación) La reserva pendiente del cliente quedaría CONFIRMADA para ${formatSlotLabel(parsed, tz)} (no se crea otra). Confírmasela al cliente.${CALENDAR_NOTE}`,
+              });
+            }
+            try {
+              const updated = await rescheduleBooking(ctx.companyId, current.id, startsAtRaw);
+              ctx.state.status = "RESERVA_SOLICITADA";
+              ctx.state.selectedProductId = product.id;
+              ctx.state.offeredSlots = null;
+              const when = updated.startsAt ? formatSlotLabel(updated.startsAt, tz) : startsAtRaw;
+              ctx.adminNotices.push(
+                `📅 Reserva pendiente CONFIRMADA con hora (${ctx.customerPhone}): ${product.name} — ${when}${updated.bookingCode ? ` · ${updated.bookingCode}` : ""}.`,
+              );
+              queueCalendarLinks(ctx, updated.calendar);
+              return JSON.stringify({
+                ok: true,
+                reprogramada: true,
+                bookingId: updated.id,
+                bookingCode: updated.bookingCode,
+                startsAt: updated.startsAt,
+                when,
+                videollamada: updated.calendar?.meetingUrl ?? null,
+                note: `La reserva pendiente del cliente quedó CONFIRMADA para ${when} (no se creó otra). Confírmasela con día y hora y dile que le recordaremos antes.${updated.calendar ? CALENDAR_NOTE : ""}`,
+              });
+            } catch (err) {
+              const message = err instanceof Error ? err.message : "no se pudo fijar la hora";
+              let alternativas: unknown = [];
+              try {
+                alternativas = await alternativesFor(ctx, product.id);
+              } catch {
+                alternativas = [];
+              }
+              return JSON.stringify({ ok: false, error: message, alternativas, note: "Ofrece estas alternativas al cliente (son reales)." });
+            }
+          }
+          return JSON.stringify({
+            ok: false,
+            error: "el cliente YA tiene una cita vigente; NO se creó otra",
+            citaVigente: { codigo: current.bookingCode, servicio: current.product?.name ?? null, cuando, estado: current.status },
+            note: "Si el cliente quiere MOVER esa cita, usa reprogramar_cita con el startsAt (antes consultar_disponibilidad si hace falta). Solo si de verdad quiere una cita ADICIONAL además de la vigente, repite agendar_servicio con adicional:true.",
+          });
+        }
+      }
       if (ctx.simulate) {
         // Validación REAL del slot (solo lectura), sin crear la cita ni
         // recordatorios: el simulador se comporta igual que producción pero
@@ -2902,7 +2978,7 @@ export async function executeTool(
           return JSON.stringify({ ok: false, error: reasonMessage(check.reason), note: "Ofrece otro horario de consultar_disponibilidad." });
         }
         ctx.state.offeredSlots = null;
-        queueCalendarLinks(ctx, null);
+        queueCalendarLinks(ctx, null, { rescheduled: true });
         return JSON.stringify({
           ok: true,
           bookingCode: booking.bookingCode,
@@ -2917,7 +2993,7 @@ export async function executeTool(
         ctx.adminNotices.push(
           `🗓️ Cita REPROGRAMADA por el cliente: ${updated.bookingCode ?? updated.id} — ${updated.product?.name ?? "servicio"} → ${when} · ${ctx.customerPhone}`,
         );
-        queueCalendarLinks(ctx, updated.calendar);
+        queueCalendarLinks(ctx, updated.calendar, { rescheduled: true });
         return JSON.stringify({
           ok: true,
           bookingCode: updated.bookingCode,

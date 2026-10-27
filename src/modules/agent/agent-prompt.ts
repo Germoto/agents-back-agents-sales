@@ -320,6 +320,14 @@ export interface PromptExtras {
   flowVars?: Record<string, string> | null;
   /** Instrucción del bloque «Pasar al agente IA» para este cliente. */
   flowNote?: string | null;
+  /** Cita vigente del cliente (SERVICE/REAL_ESTATE): para que mueva, no duplique. */
+  upcomingBooking?: { code: string | null; service: string; when: string; status: string } | null;
+}
+
+function upcomingBookingLine(extra?: PromptExtras): string | null {
+  const b = extra?.upcomingBooking;
+  if (!b) return null;
+  return `CITA VIGENTE DEL CLIENTE: ${b.service} · ${b.when}${b.code ? ` (código ${b.code}, ${b.status})` : ` (${b.status})`}. Si quiere CAMBIARLA de día u hora, usa reprogramar_cita (NUNCA agendar_servicio: crearía una segunda cita); si quiere cancelarla, cancelar_cita; solo si quiere OTRA cita ADICIONAL además de esta, agendar_servicio con adicional:true. Si pregunta por su cita, responde con estos datos sin consultar nada.`;
 }
 
 export function buildSystemPrompt(config: BotConfig, state: ConversationState, extra?: PromptExtras): string {
@@ -463,6 +471,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     // Agenda: horarios que el agente ya ofreció (los resultados de tools no sobreviven
     // entre turnos; sin esto el modelo reconsulta y se contradice).
     ...(offeredSlotsLine(state, config) ? [offeredSlotsLine(state, config)!, ""] : []),
+    // Agenda: cita vigente del cliente (sin esto el modelo "agenda" otra en vez de moverla).
+    ...(upcomingBookingLine(extra) ? [upcomingBookingLine(extra)!, ""] : []),
     // Rubros de carrito: estado REAL del carrito al inicio de este turno.
     ...(state.cartText
       ? [

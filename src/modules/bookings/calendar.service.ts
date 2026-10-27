@@ -255,9 +255,14 @@ export function bookingCalendarLinks(b: Pick<CalendarBooking, "bookingCode" | "c
 }
 
 /** Mensaje fijo que recibe el cliente tras confirmar la cita. */
-export function calendarLinksMessage(links: CalendarLinks): string {
+export function calendarLinksMessage(links: CalendarLinks, opts: { rescheduled?: boolean } = {}): string {
   const meeting = links.meetingUrl ? `🎥 Enlace de la videollamada: ${links.meetingUrl}\n\n` : "";
-  return `${meeting}📅 Agrega la cita a tu calendario:\nGoogle: ${links.google}\niPhone / otros: ${links.ics}`;
+  // Al reprogramar: el enlace de Google y el .ics crean un evento NUEVO en el
+  // calendario del cliente (no hay forma de borrar el viejo a distancia).
+  const head = opts.rescheduled
+    ? "📅 Tu cita cambió de horario. Si ya la habías agregado a tu calendario, elimina la anterior y agrega la nueva:"
+    : "📅 Agrega la cita a tu calendario:";
+  return `${meeting}${head}\nGoogle: ${links.google}\niPhone / otros: ${links.ics}`;
 }
 
 const calendarInclude = {

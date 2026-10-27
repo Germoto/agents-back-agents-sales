@@ -9,6 +9,8 @@ import { buildSystemPrompt } from "./agent-prompt";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
 import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
+import { findUpcomingBookingForCustomer } from "../bookings/bookings.service";
+import { formatSlotLabel } from "../bookings/availability.service";
 import { extractEmail } from "../../lib/email";
 import { prisma } from "../../lib/prisma";
 
@@ -50,12 +52,33 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     }
   }
 
+  // Rubros con AGENDA: la cita vigente del cliente en el prompt de CADA turno.
+  // Sin esto el modelo no sabe que ya tiene cita y "agenda" otra en vez de moverla.
+  let upcomingBooking: { code: string | null; service: string; when: string; status: string } | null = null;
+  if (vertical === "SERVICE" || vertical === "REAL_ESTATE") {
+    try {
+      const b = await findUpcomingBookingForCustomer(ctx.companyId, ctx.customerId);
+      if (b) {
+        const tz = (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima";
+        upcomingBooking = {
+          code: b.bookingCode ?? null,
+          service: b.product?.name ?? "cita",
+          when: b.startsAt ? formatSlotLabel(b.startsAt, tz) : b.requestedText ? `"${b.requestedText}" (sin hora fijada aún)` : "sin hora fijada aún",
+          status: b.status,
+        };
+      }
+    } catch {
+      upcomingBooking = null;
+    }
+  }
+
   const messages: ChatMessage[] = [
     {
       role: "system",
       content: buildSystemPrompt(ctx.config, ctx.state, {
         flowVars: ctx.customerFlowVars ?? ((ctx.state.flow as { variables?: Record<string, string> } | undefined)?.variables ?? null),
         flowNote: (ctx.state.flow as { aiTakeover?: { note?: string } } | undefined)?.aiTakeover?.note ?? null,
+        upcomingBooking,
       }),
     },
     ...history,
