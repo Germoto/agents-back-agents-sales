@@ -199,3 +199,58 @@ export async function deleteNote(companyId: string, noteId: string) {
   if (!existing) throw new AppError("Nota no encontrada", 404);
   await prisma.contactNote.delete({ where: { id: noteId } });
 }
+
+const FLOW_VARS_ALL = null;
+
+/**
+ * Quita respuestas del chatbot de flujos de la ficha del cliente
+ * (Customer.metadata.flowVars) y de la sesión de flujo guardada en sus
+ * conversaciones (Conversation.state.flow.variables — el agente cae a ese
+ * fallback si la ficha queda vacía). `keys === null` = todas las visibles
+ * (las internas `_…` nunca se tocan). Emite CRM_UPDATED para refrescar tarjetas.
+ */
+export async function removeCustomerFlowVars(
+  companyId: string,
+  customerId: string,
+  keys: string[] | typeof FLOW_VARS_ALL,
+): Promise<{ removed: string[]; remaining: Record<string, string> }> {
+  const customer = await prisma.customer.findFirst({
+    where: { id: customerId, companyId },
+    select: { id: true, metadata: true },
+  });
+  if (!customer) throw new AppError("Cliente no encontrado", 404);
+
+  const md = (customer.metadata && typeof customer.metadata === "object" ? { ...(customer.metadata as Record<string, unknown>) } : {}) as Record<string, unknown>;
+  const flowVars = md.flowVars && typeof md.flowVars === "object" ? { ...(md.flowVars as Record<string, unknown>) } : {};
+  const visible = Object.keys(flowVars).filter((k) => !k.startsWith("_"));
+  const wanted = new Set(keys === null ? visible : keys.map((k) => k.trim()).filter((k) => k && !k.startsWith("_")));
+  const removed = visible.filter((k) => wanted.has(k));
+  for (const k of removed) delete flowVars[k];
+
+  const remaining: Record<string, string> = {};
+  for (const [k, v] of Object.entries(flowVars)) if (!k.startsWith("_") && typeof v === "string") remaining[k] = v;
+  if (Object.keys(remaining).length) md.flowVars = flowVars;
+  else delete md.flowVars;
+
+  await prisma.customer.update({ where: { id: customerId }, data: { metadata: md as object } });
+
+  // Sesión de flujo en las conversaciones del cliente (fallback del agente).
+  const convos = await prisma.conversation.findMany({ where: { customerId, companyId }, select: { id: true, state: true } });
+  for (const c of convos) {
+    const state = (c.state && typeof c.state === "object" ? (c.state as Record<string, unknown>) : null);
+    const flow = state?.flow && typeof state.flow === "object" ? (state.flow as Record<string, unknown>) : null;
+    const vars = flow?.variables && typeof flow.variables === "object" ? (flow.variables as Record<string, unknown>) : null;
+    if (!vars) continue;
+    const hit = Object.keys(vars).filter((k) => wanted.has(k));
+    if (!hit.length) continue;
+    const nextVars = { ...vars };
+    for (const k of hit) delete nextVars[k];
+    await prisma.conversation.update({
+      where: { id: c.id },
+      data: { state: { ...state, flow: { ...flow, variables: nextVars } } as object },
+    });
+  }
+
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.CRM_UPDATED, { crmId: null });
+  return { removed, remaining };
+}

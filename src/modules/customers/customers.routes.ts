@@ -12,8 +12,9 @@ import {
   listNotesController,
   createNoteController,
   deleteNoteController,
+  deleteFlowVarsController,
 } from "./customers.controller";
-import { updateCustomerSchema, createNoteSchema } from "./customers.schemas";
+import { updateCustomerSchema, createNoteSchema, deleteFlowVarsSchema } from "./customers.schemas";
 
 const router = Router();
 
@@ -31,6 +32,8 @@ router.post("/:id/notes", validate({ body: createNoteSchema }), asyncHandler(cre
 
 // Ficha de contacto
 router.get("/:id", asyncHandler(getCustomerController));
+// Quitar respuestas del chatbot de flujos de la ficha (todas o por clave).
+router.delete("/:id/flow-vars", validate({ body: deleteFlowVarsSchema }), asyncHandler(deleteFlowVarsController));
 // Enriquecer la ficha con la API de identidad de WhatsApp de SMS Tools
 router.post("/:id/enrich-whatsapp", asyncHandler(enrichCustomerController));
 router.put("/:id", validate({ body: updateCustomerSchema }), asyncHandler(updateCustomerController));

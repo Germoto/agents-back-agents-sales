@@ -19,3 +19,8 @@ export const createNoteSchema = z.object({
   mediaType: z.enum(["image", "video", "audio", "document"]).nullable().optional(),
   conversationId: z.string().uuid().nullable().optional(),
 });
+
+export const deleteFlowVarsSchema = z.object({
+  /** Claves a quitar; sin `keys` se quitan todas las respuestas visibles. */
+  keys: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
+}).optional();

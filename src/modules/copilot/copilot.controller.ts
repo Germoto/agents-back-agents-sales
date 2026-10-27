@@ -50,7 +50,7 @@ import { getLivePlansPromptSection } from "../admin-console/sales-agent.service"
 import { getDashboardStats } from "../dashboard/dashboard.service";
 import { approveReceipt, associateReceiptProduct, ignoreReceipt, listReceipts, rejectReceipt } from "../receipts/receipts.service";
 import { listOrders, updateOrderStatus } from "../orders/orders.service";
-import { createNote, deleteCustomer, getCustomer, listNotes, updateCustomer } from "../customers/customers.service";
+import { createNote, deleteCustomer, getCustomer, listNotes, updateCustomer, removeCustomerFlowVars } from "../customers/customers.service";
 import { listCrmStructure } from "../crm/crm.service";
 import { crmToolConfigSchema } from "../agent-config/agent-config.schemas";
 import { listConversations, listConversationMessages, setConversationPinned, setCustomerOptOut } from "../agent/conversation.service";
@@ -522,7 +522,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "gestionar_cliente_crm",
       description:
-        "Mueve un CLIENTE a una columna del CRM y/o le asigna/quita etiquetas. Identifica al cliente por su teléfono. Usa ver_crm para los ids de tablero/columna y los NOMBRES exactos de etiquetas.",
+        "Mueve un CLIENTE a una columna del CRM, le asigna/quita etiquetas y/o le quita respuestas del chatbot de flujos (📝 en su tarjeta). Identifica al cliente por su teléfono. Usa ver_crm para los ids de tablero/columna y los NOMBRES exactos de etiquetas.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -533,6 +533,11 @@ export const TOOLS: ToolDefinition[] = [
           columnId: { type: "string" },
           addTagNames: { type: "array", items: { type: "string" }, description: "Etiquetas EXISTENTES a asignar (por nombre)" },
           removeTagNames: { type: "array", items: { type: "string" }, description: "Etiquetas a quitar (por nombre)" },
+          quitarRespuestasFlujo: {
+            type: "array",
+            items: { type: "string" },
+            description: "Claves de respuestas del chatbot a borrar de la ficha (las ves en ver_crm / leer_conversacion → respuestasDelFlujo); [\"*\"] = todas. El agente dejará de darlas por conocidas y las volverá a preguntar. Solo tras confirmación.",
+          },
         },
       },
     },
@@ -2858,10 +2863,18 @@ export async function runCopilotTool(
         crmId: asStr(args.crmId) ?? null,
         crmColumnId: asStr(args.columnId) ?? null,
       });
+      // Respuestas del chatbot de flujos (📝 en la tarjeta): por clave o todas ("*").
+      const quitarVars = asStrList(args.quitarRespuestasFlujo) ?? [];
+      let respuestasEliminadas: string[] | undefined;
+      if (quitarVars.length) {
+        const r = await removeCustomerFlowVars(companyId, customer.id, quitarVars.includes("*") ? null : quitarVars);
+        respuestasEliminadas = r.removed;
+      }
       return {
         result: JSON.stringify({
           ok: true,
           customer: customer.name ?? customer.phone,
+          ...(respuestasEliminadas ? { respuestasEliminadas } : {}),
           ...(missing.length ? { aviso: `Etiquetas inexistentes ignoradas: ${missing.join(", ")} (créalas con crear_etiqueta si hacen falta)` } : {}),
         }),
         wrote: true,
@@ -4178,7 +4191,7 @@ const SYSTEM_GUIDE = [
   "- Activación (/activacion): checklist de puesta en marcha con % de avance y botón de capacitación 1:1 por WhatsApp. Desaparece del menú al llegar al 100%.",
   "- Dashboard (/dashboard): métricas del negocio.",
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}. PESTAÑA RECURSOS del chat (junto a Contacto/Respuestas/Notas): lista la BIBLIOTECA de multimedia del negocio — archivos de productos + multimedia de recordatorios (generales y por producto), banner y mensajes adicionales de presentación y mensajes post-venta — con su origen, filtro por producto y buscador; el asesor la envía al cliente con un clic, con o sin su descripción (al enviarla, el panel resuelve las variantes {a|b} y {nombre}); la misma biblioteca se consulta por aquí con listar_recursos.",
-  "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar).",
+  "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas; con quitarRespuestasFlujo borra las respuestas del chatbot 📝 que se ven en la tarjeta y en Contacto — el agente las volverá a preguntar; solo tras confirmación) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar).",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. DEFAULTS SEGUROS si no se indica otra cosa: 45–90 s entre contactos, pausa 180–300 s cada 10, tope 60/día (cuenta todas las campañas del negocio), horario 09:00–21:00. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 60–120 s); en números nuevos recomienda tope diario 30–50 y subirlo de a poco; sin spintax todos reciben el mismo texto (pide ≥3 variantes en saludo, verbo y cierre; nunca en precios ni links). PROTECCIONES AUTOMÁTICAS: solo UNA campaña en curso por negocio; si 5 envíos seguidos fallan se pausa sola (pauseReason failures) y avisa al dueño por WhatsApp. Flujo seguro OBLIGATORIO: previsualizar_audiencia_campana (total real tras exclusiones) → crear borrador → mostrar total + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible) → ver_campana para el seguimiento (cómo va, por qué espera, fallidos) → pausar_campana / reanudar_campana (reversibles) o cancelar_campana (irreversible, confirmación con el nombre). MULTIMEDIA EN CAMPAÑAS: para adjuntar algo ya subido (archivo de producto, video de un recordatorio, banner de presentación) usa listar_recursos y pasa su url como mediaUrl en los mensajes — en el panel es el botón 'Insertar recurso' del paso Mensajes.",
   "- FLUJOS — secuencia OBLIGATORIA: (1) ver_bloques_flujo y ver_crm ANTES de diseñar (nunca inventes ids: usa nombres o los ids reales); (2) propón al dueño el flujo en lenguaje llano — qué pregunta y qué opciones numeradas verá el cliente (muéstrale el texto tal cual le llegará), qué etiqueta/columna pone cada rama, cuándo avisa al dueño, si agenda cita — y espera su confirmación; (3) crear_flujo con soloValidar=true para comprobar, luego sin él; (4) muéstrale el link /flujos/<id> y las warnings; (5) activar_flujo SOLO tras confirmación explícita, avisando que en modo FLOW el bot calla si ningún flujo se dispara (en HYBRID responde el agente) y que el modo se cambia con configurar_empresa botMode; (6) para modificar uno existente, ver_flujo primero y devuelve el grafo COMPLETO conservando ids y posiciones. GOTCHAS: en HYBRID termina el flujo de calificación con to-agent (clientText opcional + note con lo que el agente debe hacer) en vez de handoff, salvo que el dueño quiera atender él; las respuestas del flujo (saveVariable) quedan en la ficha del cliente (Conversaciones → Contacto, tarjeta del CRM, ver_cliente/leer_conversacion) y el agente las recibe como contexto; si el dueño capta leads por Meta Ads, propón trigger onAdLead (no keywords) y acciones CRM en el anuncio (configurar_anuncio); etiquetas según rango (presupuesto, tipo de cliente) requieren un bloque answers (opciones numeradas; el cliente responde con el número o el nombre) con una rama por opción, no question libre; en answers el message es SOLO la pregunta: la lista «1. … 2. …» la agrega el sistema y NUNCA se crean opciones separadas para «1»,«2»… (duplicarían ramas); para menús de 7+ opciones usa list; no existen botones de WhatsApp, todo es texto; las variables guardadas (saveVariable) solo llegan al dueño si el notifyText del handoff las incluye con {{variable}}; book-appointment necesita un servicio con durationMin; un flujo de captación típico: answers (qué necesita, una opción por servicio) → crm-add-tags → crm-move → answers (tipo/presupuesto) → crm-add-tags → question (descripción) → to-agent (HYBRID) o handoff con aviso que incluya {{nombre}} {{telefono}} y las variables (ver_bloques_flujo trae un EJEMPLO completo).",
   "- Campañas: además de mensajes, cada campaña puede llevar PASOS por contacto (esperar N segundos, etiquetar/quitar etiquetas, mover a una columna del CRM, pasar a modo humano) y etiquetas de contexto a cada alcanzado (crear_campana pasos / etiquetasContexto, actualizar_campana en borrador, eliminar_campana tras confirmación). Las respuestas rápidas también ejecutan ACCIONES al enviarse: mover al CRM, etiquetar/quitar etiquetas, marcar entregado y fijar el producto presentado (crear/actualizar_respuesta_rapida acciones por nombres).",

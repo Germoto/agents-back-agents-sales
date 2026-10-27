@@ -8,6 +8,7 @@ import {
   listNotes,
   createNote,
   deleteNote,
+  removeCustomerFlowVars,
 } from "./customers.service";
 import { enrichCustomerFromWhatsapp } from "./lead-enrich.service";
 
@@ -55,4 +56,10 @@ export async function createNoteController(req: Request, res: Response) {
 export async function deleteNoteController(req: Request, res: Response) {
   await deleteNote(req.user!.companyId, String(req.params.noteId));
   return res.json({ success: true });
+}
+
+export async function deleteFlowVarsController(req: Request, res: Response) {
+  const keys = Array.isArray(req.body?.keys) && req.body.keys.length ? (req.body.keys as string[]) : null;
+  const data = await removeCustomerFlowVars(req.user!.companyId, String(req.params.id), keys);
+  return res.json({ success: true, data });
 }
