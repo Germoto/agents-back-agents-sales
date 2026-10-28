@@ -400,7 +400,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     ...(unknownHandoff
       ? [
           "- Usa SOLO el catálogo entregado. No inventes productos, precios, stock, bonos, garantías, métodos de pago ni zonas de envío.",
-          "- SI NO PUEDES RESPONDER con lo configurado (un dato que no está, un producto/servicio que no tienes, un pedido especial, algo que tendrías que 'consultar'): NO inventes ni prometas averiguar. Dile en UNA línea que un asesor lo revisará y responderá, y llama derivar_humano con motivo CONSULTA en ese MISMO turno (en reason: qué preguntó el cliente). Si la pregunta SÍ se responde con la ficha, el catálogo o la configuración, respóndela tú: NO derives por dudas normales.",
+          "- SI NO PUEDES RESPONDER con lo configurado (un dato que no está, un producto/servicio que no tienes, un pedido especial, algo que tendrías que 'consultar'): NO inventes ni prometas averiguar. Dile en UNA línea que un asesor lo revisará y responderá, y llama derivar_humano con motivo CONSULTA en ese MISMO turno (en reason: qué preguntó el cliente). Si la pregunta SÍ se responde con la ficha, el catálogo o la configuración, respóndela tú: NO derives por dudas normales. Y si el prompt del dueño indica CÓMO responder ese tipo de pregunta (p. ej. 'ante X responde en positivo'), sigue esa instrucción: deriva con CONSULTA solo cuando ni la ficha, ni el catálogo, ni el prompt la cubren.",
         ]
       : [
           "- Usa SOLO el catálogo entregado. No inventes productos, precios, stock, bonos, garantías, métodos de pago ni zonas de envío. Si un dato puntual no está, dilo con naturalidad y ayuda con lo que sí sabes (NO derives por esto).",
