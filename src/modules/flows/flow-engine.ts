@@ -17,9 +17,11 @@ import type { ChatMessage } from "../../lib/openai";
 import {
   saveState,
   setBotPaused,
+  setHumanReason,
   type ConversationState,
 } from "../agent/conversation.service";
 import { loadWhatsappSender, sendText, webSender, type WhatsappSender } from "../agent/outbound";
+import { chatLinkLine } from "../../lib/panel-url";
 import { deliver, gapMsFor, sleep, OUTBOX_GAP_MS } from "../agent/delivery";
 import { cancelPendingReminders, scheduleReminder, minutesFromNow } from "../scheduler/scheduler.service";
 import type { OutboxMessage, TurnContext } from "../agent/agent-tools";
@@ -1030,12 +1032,12 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
         }
         const num = io.customerPhone.replace(/\D/g, "");
         const text =
-          data.notifyText?.trim()
+          (data.notifyText?.trim()
             ? renderTemplate(data.notifyText.trim(), io)
             : `🔔 Un cliente (${io.customerPhone}) pidió hablar con un asesor (flujo de chatbot).\n` +
               `El bot quedó pausado para este cliente.\n` +
               `• Responder: *${num} tu mensaje*\n` +
-              `• Reactivar el bot: *BOT ${num}*`;
+              `• Reactivar el bot: *BOT ${num}*`) + chatLinkLine(io.conversationId);
         await io.notifyOwner(text);
         await io.pauseBot();
         clearSession(fs);
@@ -1864,7 +1866,10 @@ function buildWhatsappFlowIO(opts: WhatsappIOOpts): FlowIO {
       }
     },
     async pauseBot() {
-      await setBotPaused(opts.companyId, opts.conversationId, true);
+      // Motivo persistente + toast en el panel (igual que derivar_humano del agente).
+      const reason = "El cliente pidió hablar con un asesor (flujo de chatbot)";
+      await setHumanReason(opts.conversationId, "FLUJO", reason);
+      await setBotPaused(opts.companyId, opts.conversationId, true, { reason });
     },
     async scheduleTimeout(flowId, nodeId, minutes) {
       await prisma.scheduledMessage.create({

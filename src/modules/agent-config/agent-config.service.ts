@@ -29,6 +29,8 @@ function mapAgentConfig(config: {
   mutedNumbers?: unknown;
   muteAfterSale?: boolean;
   negotiationHandoff?: boolean;
+  unknownHandoff?: boolean;
+  humanChatAlerts?: boolean;
   crmToolConfig?: unknown;
   createdAt: Date;
   updatedAt: Date;
@@ -57,6 +59,8 @@ function mapAgentConfig(config: {
       : [],
     muteAfterSale: config.muteAfterSale ?? true,
     negotiationHandoff: config.negotiationHandoff ?? false,
+    unknownHandoff: config.unknownHandoff ?? false,
+    humanChatAlerts: config.humanChatAlerts ?? true,
     crmToolConfig: config.crmToolConfig ?? null,
   };
 }
@@ -78,6 +82,8 @@ export async function upsertAgentConfig(companyId: string, data: {
   salesStyle: string;
   rules: string[];
   negotiationHandoff?: boolean;
+  unknownHandoff?: boolean;
+  humanChatAlerts?: boolean;
   catalogMode?: string;
   keywordMode?: string;
   trackStock?: boolean;
@@ -119,6 +125,8 @@ export async function upsertAgentConfig(companyId: string, data: {
     ...(typeof data.negotiationHandoff === "boolean"
       ? { negotiationHandoff: data.negotiationHandoff }
       : {}),
+    ...(typeof data.unknownHandoff === "boolean" ? { unknownHandoff: data.unknownHandoff } : {}),
+    ...(typeof data.humanChatAlerts === "boolean" ? { humanChatAlerts: data.humanChatAlerts } : {}),
     ...(data.catalogMode ? { catalogMode: data.catalogMode } : {}),
     ...(data.keywordMode ? { keywordMode: data.keywordMode } : {}),
     ...(typeof data.trackStock === "boolean" ? { trackStock: data.trackStock } : {}),

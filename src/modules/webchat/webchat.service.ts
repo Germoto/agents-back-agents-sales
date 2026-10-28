@@ -16,6 +16,7 @@ import { signWebchatToken, type WebchatJwtPayload } from "../../lib/jwt";
 import { env } from "../../config/env";
 import { normalizePhone, recordMessage, type ConversationState } from "../agent/conversation.service";
 import { scheduleTurn, processInboundReceiptImage } from "../agent/agent.service";
+import { notifyHumanChatMessage } from "../agent/human-chat-alert";
 import { buildBotConfig } from "../bot/bot.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
 import { getEntitlements } from "../billing/entitlements";
@@ -248,7 +249,7 @@ export async function getSessionHistory(session: WebchatJwtPayload) {
 export async function postVisitorMessage(session: WebchatJwtPayload, message: string) {
   const convo = await prisma.conversation.findFirst({
     where: { id: session.conversationId, companyId: session.companyId, channel: "web" },
-    select: { id: true, customerId: true, botPaused: true, customer: { select: { phone: true } } },
+    select: { id: true, customerId: true, botPaused: true, state: true, customer: { select: { phone: true } } },
   });
   if (!convo) throw new AppError("Sesión inválida", 401);
 
@@ -271,7 +272,8 @@ export async function postVisitorMessage(session: WebchatJwtPayload, message: st
     ScheduledMessageType.ABANDONED_CART,
   ]).catch(() => undefined);
 
-  // En atención humana el bot no responde: el mensaje queda en el panel.
+  // En atención humana el bot no responde: el mensaje queda en el panel y se
+  // avisa al dueño por WhatsApp (con freno anti-spam).
   if (!convo.botPaused) {
     scheduleTurn({
       companyId: session.companyId,
@@ -279,6 +281,16 @@ export async function postVisitorMessage(session: WebchatJwtPayload, message: st
       customerId: convo.customerId,
       customerPhone: convo.customer.phone,
       account: null,
+    });
+  } else {
+    await notifyHumanChatMessage({
+      companyId: session.companyId,
+      conversationId: convo.id,
+      customerId: convo.customerId,
+      customerPhone: convo.customer.phone,
+      state: (convo.state as ConversationState | null) ?? null,
+      text: message,
+      hasMedia: false,
     });
   }
 
@@ -357,6 +369,16 @@ export async function postVisitorImage(
       customerId: convo.customerId,
       customerPhone: convo.customer.phone,
       account: null,
+    });
+  } else {
+    await notifyHumanChatMessage({
+      companyId: session.companyId,
+      conversationId: convo.id,
+      customerId: convo.customerId,
+      customerPhone: convo.customer.phone,
+      state: (convo.state as ConversationState | null) ?? null,
+      text: caption,
+      hasMedia: true,
     });
   }
 

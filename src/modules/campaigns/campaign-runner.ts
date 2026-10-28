@@ -19,6 +19,7 @@ import { flushOutbox, sleep, type DeliveryIds } from "../agent/delivery";
 import type { OutboxMessage } from "../agent/agent-tools";
 import { muteCustomerToHuman } from "../agent/agent-tools";
 import { loadOrCreateConversation, notifyOwner, saveState, recordMessage } from "../agent/conversation.service";
+import { chatLinkLine } from "../../lib/panel-url";
 import { applyCrmAndTagActions } from "../crm/crm.service";
 import { metaWa, META_WINDOW_REASON } from "../../lib/meta-wa-client";
 import { isWithin24hWindow, substituteTemplateParams } from "../agent/session-window";
@@ -209,7 +210,7 @@ export async function runRecipientActions(
       if (action.notifyOwner) {
         await notifyOwner(
           companyId,
-          `📣 Campaña "${campaign.name}": ${recipient.phone} pasó a atención humana.`,
+          `📣 Campaña "${campaign.name}": ${recipient.phone} pasó a atención humana.` + chatLinkLine(conversationId),
         );
       }
     }

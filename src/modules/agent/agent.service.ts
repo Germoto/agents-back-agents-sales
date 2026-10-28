@@ -38,6 +38,8 @@ import { fulfillPendingDeliveryEmail } from "./email-delivery";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
 import { alertAiProviderFailure, notifyAiProviderRecovered } from "./ai-alerts";
+import { notifyHumanChatMessage } from "./human-chat-alert";
+import { chatLinkLine } from "../../lib/panel-url";
 import { markOrderPaid, findPendingOrderForCustomer } from "../orders/orders.service";
 import {
   runFlowTurn,
@@ -521,6 +523,17 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     await markInboundProcessed(convo.conversationId, inbound.messageId);
     if (!convo.botPaused) {
       await setBotPaused(companyId, convo.conversationId, true);
+    } else {
+      await notifyHumanChatMessage({
+        companyId,
+        conversationId: convo.conversationId,
+        customerId: convo.customerId,
+        customerPhone: inbound.fromPhone,
+        state: convo.state,
+        text: inbound.text,
+        hasMedia: Boolean(inbound.mediaUrl),
+        config,
+      });
     }
     console.log(`[agent] ${inbound.fromPhone} en lista de atención humana: sin respuesta del bot`);
     return;
@@ -593,8 +606,19 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
       : []),
   ]);
 
-  // Si la conversación está en manos de un humano, el bot no responde
+  // Si la conversación está en manos de un humano, el bot no responde; se avisa
+  // al dueño (con freno anti-spam) para que no se pierda el mensaje.
   if (convo.botPaused) {
+    await notifyHumanChatMessage({
+      companyId,
+      conversationId: convo.conversationId,
+      customerId: convo.customerId,
+      customerPhone: inbound.fromPhone,
+      state: convo.state,
+      text: inbound.text,
+      hasMedia: Boolean(inbound.mediaUrl),
+      config,
+    });
     return;
   }
 
@@ -939,7 +963,7 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     await setBotPaused(companyId, conversationId, true, {
       reason: humanReasonOf(ctx.state, true),
     });
-    if (waSender) await notifyAdmin(waSender, config, customerPhone, ctx.state.pendingAction, { optOut, cancelled });
+    if (waSender) await notifyAdmin(waSender, config, customerPhone, ctx.state.pendingAction, { optOut, cancelled, conversationId });
   }
 }
 
@@ -1533,18 +1557,19 @@ async function fulfillPendingEmailAndNotify(
   return ` ⚠️ Pidió el acceso también al correo ${r.email ?? "—"} y no se pudo enviar (${r.code ?? "error"}): envíaselo desde Comprobantes.`;
 }
 
-async function notifyAdmin(
+export async function notifyAdmin(
   sender: WhatsappSender,
   config: Awaited<ReturnType<typeof buildBotConfig>>,
   customerPhone: string,
   reason: unknown,
-  opts: { optOut?: boolean; cancelled?: number } = {},
+  opts: { optOut?: boolean; cancelled?: number; conversationId?: string | null } = {},
 ): Promise<void> {
   const adminPhone = config.payment.notification?.whatsappPhone || config.business.adminPhone;
   if (!adminPhone) return;
   const to = adminPhone.replace(/\D/g, "");
   const num = customerPhone.replace(/\D/g, "");
   const reasonText = String(reason ?? "—");
+  const link = chatLinkLine(opts.conversationId);
   // "No me escribas más": aviso propio (no hay nada que atender; sí que respetar).
   if (opts.optOut) {
     const n = opts.cancelled ?? 0;
@@ -1555,19 +1580,27 @@ async function notifyAdmin(
         `🚫 El cliente (${customerPhone}) pidió que NO le escriban más.\n` +
           `Motivo: ${reasonText.replace(/^HUMAN(\[[A-Z_]+\])?:\s*/, "") || "—"}\n\n` +
           `Se pausó el bot, se cancelaron ${n} recordatorio${n === 1 ? "" : "s"} pendiente${n === 1 ? "" : "s"} y queda EXCLUIDO de campañas y seguimientos automáticos (aunque reactives el bot).\n` +
-          `Si fue un malentendido, quítale la marca "No contactar" en Conversaciones.`,
+          `Si fue un malentendido, quítale la marca "No contactar" en Conversaciones.` +
+          link,
       );
     } catch {
       /* best-effort */
     }
     return;
   }
-  // Negociación de precio: encabezado propio para que el dueño sepa que hay
-  // una venta que cerrar (no un problema que resolver).
-  const isNegotiation = reasonText.includes("[NEGOCIACION]");
-  const header = isNegotiation
-    ? `💬 Negociación de precio: el cliente (${customerPhone}) pide una rebaja.`
-    : `🔔 Un cliente (${customerPhone}) necesita atención humana.`;
+  // Encabezado por motivo para que el dueño sepa de un vistazo si hay una venta
+  // que cerrar, una consulta que responder o un problema que resolver.
+  const motivo = /^HUMAN\[([A-Z_]+)\]/.exec(reasonText)?.[1] ?? "";
+  const header =
+    motivo === "NEGOCIACION"
+      ? `💬 Negociación de precio: el cliente (${customerPhone}) pide una rebaja.`
+      : motivo === "CONSULTA"
+        ? `❓ Consulta sin respuesta: el cliente (${customerPhone}) preguntó algo que el agente no pudo responder.`
+        : motivo === "RECLAMO"
+          ? `⚠️ Reclamo del cliente (${customerPhone}).`
+          : motivo === "PAGO"
+            ? `💳 Problema de pago del cliente (${customerPhone}).`
+            : `🔔 Un cliente (${customerPhone}) necesita atención humana.`;
   try {
     await sendText(
       sender,
@@ -1577,7 +1610,7 @@ async function notifyAdmin(
         `El bot quedó pausado para este cliente. Para atenderlo tú:\n` +
         `• Responder: *${num} tu mensaje*\n` +
         `• Reactivar el bot: *BOT ${num}*\n` +
-        `(También puedes atenderlo desde la web, en Conversaciones.)`,
+        (link ? `(O atiéndelo desde la web:)${link}` : `(También puedes atenderlo desde la web, en Conversaciones.)`),
     );
   } catch {
     /* best-effort */

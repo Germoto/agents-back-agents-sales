@@ -6,7 +6,7 @@ import { symbolFor } from "../../lib/currency";
 import { isPlatformSalesCompanyId, getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 import { listCrmStructure } from "../crm/crm.service";
 import { getEntitlements } from "../billing/entitlements";
-import type { CrmToolConfig } from "../agent-config/agent-config.schemas";
+import { LEGACY_UNKNOWN_HANDOFF_RULE, type CrmToolConfig } from "../agent-config/agent-config.schemas";
 
 /** Herramienta de CRM del agente resuelta con NOMBRES (lo que lee el prompt y la tool). */
 export interface AgentCrmTool {
@@ -264,6 +264,12 @@ export async function buildBotConfig(companyId: string, account?: string) {
         : [],
       muteAfterSale: agentConfig.muteAfterSale ?? true,
       negotiationHandoff: agentConfig.negotiationHandoff ?? false,
+      // Compat: antes el toggle del panel guardaba una frase en `rules`; si sigue
+      // ahí, el negocio lo tenía activado → se respeta sin obligar a re-guardar.
+      unknownHandoff:
+        (agentConfig.unknownHandoff ?? false) ||
+        (Array.isArray(agentConfig.rules) && (agentConfig.rules as unknown[]).includes(LEGACY_UNKNOWN_HANDOFF_RULE)),
+      humanChatAlerts: agentConfig.humanChatAlerts ?? true,
       // Rubro Comercial: comportamiento configurable del agente.
       catalogMode: (agentConfig.catalogMode as string) ?? "preguntar",
       keywordMode: (agentConfig.keywordMode as string) ?? "detalle_y_preguntar",

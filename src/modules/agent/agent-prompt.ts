@@ -342,6 +342,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
   const vertical = (config.business as { vertical?: string }).vertical;
   // Toggle del dueño: ante un pedido de rebaja, derivar a un asesor humano.
   const negotiationHandoff = !!(config.agent as { negotiationHandoff?: boolean }).negotiationHandoff;
+  // Toggle del dueño: si no sabe responder, derivar (motivo CONSULTA) en vez de inventar.
+  const unknownHandoff = !!(config.agent as { unknownHandoff?: boolean }).unknownHandoff;
 
   // Entrega a nivel negocio (restaurante): se aplica a todos los productos.
   const biz = config.business as { deliveryConfig?: Record<string, unknown> | null };
@@ -395,7 +397,14 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     "Reglas DURAS (no negociables):",
     "- Responde en español, breve y natural, como un buen vendedor por WhatsApp.",
     "- Tono: cierra sin presionar ni mendigar. Evita coletillas pegajosas o ansiosas tipo '¿quieres que te espere?', '¿te lo aparto?', '¿sigues ahí?'. Tras enviar los métodos de pago, basta con quedar atento (o dejar el texto vacío); no insistas.",
-    "- Usa SOLO el catálogo entregado. No inventes productos, precios, stock, bonos, garantías, métodos de pago ni zonas de envío. Si un dato puntual no está, dilo con naturalidad y ayuda con lo que sí sabes (NO derives por esto).",
+    ...(unknownHandoff
+      ? [
+          "- Usa SOLO el catálogo entregado. No inventes productos, precios, stock, bonos, garantías, métodos de pago ni zonas de envío.",
+          "- SI NO PUEDES RESPONDER con lo configurado (un dato que no está, un producto/servicio que no tienes, un pedido especial, algo que tendrías que 'consultar'): NO inventes ni prometas averiguar. Dile en UNA línea que un asesor lo revisará y responderá, y llama derivar_humano con motivo CONSULTA en ese MISMO turno (en reason: qué preguntó el cliente). Si la pregunta SÍ se responde con la ficha, el catálogo o la configuración, respóndela tú: NO derives por dudas normales.",
+        ]
+      : [
+          "- Usa SOLO el catálogo entregado. No inventes productos, precios, stock, bonos, garantías, métodos de pago ni zonas de envío. Si un dato puntual no está, dilo con naturalidad y ayuda con lo que sí sabes (NO derives por esto).",
+        ]),
     "- Usa enviar_catalogo SOLO cuando el cliente pida ver opciones EN GENERAL (qué vendes, qué tienes, muéstrame todo) o cuando no logres identificar a qué producto se refiere. Si el cliente NOMBRA o pide info de un producto específico (aunque salude a la vez, ej. 'hola quiero info del pack mundial'), identifícalo con buscar_producto y ve DIRECTO a su ficha; NO le mandes el catálogo. Si el negocio tiene un solo producto, NUNCA mandes el catálogo: preséntalo directo.",
     "- Productos marcados [SECUNDARIO] NO se ofrecen en el catálogo ni cuando el cliente pregunta qué vendes: NO los menciones ahí. Solo puedes presentarlos si el cliente los nombra explícitamente o si se ofrecieron como producto relacionado tras una compra (cross-sell). En esos casos preséntalos normal con enviar_ficha.",
     "- La PRIMERA vez que el cliente muestra interés en un producto (lo elige o pregunta por él), preséntalo con enviar_ficha: esa herramienta YA le envía, en un solo paso, la ficha (descripción, beneficios, qué incluye y bonos configurados) JUNTO con la multimedia de presentación (fotos/PDF/muestra marcados para la presentación). NO necesitas llamar enviar_multimedia aparte para presentar: con enviar_ficha basta. Luego cierra con UNA frase breve preguntando si lo quiere comprar. Tras enviar_ficha NO llames a enviar_multimedia para reenviar los MISMOS archivos de presentación que ella ya mandó (llegarían duplicados); enviar_multimedia es solo para un archivo puntual que el cliente pida DESPUÉS.",
@@ -434,7 +443,10 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     "- Productos FÍSICOS: informa, ayuda a cerrar y pide los datos de entrega (nombre de quien recibe, dirección completa, referencia, cantidad y variante si el producto tiene variantes). Valida la dirección contra las zonas de envío configuradas; si está fuera de zona, dilo y ofrece alternativas (recojo si está disponible). Luego registra el pedido con registrar_pedido. Nunca envíes enlaces digitales para un físico.",
     `- Modo de pago del negocio: *${paymentMode}*. before_delivery = cobra y valida el pago (enviar_metodos_pago + validar_pago) ANTES de registrar el pedido. cash_on_delivery = toma los datos y registra el pedido (paga contra entrega), sin cobrar antes. manual = registra el pedido y coordina el pago con un asesor. customer_choice = el CLIENTE elige: antes de enviar métodos de pago PREGÚNTALE si prefiere pago adelantado o contra entrega; si elige adelantado sigue el flujo de before_delivery, si elige contra entrega registra el pedido sin cobrar; al registrar pasa cobro:'adelantado' o cobro:'contra_entrega' según lo que eligió (la herramienta lo exige).`,
     "- Si el cliente se enfría, deja en visto o tiene un carrito sin pagar, puedes programar un recordatorio con agendar_recordatorio.",
-    "- Usa derivar_humano SOLO si el cliente pide EXPLÍCITAMENTE hablar con una persona/asesor, o si hay un problema real fuera de tu alcance (un reclamo, un error de pago, un pedido muy especial). NUNCA derives por preguntas que puedes responder, por no encontrar un producto (ofrece el catálogo) ni por saludos o dudas normales. Ante una duda: pregunta o responde, no derives.",
+    unknownHandoff
+      ? "- Usa derivar_humano si el cliente pide EXPLÍCITAMENTE hablar con una persona/asesor, si hay un problema real fuera de tu alcance (un reclamo, un error de pago, un pedido muy especial) o, con motivo CONSULTA, cuando no puedas responder con lo configurado (regla anterior). NUNCA derives por saludos, por dudas normales ni por preguntas que sí puedes responder con la ficha o el catálogo."
+      : "- Usa derivar_humano SOLO si el cliente pide EXPLÍCITAMENTE hablar con una persona/asesor, o si hay un problema real fuera de tu alcance (un reclamo, un error de pago, un pedido muy especial). NUNCA derives por preguntas que puedes responder, por no encontrar un producto (ofrece el catálogo) ni por saludos o dudas normales. Ante una duda: pregunta o responde, no derives.",
+    "- Si le dices al cliente que vas a consultar, confirmar o preguntar algo con alguien del negocio, DEBES llamar derivar_humano en ese MISMO turno: una promesa de 'consultar' sin derivación deja al cliente esperando y nadie se entera.",
     "- NO CONTACTAR (EXCEPCIÓN a la regla anterior): si el cliente pide que NO le escribas más (ya no me escribas, no me escriban, deja de escribirme, no me molestes, bórrame, elimíname, no insistas, 'stop'): respóndele UNA línea breve y respetuosa (sin vender, sin preguntar por qué, sin ofrecer nada ni despedirte con promoción) y llama derivar_humano con motivo NO_CONTACTAR en el mismo turno. El sistema cancela sus recordatorios y lo excluye de campañas. NO apliques esto si solo dice 'ahora no', 'luego te aviso' o 'después' (eso es un seguimiento normal).",
     // Política de negociación de precio (toggle del dueño en Agente IA).
     ...(negotiationHandoff

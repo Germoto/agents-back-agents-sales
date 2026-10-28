@@ -96,6 +96,10 @@ export type CrmToolConfig = z.infer<typeof crmToolConfigSchema>;
 
 // Núcleo de Agente IA (modelo + prompt). Recordatorios y modo de respuesta se
 // guardan por separado (módulos Recordatorios y Pruebas) para no pisarlos.
+/** Frase que el panel guardaba en `rules` para el viejo toggle «Derivar si no sabe responder» (compat). */
+export const LEGACY_UNKNOWN_HANDOFF_RULE =
+  "Si no sabes algo o no puedes resolverlo, ofrece pasar la conversación con un asesor humano (no inventes).";
+
 export const coreAgentConfigSchema = z.object({
   // Proveedor de IA: openaiModel/openaiApiKey son el modelo/key del proveedor elegido.
   aiProvider: z.enum(["OPENAI", "ANTHROPIC", "GOOGLE"]).default("OPENAI"),
@@ -110,6 +114,10 @@ export const coreAgentConfigSchema = z.object({
   rules: z.array(z.string().min(1)).default([]),
   // Si el cliente pide rebaja: intentar una vez y derivar a un asesor humano.
   negotiationHandoff: z.boolean().optional(),
+  // Si el cliente pregunta algo que no está configurado: derivar (motivo CONSULTA) en vez de inventar.
+  unknownHandoff: z.boolean().optional(),
+  // Avisar al dueño cuando un cliente escribe en un chat en atención humana.
+  humanChatAlerts: z.boolean().optional(),
   // Rubro Comercial: comportamiento del agente configurable.
   catalogMode: z.enum(["preguntar", "resumen_humano", "primeros_n"]).optional(),
   keywordMode: z.enum(["detalle_y_preguntar", "agregar_directo", "auto"]).optional(),

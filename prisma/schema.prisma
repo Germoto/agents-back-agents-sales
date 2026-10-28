@@ -301,6 +301,13 @@ model AgentConfig {
   // intenta una vez con el argumento de valor y luego DERIVA a un asesor humano
   // (en vez de cerrarse con el precio del catálogo). Apagado por defecto.
   negotiationHandoff   Boolean  @default(false)
+  // «Derivar si no sabe responder»: si el cliente pregunta algo que no está en
+  // lo configurado (dato, producto, pedido especial), el agente NO inventa ni
+  // promete consultar: deriva a un asesor con motivo CONSULTA. Apagado por defecto.
+  unknownHandoff       Boolean  @default(false)
+  // Avisar al dueño por WhatsApp cuando un cliente escribe en un chat que está
+  // en atención humana (con freno anti-spam). Activado por defecto.
+  humanChatAlerts      Boolean  @default(true)
   // Rubro Comercial: cómo presenta el agente el catálogo y maneja el match por
   // palabra clave, y si controla stock. Configurables por el dueño.
   catalogMode          String   @default("preguntar") // preguntar | resumen_humano | primeros_n

@@ -1629,7 +1629,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "derivar_humano",
       description:
-        "Pausa el bot y avisa a un asesor humano. Úsalo si el cliente lo pide, si hay un problema que no puedes resolver, (si la política del negocio lo permite) cuando el cliente insiste en negociar el precio, o con motivo NO_CONTACTAR cuando el cliente pide que NO le escriban más (el sistema cancela sus recordatorios y lo excluye de campañas).",
+        "Pausa el bot y avisa a un asesor humano. Úsalo si el cliente lo pide, si hay un problema que no puedes resolver, (si la política del negocio lo permite) cuando el cliente insiste en negociar el precio, con motivo CONSULTA cuando (si la política del negocio lo indica) no puedes responder con lo configurado, o con motivo NO_CONTACTAR cuando el cliente pide que NO le escriban más (el sistema cancela sus recordatorios y lo excluye de campañas).",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1638,8 +1638,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           reason: { type: "string" },
           motivo: {
             type: "string",
-            enum: ["NEGOCIACION", "RECLAMO", "PAGO", "NO_CONTACTAR", "OTRO"],
-            description: "Categoría del traspaso. NEGOCIACION = el cliente pide rebaja/descuento. NO_CONTACTAR = el cliente pide que no le escriban más / que dejen de molestarlo.",
+            enum: ["NEGOCIACION", "RECLAMO", "PAGO", "CONSULTA", "NO_CONTACTAR", "OTRO"],
+            description: "Categoría del traspaso. NEGOCIACION = el cliente pide rebaja/descuento. CONSULTA = preguntó algo que no puedes responder con lo configurado. NO_CONTACTAR = el cliente pide que no le escriban más / que dejen de molestarlo.",
           },
         },
       },
@@ -3032,13 +3032,16 @@ export async function executeTool(
       // El motivo va tipado entre corchetes para que el aviso al dueño y el
       // panel puedan distinguir una negociación de un reclamo o un problema.
       const motivo = String(args.motivo ?? "").toUpperCase();
-      const tag = ["NEGOCIACION", "RECLAMO", "PAGO", "NO_CONTACTAR", "OTRO"].includes(motivo) ? `[${motivo}]` : "";
+      const tag = ["NEGOCIACION", "RECLAMO", "PAGO", "CONSULTA", "NO_CONTACTAR", "OTRO"].includes(motivo) ? `[${motivo}]` : "";
       ctx.state.pendingAction = `HUMAN${tag}: ${String(args.reason ?? "")}`;
       if (motivo === "NO_CONTACTAR") {
         return JSON.stringify({
           ok: true,
           note: "Listo: el cliente queda marcado como NO CONTACTAR (se cancelan sus recordatorios y se excluye de campañas). Despídete en UNA línea breve y respetuosa, sin vender ni preguntar nada.",
         });
+      }
+      if (motivo === "CONSULTA") {
+        return JSON.stringify({ ok: true, note: "Listo: un asesor recibió la consulta con el link al chat. Dile al cliente en UNA línea que un asesor lo revisará y le responderá por aquí; no inventes la respuesta." });
       }
       return JSON.stringify({ ok: true, note: "Conversación marcada para asesor humano. Despídete amablemente indicando que un asesor continuará." });
     }

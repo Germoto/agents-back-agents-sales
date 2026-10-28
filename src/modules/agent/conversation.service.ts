@@ -35,6 +35,8 @@ export interface ConversationState {
   activeOffer?: { productId?: string | null; priceText: string; at?: string; source?: string } | null;
   lastPaymentPromptAt?: string | null;
   pendingAction?: string | null;
+  /** Último aviso al dueño «cliente escribió en un chat en atención humana» (freno anti-spam). */
+  humanAlertAt?: string | null;
   offerExpiresAt?: string | null;
   /** Productos cuya ficha ya se envió en esta conversación (evita reenviarla). */
   presentedProductIds?: string[];
