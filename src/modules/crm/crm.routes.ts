@@ -8,6 +8,7 @@ import {
   updateCrmController,
   deleteCrmController,
   getBoardController,
+  listInboxController,
   createColumnController,
   updateColumnController,
   deleteColumnController,
@@ -38,6 +39,8 @@ import {
   bulkMoveSchema,
   bulkTagsSchema,
   bulkDealsSchema,
+  boardQuerySchema,
+  inboxQuerySchema,
 } from "./crm.schemas";
 
 const router = Router();
@@ -81,7 +84,8 @@ router.put("/:id", validate({ body: upsertCrmSchema }), asyncHandler(updateCrmCo
 router.delete("/:id", asyncHandler(deleteCrmController));
 
 // --- Board / columnas / move ---
-router.get("/:id/board", asyncHandler(getBoardController));
+router.get("/:id/board", validate({ query: boardQuerySchema }), asyncHandler(getBoardController));
+router.get("/:id/inbox", validate({ query: inboxQuerySchema }), asyncHandler(listInboxController));
 router.post(
   "/:id/columns",
   validate({ body: upsertColumnSchema }),

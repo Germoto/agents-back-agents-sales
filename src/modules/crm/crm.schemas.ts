@@ -69,3 +69,21 @@ export const bulkDealsSchema = z.object({
 export const bulkDeleteSchema = z.object({
   ids: z.array(z.string().uuid()).min(1).max(500),
 });
+
+// --- Tablero / Inbox paginado ---
+const inboxSort = {
+  sortBy: z.enum(["lastMessage", "openedAt"]).default("lastMessage"),
+  dir: z.enum(["asc", "desc"]).default("desc"),
+};
+
+export const boardQuerySchema = z.object({
+  inboxLimit: z.coerce.number().int().min(10).max(200).default(100),
+  ...inboxSort,
+});
+
+export const inboxQuerySchema = z.object({
+  q: z.string().trim().max(80).default(""),
+  offset: z.coerce.number().int().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  ...inboxSort,
+});

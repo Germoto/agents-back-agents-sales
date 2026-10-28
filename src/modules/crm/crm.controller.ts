@@ -5,6 +5,8 @@ import {
   updateCrm,
   deleteCrm,
   getBoard,
+  listInboxConversations,
+  type InboxSortBy,
   createColumn,
   updateColumn,
   deleteColumn,
@@ -48,7 +50,25 @@ export async function deleteCrmController(req: Request, res: Response) {
 // --- Board / columnas / move ---
 
 export async function getBoardController(req: Request, res: Response) {
-  return res.json(await getBoard(req.user!.companyId, String(req.params.id)));
+  const q = req.query as { inboxLimit?: number; sortBy?: InboxSortBy; dir?: "asc" | "desc" };
+  return res.json(
+    await getBoard(req.user!.companyId, String(req.params.id), {
+      limit: q.inboxLimit,
+      sortBy: q.sortBy,
+      dir: q.dir,
+    }),
+  );
+}
+
+export async function listInboxController(req: Request, res: Response) {
+  const q = req.query as {
+    q?: string;
+    offset?: number;
+    limit?: number;
+    sortBy?: InboxSortBy;
+    dir?: "asc" | "desc";
+  };
+  return res.json(await listInboxConversations(req.user!.companyId, String(req.params.id), q));
 }
 
 export async function createColumnController(req: Request, res: Response) {

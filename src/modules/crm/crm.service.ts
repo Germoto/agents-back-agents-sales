@@ -14,6 +14,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
+import { normalizePhoneDigits } from "../../lib/identifier";
 
 function emitCrmUpdated(companyId: string, crmId?: string) {
   socketService.emitToCompany(companyId, SOCKET_EVENTS.CRM_UPDATED, { crmId: crmId ?? null });
@@ -217,91 +218,123 @@ interface LastMessageRow {
   createdAt: Date;
 }
 
-export async function getBoard(companyId: string, crmId: string) {
-  // 1+2 en paralelo: CRM + columnas + cards, y conversaciones del tenant.
-  // OJO rendimiento: el `messages: { take: 1 }` anidado de antes generaba una
-  // subconsulta lateral POR CADA conversación (miles con data real = 3-5 s).
-  // Ahora los últimos mensajes se resuelven en UNA sola query DISTINCT ON.
-  const [crm, conversations] = await Promise.all([
-    prisma.crm.findFirst({
-      where: { id: crmId, companyId },
-      select: {
-        ...crmSelect,
-        columns: {
-          orderBy: { sortOrder: "asc" },
-          select: {
-            ...columnSelect,
-            cards: {
-              orderBy: { sortOrder: "asc" },
-              select: {
-                customerId: true,
-                sortOrder: true,
-                customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true, adSourceId: true, adTitle: true, metadata: true } },
-              },
-            },
-          },
-        },
-      },
-    }),
-    prisma.conversation.findMany({
-      where: { companyId, channel: { in: ["whatsapp", "web"] } },
-      orderBy: { lastMessageAt: "desc" },
-      select: {
-        id: true,
-        customerId: true,
-        botPaused: true,
-        lastMessageAt: true,
-        openedAt: true,
-        customer: { select: { id: true, name: true, phone: true, waUsername: true, avatarUrl: true, adSourceId: true, adTitle: true, metadata: true } },
-      },
-    }),
-  ]);
-  if (!crm) throw new AppError("CRM no encontrado", 404);
+const BOARD_CHANNELS = ["whatsapp", "web"];
+/** Tamaño por defecto de la primera página del Inbox (el panel pide más con «Cargar más»). */
+export const INBOX_DEFAULT_LIMIT = 100;
+const INBOX_MAX_LIMIT = 500;
+/** Sobre-lectura para absorber clientes con conversación de WhatsApp Y de web (se dedupe por cliente). */
+const INBOX_OVERFETCH = 20;
 
-  // Un cliente puede tener conversación de WhatsApp Y de web: nos quedamos con
-  // la más reciente (la lista viene ordenada por lastMessageAt desc).
-  const convoByCustomer = new Map<string, (typeof conversations)[number]>();
-  for (const c of conversations) {
-    if (!convoByCustomer.has(c.customerId)) convoByCustomer.set(c.customerId, c);
+const boardCustomerSelect = {
+  id: true,
+  name: true,
+  phone: true,
+  waUsername: true,
+  avatarUrl: true,
+  adSourceId: true,
+  adTitle: true,
+  metadata: true,
+} satisfies Prisma.CustomerSelect;
+
+const boardConversationSelect = {
+  id: true,
+  customerId: true,
+  botPaused: true,
+  lastMessageAt: true,
+  openedAt: true,
+  customer: { select: boardCustomerSelect },
+} satisfies Prisma.ConversationSelect;
+
+type BoardCustomerRow = Prisma.CustomerGetPayload<{ select: typeof boardCustomerSelect }>;
+type BoardConversationRow = Prisma.ConversationGetPayload<{ select: typeof boardConversationSelect }>;
+
+export type InboxSortBy = "lastMessage" | "openedAt";
+export interface InboxQuery {
+  /** Búsqueda por nombre, usuario de WhatsApp o teléfono (dígitos). */
+  q?: string;
+  offset?: number;
+  limit?: number;
+  sortBy?: InboxSortBy;
+  dir?: "asc" | "desc";
+}
+
+export interface InboxPage {
+  items: CrmBoardCard[];
+  /** Conversaciones sin colocar en este CRM (cuenta canales: un cliente con WhatsApp y web suma 2). */
+  total: number;
+  hasMore: boolean;
+  nextOffset: number;
+}
+
+/**
+ * Un cliente puede tener conversación de WhatsApp Y de web: nos quedamos con la
+ * primera de la lista (ya viene ordenada). Devuelve también cuántas filas crudas
+ * se consumieron para llenar `limit` tarjetas (para calcular el siguiente offset).
+ */
+function dedupeByCustomer(rows: BoardConversationRow[], limit = Infinity) {
+  const seen = new Set<string>();
+  const items: BoardConversationRow[] = [];
+  let consumed = 0;
+  for (const row of rows) {
+    consumed++;
+    if (seen.has(row.customerId)) continue;
+    seen.add(row.customerId);
+    items.push(row);
+    if (items.length >= limit) break;
   }
+  return { items, consumed };
+}
 
-  const placedCustomerIds = new Set(
-    crm.columns.flatMap((col) => col.cards.map((card) => card.customerId)),
-  );
-  const allCustomerIds = [
-    ...new Set([...placedCustomerIds, ...conversations.map((c) => c.customerId)]),
+/**
+ * Enriquecimiento común de tarjetas: último mensaje (DISTINCT ON, una sola
+ * query), etiquetas, comprobantes aprobados, deals y anuncio de origen. Todas
+ * las consultas van por ids, así el costo es proporcional a las tarjetas
+ * pedidas y no al historial del negocio (antes el Inbox traía TODAS las
+ * conversaciones: miles con data real).
+ *
+ * `conversations` ya dedupeadas por cliente; `placed` = tarjetas colocadas en
+ * columnas (pueden no tener conversación: clientes creados a mano o por campaña).
+ */
+async function buildBoardCards(
+  companyId: string,
+  conversations: BoardConversationRow[],
+  placed: Array<{ customer: BoardCustomerRow; sortOrder: number | null }> = [],
+): Promise<Map<string, CrmBoardCard>> {
+  const cards = new Map<string, CrmBoardCard>();
+  const convoByCustomer = new Map(conversations.map((c) => [c.customerId, c]));
+  const customerIds = [
+    ...new Set([...placed.map((p) => p.customer.id), ...conversations.map((c) => c.customerId)]),
   ];
-  // Solo necesitamos el último mensaje de la conversación que se muestra por
-  // cliente (la más reciente), no de todas.
-  const shownConversationIds = [...convoByCustomer.values()].map((c) => c.id);
+  if (!customerIds.length) return cards;
+  const conversationIds = conversations.map((c) => c.id);
 
-  // 3-5 + últimos mensajes, en paralelo (todas dependen solo de los IDs).
-  const [lastMessages, tagLinks, receipts, dealSums] = await Promise.all([
+  const [lastMessages, tagLinks, receipts, dealSums, adMap] = await Promise.all([
     // Último mensaje por conversación en UNA query (usa el índice
     // ConversationMessage(conversationId, createdAt)).
-    shownConversationIds.length
+    conversationIds.length
       ? prisma.$queryRaw<LastMessageRow[]>`
           SELECT DISTINCT ON ("conversationId")
             "conversationId", "message", "role"::text AS "role", "mediaType", "createdAt"
           FROM "ConversationMessage"
-          WHERE "conversationId" = ANY(${shownConversationIds}::uuid[])
+          WHERE "conversationId" = ANY(${conversationIds}::uuid[])
           ORDER BY "conversationId", "createdAt" DESC`
       : Promise.resolve([] as LastMessageRow[]),
     prisma.customerTagLink.findMany({
-      where: { customerId: { in: allCustomerIds }, tag: { companyId } },
+      where: { customerId: { in: customerIds }, tag: { companyId } },
       select: { customerId: true, tag: { select: { id: true, name: true, color: true } } },
     }),
     // Suma de comprobantes APROBADOS (amounts son String legacy => sumar en JS)
     prisma.paymentReceipt.findMany({
-      where: { companyId, status: "APROBADO", customerId: { in: allCustomerIds } },
+      where: { companyId, status: "APROBADO", customerId: { in: customerIds } },
       select: { customerId: true, amountPaid: true, amountExpected: true },
     }),
     // Suma de valores de negocio manuales
     prisma.customerDeal.groupBy({
       by: ["customerId"],
-      where: { companyId, customerId: { in: allCustomerIds } },
+      where: { companyId, customerId: { in: customerIds } },
       _sum: { amount: true },
     }),
+    resolveAdDescriptions(companyId),
   ]);
 
   const lastMessageByConvo = new Map(lastMessages.map((m) => [m.conversationId, m]));
@@ -325,19 +358,7 @@ export async function getBoard(companyId: string, crmId: string) {
     dealSums.map((d) => [d.customerId, Number(d._sum.amount ?? 0)]),
   );
 
-  const adMap = await resolveAdDescriptions(companyId);
-
-  function buildCard(
-    customer: {
-      id: string;
-      name: string | null;
-      phone: string;
-      adSourceId?: string | null;
-      adTitle?: string | null;
-      metadata?: unknown;
-    },
-    sortOrder: number | null,
-  ): CrmBoardCard {
+  function buildCard(customer: BoardCustomerRow, sortOrder: number | null): CrmBoardCard {
     const convo = convoByCustomer.get(customer.id) ?? null;
     const last = convo ? lastMessageByConvo.get(convo.id) ?? null : null;
     const { adSourceId, adTitle, metadata, ...customerRest } = customer;
@@ -359,24 +380,126 @@ export async function getBoard(companyId: string, crmId: string) {
     };
   }
 
+  for (const p of placed) cards.set(p.customer.id, buildCard(p.customer, p.sortOrder));
+  for (const c of conversations) {
+    if (!cards.has(c.customerId)) cards.set(c.customerId, buildCard(c.customer, null));
+  }
+  return cards;
+}
+
+/** Filtro del Inbox: conversaciones del negocio cuyo cliente NO está colocado en este CRM (+ búsqueda). */
+function inboxWhere(companyId: string, crmId: string, q?: string): Prisma.ConversationWhereInput {
+  const term = (q ?? "").trim();
+  const customer: Prisma.CustomerWhereInput = { crmCards: { none: { crmId } } };
+  if (term) {
+    const digits = normalizePhoneDigits(term);
+    customer.OR = [
+      { name: { contains: term, mode: "insensitive" } },
+      { waUsername: { contains: term, mode: "insensitive" } },
+      ...(digits ? [{ phone: { contains: digits } }] : []),
+    ];
+  }
+  return { companyId, channel: { in: BOARD_CHANNELS }, customer };
+}
+
+async function queryInbox(companyId: string, crmId: string, opts: InboxQuery): Promise<InboxPage> {
+  const limit = Math.max(1, Math.min(opts.limit ?? INBOX_DEFAULT_LIMIT, INBOX_MAX_LIMIT));
+  const offset = Math.max(0, opts.offset ?? 0);
+  const dir = opts.dir ?? "desc";
+  const where = inboxWhere(companyId, crmId, opts.q);
+  const orderBy: Prisma.ConversationOrderByWithRelationInput[] =
+    opts.sortBy === "openedAt" ? [{ openedAt: dir }, { id: "asc" }] : [{ lastMessageAt: dir }, { id: "asc" }];
+
+  const [rows, total] = await Promise.all([
+    prisma.conversation.findMany({
+      where,
+      orderBy,
+      skip: offset,
+      take: limit + INBOX_OVERFETCH,
+      select: boardConversationSelect,
+    }),
+    prisma.conversation.count({ where }),
+  ]);
+  const { items: convos, consumed } = dedupeByCustomer(rows, limit);
+  const cards = await buildBoardCards(companyId, convos);
+  const nextOffset = offset + consumed;
+  return {
+    items: convos.map((c) => cards.get(c.customerId)!),
+    total,
+    // Quedan filas sin consumir en este tramo, o el tramo vino lleno y el total dice que hay más.
+    hasMore: consumed < rows.length || (rows.length >= limit + INBOX_OVERFETCH && nextOffset < total),
+    nextOffset,
+  };
+}
+
+/** Página del Inbox de un CRM (últimas conversaciones sin colocar, con búsqueda). */
+export async function listInboxConversations(
+  companyId: string,
+  crmId: string,
+  opts: InboxQuery = {},
+): Promise<InboxPage> {
+  await assertCrmOwned(companyId, crmId);
+  return queryInbox(companyId, crmId, opts);
+}
+
+export async function getBoard(
+  companyId: string,
+  crmId: string,
+  inbox: Pick<InboxQuery, "limit" | "sortBy" | "dir"> = {},
+) {
+  // CRM + columnas + placements, y la primera página del Inbox, en paralelo.
+  const [crm, inboxPage] = await Promise.all([
+    prisma.crm.findFirst({
+      where: { id: crmId, companyId },
+      select: {
+        ...crmSelect,
+        columns: {
+          orderBy: { sortOrder: "asc" },
+          select: {
+            ...columnSelect,
+            cards: {
+              orderBy: { sortOrder: "asc" },
+              select: { customerId: true, sortOrder: true, customer: { select: boardCustomerSelect } },
+            },
+          },
+        },
+      },
+    }),
+    queryInbox(companyId, crmId, { ...inbox, offset: 0 }),
+  ]);
+  if (!crm) throw new AppError("CRM no encontrado", 404);
+
+  // Conversaciones SOLO de los clientes colocados (cientos, no el historial entero).
+  const placed = crm.columns.flatMap((col) => col.cards);
+  const placedIds = placed.map((c) => c.customerId);
+  const placedConvos = placedIds.length
+    ? await prisma.conversation.findMany({
+        where: { companyId, channel: { in: BOARD_CHANNELS }, customerId: { in: placedIds } },
+        orderBy: { lastMessageAt: "desc" },
+        select: boardConversationSelect,
+      })
+    : [];
+  const cards = await buildBoardCards(
+    companyId,
+    dedupeByCustomer(placedConvos).items,
+    placed.map((c) => ({ customer: c.customer, sortOrder: c.sortOrder })),
+  );
+
   const columns = crm.columns.map((col) => ({
     id: col.id,
     name: col.name,
     color: col.color,
     sortOrder: col.sortOrder,
-    cards: col.cards.map((card) => buildCard(card.customer, card.sortOrder)),
+    cards: col.cards.map((card) => cards.get(card.customerId)!),
   }));
-
-  // Inbox: conversaciones cuyo cliente no está colocado en este CRM (ya vienen
-  // ordenadas por lastMessageAt desc)
-  const inbox = conversations
-    .filter((c) => !placedCustomerIds.has(c.customerId))
-    .map((c) => buildCard(c.customer, null));
 
   return {
     crm: { id: crm.id, name: crm.name, description: crm.description, color: crm.color },
     columns,
-    inbox,
+    inbox: inboxPage.items,
+    inboxTotal: inboxPage.total,
+    inboxHasMore: inboxPage.hasMore,
+    inboxNextOffset: inboxPage.nextOffset,
   };
 }
 
