@@ -53,7 +53,25 @@ import { listOrders, updateOrderStatus } from "../orders/orders.service";
 import { createNote, deleteCustomer, getCustomer, listNotes, updateCustomer, removeCustomerFlowVars } from "../customers/customers.service";
 import { listCrmStructure } from "../crm/crm.service";
 import { crmToolConfigSchema } from "../agent-config/agent-config.schemas";
-import { listConversations, listConversationMessages, setConversationPinned, setCustomerOptOut } from "../agent/conversation.service";
+import {
+  listConversations,
+  listConversationMessages,
+  setConversationPinned,
+  setCustomerOptOut,
+  sendHumanReply,
+  sendHumanMedia,
+  setBotPaused,
+  setHumanReason,
+  reactToMessage,
+  scheduleManualReminder,
+  startConversation,
+  resetConversation,
+} from "../agent/conversation.service";
+import { loadWhatsappSender, mediaKindFor } from "../agent/outbound";
+import { checkManualSendGate, COPILOT_SOURCE } from "../agent/manual-send-gate";
+import { sendQuickReply } from "../quick-replies/quick-replies.service";
+import { cancelPendingReminders } from "../scheduler/scheduler.service";
+import { Prisma, ScheduledMessageType } from "@prisma/client";
 import { createBooking, createScheduleBlock, deleteScheduleBlock, listBookings, listScheduleBlocks, rescheduleBooking, updateBookingStatus } from "../bookings/bookings.service";
 import type { OrderStatus, ServiceBookingStatus } from "@prisma/client";
 import { listCampaigns, getCampaign, listRecipients, createCampaign, updateCampaign, deleteCampaign, startCampaign, pauseCampaign, resumeCampaign, cancelCampaign, testCampaign, buildExclusionSets, filterAudience } from "../campaigns/campaigns.service";
@@ -868,6 +886,133 @@ export const TOOLS: ToolDefinition[] = [
         additionalProperties: false,
         required: ["cliente"],
         properties: { cliente: { type: "string", description: "teléfono o id del cliente" }, fijar: { type: "boolean", description: "true = fijar (default), false = desfijar" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "enviar_mensaje_cliente",
+      description:
+        "ESCRIBE al cliente por WhatsApp (o chat web) COMO ASESOR (igual que responder desde el panel): texto y/o un adjunto (imagen, video o PDF por URL). Por defecto pasa el chat a ATENCIÓN HUMANA (el agente IA deja de responder a ese cliente hasta atencion_humana activar:false). Antes lee la conversación con leer_conversacion. Respeta no contactar, la ventana de 24 h (Meta) y el ritmo anti-bloqueo (puede devolver reintentarEnSeg). La firma del negocio se agrega sola. Un mensaje por llamada; no inventes precios ni enlaces (usa ver_producto/ver_configuracion). No crea chats nuevos: para un número sin conversación usa iniciar_conversacion.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phone"],
+        properties: {
+          phone: { type: "string", description: "teléfono (o id) del cliente" },
+          mensaje: { type: "string", description: "texto a enviar (opcional si va adjunto; con adjunto es el caption)" },
+          mediaUrl: { type: "string", description: "URL http(s) de imagen/video/PDF: archivo del producto, imagen de generar_imagen, recurso de listar_recursos o URL pública" },
+          nombreArchivo: { type: "string", description: "nombre visible del PDF/documento (opcional)" },
+          citarMensajeId: { type: "string", description: "id de un mensaje de leer_conversacion para responder citándolo (opcional)" },
+          pasarAHumano: { type: "boolean", description: "default true: pausa el agente IA en este chat (atención humana). false = solo enviar" },
+          motivo: { type: "string", description: "motivo corto que verá el dueño en el panel (ej. 'Copiloto cerrando venta')" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "atencion_humana",
+      description:
+        "Toma o DEVUELVE el control de un chat. activar:true = pausa el agente IA (atención humana; también cancela sus recordatorios automáticos). activar:false = REACTIVA el bot: el agente vuelve a responder al cliente. Úsala al terminar de atender a alguien por aquí.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phone", "activar"],
+        properties: {
+          phone: { type: "string", description: "teléfono (o id) del cliente" },
+          activar: { type: "boolean", description: "true = pausar el bot (humano atiende); false = reactivar el bot" },
+          motivo: { type: "string", description: "motivo corto al pausar (lo ve el dueño en el panel)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "enviar_respuesta_rapida",
+      description:
+        "Envía al cliente una RESPUESTA RÁPIDA del asesor (secuencia completa de mensajes/multimedia, con sus acciones de etiquetas/CRM/producto presentado), como el /comando del panel. Busca con ver_respuestas_rapidas. Por defecto toma el control del chat (pausa el agente IA). Respeta no contactar, ventana 24 h y ritmo anti-bloqueo.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phone", "respuesta"],
+        properties: {
+          phone: { type: "string", description: "teléfono (o id) del cliente" },
+          respuesta: { type: "string", description: "id, /comando o título de la respuesta rápida" },
+          tomarControl: { type: "boolean", description: "default true: pausa el agente IA en este chat" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "reaccionar_mensaje",
+      description: "Reacciona con un emoji a un mensaje del chat (como en WhatsApp). emoji '' quita la reacción. Necesita el id del mensaje (leer_conversacion). No disponible en chat web.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phone", "mensajeId", "emoji"],
+        properties: {
+          phone: { type: "string", description: "teléfono (o id) del cliente" },
+          mensajeId: { type: "string", description: "id del mensaje (de leer_conversacion)" },
+          emoji: { type: "string", description: "un emoji, o '' para quitar" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "programar_recordatorio_cliente",
+      description:
+        "Programa un RECORDATORIO MANUAL para un cliente (como el botón del chat): un mensaje (y opcional multimedia) que sale a la hora indicada aunque el chat esté en atención humana. Lo envía el sistema con su ritmo anti-bloqueo y horario hábil; en Meta fuera de la ventana de 24 h usa la plantilla de respaldo del negocio. Indica enviarEn (fecha-hora ISO en la zona del negocio) o enMinutos.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phone", "mensaje"],
+        properties: {
+          phone: { type: "string", description: "teléfono (o id) del cliente" },
+          mensaje: { type: "string" },
+          enviarEn: { type: "string", description: "fecha-hora ISO futura (ej. 2026-10-28T18:30:00-05:00)" },
+          enMinutos: { type: "number", description: "alternativa: minutos desde ahora" },
+          mediaUrl: { type: "string", description: "URL http(s) de imagen/video/PDF (opcional)" },
+          mediaType: { type: "string", enum: ["image", "video", "document"], description: "tipo del adjunto (default según extensión)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "iniciar_conversacion",
+      description:
+        "Abre una conversación NUEVA con un número que aún no tiene chat y envía el primer mensaje como asesor (botón 'Nueva conversación' del panel). No pausa el bot: si el cliente responde, el agente IA continúa. Respeta el ritmo anti-bloqueo; con Meta un número que nunca escribió está fuera de la ventana de 24 h y se rechaza (usa una campaña con plantilla). SOLO tras confirmación del dueño.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phone", "mensaje"],
+        properties: {
+          phone: { type: "string", description: "número con código de país (ej. 51999888777)" },
+          mensaje: { type: "string" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "reiniciar_conversacion",
+      description:
+        "REINICIA el chat de un cliente como el botón 'Reiniciar' del panel: borra el historial de mensajes y el carrito, limpia el estado del agente, reactiva el bot y cancela sus recordatorios pendientes. El cliente NO recibe nada. Irreversible: SOLO si el dueño lo pidió explícitamente y confirmó.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["phone"],
+        properties: { phone: { type: "string", description: "teléfono (o id) del cliente" } },
       },
     },
   },
@@ -1949,6 +2094,49 @@ async function findCustomerRef(companyId: string, ref: unknown) {
   if (!c) throw new AppError(`No encontré un cliente con «${raw}»`, 404);
   return c;
 }
+
+/**
+ * Cliente (id o teléfono) + su conversación más reciente de WhatsApp/chat web,
+ * con lo que necesita la compuerta de envíos manuales del copiloto.
+ */
+async function findChatByRef(companyId: string, ref: unknown) {
+  const customer = await findCustomerRef(companyId, ref);
+  const convo = await prisma.conversation.findFirst({
+    where: { companyId, customerId: customer.id, channel: { in: ["whatsapp", "web"] } },
+    orderBy: { lastMessageAt: "desc" },
+    select: { id: true, channel: true, botPaused: true, status: true, customer: { select: { optOutAt: true } } },
+  });
+  if (!convo) throw new AppError(`${customer.name ?? customer.phone} no tiene conversación todavía (para escribirle por primera vez usa iniciar_conversacion)`, 404);
+  return { customer, convo };
+}
+
+/** Proveedor con el que saldría un envío manual (la ventana de 24 h solo aplica a META). */
+async function senderProviderFor(companyId: string, channel: string): Promise<"SMSTOOLS" | "META" | "WEB" | null> {
+  if (channel === "web") return "WEB";
+  const sender = await loadWhatsappSender(companyId);
+  return sender?.provider ?? null;
+}
+
+/** Pausa el bot en nombre del copiloto con motivo persistente (si no estaba ya pausado). */
+async function takeControlByCopilot(companyId: string, convo: { id: string; botPaused: boolean }, motivo: unknown) {
+  if (convo.botPaused) return false;
+  const reason = String(motivo ?? "").trim() || "Copiloto atendiendo el chat";
+  await setHumanReason(convo.id, "COPILOTO", reason);
+  await setBotPaused(companyId, convo.id, true, { reason });
+  return true;
+}
+
+function mediaKindFromUrl(url: string, explicit?: unknown): "image" | "video" | "document" {
+  const e = String(explicit ?? "").toLowerCase();
+  if (e === "image" || e === "video" || e === "document") return e;
+  const ext = (url.split("?")[0].split("#")[0].match(/\.([a-z0-9]{2,5})$/i)?.[1] ?? "").toLowerCase();
+  if (["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) return "image";
+  if (["mp4", "mov", "3gp", "webm"].includes(ext)) return "video";
+  const kind = mediaKindFor(ext === "pdf" ? "pdf" : "document");
+  return kind === "audio" ? "document" : kind;
+}
+
+const NOTA_ATENCION_HUMANA = "El agente IA NO responderá a este cliente hasta que lo reactives con atencion_humana {activar:false}.";
 
 /** Nombres de etiquetas → ids (error si alguna no existe). */
 async function tagIdsByName(companyId: string, names: unknown): Promise<string[] | undefined> {
@@ -3239,7 +3427,14 @@ export async function runCopilotTool(
         result: JSON.stringify({
           cliente: { nombre: customer.name, phone: customer.phone },
           ...(respuestasDelFlujo && Object.keys(respuestasDelFlujo).length ? { respuestasDelFlujo } : {}),
-          mensajes: messages.map((m) => ({ rol: m.role, texto: String(m.message ?? "").slice(0, 300), fecha: m.createdAt })),
+          mensajes: messages.map((m) => ({
+            id: m.id,
+            rol: m.role,
+            texto: String(m.message ?? "").slice(0, 300),
+            ...(m.mediaType ? { media: m.mediaType } : {}),
+            fecha: m.createdAt,
+          })),
+          nota: "Para responder como asesor usa enviar_mensaje_cliente (citarMensajeId = id); para reaccionar, reaccionar_mensaje.",
         }),
         wrote: false,
       };
@@ -3259,6 +3454,218 @@ export async function runCopilotTool(
         return { result: JSON.stringify({ ok: true, fijado: fijar }), wrote: true };
       } catch (err) {
         return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no encontrado" }), wrote: false };
+      }
+    }
+
+    case "enviar_mensaje_cliente": {
+      try {
+        const mensaje = String(args.mensaje ?? "").trim();
+        const mediaUrl = String(args.mediaUrl ?? "").trim();
+        if (!mensaje && !mediaUrl) return { result: JSON.stringify({ ok: false, error: "indica mensaje y/o mediaUrl" }), wrote: false };
+        if (mediaUrl && !/^https?:\/\/\S+$/i.test(mediaUrl)) return { result: JSON.stringify({ ok: false, error: "mediaUrl debe ser una URL http(s) real (archivo del producto, generar_imagen, listar_recursos o URL pública); nunca un data:URI" }), wrote: false };
+        const { customer, convo } = await findChatByRef(companyId, args.phone);
+        if (convo.status === "CLOSED") return { result: JSON.stringify({ ok: false, error: "la conversación está cerrada" }), wrote: false };
+        const provider = await senderProviderFor(companyId, convo.channel);
+        if (!provider) return { result: JSON.stringify({ ok: false, error: "no hay una cuenta de WhatsApp activa para enviar (panel → WhatsApp API)" }), wrote: false };
+        const gate = await checkManualSendGate({ companyId, customerId: customer.id, provider, optOutAt: convo.customer.optOutAt });
+        if (!gate.ok) return { result: JSON.stringify(gate), wrote: false };
+
+        let tipo: string;
+        if (mediaUrl) {
+          const kind = mediaKindFromUrl(mediaUrl);
+          await sendHumanMedia(
+            companyId,
+            convo.id,
+            { mediaUrl, mediaKind: kind, caption: mensaje || undefined, fileName: args.nombreArchivo ? String(args.nombreArchivo) : undefined },
+            { source: COPILOT_SOURCE },
+          );
+          tipo = kind;
+        } else {
+          await sendHumanReply(companyId, convo.id, mensaje, {
+            quoteMessageId: args.citarMensajeId ? String(args.citarMensajeId) : null,
+            source: COPILOT_SOURCE,
+          });
+          tipo = "text";
+        }
+        const pausado = args.pasarAHumano === false ? false : await takeControlByCopilot(companyId, convo, args.motivo);
+        const atencionHumana = convo.botPaused || pausado;
+        return {
+          result: JSON.stringify({
+            ok: true,
+            enviado: { phone: customer.phone, nombre: customer.name, tipo, rol: "ADMIN", canal: convo.channel },
+            atencionHumana,
+            ritmo: { esperadoSeg: gate.esperadoSeg, enviadosUltimaHora: gate.enviadosUltimaHora + 1, topeHora: gate.topeHora },
+            nota: atencionHumana ? NOTA_ATENCION_HUMANA : "El agente IA sigue activo en este chat.",
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo enviar" }), wrote: false };
+      }
+    }
+
+    case "atencion_humana": {
+      try {
+        const { customer, convo } = await findChatByRef(companyId, args.phone);
+        const activar = args.activar === true;
+        if (activar) {
+          const pausado = await takeControlByCopilot(companyId, convo, args.motivo);
+          return {
+            result: JSON.stringify({ ok: true, atencionHumana: true, cambio: pausado, cliente: { phone: customer.phone, nombre: customer.name }, nota: pausado ? NOTA_ATENCION_HUMANA : "Ya estaba en atención humana." }),
+            wrote: pausado,
+          };
+        }
+        if (!convo.botPaused) {
+          return { result: JSON.stringify({ ok: true, atencionHumana: false, cambio: false, nota: "El bot ya estaba activo en este chat." }), wrote: false };
+        }
+        await setHumanReason(convo.id, "COPILOTO", null);
+        await setBotPaused(companyId, convo.id, false);
+        return {
+          result: JSON.stringify({ ok: true, atencionHumana: false, cambio: true, cliente: { phone: customer.phone, nombre: customer.name }, nota: "Bot reactivado: el agente IA vuelve a responder a este cliente." }),
+          wrote: true,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no encontrado" }), wrote: false };
+      }
+    }
+
+    case "enviar_respuesta_rapida": {
+      try {
+        const ref = String(args.respuesta ?? "").trim();
+        if (!ref) return { result: JSON.stringify({ ok: false, error: "indica la respuesta rápida (id, /comando o título)" }), wrote: false };
+        const replies = await listQuickReplies(companyId);
+        const refCmd = ref.replace(/^\/+/, "").toLowerCase().replace(/\s+/g, "");
+        const refLower = ref.toLowerCase();
+        const qr =
+          replies.find((r) => r.id === ref) ??
+          replies.find((r) => (r.command ?? "").toLowerCase() === refCmd) ??
+          replies.find((r) => r.title.trim().toLowerCase() === refLower) ??
+          replies.find((r) => r.title.toLowerCase().includes(refLower));
+        if (!qr) return { result: JSON.stringify({ ok: false, error: `no encontré la respuesta rápida «${ref}»`, disponibles: replies.slice(0, 20).map((r) => ({ id: r.id, titulo: r.title, comando: r.command ? `/${r.command}` : null })) }), wrote: false };
+        const { customer, convo } = await findChatByRef(companyId, args.phone);
+        if (convo.channel === "web") return { result: JSON.stringify({ ok: false, error: "las respuestas rápidas solo salen por WhatsApp; en chat web usa enviar_mensaje_cliente" }), wrote: false };
+        const provider = await senderProviderFor(companyId, convo.channel);
+        if (!provider) return { result: JSON.stringify({ ok: false, error: "no hay una cuenta de WhatsApp activa para enviar (panel → WhatsApp API)" }), wrote: false };
+        const gate = await checkManualSendGate({ companyId, customerId: customer.id, provider, optOutAt: convo.customer.optOutAt });
+        if (!gate.ok) return { result: JSON.stringify(gate), wrote: false };
+        const tomarControl = args.tomarControl !== false;
+        if (tomarControl) await setHumanReason(convo.id, "COPILOTO", `Respuesta rápida «${qr.title}» enviada por el copiloto`);
+        const r = await sendQuickReply(companyId, qr.id, convo.id, tomarControl);
+        // Marcar el origen para el ritmo anti-bloqueo (sendQuickReply guarda ADMIN sin rawPayload).
+        await prisma.conversationMessage.updateMany({
+          where: { companyId, conversationId: convo.id, role: "ADMIN", rawPayload: { equals: Prisma.DbNull }, createdAt: { gte: new Date(Date.now() - 5 * 60_000) } },
+          data: { rawPayload: { source: COPILOT_SOURCE } },
+        }).catch(() => undefined);
+        const atencionHumana = convo.botPaused || tomarControl;
+        return {
+          result: JSON.stringify({
+            ok: true,
+            respuesta: { id: qr.id, titulo: qr.title, comando: qr.command ? `/${qr.command}` : null },
+            enviados: r.sentCount,
+            total: r.total,
+            ...(r.failedAtIndex !== undefined ? { falloEnMensaje: r.failedAtIndex + 1 } : {}),
+            cliente: { phone: customer.phone, nombre: customer.name },
+            atencionHumana,
+            ritmo: { esperadoSeg: gate.esperadoSeg, enviadosUltimaHora: gate.enviadosUltimaHora + r.sentCount, topeHora: gate.topeHora },
+            nota: atencionHumana ? NOTA_ATENCION_HUMANA : "El agente IA sigue activo en este chat.",
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo enviar" }), wrote: false };
+      }
+    }
+
+    case "reaccionar_mensaje": {
+      try {
+        const mensajeId = String(args.mensajeId ?? "").trim();
+        if (!mensajeId) return { result: JSON.stringify({ ok: false, error: "mensajeId requerido (de leer_conversacion)" }), wrote: false };
+        const { convo } = await findChatByRef(companyId, args.phone);
+        const emoji = String(args.emoji ?? "");
+        await reactToMessage(companyId, convo.id, mensajeId, emoji);
+        return { result: JSON.stringify({ ok: true, mensajeId, reaccion: emoji.trim() || null }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo reaccionar" }), wrote: false };
+      }
+    }
+
+    case "programar_recordatorio_cliente": {
+      try {
+        const mensaje = String(args.mensaje ?? "").trim();
+        const mediaUrl = args.mediaUrl ? String(args.mediaUrl).trim() : null;
+        if (mediaUrl && !/^https?:\/\/\S+$/i.test(mediaUrl)) return { result: JSON.stringify({ ok: false, error: "mediaUrl debe ser una URL http(s) real" }), wrote: false };
+        let sendAt: Date;
+        if (args.enviarEn) sendAt = new Date(String(args.enviarEn));
+        else if (args.enMinutos != null && Number.isFinite(Number(args.enMinutos))) sendAt = new Date(Date.now() + Number(args.enMinutos) * 60_000);
+        else return { result: JSON.stringify({ ok: false, error: "indica enviarEn (ISO) o enMinutos" }), wrote: false };
+        if (isNaN(sendAt.getTime())) return { result: JSON.stringify({ ok: false, error: "enviarEn no es una fecha válida (usa ISO, ej. 2026-10-28T18:30:00-05:00)" }), wrote: false };
+        const { customer, convo } = await findChatByRef(companyId, args.phone);
+        if (convo.customer.optOutAt) return { result: JSON.stringify({ ok: false, error: "el cliente pidió no ser contactado (noContactar)" }), wrote: false };
+        if (convo.channel === "web") return { result: JSON.stringify({ ok: false, error: "el chat web no admite recordatorios programados" }), wrote: false };
+        await scheduleManualReminder(companyId, convo.id, {
+          message: mensaje,
+          sendAt,
+          mediaUrl,
+          mediaType: mediaUrl ? mediaKindFromUrl(mediaUrl, args.mediaType) : null,
+        });
+        return {
+          result: JSON.stringify({
+            ok: true,
+            cliente: { phone: customer.phone, nombre: customer.name },
+            enviaEl: sendAt.toISOString(),
+            nota: "Si cae fuera del horario hábil del negocio, el sistema lo mueve a la apertura. Se ve y se cancela en listar_recordatorios_programados o en el chat del panel.",
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo programar" }), wrote: false };
+      }
+    }
+
+    case "iniciar_conversacion": {
+      try {
+        const phone = String(args.phone ?? "").trim();
+        const mensaje = String(args.mensaje ?? "").trim();
+        if (!phone || !mensaje) return { result: JSON.stringify({ ok: false, error: "phone y mensaje son requeridos" }), wrote: false };
+        const digits = phone.replace(/\D/g, "");
+        if (digits.length < 8) return { result: JSON.stringify({ ok: false, error: "número inválido (incluye el código de país, ej. 51999888777)" }), wrote: false };
+        const existing = await prisma.customer.findFirst({ where: { companyId, phone: `+${digits}` }, select: { id: true, name: true, optOutAt: true } });
+        const sender = await loadWhatsappSender(companyId);
+        if (!sender) return { result: JSON.stringify({ ok: false, error: "no hay una cuenta de WhatsApp activa para enviar (panel → WhatsApp API)" }), wrote: false };
+        if (existing) {
+          const convo = await prisma.conversation.findFirst({ where: { companyId, customerId: existing.id, channel: "whatsapp" }, select: { id: true } });
+          if (convo) return { result: JSON.stringify({ ok: false, error: `${existing.name ?? phone} ya tiene conversación: usa enviar_mensaje_cliente` }), wrote: false };
+        }
+        // Número nuevo en META: nunca escribió → fuera de la ventana de 24 h (la compuerta lo rechaza).
+        const gate = await checkManualSendGate({ companyId, customerId: existing?.id ?? null, provider: sender.provider, optOutAt: existing?.optOutAt ?? null });
+        if (!gate.ok) return { result: JSON.stringify(gate), wrote: false };
+        if (sender.provider === "META" && !existing) {
+          return { result: JSON.stringify({ ok: false, error: "con WhatsApp Meta no se puede escribir primero a un número que nunca escribió (ventana de 24 h); usa una campaña con plantilla aprobada" }), wrote: false };
+        }
+        const r = await startConversation(companyId, phone, mensaje, { source: COPILOT_SOURCE });
+        return {
+          result: JSON.stringify({ ok: true, conversacionId: r.conversationId, phone: `+${digits}`, ritmo: { esperadoSeg: gate.esperadoSeg, enviadosUltimaHora: gate.enviadosUltimaHora + 1, topeHora: gate.topeHora }, nota: "El bot sigue activo: si el cliente responde, el agente IA continúa. Para atenderlo tú, atencion_humana {activar:true}." }),
+          wrote: true,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo iniciar" }), wrote: false };
+      }
+    }
+
+    case "reiniciar_conversacion": {
+      try {
+        const { customer, convo } = await findChatByRef(companyId, args.phone);
+        await resetConversation(companyId, convo.id, customer.id);
+        await cancelPendingReminders(companyId, customer.id, [
+          ScheduledMessageType.ABANDONED_CART,
+          ScheduledMessageType.LEFT_ON_READ,
+          ScheduledMessageType.OFFER_COUNTDOWN,
+          ScheduledMessageType.POST_SALE,
+          ScheduledMessageType.CUSTOM,
+        ]);
+        return { result: JSON.stringify({ ok: true, cliente: { phone: customer.phone, nombre: customer.name }, nota: "Historial y carrito borrados, estado limpio, bot activo. El cliente no recibió nada." }), wrote: true };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo reiniciar" }), wrote: false };
       }
     }
 
@@ -4192,7 +4599,7 @@ const SYSTEM_GUIDE = [
   "MAPA DEL PANEL (menú lateral). El menú está agrupado por frecuencia de uso: OPERACIÓN (siempre visible: Dashboard, Conversaciones, Comprobantes y la página del rubro), VENTAS (CRM, Campañas, Embudo, Productos), AGENTE IA (Agente IA, Flujos, Recordatorios, Pruebas) y CONFIGURACIÓN (Empresa, Pagos, WhatsApp API, Chat Web, Integraciones, Mi plan) — estos dos últimos grupos aparecen COLAPSADOS por defecto: si el usuario 'no encuentra' una página, dile que despliegue el grupo tocando su título. Centro de ayuda está fijo al PIE del menú, y Activación desaparece del menú al completar el setup:",
   "- Activación (/activacion): checklist de puesta en marcha con % de avance y botón de capacitación 1:1 por WhatsApp. Desaparece del menú al llegar al 100%.",
   "- Dashboard (/dashboard): métricas del negocio.",
-  "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}. PESTAÑA RECURSOS del chat (junto a Contacto/Respuestas/Notas): lista la BIBLIOTECA de multimedia del negocio — archivos de productos + multimedia de recordatorios (generales y por producto), banner y mensajes adicionales de presentación y mensajes post-venta — con su origen, filtro por producto y buscador; el asesor la envía al cliente con un clic, con o sin su descripción (al enviarla, el panel resuelve las variantes {a|b} y {nombre}); la misma biblioteca se consulta por aquí con listar_recursos.",
+  "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}. PESTAÑA RECURSOS del chat (junto a Contacto/Respuestas/Notas): lista la BIBLIOTECA de multimedia del negocio — archivos de productos + multimedia de recordatorios (generales y por producto), banner y mensajes adicionales de presentación y mensajes post-venta — con su origen, filtro por producto y buscador; el asesor la envía al cliente con un clic, con o sin su descripción (al enviarla, el panel resuelve las variantes {a|b} y {nombre}); la misma biblioteca se consulta por aquí con listar_recursos. TOMAR EL CONTROL DE UN CHAT DESDE AQUÍ (lo mismo que hace el asesor en el panel): leer_conversacion (trae el id de cada mensaje) → enviar_mensaje_cliente (texto y/o imagen/video/PDF por URL, citando con citarMensajeId; por defecto pasa el chat a atención humana) o enviar_respuesta_rapida (/comando con sus acciones) o reaccionar_mensaje (emoji) → programar_recordatorio_cliente para un seguimiento a una hora → al terminar, atencion_humana {activar:false} REACTIVA el bot (si no, el agente IA no vuelve a responderle). atencion_humana {activar:true} pausa el bot sin escribir. iniciar_conversacion abre un chat con un número nuevo (solo tras confirmación; en Meta no se puede sin plantilla). reiniciar_conversacion borra el historial (irreversible, solo tras confirmación). Límites automáticos de los envíos del copiloto: nunca a clientes noContactar; en Meta solo dentro de la ventana de 24 h desde el último mensaje del cliente (fuera de ella usa un recordatorio o campaña con plantilla); ritmo anti-bloqueo igual al de los recordatorios (tope por hora y separación entre clientes distintos; si devuelve reintentarEnSeg, espera). La firma del negocio se agrega sola a cada mensaje. Escribe como una persona del negocio: corto, una idea y una pregunta; precios, pagos y enlaces SOLO de ver_producto/ver_configuracion/ver_tienda, nunca inventados.",
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas; con quitarRespuestasFlujo borra las respuestas del chatbot 📝 que se ven en la tarjeta y en Contacto — el agente las volverá a preguntar; solo tras confirmación) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar). CALENDARIO: tras cada cita confirmada por el agente o un flujo, el cliente recibe por WhatsApp enlaces para agregarla a Google Calendar / iPhone (crear_cita devuelve esos enlaces en 'calendario' para que el dueño los pegue si la creó a mano) y, si tiene correo en su ficha, una invitación por email. El dueño ve TODAS sus citas y bloqueos en su propio calendario suscribiendo la URL ICS de Empresa → Agenda → «Calendario en tu teléfono» (iPhone: Ajustes → Calendario → Cuentas → Añadir cuenta → Otro → Añadir calendario suscrito; Google Calendar: Otros calendarios → + → Desde URL; Outlook: Agregar calendario → Suscribirse desde web). Es de UN solo sentido (FlowApp → calendario) y se refresca cada ~1 h según el dispositivo; no hay sincronización con Google OAuth. VIDEOLLAMADA (citas online): el dueño pega un enlace FIJO de Meet/Zoom en el servicio (actualizar_producto verticalData.meetingUrl) o uno por defecto para todo el negocio (configurar_empresa meetingUrl); con eso el cliente recibe '🎥 Enlace de la videollamada' junto con los enlaces de calendario al confirmar/reprogramar, en los recordatorios, en el evento del calendario (como ubicación) y en el correo. No se envía si la cita quedó como presencial (modality) o si no hay enlace. Para crear la sala fija de Meet: meet.google.com → «Nueva reunión» → «Crear una reunión para más tarde» → copiar el enlace (los clientes piden unirse y el dueño los admite; Google borra la sala si pasa 1 año sin usarse). crear_cita devuelve 'calendario.meetingUrl'. Aún no hay enlace único por cita (eso requeriría conectar Google con OAuth). REPROGRAMAR: el agente ve en su prompt la cita vigente del cliente y la MUEVE con reprogramar_cita; agendar_servicio no crea una segunda cita si ya hay una vigente (solo con adicional:true). Si el dueño ve citas duplicadas de antes de este cambio, cancele la vieja con actualizar_cita.",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. DEFAULTS SEGUROS si no se indica otra cosa: 45–90 s entre contactos, pausa 180–300 s cada 10, tope 60/día (cuenta todas las campañas del negocio), horario 09:00–21:00. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 60–120 s); en números nuevos recomienda tope diario 30–50 y subirlo de a poco; sin spintax todos reciben el mismo texto (pide ≥3 variantes en saludo, verbo y cierre; nunca en precios ni links). PROTECCIONES AUTOMÁTICAS: solo UNA campaña en curso por negocio; si 5 envíos seguidos fallan se pausa sola (pauseReason failures) y avisa al dueño por WhatsApp. Flujo seguro OBLIGATORIO: previsualizar_audiencia_campana (total real tras exclusiones) → crear borrador → mostrar total + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible) → ver_campana para el seguimiento (cómo va, por qué espera, fallidos) → pausar_campana / reanudar_campana (reversibles) o cancelar_campana (irreversible, confirmación con el nombre). MULTIMEDIA EN CAMPAÑAS: para adjuntar algo ya subido (archivo de producto, video de un recordatorio, banner de presentación) usa listar_recursos y pasa su url como mediaUrl en los mensajes — en el panel es el botón 'Insertar recurso' del paso Mensajes.",
   "- FLUJOS — secuencia OBLIGATORIA: (1) ver_bloques_flujo y ver_crm ANTES de diseñar (nunca inventes ids: usa nombres o los ids reales); (2) propón al dueño el flujo en lenguaje llano — qué pregunta y qué opciones numeradas verá el cliente (muéstrale el texto tal cual le llegará), qué etiqueta/columna pone cada rama, cuándo avisa al dueño, si agenda cita — y espera su confirmación; (3) crear_flujo con soloValidar=true para comprobar, luego sin él; (4) muéstrale el link /flujos/<id> y las warnings; (5) activar_flujo SOLO tras confirmación explícita, avisando que en modo FLOW el bot calla si ningún flujo se dispara (en HYBRID responde el agente) y que el modo se cambia con configurar_empresa botMode; (6) para modificar uno existente, ver_flujo primero y devuelve el grafo COMPLETO conservando ids y posiciones. GOTCHAS: en HYBRID termina el flujo de calificación con to-agent (clientText opcional + note con lo que el agente debe hacer) en vez de handoff, salvo que el dueño quiera atender él; las respuestas del flujo (saveVariable) quedan en la ficha del cliente (Conversaciones → Contacto, tarjeta del CRM, ver_cliente/leer_conversacion) y el agente las recibe como contexto; si el dueño capta leads por Meta Ads, propón trigger onAdLead (no keywords) y acciones CRM en el anuncio (configurar_anuncio); etiquetas según rango (presupuesto, tipo de cliente) requieren un bloque answers (opciones numeradas; el cliente responde con el número o el nombre) con una rama por opción, no question libre; en answers el message es SOLO la pregunta: la lista «1. … 2. …» la agrega el sistema y NUNCA se crean opciones separadas para «1»,«2»… (duplicarían ramas); para menús de 7+ opciones usa list; no existen botones de WhatsApp, todo es texto; las variables guardadas (saveVariable) solo llegan al dueño si el notifyText del handoff las incluye con {{variable}}; book-appointment necesita un servicio con durationMin; un flujo de captación típico: answers (qué necesita, una opción por servicio) → crm-add-tags → crm-move → answers (tipo/presupuesto) → crm-add-tags → question (descripción) → to-agent (HYBRID) o handoff con aviso que incluya {{nombre}} {{telefono}} y las variables (ver_bloques_flujo trae un EJEMPLO completo).",
@@ -4262,7 +4669,8 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",
-    "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana y eliminar_cliente: SOLO si lo pidió explícitamente y confirmó. Nunca elimines por iniciativa propia.",
+    "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana, eliminar_cliente, reiniciar_conversacion e iniciar_conversacion: SOLO si lo pidió explícitamente y confirmó. Nunca elimines ni escribas a números nuevos por iniciativa propia.",
+    "- ESCRIBIR A CLIENTES (enviar_mensaje_cliente, enviar_respuesta_rapida): son mensajes REALES que el cliente recibe en su WhatsApp a nombre del negocio. Lee antes la conversación, un mensaje por llamada, no insistas si el cliente no respondió al anterior, y reporta cada envío al dueño. Si el dueño te dio una instrucción permanente (p. ej. 'atiende y cierra los leads que vayan quedando'), puedes actuar sin pedir confirmación en cada mensaje, siempre dentro de esa instrucción. Cuando termines de atender a alguien, devuelve el chat al bot con atencion_humana {activar:false}.",
     "- No gestionas datos sensibles (API keys de OpenAI, tokens de Mercado Pago/Meta, credenciales de WhatsApp): para eso indícale la página del panel correspondiente (Agente IA, Pagos, WhatsApp API).",
     "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación en Activación (/activacion). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",
     "- Tras crear/modificar, resume QUÉ quedó hecho y sugiere el siguiente paso (revisar en el panel, probar en el simulador...).",

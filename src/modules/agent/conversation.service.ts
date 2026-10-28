@@ -194,6 +194,26 @@ export async function setBotPaused(
   }
 }
 
+/**
+ * Motivo persistente de la atención humana (state.pendingAction = "HUMAN[ORIGEN]: razón"),
+ * el mismo que escribe derivar_humano: así listar_conversaciones y el panel lo muestran
+ * aunque el evento de socket ya haya pasado. `null` lo limpia solo si lo puso ese origen.
+ * No toca lastMessageAt (no reordena la lista).
+ */
+export async function setHumanReason(conversationId: string, origin: string, reason: string | null) {
+  const convo = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { state: true } });
+  if (!convo) return;
+  const state = ((convo.state as ConversationState) ?? {}) as ConversationState;
+  const tag = `HUMAN[${origin}]`;
+  if (reason === null) {
+    if (typeof state.pendingAction !== "string" || !state.pendingAction.startsWith(tag)) return;
+    state.pendingAction = null;
+  } else {
+    state.pendingAction = `${tag}: ${reason}`.trim();
+  }
+  await prisma.conversation.update({ where: { id: conversationId }, data: { state: state as Prisma.InputJsonValue } });
+}
+
 /** Persiste un mensaje y emite el evento de tiempo real al panel. */
 export async function recordMessage(opts: {
   companyId: string;
@@ -569,8 +589,8 @@ export async function sendHumanReply(
   companyId: string,
   conversationId: string,
   message: string,
-  opts?: { quoteMessageId?: string | null },
-) {
+  opts?: { quoteMessageId?: string | null; source?: string | null },
+): Promise<{ messageId: string; text: string }> {
   const convo = await prisma.conversation.findFirst({
     where: { id: conversationId, companyId },
     select: { id: true, channel: true, customerId: true, customer: { select: { phone: true } } },
@@ -608,7 +628,7 @@ export async function sendHumanReply(
   const to = convo.customer.phone.replace(/\D/g, "");
   const text = (await applyFirma(companyId, message)) ?? message;
   const sent = await sendText(sender, to, text, quote ? { quoteWamid: quote.wamid, quoteFrom: quote.from } : undefined);
-  await recordMessage({
+  const messageId = await recordMessage({
     companyId,
     customerId: convo.customerId,
     conversationId,
@@ -620,7 +640,11 @@ export async function sendHumanReply(
     deliveryStatus: sent.gatewayId ? "pending" : null,
     quotedWamid: quote?.wamid ?? null,
     quotedPreview: quote?.preview ?? null,
+    // Origen del envío (p. ej. "copilot"): el ritmo anti-bloqueo del copiloto
+    // cuenta sus propios mensajes por este campo. El panel no lo manda.
+    ...(opts?.source ? { rawPayload: { source: opts.source } } : {}),
   });
+  return { messageId, text };
 }
 
 /**
@@ -751,7 +775,8 @@ export async function sendHumanMedia(
   companyId: string,
   conversationId: string,
   media: { mediaUrl: string; mediaKind: "image" | "video" | "audio" | "document"; caption?: string; fileName?: string },
-) {
+  opts?: { source?: string | null },
+): Promise<{ messageId: string }> {
   const convo = await prisma.conversation.findFirst({
     where: { id: conversationId, companyId },
     select: { id: true, channel: true, customerId: true, customer: { select: { phone: true } } },
@@ -763,8 +788,8 @@ export async function sendHumanMedia(
 
   const to = convo.customer.phone.replace(/\D/g, "");
   const caption = (await applyFirma(companyId, media.caption)) ?? media.caption;
-  await sendMedia(sender, to, media.mediaKind, media.mediaUrl, caption, media.fileName);
-  await recordMessage({
+  const sent = await sendMedia(sender, to, media.mediaKind, media.mediaUrl, caption, media.fileName);
+  const messageId = await recordMessage({
     companyId,
     customerId: convo.customerId,
     conversationId,
@@ -772,7 +797,12 @@ export async function sendHumanMedia(
     message: caption ?? null,
     mediaUrl: media.mediaUrl,
     mediaType: media.mediaKind,
+    // Igual que el texto: checks de entrega vía el gatewayId.
+    gatewayId: sent.gatewayId,
+    deliveryStatus: sent.gatewayId ? "pending" : null,
+    ...(opts?.source ? { rawPayload: { source: opts.source } } : {}),
   });
+  return { messageId };
 }
 
 /**
@@ -786,6 +816,7 @@ export async function startConversation(
   companyId: string,
   phone: string,
   message: string,
+  opts?: { source?: string | null },
 ): Promise<{ conversationId: string }> {
   const normalized = normalizePhone(phone);
   if (normalized.replace(/\D/g, "").length < 8) {
@@ -800,13 +831,16 @@ export async function startConversation(
   const convo = await loadOrCreateConversation(companyId, normalized, null);
 
   const finalText = (await applyFirma(companyId, text)) ?? text;
-  await sendText(sender, normalized.replace(/\D/g, ""), finalText);
+  const sent = await sendText(sender, normalized.replace(/\D/g, ""), finalText);
   await recordMessage({
     companyId,
     customerId: convo.customerId,
     conversationId: convo.conversationId,
     role: "ADMIN",
     message: finalText,
+    gatewayId: sent.gatewayId,
+    deliveryStatus: sent.gatewayId ? "pending" : null,
+    ...(opts?.source ? { rawPayload: { source: opts.source } } : {}),
   });
   // Subir al tope de la lista + refrescar el panel en tiempo real.
   await prisma.conversation.update({
