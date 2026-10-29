@@ -16,6 +16,7 @@ import { deleteCustomer } from "../customers/customers.service";
 import { loadWhatsappSender, sendText, sendMedia, sendReaction, sendTyping, webSender } from "./outbound";
 import { applyFirma } from "./firma";
 import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
+import { normalizePhoneDigits } from "../../lib/identifier";
 import type { ChatMessage } from "../../lib/openai";
 
 /** Estado conversacional persistido en Conversation.state (equivalente al customer.* de n8n). */
@@ -423,14 +424,83 @@ function serializeConversationSummary(c: ConversationSummaryRow, adMap: Map<stri
   };
 }
 
-export async function listConversations(companyId: string, limit = 50) {
-  // whatsapp + web (chat embebido); excluye la conversación del simulador (canal "sim").
-  // Los FIJADOS van todos (sin límite) además de los `limit` más recientes: un
-  // chat fijado antiguo no desaparece de la lista.
-  const where = { companyId, channel: { in: ["whatsapp", "web"] } };
-  const [pinned, recent] = await Promise.all([
-    prisma.conversation.findMany({ where: { ...where, pinnedAt: { not: null } }, orderBy: { pinnedAt: "desc" }, select: conversationSummarySelect }),
-    prisma.conversation.findMany({ where, orderBy: { lastMessageAt: "desc" }, take: limit, select: conversationSummarySelect }),
+export type ConversationSummary = ReturnType<typeof serializeConversationSummary>;
+
+const CONVERSATION_CHANNELS = ["whatsapp", "web"];
+const CONVERSATIONS_DEFAULT_LIMIT = 50;
+const CONVERSATIONS_MAX_LIMIT = 100;
+
+export interface ConversationListQuery {
+  /** Búsqueda por nombre, usuario de WhatsApp o teléfono (dígitos). */
+  q?: string;
+  /** Etapa del embudo (state.status) o los especiales HUMANO / NO_CONTACTAR. */
+  status?: string;
+  tagId?: string;
+  adSourceId?: string;
+  sortBy?: "last" | "opened";
+  dir?: "asc" | "desc";
+  offset?: number;
+  limit?: number;
+}
+
+export interface ConversationListPage {
+  items: ConversationSummary[];
+  /** Conversaciones que cumplen el filtro (fijadas incluidas). */
+  total: number;
+  hasMore: boolean;
+  nextOffset: number;
+}
+
+function conversationListWhere(companyId: string, q: ConversationListQuery): Prisma.ConversationWhereInput {
+  const where: Prisma.ConversationWhereInput = { companyId, channel: { in: CONVERSATION_CHANNELS } };
+  const customer: Prisma.CustomerWhereInput = {};
+  const term = (q.q ?? "").trim();
+  if (term) {
+    const digits = normalizePhoneDigits(term);
+    customer.OR = [
+      { name: { contains: term, mode: "insensitive" } },
+      { waUsername: { contains: term, mode: "insensitive" } },
+      ...(digits ? [{ phone: { contains: digits } }] : []),
+    ];
+  }
+  if (q.tagId) customer.tagLinks = { some: { tagId: q.tagId } };
+  if (q.adSourceId) customer.adSourceId = q.adSourceId;
+  const status = (q.status ?? "").trim().toUpperCase();
+  if (status === "HUMANO") where.botPaused = true;
+  else if (status === "NO_CONTACTAR") customer.optOutAt = { not: null };
+  else if (status) where.state = { path: ["status"], equals: status };
+  if (Object.keys(customer).length) where.customer = customer;
+  return where;
+}
+
+function hasListFilters(q: ConversationListQuery): boolean {
+  return Boolean((q.q ?? "").trim() || q.status || q.tagId || q.adSourceId);
+}
+
+/**
+ * Lista paginada del visor de Conversaciones (whatsapp + web; excluye el
+ * simulador, canal "sim"). Sin filtros, la página 0 trae TODOS los fijados
+ * (un chat fijado antiguo no desaparece) y luego los recientes; las páginas
+ * siguientes solo recientes no fijados. Con búsqueda o filtros, los fijados
+ * entran en el orden normal.
+ */
+export async function listConversationsPage(companyId: string, opts: ConversationListQuery = {}): Promise<ConversationListPage> {
+  const limit = Math.max(1, Math.min(opts.limit ?? CONVERSATIONS_DEFAULT_LIMIT, CONVERSATIONS_MAX_LIMIT));
+  const offset = Math.max(0, opts.offset ?? 0);
+  const dir = opts.dir ?? "desc";
+  const orderBy: Prisma.ConversationOrderByWithRelationInput[] =
+    opts.sortBy === "opened" ? [{ openedAt: dir }, { id: "asc" }] : [{ lastMessageAt: dir }, { id: "asc" }];
+  const where = conversationListWhere(companyId, opts);
+  const filtered = hasListFilters(opts);
+  const recentWhere: Prisma.ConversationWhereInput = filtered ? where : { ...where, pinnedAt: null };
+
+  const [pinned, recent, totalRecent, totalAll] = await Promise.all([
+    !filtered && offset === 0
+      ? prisma.conversation.findMany({ where: { ...where, pinnedAt: { not: null } }, orderBy: { pinnedAt: "desc" }, select: conversationSummarySelect })
+      : Promise.resolve([] as ConversationSummaryRow[]),
+    prisma.conversation.findMany({ where: recentWhere, orderBy, skip: offset, take: limit, select: conversationSummarySelect }),
+    prisma.conversation.count({ where: recentWhere }),
+    filtered ? Promise.resolve(-1) : prisma.conversation.count({ where }),
   ]);
   const seen = new Set<string>();
   const rows: ConversationSummaryRow[] = [];
@@ -440,7 +510,19 @@ export async function listConversations(companyId: string, limit = 50) {
     rows.push(c);
   }
   const adMap = await resolveAdDescriptions(companyId);
-  return rows.map((c) => serializeConversationSummary(c, adMap));
+  const nextOffset = offset + recent.length;
+  return {
+    items: rows.map((c) => serializeConversationSummary(c, adMap)),
+    total: totalAll >= 0 ? totalAll : totalRecent,
+    hasMore: nextOffset < totalRecent,
+    nextOffset,
+  };
+}
+
+/** Compat (copiloto y usos internos): fijados + los `limit` más recientes, como lista plana. */
+export async function listConversations(companyId: string, limit = CONVERSATIONS_DEFAULT_LIMIT): Promise<ConversationSummary[]> {
+  const page = await listConversationsPage(companyId, { limit: Math.min(limit, 500) });
+  return page.items;
 }
 
 /**
@@ -968,34 +1050,71 @@ export async function notifyOwner(companyId: string, message: string): Promise<v
   }
 }
 
+const MESSAGES_DEFAULT_LIMIT = 60;
+const MESSAGES_MAX_LIMIT = 200;
+
+export interface MessagesQuery {
+  /** Cursor: solo mensajes ANTERIORES a esta fecha (createdAt del más viejo cargado). */
+  before?: Date | string | null;
+  limit?: number;
+}
+
+const conversationMessageSelect = {
+  id: true,
+  role: true,
+  message: true,
+  mediaUrl: true,
+  mediaType: true,
+  createdAt: true,
+  // Checks de entrega, reacción anclada y preview de la cita (panel).
+  deliveryStatus: true,
+  reaction: true,
+  quotedPreview: true,
+  // wamid (normalizado abajo): el panel decide si un mensaje ya es
+  // reaccionable/citable; ownReaction: la reacción del asesor.
+  wamid: true,
+  gatewayId: true,
+  ownReaction: true,
+} satisfies Prisma.ConversationMessageSelect;
+
+type MessageRow = Prisma.ConversationMessageGetPayload<{ select: typeof conversationMessageSelect }>;
+
+function serializeMessage({ gatewayId, ...r }: MessageRow) {
+  return { ...r, wamid: whatsappIdOf({ wamid: r.wamid, gatewayId }) };
+}
+
+/**
+ * Mensajes de una conversación por tramos (los más recientes primero en la
+ * consulta, devueltos en orden cronológico). `before` pide el tramo anterior.
+ * Con un número (compat copiloto) devuelve los primeros N en orden ascendente.
+ */
+export async function listConversationMessages(companyId: string, conversationId: string, opts: MessagesQuery): Promise<{ items: ReturnType<typeof serializeMessage>[]; hasMore: boolean }>;
+export async function listConversationMessages(companyId: string, conversationId: string, limit?: number): Promise<ReturnType<typeof serializeMessage>[]>;
 export async function listConversationMessages(
   companyId: string,
   conversationId: string,
-  limit = 200,
+  arg: number | MessagesQuery = 200,
 ) {
+  if (typeof arg === "number") {
+    const rows = await prisma.conversationMessage.findMany({
+      where: { companyId, conversationId },
+      orderBy: { createdAt: "asc" },
+      take: arg,
+      select: conversationMessageSelect,
+    });
+    return rows.map(serializeMessage);
+  }
+  const limit = Math.max(1, Math.min(arg.limit ?? MESSAGES_DEFAULT_LIMIT, MESSAGES_MAX_LIMIT));
+  const before = arg.before ? new Date(arg.before) : null;
   const rows = await prisma.conversationMessage.findMany({
-    where: { companyId, conversationId },
-    orderBy: { createdAt: "asc" },
-    take: limit,
-    select: {
-      id: true,
-      role: true,
-      message: true,
-      mediaUrl: true,
-      mediaType: true,
-      createdAt: true,
-      // Checks de entrega, reacción anclada y preview de la cita (panel).
-      deliveryStatus: true,
-      reaction: true,
-      quotedPreview: true,
-      // wamid (normalizado abajo): el panel decide si un mensaje ya es
-      // reaccionable/citable; ownReaction: la reacción del asesor.
-      wamid: true,
-      gatewayId: true,
-      ownReaction: true,
-    },
+    where: { companyId, conversationId, ...(before && !Number.isNaN(before.getTime()) ? { createdAt: { lt: before } } : {}) },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit + 1,
+    select: conversationMessageSelect,
   });
-  return rows.map(({ gatewayId, ...r }) => ({ ...r, wamid: whatsappIdOf({ wamid: r.wamid, gatewayId }) }));
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit).reverse();
+  return { items: page.map(serializeMessage), hasMore };
 }
 
 /**

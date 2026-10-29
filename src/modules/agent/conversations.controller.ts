@@ -3,7 +3,7 @@ import { ScheduledMessageType } from "@prisma/client";
 import { asyncHandler } from "../../lib/async-handler";
 import { AppError } from "../../lib/app-error";
 import {
-  listConversations,
+  listConversationsPage,
   getConversationSummary,
   listConversationMessages,
   setBotPaused,
@@ -26,8 +26,19 @@ import { cancelPendingReminders } from "../scheduler/scheduler.service";
 
 export const listConversationsController = asyncHandler(async (req: Request, res: Response) => {
   const companyId = req.user!.companyId;
-  const conversations = await listConversations(companyId);
-  res.json({ success: true, data: conversations });
+  const q = req.query as {
+    q?: string;
+    status?: string;
+    tagId?: string;
+    adSourceId?: string;
+    sortBy?: "last" | "opened";
+    dir?: "asc" | "desc";
+    offset?: number;
+    limit?: number;
+  };
+  const page = await listConversationsPage(companyId, q);
+  // `data` sigue siendo el array (compat); total/hasMore/nextOffset van al lado.
+  res.json({ success: true, data: page.items, total: page.total, hasMore: page.hasMore, nextOffset: page.nextOffset });
 });
 
 export const getConversationController = asyncHandler(async (req: Request, res: Response) => {
@@ -39,8 +50,9 @@ export const getConversationController = asyncHandler(async (req: Request, res: 
 
 export const listMessagesController = asyncHandler(async (req: Request, res: Response) => {
   const companyId = req.user!.companyId;
-  const messages = await listConversationMessages(companyId, String(req.params.id));
-  res.json({ success: true, data: messages });
+  const q = req.query as { before?: string; limit?: number };
+  const page = await listConversationMessages(companyId, String(req.params.id), { before: q.before, limit: q.limit });
+  res.json({ success: true, data: page.items, hasMore: page.hasMore });
 });
 
 export const pauseConversationController = asyncHandler(async (req: Request, res: Response) => {

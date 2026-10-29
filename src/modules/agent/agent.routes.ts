@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { optionalAgentApiKey } from "../../middlewares/optional-agent-api-key";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { validate } from "../../middlewares/validate";
+import { conversationsQuerySchema, messagesQuerySchema } from "./conversations.schemas";
 import { inboundController } from "./agent.controller";
 import {
   listConversationsController,
@@ -37,10 +39,10 @@ const router = Router();
 router.post("/inbound", optionalAgentApiKey, inboundController);
 
 // Visor de conversaciones para el panel admin (requiere auth de tenant)
-router.get("/conversations", requireAuth, listConversationsController);
+router.get("/conversations", requireAuth, validate({ query: conversationsQuerySchema }), listConversationsController);
 router.post("/conversations/start", requireAuth, startConversationController);
 router.post("/conversations/delete-bulk", requireAuth, deleteConversationsBulkController);
-router.get("/conversations/:id/messages", requireAuth, listMessagesController);
+router.get("/conversations/:id/messages", requireAuth, validate({ query: messagesQuerySchema }), listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
 router.post("/conversations/:id/pin", requireAuth, pinConversationController);
 router.post("/conversations/:id/opt-out", requireAuth, optOutConversationController);
