@@ -24,6 +24,10 @@ const envSchema = z.object({
   REMINDER_PACING_MIN_SEC: z.coerce.number().int().min(5).default(25),
   REMINDER_PACING_MAX_SEC: z.coerce.number().int().min(5).default(70),
   REMINDER_MAX_PER_HOUR: z.coerce.number().int().min(5).default(60),
+  // Un paso de seguimiento con más de N h de atraso vence si ya hay uno más nuevo pendiente;
+  // el último paso de la secuencia vence recién con REMINDER_MAX_LATE_LAST_HOURS.
+  REMINDER_MAX_LATE_HOURS: z.coerce.number().min(1).default(12),
+  REMINDER_MAX_LATE_LAST_HOURS: z.coerce.number().min(1).default(48),
   UPLOAD_DIR: z.string().default("uploads"),
   PUBLIC_BASE_URL: z.string().default("http://localhost:3000"),
   // Modelo de generación de imágenes del copiloto (override sin tocar código).

@@ -24,8 +24,9 @@ export const listRemindersController = asyncHandler(async (req: Request, res: Re
     : undefined;
   const q = String(req.query.q ?? "");
   const productId = String(req.query.productId ?? "");
-  const reminders = await listPendingReminders(companyId, { type, q, productId });
-  res.json({ success: true, data: reminders });
+  const page = await listPendingReminders(companyId, { type, q, productId });
+  // `data` sigue siendo el array (compat); total/porTipo/atrasados son el conteo REAL (la lista corta en 500).
+  res.json({ success: true, data: page.items, total: page.total, porTipo: page.porTipo, atrasados: page.atrasados });
 });
 
 /** POST /agent/reminders/cancel-bulk { ids: string[] } → cancela en lote los seleccionados. */

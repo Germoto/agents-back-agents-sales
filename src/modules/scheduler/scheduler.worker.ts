@@ -36,7 +36,14 @@ import { symbolFor } from "../../lib/currency";
 // La mayoría de filas vencidas de una pasada solo se REPROGRAMAN (pacing), así
 // que el lote puede ser amplio sin que una empresa con muchos vencidos deje sin
 // atender a las demás.
-const BATCH = 200;
+const BATCH = 300;
+/** Tipos de SECUENCIA (varios pasos por cliente): se colapsan y vencen; el resto no. */
+const SEQUENCE_TYPES: ScheduledMessageType[] = [ScheduledMessageType.ABANDONED_CART, ScheduledMessageType.LEFT_ON_READ];
+const MAX_LATE_MS = env.REMINDER_MAX_LATE_HOURS * 60 * 60_000;
+const MAX_LATE_LAST_MS = env.REMINDER_MAX_LATE_LAST_HOURS * 60 * 60_000;
+
+/** Inyectable en tests (reloj). */
+export const schedulerInternals = { now: () => new Date() };
 // Separación mínima entre recordatorios VISIBLES al mismo cliente en una misma pasada
 // del worker: evita que dos seguimientos lleguen pegados (parece spam). Configurable.
 const MIN_GAP_MS = Number(process.env.REMINDER_MIN_GAP_MS) || 120_000;
@@ -83,27 +90,41 @@ async function getQuietConfig(companyId: string, cache: Map<string, QuietConfig>
  * que puede salir un recordatorio visible, cuántos salieron en la última hora
  * y si hay una campaña enviando ahora (ritmo ×2).
  */
-type CompanyPace = { nextSlotMs: number; sentLastHour: number; campaignActive: boolean };
+type CompanyPace = {
+  nextSlotMs: number;
+  sentLastHour: number;
+  campaignActive: boolean;
+  /** Tope por hora alcanzado: próximo slot SECUENCIAL (arranca cuando el envío más
+   *  antiguo de la última hora sale de la ventana). Mantiene el orden del lote. */
+  capSlotMs: number;
+};
 
 async function getCompanyPace(companyId: string, now: Date, cache: Map<string, CompanyPace>): Promise<CompanyPace> {
   const hit = cache.get(companyId);
   if (hit) return hit;
   const hourAgo = new Date(now.getTime() - 60 * 60_000);
-  const [sentLastHour, campaign] = await Promise.all([
+  const visible = { notIn: [ScheduledMessageType.FLOW_TIMEOUT, ScheduledMessageType.PAYMENT_RECHECK] };
+  const [sentLastHour, oldestSent, campaign] = await Promise.all([
     prisma.scheduledMessage.count({
-      where: {
-        companyId,
-        status: ScheduledMessageStatus.SENT,
-        sentAt: { gte: hourAgo },
-        type: { notIn: [ScheduledMessageType.FLOW_TIMEOUT, ScheduledMessageType.PAYMENT_RECHECK] },
-      },
+      where: { companyId, status: ScheduledMessageStatus.SENT, sentAt: { gte: hourAgo }, type: visible },
+    }),
+    prisma.scheduledMessage.findFirst({
+      where: { companyId, status: ScheduledMessageStatus.SENT, sentAt: { gte: hourAgo }, type: visible },
+      orderBy: { sentAt: "asc" },
+      select: { sentAt: true },
     }),
     prisma.campaign.findFirst({
       where: { companyId, status: "RUNNING", nextSendAt: { gte: new Date(now.getTime() - CAMPAIGN_ACTIVE_WINDOW_MS) } },
       select: { id: true },
     }),
   ]);
-  const pace: CompanyPace = { nextSlotMs: 0, sentLastHour, campaignActive: Boolean(campaign) };
+  const capResetMs = oldestSent?.sentAt ? oldestSent.sentAt.getTime() + 60 * 60_000 : now.getTime() + 5 * 60_000;
+  const pace: CompanyPace = {
+    nextSlotMs: 0,
+    sentLastHour,
+    campaignActive: Boolean(campaign),
+    capSlotMs: Math.max(capResetMs, now.getTime() + 60_000),
+  };
   cache.set(companyId, pace);
   return pace;
 }
@@ -120,8 +141,50 @@ export function startScheduler(): void {
   console.log("[scheduler] worker de recordatorios iniciado (cada 60s)");
 }
 
-async function processDue(): Promise<void> {
-  const now = new Date();
+type DueRow = Prisma.ScheduledMessageGetPayload<{ include: { customer: { select: { phone: true; name: true; optOutAt: true } } } }>;
+type SeqMeta = { stepIndex?: unknown; dueAt?: unknown; offerPrice?: unknown; manual?: unknown; productId?: unknown };
+
+function metaOf(row: { metadata: Prisma.JsonValue | null }): SeqMeta {
+  const m = row.metadata;
+  return m && typeof m === "object" && !Array.isArray(m) ? (m as SeqMeta) : {};
+}
+function stepIndexOf(row: { metadata: Prisma.JsonValue | null }): number | null {
+  const v = Number(metaOf(row).stepIndex);
+  return Number.isInteger(v) && v >= 0 ? v : null;
+}
+/** Hora planificada original (sendAt se mueve con el pacing). */
+function dueAtOf(row: { sendAt: Date; metadata: Prisma.JsonValue | null }): number {
+  const raw = metaOf(row).dueAt;
+  const t = typeof raw === "string" ? new Date(raw).getTime() : NaN;
+  return Number.isFinite(t) ? t : row.sendAt.getTime();
+}
+/** a es un paso MÁS NUEVO que b (por posición en la secuencia; si falta, por hora planificada). */
+function isNewer(a: { sendAt: Date; metadata: Prisma.JsonValue | null }, b: { sendAt: Date; metadata: Prisma.JsonValue | null }): boolean {
+  const ia = stepIndexOf(a);
+  const ib = stepIndexOf(b);
+  if (ia !== null && ib !== null && ia !== ib) return ia > ib;
+  return dueAtOf(a) > dueAtOf(b);
+}
+/** Prioridad de envío: 0 = internos, citas, renovaciones, manuales y el PRIMER paso de una secuencia. */
+function priorityOf(row: DueRow): number {
+  if (
+    row.type === ScheduledMessageType.FLOW_TIMEOUT ||
+    row.type === ScheduledMessageType.PAYMENT_RECHECK ||
+    row.type === ScheduledMessageType.BOOKING_REMINDER ||
+    row.type === ScheduledMessageType.RENEWAL
+  ) return 0;
+  const meta = metaOf(row);
+  if (meta.manual === true) return 0;
+  if (SEQUENCE_TYPES.includes(row.type) && stepIndexOf(row) === 0) return 0;
+  return 1;
+}
+function priceNumber(text: unknown): number | null {
+  const n = Number(String(text ?? "").replace(/[^0-9.]/g, ""));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+export async function processDue(): Promise<void> {
+  const now = schedulerInternals.now();
   const due = await prisma.scheduledMessage.findMany({
     where: { status: ScheduledMessageStatus.PENDING, sendAt: { lte: now } },
     orderBy: { sendAt: "asc" },
@@ -129,6 +192,10 @@ async function processDue(): Promise<void> {
     include: { customer: { select: { phone: true, name: true, optOutAt: true } } },
   });
   if (!due.length) return;
+  // Orden justo: primero lo urgente y el PRIMER paso de cada lead (un lead nuevo no
+  // espera detrás de pasos 4-6 atrasados); dentro de cada grupo, el que más espera.
+  due.sort((a, b) => priorityOf(a) - priorityOf(b) || dueAtOf(a) - dueAtOf(b));
+  const batchById = new Map(due.map((r) => [r.id, r]));
 
   const senderCache = new Map<string, WhatsappSender | null>();
   const quietCache = new Map<string, QuietConfig>();
@@ -136,7 +203,7 @@ async function processDue(): Promise<void> {
   // Clientes que ya recibieron un recordatorio VISIBLE en esta pasada: el resto de
   // sus recordatorios se reprograma para no encimarse.
   const sentToCustomer = new Set<string>();
-  const stats = { sent: 0, paced: 0, capped: 0, spread: 0, cancelled: 0, failed: 0 };
+  const stats = { sent: 0, paced: 0, capped: 0, spread: 0, cancelled: 0, failed: 0, collapsed: 0, expired: 0 };
 
   for (const msg of due) {
     const isInternal =
@@ -215,6 +282,14 @@ async function processDue(): Promise<void> {
       }
     }
 
+    // Secuencias (carrito abandonado / dejado en visto): si este paso ya venció o
+    // hay varios pasos atrasados del mismo cliente, se envía SOLO el más reciente
+    // (con el precio de la oferta escalonada más avanzada) y el resto se cancela.
+    if (SEQUENCE_TYPES.includes(msg.type)) {
+      const verdict = await collapseOverdueSiblings(msg, now, stats, batchById);
+      if (verdict === "skip") continue;
+    }
+
     // Horario hábil: los mensajes al cliente (no los timeouts internos de flujo
     // ni los reintentos de pago, que son urgentes) no se envían fuera de la
     // ventana del tenant; se reprograman al próximo horario válido sin
@@ -256,10 +331,13 @@ async function processDue(): Promise<void> {
       const qc = await getQuietConfig(msg.companyId, quietCache);
       pace = await getCompanyPace(msg.companyId, now, paceCache);
       if (pace.sentLastHour >= qc.pacing.maxPerHour) {
+        // Tope alcanzado: a slots SECUENCIALES desde que se libera la hora (antes
+        // era +5-15 min al azar y la cola perdía el orden).
         await prisma.scheduledMessage.updateMany({
           where: { id: msg.id, status: ScheduledMessageStatus.PENDING },
-          data: { sendAt: new Date(now.getTime() + (5 + Math.random() * 10) * 60_000) },
+          data: { sendAt: new Date(pace.capSlotMs) },
         });
+        pace.capSlotMs += pacingDelayMs(qc.pacing, pace.campaignActive ? CAMPAIGN_PACING_FACTOR : 1);
         stats.capped += 1;
         continue;
       }
@@ -365,27 +443,37 @@ async function processDue(): Promise<void> {
           const offerCompany = await prisma.company.findUnique({ where: { id: msg.companyId }, select: { currency: true } });
           const priceText = offerNum > 0 ? `${symbolFor(offerCompany?.currency)} ${offerNum.toFixed(2)}` : null;
           if (priceText) {
+            // Nunca retroceder: si el cliente ya tiene activa una oferta MENOR, se conserva.
+            let keepLower = false;
             if (msg.conversationId) {
               const row = await prisma.conversation.findUnique({
                 where: { id: msg.conversationId },
                 select: { state: true },
               });
               const state = (row?.state ?? {}) as Record<string, unknown>;
-              state.activeOffer = {
-                productId: offerMeta.productId ?? null,
-                priceText,
-                at: new Date().toISOString(),
-                source: "reminder",
-              };
-              await prisma.conversation.update({
-                where: { id: msg.conversationId },
-                data: { state: state as Prisma.InputJsonValue },
-              });
+              const current = priceNumber((state.activeOffer as { priceText?: unknown } | null)?.priceText);
+              keepLower = current !== null && current < offerNum;
+              if (!keepLower) {
+                state.activeOffer = {
+                  productId: offerMeta.productId ?? null,
+                  priceText,
+                  at: new Date().toISOString(),
+                  source: "reminder",
+                };
+                await prisma.conversation.update({
+                  where: { id: msg.conversationId },
+                  data: { state: state as Prisma.InputJsonValue },
+                });
+              }
             }
-            if (offerMeta.productId) {
+            if (!keepLower && offerMeta.productId) {
               await setCartUnitPrice(msg.companyId, msg.customerId, offerMeta.productId, priceText);
             }
-            console.log(`[scheduler] oferta escalonada activada (${priceText}) cliente=${msg.customerId}`);
+            console.log(
+              keepLower
+                ? `[scheduler] oferta escalonada ${priceText} NO aplicada: el cliente ya tiene una menor cliente=${msg.customerId}`
+                : `[scheduler] oferta escalonada activada (${priceText}) cliente=${msg.customerId}`,
+            );
           }
         } catch (err) {
           console.warn("[scheduler] no se pudo activar la oferta del recordatorio:", err instanceof Error ? err.message : err);
@@ -408,9 +496,9 @@ async function processDue(): Promise<void> {
     }
   }
 
-  if (stats.sent || stats.paced || stats.capped || stats.spread || stats.failed) {
+  if (stats.sent || stats.paced || stats.capped || stats.spread || stats.failed || stats.collapsed || stats.expired) {
     console.log(
-      `[scheduler] pasada due=${due.length} enviados=${stats.sent} pacing=${stats.paced} tope=${stats.capped} dispersados=${stats.spread} cancelados=${stats.cancelled} fallidos=${stats.failed}`,
+      `[scheduler] pasada due=${due.length} enviados=${stats.sent} pacing=${stats.paced} tope=${stats.capped} dispersados=${stats.spread} cancelados=${stats.cancelled} colapsados=${stats.collapsed} vencidos=${stats.expired} fallidos=${stats.failed}`,
     );
   }
 
@@ -421,4 +509,74 @@ async function processDue(): Promise<void> {
     p.sentLastHour += 1;
     p.nextSlotMs = Date.now() + pacingDelayMs(pacing, p.campaignActive ? CAMPAIGN_PACING_FACTOR : 1);
   }
+}
+
+/**
+ * Colapso + vencimiento de un paso de secuencia que está por enviarse.
+ * - Vence si lleva > REMINDER_MAX_LATE_HOURS de atraso y hay un paso más nuevo
+ *   pendiente (vencido o futuro), o > REMINDER_MAX_LATE_LAST_HOURS en cualquier caso.
+ * - Si hay varios pasos vencidos del mismo cliente, gana el más reciente; los
+ *   demás se cancelan. El precio de la oferta escalonada más avanzada entre los
+ *   vencidos se traslada al ganador si este no trae uno.
+ * Devuelve "skip" si la fila actual no debe enviarse.
+ */
+async function collapseOverdueSiblings(
+  msg: DueRow,
+  now: Date,
+  stats: { collapsed: number; expired: number },
+  batchById: Map<string, DueRow>,
+): Promise<"send" | "skip"> {
+  const siblings = await prisma.scheduledMessage.findMany({
+    where: { companyId: msg.companyId, customerId: msg.customerId, type: msg.type, status: ScheduledMessageStatus.PENDING },
+    orderBy: { sendAt: "asc" },
+    select: { id: true, sendAt: true, metadata: true },
+  });
+  const me = siblings.find((r) => r.id === msg.id) ?? { id: msg.id, sendAt: msg.sendAt, metadata: msg.metadata };
+  const nowMs = now.getTime();
+  const lateMs = nowMs - dueAtOf(me);
+  const hasNewer = siblings.some((r) => r.id !== me.id && isNewer(r, me));
+  if (lateMs > MAX_LATE_LAST_MS || (lateMs > MAX_LATE_MS && hasNewer)) {
+    await prisma.scheduledMessage.updateMany({
+      where: { id: me.id, status: ScheduledMessageStatus.PENDING },
+      data: {
+        status: ScheduledMessageStatus.CANCELLED,
+        failureReason: hasNewer
+          ? "venció: se envía el paso más reciente de la secuencia"
+          : `venció: más de ${env.REMINDER_MAX_LATE_LAST_HOURS} h de atraso`,
+      },
+    });
+    stats.expired += 1;
+    return "skip";
+  }
+
+  // "Vencido" = su hora PLANIFICADA ya pasó (sendAt puede estar corrido unos
+  // segundos/minutos por el pacing y aun así el paso está atrasado).
+  const overdue = siblings.filter((r) => dueAtOf(r) <= nowMs);
+  if (overdue.length <= 1) return "send";
+  const winner = overdue.reduce((best, r) => (isNewer(r, best) ? r : best));
+  const losers = overdue.filter((r) => r.id !== winner.id);
+  const carrier = overdue
+    .filter((r) => priceNumber(metaOf(r).offerPrice) !== null)
+    .reduce<(typeof overdue)[number] | null>((best, r) => (!best || isNewer(r, best) ? r : best), null);
+  const winnerStep = stepIndexOf(winner);
+  await prisma.scheduledMessage.updateMany({
+    where: { id: { in: losers.map((r) => r.id) }, status: ScheduledMessageStatus.PENDING },
+    data: {
+      status: ScheduledMessageStatus.CANCELLED,
+      failureReason: `colapsado: se envía el paso${winnerStep !== null ? ` ${winnerStep + 1}` : ""} más reciente (el cliente tenía ${overdue.length} atrasados)`,
+    },
+  });
+  stats.collapsed += losers.length;
+  // Oferta escalonada: el ganador hereda el precio del paso vencido más avanzado que la traía.
+  if (carrier && carrier.id !== winner.id && priceNumber(metaOf(winner).offerPrice) === null) {
+    const carried = metaOf(carrier);
+    const merged = { ...metaOf(winner), offerPrice: carried.offerPrice, carriedFromStep: stepIndexOf(carrier), productId: metaOf(winner).productId ?? carried.productId ?? null };
+    await prisma.scheduledMessage.update({ where: { id: winner.id }, data: { metadata: merged as Prisma.InputJsonValue } });
+    // El ganador puede venir más adelante en este mismo lote: actualizar su copia en memoria.
+    const inBatch = batchById.get(winner.id);
+    if (inBatch) inBatch.metadata = merged as Prisma.JsonValue;
+    if (winner.id === me.id) msg.metadata = merged as Prisma.JsonValue;
+  }
+  if (winner.id !== me.id) return "skip";
+  return "send";
 }

@@ -1495,8 +1495,12 @@ async function scheduleAutoReminders(
   const scheduleSeq = async (type: ReminderType, smType: ScheduledMessageType) => {
     const seq = resolveReminderSequence(followup, type, productReminder, vars);
     if (!seq.enabled) return;
-    for (const step of seq.steps) {
-      const meta: Record<string, unknown> = {};
+    for (const [stepIndex, step] of seq.steps.entries()) {
+      const sendAt = secondsFromNow(step.delaySeconds);
+      // Posición en la secuencia y hora planificada: el worker los usa para colapsar
+      // pasos atrasados (envía solo el más reciente), vencerlos y ordenar con justicia
+      // (sendAt se mueve con el pacing; dueAt conserva la hora original).
+      const meta: Record<string, unknown> = { stepIndex, stepCount: seq.steps.length, dueAt: sendAt.toISOString() };
       if (step.mediaType) meta.mediaType = step.mediaType;
       if (productId) meta.productId = productId;
       // Oferta escalonada: viaja en la fila y se ACTIVA al enviarse el step (worker).
@@ -1506,10 +1510,10 @@ async function scheduleAutoReminders(
         customerId,
         conversationId,
         type: smType,
-        sendAt: secondsFromNow(step.delaySeconds),
+        sendAt,
         body: step.message,
         mediaUrl: step.mediaUrl,
-        metadata: Object.keys(meta).length ? (meta as Prisma.InputJsonValue) : undefined,
+        metadata: meta as Prisma.InputJsonValue,
         timezone: config.business.timezone,
         quietHours: (followup as { quietHours?: unknown } | null)?.quietHours,
       });

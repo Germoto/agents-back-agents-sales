@@ -163,26 +163,35 @@ export async function cancelRemindersByIds(companyId: string, ids: string[]): Pr
  * Excluye los internos (FLOW_TIMEOUT, PAYMENT_RECHECK). Filtro opcional por tipo y por
  * texto (nombre/teléfono del cliente).
  */
+export type PendingReminderRow = {
+  id: string;
+  type: ScheduledMessageType;
+  sendAt: Date;
+  body: string;
+  mediaUrl: string | null;
+  customerId: string;
+  conversationId: string | null;
+  productId: string | null;
+  customer: { name: string | null; phone: string };
+};
+
+export type PendingRemindersPage = {
+  /** Hasta 500 filas (por sendAt). */
+  items: PendingReminderRow[];
+  /** Total REAL de pendientes que cumplen el filtro (la lista corta en 500). */
+  total: number;
+  porTipo: Partial<Record<ScheduledMessageType, number>>;
+  /** Pendientes con más de 1 h de atraso respecto a su hora de envío. */
+  atrasados: number;
+};
+
 export async function listPendingReminders(
   companyId: string,
   opts?: { type?: ScheduledMessageType; q?: string; productId?: string },
-): Promise<
-  Array<{
-    id: string;
-    type: ScheduledMessageType;
-    sendAt: Date;
-    body: string;
-    mediaUrl: string | null;
-    customerId: string;
-    conversationId: string | null;
-    productId: string | null;
-    customer: { name: string | null; phone: string };
-  }>
-> {
+): Promise<PendingRemindersPage> {
   const q = (opts?.q ?? "").trim();
   const productId = (opts?.productId ?? "").trim();
-  const rows = await prisma.scheduledMessage.findMany({
-    where: {
+  const where: Prisma.ScheduledMessageWhereInput = {
       companyId,
       status: ScheduledMessageStatus.PENDING,
       type: opts?.type ? opts.type : { in: LISTABLE_TYPES },
@@ -198,27 +207,38 @@ export async function listPendingReminders(
             },
           }
         : {}),
-    },
-    orderBy: { sendAt: "asc" },
-    take: 500,
-    select: {
-      id: true,
-      type: true,
-      sendAt: true,
-      body: true,
-      mediaUrl: true,
-      customerId: true,
-      conversationId: true,
-      metadata: true,
-      customer: { select: { name: true, phone: true } },
-    },
-  });
-  return rows.map(({ metadata, ...r }) => {
+  };
+  const hourAgo = new Date(Date.now() - 60 * 60_000);
+  const [rows, total, byType, atrasados] = await Promise.all([
+    prisma.scheduledMessage.findMany({
+      where,
+      orderBy: { sendAt: "asc" },
+      take: 500,
+      select: {
+        id: true,
+        type: true,
+        sendAt: true,
+        body: true,
+        mediaUrl: true,
+        customerId: true,
+        conversationId: true,
+        metadata: true,
+        customer: { select: { name: true, phone: true } },
+      },
+    }),
+    prisma.scheduledMessage.count({ where }),
+    prisma.scheduledMessage.groupBy({ by: ["type"], where, _count: { _all: true } }),
+    prisma.scheduledMessage.count({ where: { ...where, sendAt: { lt: hourAgo } } }),
+  ]);
+  const porTipo: Partial<Record<ScheduledMessageType, number>> = {};
+  for (const g of byType) porTipo[g.type] = g._count._all;
+  const items = rows.map(({ metadata, ...r }) => {
     const pid = metadata && typeof metadata === "object" && !Array.isArray(metadata)
       ? (metadata as Record<string, unknown>).productId
       : null;
     return { ...r, productId: typeof pid === "string" ? pid : null };
   });
+  return { items, total, porTipo, atrasados };
 }
 
 /**
