@@ -48,4 +48,7 @@ export const upsertCategorySchema = z.object({
 
 export const sendQuickReplySchema = z.object({
   conversationId: z.string().uuid(),
+  takeControl: z.boolean().optional(),
+  // Entrega solo por correo: aplica las acciones sin mandar mensajes por WhatsApp.
+  skipMessages: z.boolean().optional(),
 });

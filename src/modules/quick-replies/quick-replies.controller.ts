@@ -50,11 +50,9 @@ export async function deleteQuickReplyController(req: Request, res: Response) {
 }
 
 export async function sendQuickReplyController(req: Request, res: Response) {
-  const result = await sendQuickReply(
-    req.user!.companyId,
-    String(req.params.id),
-    req.body.conversationId,
-    req.body.takeControl === true,
-  );
+  const result = await sendQuickReply(req.user!.companyId, String(req.params.id), req.body.conversationId, {
+    takeControl: req.body.takeControl === true,
+    skipMessages: req.body.skipMessages === true,
+  });
   return res.json({ success: true, ...result });
 }

@@ -193,8 +193,14 @@ export async function sendQuickReply(
   companyId: string,
   quickReplyId: string,
   conversationId: string,
-  takeControl = false,
+  takeControlOrOpts: boolean | { takeControl?: boolean; skipMessages?: boolean } = false,
 ): Promise<SendQuickReplyResult> {
+  const opts = typeof takeControlOrOpts === "boolean" ? { takeControl: takeControlOrOpts } : takeControlOrOpts;
+  const takeControl = opts.takeControl === true;
+  // skipMessages: entrega SOLO por correo desde el panel. No se manda nada por
+  // WhatsApp, pero se aplican las acciones de la respuesta (etiquetas, CRM,
+  // producto presentado) y cuenta como uso.
+  const skipMessages = opts.skipMessages === true;
   const quickReply = await prisma.quickReply.findFirst({
     where: { id: quickReplyId, companyId },
     select: { id: true, messages: true, actions: true },
@@ -207,11 +213,12 @@ export async function sendQuickReply(
   });
   if (!convo) throw new AppError("Conversación no encontrada", 404);
 
-  const sender = await loadWhatsappSender(companyId);
-  if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
-
   const messages = (quickReply.messages as unknown as QuickReplyMessageInput[]) ?? [];
-  if (!messages.length) throw new AppError("La respuesta rápida no tiene mensajes", 422);
+  const sender = skipMessages ? null : await loadWhatsappSender(companyId);
+  if (!skipMessages) {
+    if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
+    if (!messages.length) throw new AppError("La respuesta rápida no tiene mensajes", 422);
+  }
 
   // Tomar control solo si se pidió explícitamente (emite CONVERSATION_UPDATED).
   if (takeControl && !convo.botPaused) {
@@ -222,7 +229,7 @@ export async function sendQuickReply(
   let sentCount = 0;
   let failedAtIndex: number | undefined;
 
-  for (let i = 0; i < messages.length; i++) {
+  for (let i = 0; !skipMessages && sender && i < messages.length; i++) {
     const msg = messages[i];
     try {
       const text = (await applyFirma(companyId, msg.text)) ?? msg.text ?? null;
@@ -251,7 +258,7 @@ export async function sendQuickReply(
     }
   }
 
-  if (sentCount === 0) {
+  if (sentCount === 0 && !skipMessages) {
     throw new AppError("No se pudo enviar la respuesta rápida", 502);
   }
 
@@ -274,7 +281,7 @@ export async function sendQuickReply(
       state.selectedProductId = productId;
       state.presentedProductIds = Array.from(new Set([...(state.presentedProductIds ?? []), productId]));
       // Si la respuesta incluye multimedia, también evitamos reenviar media de presentación.
-      if (messages.some((m) => m.type !== "text")) {
+      if (!skipMessages && messages.some((m) => m.type !== "text")) {
         state.mediaSentProductIds = Array.from(new Set([...(state.mediaSentProductIds ?? []), productId]));
       }
       await saveState(conversationId, state);
@@ -286,7 +293,7 @@ export async function sendQuickReply(
     }
   }
 
-  return { sentCount, total: messages.length, ...(failedAtIndex !== undefined ? { failedAtIndex } : {}) };
+  return { sentCount, total: skipMessages ? 0 : messages.length, ...(failedAtIndex !== undefined ? { failedAtIndex } : {}) };
 }
 
 /** Etiqueta al cliente y/o lo mueve a una pestaña de un CRM tras enviar. */

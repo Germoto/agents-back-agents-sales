@@ -23,11 +23,15 @@ export const deliverReceiptSchema = z.object({
   // Conversación a marcar como ENTREGADO en el embudo. Opcional (si no, se resuelve
   // por el cliente del comprobante).
   conversationId: z.string().uuid().nullable().optional(),
+  // Correo opcional: además de aprobar/entregar, envía el acceso por email.
+  email: z.string().trim().max(160).nullable().optional(),
 });
 
 export const emailDeliverySchema = z.object({
   // Correo destino (se guarda en la ficha del cliente).
   email: z.string().trim().min(3).max(160),
+  // Chat donde dejar la nota «📧 Acceso enviado por correo» (opcional).
+  conversationId: z.string().uuid().nullable().optional(),
 });
 
 export const associateReceiptSchema = z.object({
