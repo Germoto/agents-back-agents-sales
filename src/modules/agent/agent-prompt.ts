@@ -330,6 +330,12 @@ function upcomingBookingLine(extra?: PromptExtras): string | null {
   return `CITA VIGENTE DEL CLIENTE: ${b.service} · ${b.when}${b.code ? ` (código ${b.code}, ${b.status})` : ` (${b.status})`}. Si quiere CAMBIARLA de día u hora, usa reprogramar_cita (NUNCA agendar_servicio: crearía una segunda cita); si quiere cancelarla, cancelar_cita; solo si quiere OTRA cita ADICIONAL además de esta, agendar_servicio con adicional:true. Si pregunta por su cita, responde con estos datos sin consultar nada.`;
 }
 
+/** true si un asesor devolvió el control al bot en las últimas 24 h. */
+function recentlyResumed(state: ConversationState): boolean {
+  const at = state.botResumedAt ? new Date(state.botResumedAt).getTime() : NaN;
+  return Number.isFinite(at) && Date.now() - at < 24 * 60 * 60_000;
+}
+
 export function buildSystemPrompt(config: BotConfig, state: ConversationState, extra?: PromptExtras): string {
   const flowVarsText = extra?.flowVars
     ? Object.entries(extra.flowVars)
@@ -517,7 +523,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
       // true = ya enviaste el monto y los métodos de pago en este chat (estás esperando el pago).
       esperandoPago: state.status === "ESPERANDO_PAGO" || Boolean(state.lastPaymentPromptAt),
       selectedProductId: state.selectedProductId ?? null,
-      pendingAction: state.pendingAction ?? null,
+      // La derivación vieja no se muestra (se limpia al reactivar; por si acaso).
+      pendingAction: typeof state.pendingAction === "string" && state.pendingAction.startsWith("HUMAN") ? null : (state.pendingAction ?? null),
       presented: Array.isArray(state.presentedProductIds) ? state.presentedProductIds : [],
       offeredCrossSell: (() => {
         const id = state.offeredCrossSellProductId;
@@ -541,6 +548,11 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
           }
         : null,
     })}`,
+    ...(recentlyResumed(state)
+      ? [
+          `UN ASESOR HUMANO YA ATENDIÓ ESTE CHAT HACE POCO${state.lastHumanReason ? ` (motivo: ${state.lastHumanReason})` : ""} y te devolvió el control: continúa con lo que el asesor respondió (está en el historial marcado como ${HUMAN_AGENT_TAG}), sin contradecirlo ni repetirlo. NO vuelvas a derivar por ese mismo motivo; deriva solo si el cliente pide EXPLÍCITAMENTE hablar con una persona o surge un problema nuevo.`,
+        ]
+      : []),
     `- En el historial, los mensajes del lado del negocio que empiezan con ${HUMAN_AGENT_TAG} los escribió un compañero HUMANO del equipo (no tú) mientras atendía al cliente; los demás mensajes del negocio (sin ese prefijo) son tuyos o seguimientos automáticos enviados en tu nombre. Trata lo que dijo el asesor humano como contexto real y vigente: respeta lo que prometió o acordó, NO lo contradigas ni repitas lo ya dicho, y continúa la conversación de forma coherente (como si retomaras un chat que dejó un compañero). No menciones estas etiquetas al cliente.`,
     "- Si en el estado 'esperandoPago' es true, YA enviaste el monto y los métodos de pago en este chat y estás esperando que el cliente pague. El cliente YA TIENE esos datos: NUNCA le ofrezcas 'enviarte los métodos de pago', NUNCA le preguntes si quiere que se los mandes, y NO reinicies la venta como si recién empezara (eso confunde y suena a bot). Si vuelve a preguntar el monto, recuérdaselo en UNA línea; si vuelve a preguntar a qué cuenta/número deposita, reenvía los datos con enviar_metodos_pago SIN preguntar si los quiere (tú no conoces los números para escribirlos). Si pide más información del producto ('cuéntame más', 'qué incluye'), NO le respondas solo con el monto: dale la información real de la base de conocimiento (beneficios, incluye, FAQ) en 2-4 líneas y cierra con una línea suave. Ante cualquier otro mensaje mientras esperas el pago, responde la duda breve y cierra empujando suave al pago/comprobante, pero con palabras DISTINTAS cada vez: está PROHIBIDO repetir el mismo texto de cierre que ya enviaste antes (si tu último mensaje fue del estilo '¿ya pudiste pagar?', esta vez dilo de otra forma o simplemente reconoce lo que dijo y queda atento). Eres un agente abierto: lee lo que el cliente realmente dice (p. ej. 'ya me diste los métodos', 'ya pagué', 'en un momento pago') y respóndele de forma natural y coherente, sin guion. No abras temas nuevos ni ofrezcas otros productos.",
     "- OJO mientras esperas el pago: que el cliente diga que pagará MÁS TARDE (en un rato, luego, ahorita te lo mando, te confirmo más tarde) o suelte un ok/listo/ya de simple acuse NO significa que ya pagó. En ese caso NO llames a validar_pago y NO digas que estás validando, verificando o confirmando un pago (todavía no existe): respóndele en UNA línea, natural y sin presionar, reconociendo lo que dijo y quedando atento a su comprobante. Valida SOLO cuando AFIRME que ya pagó (ya pagué, ya te yapeé, ya hice la transferencia) o cuando mande el comprobante.",

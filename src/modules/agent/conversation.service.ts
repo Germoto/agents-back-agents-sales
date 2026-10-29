@@ -38,6 +38,12 @@ export interface ConversationState {
   pendingAction?: string | null;
   /** Último aviso al dueño «cliente escribió en un chat en atención humana» (freno anti-spam). */
   humanAlertAt?: string | null;
+  /** Etapa que tenía el chat antes de derivar a humano (para restaurarla al reactivar el bot). */
+  statusBeforeHandoff?: string | null;
+  /** Motivo de la última derivación ya atendida por un asesor (el prompt lo menciona tras reactivar). */
+  lastHumanReason?: string | null;
+  /** Momento en que un asesor devolvió el control al bot (reactivar). */
+  botResumedAt?: string | null;
   offerExpiresAt?: string | null;
   /** Productos cuya ficha ya se envió en esta conversación (evita reenviarla). */
   presentedProductIds?: string[];
@@ -160,15 +166,53 @@ export async function saveState(conversationId: string, state: ConversationState
   });
 }
 
+/**
+ * Limpia en el estado la derivación a humano cuando el bot vuelve a tomar el chat.
+ * Sin esto, `status: "ASESOR_HUMANO"` quedaba pegado y el bloque post-turno del
+ * agente volvía a pausar el chat (y a reenviar el aviso viejo) con cada mensaje
+ * del cliente, aunque el modelo no hubiera derivado. Devuelve true si cambió algo.
+ */
+export function clearHumanHandoff(state: ConversationState, now = new Date()): boolean {
+  let changed = false;
+  const pending = typeof state.pendingAction === "string" ? state.pendingAction : "";
+  if (pending.startsWith("HUMAN") || pending.startsWith("Entrega manual")) {
+    const reason = pending.startsWith("HUMAN") ? humanReasonOf(state, true) : pending;
+    state.lastHumanReason = reason || null;
+    delete state.pendingAction;
+    changed = true;
+  }
+  if (state.status === "ASESOR_HUMANO") {
+    const prev = state.statusBeforeHandoff;
+    if (prev && prev !== "ASESOR_HUMANO") state.status = prev;
+    else if (state.lastPaymentPromptAt) state.status = "ESPERANDO_PAGO";
+    else if (state.selectedProductId || (Array.isArray(state.presentedProductIds) && state.presentedProductIds.length)) state.status = "INTERESADO";
+    else delete state.status;
+    changed = true;
+  }
+  if (changed) {
+    delete state.statusBeforeHandoff;
+    state.botResumedAt = now.toISOString();
+  }
+  return changed;
+}
+
 export async function setBotPaused(
   companyId: string,
   conversationId: string,
   paused: boolean,
   opts: { reason?: string | null } = {},
 ) {
+  // Al reactivar: limpiar la derivación en el MISMO update (panel, comando BOT por
+  // WhatsApp y copiloto pasan todos por aquí).
+  let stateData: { state: ConversationState } | null = null;
+  if (!paused) {
+    const current = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { state: true } });
+    const state = ((current?.state as ConversationState | null) ?? {}) as ConversationState;
+    if (clearHumanHandoff(state)) stateData = { state };
+  }
   const updated = await prisma.conversation.update({
     where: { id: conversationId },
-    data: { botPaused: paused, status: paused ? "HUMAN" : "OPEN" },
+    data: { botPaused: paused, status: paused ? "HUMAN" : "OPEN", ...(stateData ? { state: stateData.state as Prisma.InputJsonValue } : {}) },
     select: { customerId: true },
   });
   socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {

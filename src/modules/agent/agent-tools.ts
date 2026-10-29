@@ -130,6 +130,14 @@ export interface OutboxMessage {
   fileName?: string;
 }
 
+/** Marca el chat como derivado a humano en este turno (guarda la etapa previa para restaurarla al reactivar). */
+export function markHandoff(ctx: TurnContext, pendingAction: string) {
+  if (ctx.state.status !== "ASESOR_HUMANO") ctx.state.statusBeforeHandoff = ctx.state.status ?? null;
+  ctx.state.status = "ASESOR_HUMANO";
+  ctx.state.pendingAction = pendingAction;
+  ctx.handoffThisTurn = true;
+}
+
 export interface TurnContext {
   companyId: string;
   customerId: string;
@@ -144,6 +152,9 @@ export interface TurnContext {
   reminders: Array<{ type: string; minutes: number; body: string }>;
   /** avisos a enviar al admin al cerrar el turno (pedidos, handoff, etc.) */
   adminNotices: string[];
+  /** true si en ESTE turno se derivó a humano (derivar_humano, 3 pagos fallidos, entrega manual).
+   *  El cierre del turno solo pausa el chat cuando es así: un status ASESOR_HUMANO viejo no cuenta. */
+  handoffThisTurn?: boolean;
   /** Productos PRESENTADOS en ESTE turno (enviar_ficha). Evita que el modelo, en el
    *  mismo turno de la presentación, "complete" mandando los archivos on-demand
    *  (showInPresentation=false) vía enviar_multimedia. Transitorio por turno. */
@@ -2345,8 +2356,7 @@ export async function executeTool(
       const attempts = (Number(ctx.state.paymentAttempts) || 0) + 1;
       ctx.state.paymentAttempts = attempts;
       if (attempts >= 3) {
-        ctx.state.status = "ASESOR_HUMANO";
-        ctx.state.pendingAction = "HUMAN: no se pudo validar el pago automáticamente (3 intentos)";
+        markHandoff(ctx, "HUMAN[PAGO]: no se pudo validar el pago automáticamente (3 intentos)");
         ctx.state.paymentAttempts = 0;
         ctx.outbox.push({
           kind: "text",
@@ -2462,10 +2472,11 @@ export async function executeTool(
             `🔇 (Simulación) ${manualNeeded.join(", ")} requiere entrega manual${outOfStock.length ? " (SIN STOCK en inventario)" : ""}; el chat pasaría a atención humana.`,
           );
         } else {
-          ctx.state.status = "ASESOR_HUMANO";
-          ctx.state.pendingAction =
+          markHandoff(
+            ctx,
             `Entrega manual pendiente: ${manualNeeded.join(", ")}` +
-            (outOfStock.length ? ` · SIN STOCK: ${outOfStock.join(", ")}` : "");
+              (outOfStock.length ? ` · SIN STOCK: ${outOfStock.join(", ")}` : ""),
+          );
         }
       } else if (ctx.simulate) {
         // En el simulador NO se mutea de verdad (no tocamos mutedNumbers ni pausamos).
@@ -3028,12 +3039,11 @@ export async function executeTool(
     }
 
     case "derivar_humano": {
-      ctx.state.status = "ASESOR_HUMANO";
       // El motivo va tipado entre corchetes para que el aviso al dueño y el
       // panel puedan distinguir una negociación de un reclamo o un problema.
       const motivo = String(args.motivo ?? "").toUpperCase();
       const tag = ["NEGOCIACION", "RECLAMO", "PAGO", "CONSULTA", "NO_CONTACTAR", "OTRO"].includes(motivo) ? `[${motivo}]` : "";
-      ctx.state.pendingAction = `HUMAN${tag}: ${String(args.reason ?? "")}`;
+      markHandoff(ctx, `HUMAN${tag}: ${String(args.reason ?? "")}`);
       if (motivo === "NO_CONTACTAR") {
         return JSON.stringify({
           ok: true,

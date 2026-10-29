@@ -31,6 +31,7 @@ import {
   resolveQuotedPreview,
   type ConversationState,
   setCustomerOptOut,
+  clearHumanHandoff,
 } from "./conversation.service";
 import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type WhatsappSender } from "./outbound";
 import { readReceiptImage } from "./receipt-vision";
@@ -754,6 +755,11 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
   const runtime = await getConversationRuntime(conversationId);
   if (!runtime) return;
   if (runtime.botPaused) return;
+  // Defensivo: si el bot está activo pero el estado quedó con la derivación vieja
+  // (chats pausados/reactivados antes de este fix), se limpia aquí mismo.
+  if (runtime.state.status === "ASESOR_HUMANO" || String(runtime.state.pendingAction ?? "").startsWith("HUMAN")) {
+    clearHumanHandoff(runtime.state);
+  }
 
   let config;
   try {
@@ -924,8 +930,8 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     }
   }
 
-  // Derivación a humano
-  if (ctx.state.status === "ASESOR_HUMANO") {
+  // Derivación a humano: SOLO si ocurrió en este turno (un status viejo no re-pausa).
+  if (ctx.state.status === "ASESOR_HUMANO" && ctx.handoffThisTurn) {
     // "No me escribas más": el cliente queda NO CONTACTAR (marca durable en su
     // ficha), se cancelan TODOS sus recordatorios y el aviso al dueño es distinto.
     const optOut = String(ctx.state.pendingAction ?? "").includes("[NO_CONTACTAR]");
