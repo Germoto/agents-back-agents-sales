@@ -259,7 +259,7 @@ export type PendingRemindersPage = {
   /** Total REAL de pendientes que cumplen el filtro (la lista corta en 500). */
   total: number;
   porTipo: Partial<Record<ScheduledMessageType, number>>;
-  /** Pendientes con más de 1 h de atraso respecto a su hora de envío. */
+  /** Pendientes con más de 1 h de atraso respecto a su hora planificada (dueAt). */
   atrasados: number;
 };
 
@@ -288,7 +288,12 @@ export async function listPendingReminders(
     }),
     prisma.scheduledMessage.count({ where }),
     prisma.scheduledMessage.groupBy({ by: ["type"], where, _count: { _all: true } }),
-    prisma.scheduledMessage.count({ where: { AND: [where, { sendAt: { lt: hourAgo } }] } }),
+    // Atraso por hora PLANIFICADA (metadata.dueAt): el tope por hora corre sendAt hacia
+    // adelante y contar por sendAt escondía los atrasados reales. JSON ⇒ se filtra en JS;
+    // dueAt ≥ createdAt, así que solo pueden estar atrasados los creados hace más de 1 h.
+    prisma.scheduledMessage
+      .findMany({ where: { AND: [where, { createdAt: { lt: hourAgo } }] }, select: { sendAt: true, metadata: true } })
+      .then((cands) => cands.filter((r) => reminderDueAt(r) < hourAgo).length),
   ]);
   const porTipo: Partial<Record<ScheduledMessageType, number>> = {};
   for (const g of byType) porTipo[g.type] = g._count._all;
