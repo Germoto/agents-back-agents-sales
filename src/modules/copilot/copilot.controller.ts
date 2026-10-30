@@ -86,7 +86,13 @@ import { AUTHORING_HINTS, AUTHORING_EXAMPLE, HARD_RULES, NODE_DOCS, buildBusines
 import { getEntitlements } from "../billing/entitlements";
 import type { FlowEdge, FlowNode, FlowTrigger } from "../flows/flow-types";
 import { getMetaCapiConfig, updateMetaCapiConfig } from "../meta-capi/meta-capi.service";
-import { listPendingReminders, listReminderHistory } from "../scheduler/scheduler.service";
+import {
+  listPendingReminders,
+  listReminderHistory,
+  cancelRemindersByIds,
+  cancelRemindersByFilter,
+  LISTABLE_TYPES,
+} from "../scheduler/scheduler.service";
 import { approveStoreOrder, createCoupon, deleteStoreOrder, getStorefrontConfig, listCoupons, listStoreOrders, rejectStoreOrder, storeMetrics, updateCoupon, updateStorefrontConfig } from "../storefront/storefront.service";
 import { listStoreEmails } from "../storefront/storefront-email.service";
 import { createCampaign as createEmailCampaign, listCampaigns as listEmailCampaigns, previewAudience as previewEmailAudience, sendCampaignTest as sendEmailCampaignTest, startCampaign as startEmailCampaign } from "../storefront/storefront-campaigns.service";
@@ -757,7 +763,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_recordatorios",
       description:
-        "Actualiza los RECORDATORIOS automáticos. `data` es PARCIAL: {abandonedCart? {enabled, steps: [{delaySeconds, message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje)}]}, leftOnRead? {enabled, steps: [...]}, quietHours? {startHour 0-23, endHour 1-24, spreadMinutes 0-180 (DISPERSIÓN AL ABRIR: lo acumulado fuera de horario se reparte al azar en los primeros N minutos en vez de salir todo a la hora exacta; default 90)}, pacing? {minSec, maxSec, maxPerHour} (RITMO ANTI-BLOQUEO: separación al azar entre recordatorios de la empresa, default 25-70 s, y tope por hora, default 60)}. delaySeconds en segundos (ej. 3600 = 1 hora). En los mensajes se puede usar SPINTAX {Hola|Buenas|Qué tal} para que cada cliente reciba un texto distinto (anti-bloqueo). Tras un BLOQUEO de WhatsApp, recomienda calentar el número: pacing 60-120 s y maxPerHour 20-30 la primera semana. Llámala SOLO tras confirmación.",
+        "Actualiza los RECORDATORIOS automáticos. `data` es PARCIAL: {abandonedCart? {enabled, steps: [{delaySeconds, message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje)}]}, leftOnRead? {enabled, steps: [...]}, quietHours? {startHour 0-23, endHour 1-24, spreadMinutes 0-180 (DISPERSIÓN AL ABRIR: lo acumulado fuera de horario se reparte al azar en los primeros N minutos en vez de salir todo a la hora exacta; default 90)}, pacing? {minSec, maxSec, maxPerHour} (RITMO ANTI-BLOQUEO: separación al azar entre recordatorios de la empresa, default 25-70 s, y tope por hora, default 60)}. delaySeconds en segundos (ej. 3600 = 1 hora). En los mensajes se puede usar SPINTAX {Hola|Buenas|Qué tal} para que cada cliente reciba un texto distinto (anti-bloqueo). Tras un BLOQUEO de WhatsApp, recomienda calentar el número: pacing 60-120 s y maxPerHour 20-30 la primera semana. CÓMO FUNCIONA LA COLA: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delaySeconds desde ese momento, no acumulativo); el envío respeta horario, ritmo y tope por hora; si varios pasos de un cliente están vencidos sale SOLO el más reciente (con el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y los demás se cancelan; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre los atrasados. CAPACIDAD ≈ maxPerHour × horas de envío por día; cada paso extra multiplica la demanda (leads/día × pasos) — antes de AGREGAR pasos o BAJAR el ritmo, compara con listar_recordatorios_programados (total/atrasados) y avisa al dueño si la cola no se va a cubrir. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1458,7 +1464,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "listar_recordatorios_programados",
       description:
-        "Recordatorios (seguimientos, citas, renovaciones) con fecha y cliente. Por defecto los PENDIENTES. Con estado=SENT devuelve los ENVIADOS en un rango (desde/hasta ISO) más un RESUMEN para analizar ráfagas: envíos por hora, separación mínima/promedio entre envíos consecutivos y por tipo — úsalo para verificar que los recordatorios de la apertura (p. ej. 7am) salieron dispersos y espaciados. estado=FAILED o CANCELLED muestra el motivo.",
+        "Recordatorios (seguimientos, citas, renovaciones) con fecha y cliente. Por defecto los PENDIENTES: devuelve el TOTAL real, cuántos van ATRASADOS (más de 1 h) y por tipo, y cada ítem con su id, paso de la secuencia y atrasoMin (minutos desde su hora planificada) — los ids sirven para cancelar_recordatorios; filtra con phone, tipo, productId o atrasadosMasDeHoras. Con estado=SENT devuelve los ENVIADOS en un rango (desde/hasta ISO) más un RESUMEN para analizar ráfagas: envíos por hora, separación mínima/promedio entre envíos consecutivos y por tipo — úsalo para verificar que los recordatorios de la apertura (p. ej. 7am) salieron dispersos y espaciados. estado=FAILED o CANCELLED muestra el motivo; en CANCELLED, «colapsado…» o «venció…» es la COLA descartando pasos viejos a propósito (no es un fallo): cuando varios pasos de un cliente están vencidos sale solo el más reciente.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1467,6 +1473,36 @@ export const TOOLS: ToolDefinition[] = [
           estado: { type: "string", enum: ["PENDING", "SENT", "FAILED", "CANCELLED"], description: "default PENDING" },
           desde: { type: "string", description: "ISO (solo con estado≠PENDING); default: últimas 24 h" },
           hasta: { type: "string", description: "ISO (solo con estado≠PENDING)" },
+          phone: { type: "string", description: "solo PENDING: teléfono o id del cliente" },
+          tipo: { type: "string", enum: LISTABLE_TYPES, description: "solo PENDING: filtrar por tipo" },
+          productId: { type: "string", description: "solo PENDING: uuid del producto" },
+          atrasadosMasDeHoras: { type: "number", description: "solo PENDING: solo los que llevan más de N horas de atraso respecto a su hora planificada" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "cancelar_recordatorios",
+      description:
+        "CANCELA recordatorios PENDIENTES (no se envían). Individual o selección: ids (de listar_recordatorios_programados). En lote: filtro {phone?, tipo?, productId?, atrasadosMasDeHoras?} (al menos un campo; no existe 'cancelar todos' sin filtro). Sin tipo, el filtro solo toca SEGUIMIENTOS (carrito, visto, cuenta regresiva, post-venta, manuales); citas (BOOKING_REMINDER) y renovaciones (RENEWAL) solo si se nombran en tipo o por id. FLUJO OBLIGATORIO en lote: primero soloContar=true, muéstrale al dueño cuántos y la muestra, y cancela SOLO tras su confirmación explícita; por id, también tras confirmación. Es IRREVERSIBLE (quedan CANCELLED con motivo 'Cancelado por el dueño'); si el cliente vuelve a escribir, el bot programa su secuencia de nuevo, y uno puntual se repone con programar_recordatorio_cliente.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ids: { type: "array", items: { type: "string" }, description: "ids de recordatorios (1-500)" },
+          filtro: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              phone: { type: "string", description: "teléfono o id del cliente: todos sus pendientes" },
+              tipo: { type: "string", enum: LISTABLE_TYPES },
+              productId: { type: "string", description: "uuid del producto" },
+              atrasadosMasDeHoras: { type: "number", description: "solo los que llevan más de N horas de atraso" },
+            },
+          },
+          soloContar: { type: "boolean", description: "true = solo cuenta y muestra 5 de ejemplo, no cancela" },
         },
       },
     },
@@ -3617,7 +3653,7 @@ export async function runCopilotTool(
             ok: true,
             cliente: { phone: customer.phone, nombre: customer.name },
             enviaEl: sendAt.toISOString(),
-            nota: "Si cae fuera del horario hábil del negocio, el sistema lo mueve a la apertura. Se ve y se cancela en listar_recordatorios_programados o en el chat del panel.",
+            nota: "Si cae fuera del horario hábil del negocio, el sistema lo mueve a la apertura. Se ve en listar_recordatorios_programados y se cancela con cancelar_recordatorios o desde el chat del panel.",
           }),
           wrote: true,
         };
@@ -4541,10 +4577,22 @@ export async function runCopilotTool(
         }));
         return { result: JSON.stringify({ resumen, mostrados: rows.length, items: rows }), wrote: false };
       }
-      const page = await listPendingReminders(companyId);
-      const rows = page.items.slice(0, limit).map((r) => ({
+      const tipo = String(args.tipo ?? "").toUpperCase();
+      const customerId = args.phone ? (await findCustomerRef(companyId, args.phone)).id : undefined;
+      const page = await listPendingReminders(companyId, {
+        type: (LISTABLE_TYPES as string[]).includes(tipo) ? (tipo as ScheduledMessageType) : undefined,
+        productId: args.productId ? String(args.productId) : undefined,
+        customerId,
+      });
+      const lateH = Number(args.atrasadosMasDeHoras);
+      const nowMs = Date.now();
+      const filtered = Number.isFinite(lateH) && lateH > 0 ? page.items.filter((r) => nowMs - r.dueAt.getTime() > lateH * 3600_000) : page.items;
+      const rows = filtered.slice(0, limit).map((r) => ({
+        id: r.id,
         tipo: r.type,
         enviaEl: r.sendAt,
+        ...(r.stepIndex != null ? { paso: r.stepCount ? `${r.stepIndex + 1}/${r.stepCount}` : r.stepIndex + 1 } : {}),
+        atrasoMin: Math.max(0, Math.round((nowMs - r.dueAt.getTime()) / 60_000)),
         cliente: { nombre: r.customer?.name ?? null, phone: r.customer?.phone ?? null },
         texto: String(r.body ?? "").slice(0, 150),
       }));
@@ -4553,6 +4601,7 @@ export async function runCopilotTool(
           total: page.total,
           atrasados: page.atrasados,
           porTipo: page.porTipo,
+          ...(filtered !== page.items ? { coincidenAtraso: filtered.length } : {}),
           mostrados: rows.length,
           nota:
             page.atrasados > 0
@@ -4562,6 +4611,66 @@ export async function runCopilotTool(
         }),
         wrote: false,
       };
+    }
+
+    case "cancelar_recordatorios": {
+      const reason = "Cancelado por el dueño (copiloto)";
+      const ids = Array.isArray(args.ids) ? (args.ids as unknown[]).map((v) => String(v).trim()).filter(Boolean) : [];
+      const f = (args.filtro && typeof args.filtro === "object" ? args.filtro : {}) as Record<string, unknown>;
+      const dryRun = args.soloContar === true;
+      if (ids.length) {
+        if (ids.length > 500) return { result: JSON.stringify({ ok: false, error: "Máximo 500 ids por llamada" }), wrote: false };
+        if (dryRun) {
+          const seCancelarian = await prisma.scheduledMessage.count({
+            where: { id: { in: ids }, companyId, status: ScheduledMessageStatus.PENDING, type: { in: LISTABLE_TYPES } },
+          });
+          return { result: JSON.stringify({ ok: true, soloContar: true, seCancelarian }), wrote: false };
+        }
+        const count = await cancelRemindersByIds(companyId, ids, reason);
+        const restantes = await listPendingReminders(companyId);
+        return {
+          result: JSON.stringify({
+            ok: true,
+            cancelados: count,
+            ...(count < ids.length ? { nota: `${ids.length - count} id(s) no existían, no eran de este negocio o ya no estaban pendientes.` } : {}),
+            pendientesRestantes: restantes.total,
+          }),
+          wrote: count > 0,
+        };
+      }
+      const tipo = String(f.tipo ?? "").toUpperCase();
+      const late = Number(f.atrasadosMasDeHoras);
+      const hasFilter = !!f.phone || !!tipo || !!f.productId || (Number.isFinite(late) && late > 0);
+      if (!hasFilter) {
+        return { result: JSON.stringify({ ok: false, error: "Indica ids o un filtro (phone, tipo, productId o atrasadosMasDeHoras). No se cancela todo sin filtro." }), wrote: false };
+      }
+      if (tipo && !(LISTABLE_TYPES as string[]).includes(tipo)) {
+        return { result: JSON.stringify({ ok: false, error: `Tipo inválido: ${tipo}` }), wrote: false };
+      }
+      try {
+        const customerId = f.phone ? (await findCustomerRef(companyId, f.phone)).id : undefined;
+        const res = await cancelRemindersByFilter(
+          companyId,
+          {
+            type: tipo ? (tipo as ScheduledMessageType) : undefined,
+            productId: f.productId ? String(f.productId) : undefined,
+            customerId,
+            lateMoreThanHours: Number.isFinite(late) && late > 0 ? late : undefined,
+          },
+          { reason, dryRun },
+        );
+        const muestra = res.muestra.map((r) => ({ id: r.id, tipo: r.type, horaPlanificada: r.dueAt, cliente: { nombre: r.customer?.name ?? null, phone: r.customer?.phone ?? null } }));
+        if (dryRun) {
+          return {
+            result: JSON.stringify({ ok: true, soloContar: true, seCancelarian: res.count, muestra, nota: "Muestra este número al dueño y cancela solo si confirma (misma llamada sin soloContar)." }),
+            wrote: false,
+          };
+        }
+        const restantes = await listPendingReminders(companyId);
+        return { result: JSON.stringify({ ok: true, cancelados: res.count, muestra, pendientesRestantes: restantes.total }), wrote: res.count > 0 };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo cancelar" }), wrote: false };
+      }
     }
 
     case "ver_mi_plan": {
@@ -4618,7 +4727,7 @@ const SYSTEM_GUIDE = [
   "- Dashboard (/dashboard): métricas del negocio.",
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}. PESTAÑA RECURSOS del chat (junto a Contacto/Respuestas/Notas): lista la BIBLIOTECA de multimedia del negocio — archivos de productos + multimedia de recordatorios (generales y por producto), banner y mensajes adicionales de presentación y mensajes post-venta — con su origen, filtro por producto y buscador; el asesor la envía al cliente con un clic, con o sin su descripción (al enviarla, el panel resuelve las variantes {a|b} y {nombre}); la misma biblioteca se consulta por aquí con listar_recursos. AVISOS AL DUEÑO: cuando el agente deriva a humano (consulta sin respuesta, negociación, reclamo, pago, flujo, campaña) y cuando un cliente escribe en un chat en atención humana, el dueño recibe un WhatsApp con el link directo al chat (flowapp.pe/conversaciones?id=…). TOMAR EL CONTROL DE UN CHAT DESDE AQUÍ (lo mismo que hace el asesor en el panel): leer_conversacion (trae el id de cada mensaje) → enviar_mensaje_cliente (texto y/o imagen/video/PDF por URL, citando con citarMensajeId; por defecto pasa el chat a atención humana) o enviar_respuesta_rapida (/comando con sus acciones) o reaccionar_mensaje (emoji) → programar_recordatorio_cliente para un seguimiento a una hora → al terminar, atencion_humana {activar:false} REACTIVA el bot (si no, el agente IA no vuelve a responderle). Reactivar el bot (desde el panel, con BOT <número> por WhatsApp o con atencion_humana) limpia la derivación: el agente retoma con lo que respondió el asesor y NO vuelve a derivar por el mismo motivo (solo si el cliente pide una persona o hay un problema nuevo). atencion_humana {activar:true} pausa el bot sin escribir. iniciar_conversacion abre un chat con un número nuevo (solo tras confirmación; en Meta no se puede sin plantilla). reiniciar_conversacion borra el historial (irreversible, solo tras confirmación). Límites automáticos de los envíos del copiloto: nunca a clientes noContactar; en Meta solo dentro de la ventana de 24 h desde el último mensaje del cliente (fuera de ella usa un recordatorio o campaña con plantilla); ritmo anti-bloqueo igual al de los recordatorios (tope por hora y separación entre clientes distintos; si devuelve reintentarEnSeg, espera). La firma del negocio se agrega sola a cada mensaje. Escribe como una persona del negocio: corto, una idea y una pregunta; precios, pagos y enlaces SOLO de ver_producto/ver_configuracion/ver_tienda, nunca inventados.",
   "- CONVERSACIONES (/conversaciones): la lista del panel busca y filtra en TODO el historial del negocio (nombre, teléfono, etapa, etiqueta, anuncio) con scroll infinito, y los mensajes de cada chat se cargan por tramos (los más recientes primero, «Cargar anteriores» arriba). En móvil: lista → chat (atrás vuelve a la lista) → herramientas en hoja inferior (Contacto, Respuestas, Notas, Recursos); el menú ⋯ del chat tiene Fijar, Etiquetas, Recordatorio, No contactar, Fondo, Reiniciar y Eliminar; escribir en un chat con el bot activo toma el control automáticamente.\n" +
-  "- COLA DE RECORDATORIOS: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delays desde ese momento). El worker respeta el tope por hora y el horario; si varios pasos de un cliente están vencidos envía solo el más reciente (activando el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y cancela los demás; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre pasos atrasados. listar_recordatorios_programados muestra el total real y los atrasados: si los atrasados crecen, la capacidad (tope/hora × horas) no cubre la demanda.\n" +
+  "- COLA DE RECORDATORIOS: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delays desde ese momento). El worker respeta el tope por hora y el horario; si varios pasos de un cliente están vencidos envía solo el más reciente (activando el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y cancela los demás; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre pasos atrasados. listar_recordatorios_programados muestra el total real y los atrasados: si los atrasados crecen, la capacidad (tope/hora × horas) no cubre la demanda. cancelar_recordatorios cancela uno, una selección por ids o un lote por filtro (cliente, tipo, producto, atraso): en lote primero soloContar y confirmación del dueño.\n" +
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). El Inbox del panel muestra los últimos 100 contactos sin colocar con «Cargar más» y búsqueda por nombre/teléfono; los clientes siguen existiendo aunque no estén en pantalla. CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas; con quitarRespuestasFlujo borra las respuestas del chatbot 📝 que se ven en la tarjeta y en Contacto — el agente las volverá a preguntar; solo tras confirmación) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar). CALENDARIO: tras cada cita confirmada por el agente o un flujo, el cliente recibe por WhatsApp enlaces para agregarla a Google Calendar / iPhone (crear_cita devuelve esos enlaces en 'calendario' para que el dueño los pegue si la creó a mano) y, si tiene correo en su ficha, una invitación por email. El dueño ve TODAS sus citas y bloqueos en su propio calendario suscribiendo la URL ICS de Empresa → Agenda → «Calendario en tu teléfono» (iPhone: Ajustes → Calendario → Cuentas → Añadir cuenta → Otro → Añadir calendario suscrito; Google Calendar: Otros calendarios → + → Desde URL; Outlook: Agregar calendario → Suscribirse desde web). Es de UN solo sentido (FlowApp → calendario) y se refresca cada ~1 h según el dispositivo; no hay sincronización con Google OAuth. VIDEOLLAMADA (citas online): el dueño pega un enlace FIJO de Meet/Zoom en el servicio (actualizar_producto verticalData.meetingUrl) o uno por defecto para todo el negocio (configurar_empresa meetingUrl); con eso el cliente recibe '🎥 Enlace de la videollamada' junto con los enlaces de calendario al confirmar/reprogramar, en los recordatorios, en el evento del calendario (como ubicación) y en el correo. No se envía si la cita quedó como presencial (modality) o si no hay enlace. Para crear la sala fija de Meet: meet.google.com → «Nueva reunión» → «Crear una reunión para más tarde» → copiar el enlace (los clientes piden unirse y el dueño los admite; Google borra la sala si pasa 1 año sin usarse). crear_cita devuelve 'calendario.meetingUrl'. Aún no hay enlace único por cita (eso requeriría conectar Google con OAuth). REPROGRAMAR: el agente ve en su prompt la cita vigente del cliente y la MUEVE con reprogramar_cita; agendar_servicio no crea una segunda cita si ya hay una vigente (solo con adicional:true). Si el dueño ve citas duplicadas de antes de este cambio, cancele la vieja con actualizar_cita.",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. DEFAULTS SEGUROS si no se indica otra cosa: 45–90 s entre contactos, pausa 180–300 s cada 10, tope 60/día (cuenta todas las campañas del negocio), horario 09:00–21:00. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 60–120 s); en números nuevos recomienda tope diario 30–50 y subirlo de a poco; sin spintax todos reciben el mismo texto (pide ≥3 variantes en saludo, verbo y cierre; nunca en precios ni links). PROTECCIONES AUTOMÁTICAS: solo UNA campaña en curso por negocio; si 5 envíos seguidos fallan se pausa sola (pauseReason failures) y avisa al dueño por WhatsApp. Flujo seguro OBLIGATORIO: previsualizar_audiencia_campana (total real tras exclusiones) → crear borrador → mostrar total + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible) → ver_campana para el seguimiento (cómo va, por qué espera, fallidos) → pausar_campana / reanudar_campana (reversibles) o cancelar_campana (irreversible, confirmación con el nombre). MULTIMEDIA EN CAMPAÑAS: para adjuntar algo ya subido (archivo de producto, video de un recordatorio, banner de presentación) usa listar_recursos y pasa su url como mediaUrl en los mensajes — en el panel es el botón 'Insertar recurso' del paso Mensajes.",
   "- FLUJOS — secuencia OBLIGATORIA: (1) ver_bloques_flujo y ver_crm ANTES de diseñar (nunca inventes ids: usa nombres o los ids reales); (2) propón al dueño el flujo en lenguaje llano — qué pregunta y qué opciones numeradas verá el cliente (muéstrale el texto tal cual le llegará), qué etiqueta/columna pone cada rama, cuándo avisa al dueño, si agenda cita — y espera su confirmación; (3) crear_flujo con soloValidar=true para comprobar, luego sin él; (4) muéstrale el link /flujos/<id> y las warnings; (5) activar_flujo SOLO tras confirmación explícita, avisando que en modo FLOW el bot calla si ningún flujo se dispara (en HYBRID responde el agente) y que el modo se cambia con configurar_empresa botMode; (6) para modificar uno existente, ver_flujo primero y devuelve el grafo COMPLETO conservando ids y posiciones. GOTCHAS: en HYBRID termina el flujo de calificación con to-agent (clientText opcional + note con lo que el agente debe hacer) en vez de handoff, salvo que el dueño quiera atender él; las respuestas del flujo (saveVariable) quedan en la ficha del cliente (Conversaciones → Contacto, tarjeta del CRM, ver_cliente/leer_conversacion) y el agente las recibe como contexto; si el dueño capta leads por Meta Ads, propón trigger onAdLead (no keywords) y acciones CRM en el anuncio (configurar_anuncio); etiquetas según rango (presupuesto, tipo de cliente) requieren un bloque answers (opciones numeradas; el cliente responde con el número o el nombre) con una rama por opción, no question libre; en answers el message es SOLO la pregunta: la lista «1. … 2. …» la agrega el sistema y NUNCA se crean opciones separadas para «1»,«2»… (duplicarían ramas); para menús de 7+ opciones usa list; no existen botones de WhatsApp, todo es texto; las variables guardadas (saveVariable) solo llegan al dueño si el notifyText del handoff las incluye con {{variable}}; book-appointment necesita un servicio con durationMin; un flujo de captación típico: answers (qué necesita, una opción por servicio) → crm-add-tags → crm-move → answers (tipo/presupuesto) → crm-add-tags → question (descripción) → to-agent (HYBRID) o handoff con aviso que incluya {{nombre}} {{telefono}} y las variables (ver_bloques_flujo trae un EJEMPLO completo).",
@@ -4688,7 +4797,7 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",
-    "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana, eliminar_cliente, reiniciar_conversacion e iniciar_conversacion: SOLO si lo pidió explícitamente y confirmó. Nunca elimines ni escribas a números nuevos por iniciativa propia.",
+    "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana, eliminar_cliente, reiniciar_conversacion, iniciar_conversacion y cancelar_recordatorios: SOLO si lo pidió explícitamente y confirmó. Nunca elimines ni escribas a números nuevos por iniciativa propia.",
     "- ESCRIBIR A CLIENTES (enviar_mensaje_cliente, enviar_respuesta_rapida): son mensajes REALES que el cliente recibe en su WhatsApp a nombre del negocio. Lee antes la conversación, un mensaje por llamada, no insistas si el cliente no respondió al anterior, y reporta cada envío al dueño. Si el dueño te dio una instrucción permanente (p. ej. 'atiende y cierra los leads que vayan quedando'), puedes actuar sin pedir confirmación en cada mensaje, siempre dentro de esa instrucción. Cuando termines de atender a alguien, devuelve el chat al bot con atencion_humana {activar:false}.",
     "- No gestionas datos sensibles (API keys de OpenAI, tokens de Mercado Pago/Meta, credenciales de WhatsApp): para eso indícale la página del panel correspondiente (Agente IA, Pagos, WhatsApp API).",
     "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación en Activación (/activacion). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",

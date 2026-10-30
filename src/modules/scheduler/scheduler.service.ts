@@ -148,14 +148,87 @@ export async function cancelReminderById(companyId: string, id: string): Promise
  * Cancela en lote varios recordatorios PENDING por id (selección masiva desde el panel).
  * Filtra por empresa y solo PENDING; devuelve cuántos canceló.
  */
-export async function cancelRemindersByIds(companyId: string, ids: string[]): Promise<number> {
+export async function cancelRemindersByIds(companyId: string, ids: string[], reason?: string): Promise<number> {
   const clean = [...new Set(ids.map((s) => String(s).trim()).filter(Boolean))];
   if (!clean.length) return 0;
   const res = await prisma.scheduledMessage.updateMany({
-    where: { id: { in: clean }, companyId, status: ScheduledMessageStatus.PENDING },
-    data: { status: ScheduledMessageStatus.CANCELLED },
+    // Solo tipos visibles en Programados: los internos (FLOW_TIMEOUT, PAYMENT_RECHECK) no se tocan por id.
+    where: { id: { in: clean }, companyId, status: ScheduledMessageStatus.PENDING, type: { in: LISTABLE_TYPES } },
+    data: { status: ScheduledMessageStatus.CANCELLED, ...(reason ? { failureReason: reason } : {}) },
   });
   return res.count;
+}
+
+/** Filtros de la lista de pendientes (panel y copiloto). */
+export type PendingReminderFilter = {
+  type?: ScheduledMessageType;
+  /** Varios tipos; si no hay type ni types se listan todos los LISTABLE_TYPES. */
+  types?: ScheduledMessageType[];
+  q?: string;
+  productId?: string;
+  customerId?: string;
+};
+
+/** where de los recordatorios PENDING visibles en Programados (nunca los internos). */
+export function pendingRemindersWhere(companyId: string, opts: PendingReminderFilter = {}): Prisma.ScheduledMessageWhereInput {
+  const q = (opts.q ?? "").trim();
+  const productId = (opts.productId ?? "").trim();
+  const types = opts.type ? [opts.type] : opts.types?.length ? opts.types : LISTABLE_TYPES;
+  return {
+    companyId,
+    status: ScheduledMessageStatus.PENDING,
+    type: { in: types.filter((t) => LISTABLE_TYPES.includes(t)) },
+    ...(opts.customerId ? { customerId: opts.customerId } : {}),
+    // El productId se guarda en metadata al agendar el recordatorio (scheduleAutoReminders).
+    ...(productId ? { metadata: { path: ["productId"], equals: productId } } : {}),
+    ...(q
+      ? {
+          customer: {
+            OR: [
+              { name: { contains: q, mode: "insensitive" } },
+              { phone: { contains: q.replace(/\D/g, "") || q } },
+            ],
+          },
+        }
+      : {}),
+  };
+}
+
+/** Hora PLANIFICADA del paso (metadata.dueAt); sendAt se corre con el ritmo/tope. */
+export function reminderDueAt(row: { sendAt: Date; metadata: Prisma.JsonValue | null }): Date {
+  const m = row.metadata;
+  const raw = m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>).dueAt : null;
+  const t = typeof raw === "string" ? Date.parse(raw) : NaN;
+  return Number.isFinite(t) ? new Date(t) : row.sendAt;
+}
+
+/**
+ * Cancela en lote por FILTRO (copiloto/MCP). Sin tipo explícito solo toca
+ * seguimientos (FOLLOWUP_TYPES): citas y renovaciones se cancelan solo si se
+ * nombran. `lateMoreThanHours` usa la hora planificada (dueAt), no sendAt.
+ * Con dryRun solo cuenta y devuelve una muestra.
+ */
+export async function cancelRemindersByFilter(
+  companyId: string,
+  filter: Omit<PendingReminderFilter, "types"> & { lateMoreThanHours?: number },
+  opts: { reason?: string; dryRun?: boolean } = {},
+): Promise<{
+  count: number;
+  muestra: Array<{ id: string; type: ScheduledMessageType; dueAt: Date; customer: { name: string | null; phone: string } }>;
+}> {
+  const where = pendingRemindersWhere(companyId, { ...filter, types: filter.type ? undefined : FOLLOWUP_TYPES });
+  const rows = await prisma.scheduledMessage.findMany({
+    where,
+    orderBy: { sendAt: "asc" },
+    select: { id: true, type: true, sendAt: true, metadata: true, customer: { select: { name: true, phone: true } } },
+  });
+  const late = Number(filter.lateMoreThanHours);
+  const cutoff = Number.isFinite(late) && late > 0 ? Date.now() - late * 3600_000 : null;
+  const hits = cutoff == null ? rows : rows.filter((r) => reminderDueAt(r).getTime() < cutoff);
+  const muestra = hits.slice(0, 5).map((r) => ({ id: r.id, type: r.type, dueAt: reminderDueAt(r), customer: r.customer }));
+  if (opts.dryRun || !hits.length) return { count: hits.length, muestra };
+  const count = await cancelRemindersByIds(companyId, hits.map((r) => r.id), opts.reason);
+  return { count, muestra };
 }
 
 /**
@@ -172,6 +245,11 @@ export type PendingReminderRow = {
   customerId: string;
   conversationId: string | null;
   productId: string | null;
+  /** Hora planificada del paso (metadata.dueAt; si no hay, sendAt). */
+  dueAt: Date;
+  /** Paso de la secuencia (0 = primero) y total de pasos, si aplica. */
+  stepIndex: number | null;
+  stepCount: number | null;
   customer: { name: string | null; phone: string };
 };
 
@@ -187,27 +265,9 @@ export type PendingRemindersPage = {
 
 export async function listPendingReminders(
   companyId: string,
-  opts?: { type?: ScheduledMessageType; q?: string; productId?: string },
+  opts?: PendingReminderFilter,
 ): Promise<PendingRemindersPage> {
-  const q = (opts?.q ?? "").trim();
-  const productId = (opts?.productId ?? "").trim();
-  const where: Prisma.ScheduledMessageWhereInput = {
-      companyId,
-      status: ScheduledMessageStatus.PENDING,
-      type: opts?.type ? opts.type : { in: LISTABLE_TYPES },
-      // El productId se guarda en metadata al agendar el recordatorio (scheduleAutoReminders).
-      ...(productId ? { metadata: { path: ["productId"], equals: productId } } : {}),
-      ...(q
-        ? {
-            customer: {
-              OR: [
-                { name: { contains: q, mode: "insensitive" } },
-                { phone: { contains: q.replace(/\D/g, "") || q } },
-              ],
-            },
-          }
-        : {}),
-  };
+  const where = pendingRemindersWhere(companyId, opts);
   const hourAgo = new Date(Date.now() - 60 * 60_000);
   const [rows, total, byType, atrasados] = await Promise.all([
     prisma.scheduledMessage.findMany({
@@ -228,15 +288,20 @@ export async function listPendingReminders(
     }),
     prisma.scheduledMessage.count({ where }),
     prisma.scheduledMessage.groupBy({ by: ["type"], where, _count: { _all: true } }),
-    prisma.scheduledMessage.count({ where: { ...where, sendAt: { lt: hourAgo } } }),
+    prisma.scheduledMessage.count({ where: { AND: [where, { sendAt: { lt: hourAgo } }] } }),
   ]);
   const porTipo: Partial<Record<ScheduledMessageType, number>> = {};
   for (const g of byType) porTipo[g.type] = g._count._all;
   const items = rows.map(({ metadata, ...r }) => {
-    const pid = metadata && typeof metadata === "object" && !Array.isArray(metadata)
-      ? (metadata as Record<string, unknown>).productId
-      : null;
-    return { ...r, productId: typeof pid === "string" ? pid : null };
+    const m = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>) : {};
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    return {
+      ...r,
+      productId: typeof m.productId === "string" ? m.productId : null,
+      dueAt: reminderDueAt({ sendAt: r.sendAt, metadata }),
+      stepIndex: num(m.stepIndex),
+      stepCount: num(m.stepCount),
+    };
   });
   return { items, total, porTipo, atrasados };
 }
