@@ -642,6 +642,11 @@ function field(
   return null;
 }
 
+/** Valor del webhook que de verdad es una URL descargable (http/https); el resto ("0", "", "false") → null. */
+function asHttpUrl(value: string | null): string | null {
+  return value && /^https?:\/\/\S+$/i.test(value) ? value : null;
+}
+
 export function parseInboundWebhook(raw: unknown): InboundMessage {
   const body = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
   const data = (body.data && typeof body.data === "object" ? body.data : {}) as Record<string, any>;
@@ -662,12 +667,15 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
   const hasText = text.trim().length > 0;
 
   // Campos ADJUNTO-específicos: si vienen, es un adjunto real (nunca foto de perfil).
-  const attachmentUrl = field(body, data, [
-    "media_url", "mediaUrl", "file_url", "download_url", "attachment", "document_url", "media",
-  ]);
+  // Solo cuenta si es una URL http(s): SMS Tools manda `attachment: 0` en TODOS los
+  // mensajes de texto (visto el 30-oct-2026) y ese "0" convertía cada texto en una
+  // "imagen" que no se podía descargar ni leer (visión 400, adjunto roto en el panel).
+  const attachmentUrl = asHttpUrl(
+    field(body, data, ["media_url", "mediaUrl", "file_url", "download_url", "attachment", "document_url", "media"]),
+  );
   // Campos AMBIGUOS: SMS Tools manda la foto de perfil del remitente en image/url
   // en TODOS los inbound (incluidos los de texto) → solo son adjunto si NO hay texto.
-  const ambiguousUrl = field(body, data, ["image", "url", "file", "photo", "picture"]);
+  const ambiguousUrl = asHttpUrl(field(body, data, ["image", "url", "file", "photo", "picture"]));
 
   const rawType = (field(body, data, ["type", "message_type", "messageType", "msgtype", "msg_type"]) ?? "").toLowerCase();
   const typeFromRaw = (): InboundMessage["type"] | null => {

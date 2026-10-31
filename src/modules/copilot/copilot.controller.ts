@@ -70,6 +70,7 @@ import {
 import { loadWhatsappSender, mediaKindFor } from "../agent/outbound";
 import { checkManualSendGate, COPILOT_SOURCE } from "../agent/manual-send-gate";
 import { sendQuickReply } from "../quick-replies/quick-replies.service";
+import { deliverApprovedReceipt } from "../receipts/receipt-delivery";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
 import { Prisma, ScheduledMessageType } from "@prisma/client";
 import { createBooking, createScheduleBlock, deleteScheduleBlock, listBookings, listScheduleBlocks, rescheduleBooking, updateBookingStatus } from "../bookings/bookings.service";
@@ -1220,7 +1221,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "aprobar_comprobante",
       description:
-        "APRUEBA un comprobante de pago del chat (listar_comprobantes → id) y lo marca como venta: opcionalmente lo asocia a un producto (productId o nombre) y al teléfono del pagador. Dispara la entrega/flujo post-pago igual que el botón del panel. Irreversible: muestra monto, pagador y producto y pide confirmación explícita antes.",
+        "APRUEBA un comprobante de pago del chat (listar_comprobantes → id) y lo marca como venta: opcionalmente lo asocia a un producto (productId o nombre) y al teléfono del pagador. Además ENVÍA LA ENTREGA por el chat del cliente (mensaje de acceso + archivos + mensajes adicionales del producto, igual que el agente al validar) si el comprobante tiene producto digital y cliente; con entrega MANUAL o sin producto NO envía nada y lo dice en 'entrega' (usa enviar_respuesta_rapida con la respuesta de entrega). Funciona aunque el chat esté en atención humana. Irreversible: muestra monto, pagador y producto y pide confirmación explícita antes.",
       parameters: { type: "object", additionalProperties: false, required: ["receiptId"], properties: { receiptId: { type: "string" }, producto: { type: "string", description: "id o nombre del producto (opcional)" }, telefonoPagador: { type: "string", description: "teléfono del cliente (opcional)" } } },
     },
   },
@@ -4118,6 +4119,23 @@ export async function runCopilotTool(
       const phone = asStr(args.telefonoPagador)?.replace(/\D/g, "") || null;
       try {
         const r = name === "aprobar_comprobante" ? await approveReceipt(companyId, receiptId, productId, phone) : await associateReceiptProduct(companyId, receiptId, productId, phone);
+        const entrega =
+          name === "aprobar_comprobante"
+            ? await deliverApprovedReceipt(companyId, receiptId).catch((err) => ({ delivered: false, sent: 0, reason: err instanceof Error ? err.message : "no se pudo entregar", manualNeeded: [], outOfStock: [] }))
+            : null;
+        if (entrega) {
+          return {
+            result: JSON.stringify({
+              ok: true,
+              estado: (r as { status?: string }).status ?? null,
+              entrega: entrega.delivered ? { enviada: true, mensajes: entrega.sent } : { enviada: false, motivo: entrega.reason },
+              nota: entrega.delivered
+                ? "Comprobante aprobado y entrega enviada por el chat (queda nota 📦 en la conversación)."
+                : `Comprobante aprobado, pero la entrega NO se envió: ${entrega.reason}. Si corresponde, envíala con enviar_respuesta_rapida (respuesta de entrega).`,
+            }),
+            wrote: true,
+          };
+        }
         return { result: JSON.stringify({ ok: true, estado: (r as { status?: string }).status ?? null, nota: name === "aprobar_comprobante" ? "Comprobante aprobado: cuenta como venta y dispara la entrega configurada." : "Comprobante asociado." }), wrote: true };
       } catch (err) {
         return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo procesar" }), wrote: false };

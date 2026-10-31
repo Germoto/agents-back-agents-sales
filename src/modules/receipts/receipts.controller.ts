@@ -4,6 +4,7 @@ import { AppError } from "../../lib/app-error";
 import { sendDigitalDeliveryEmail, EmailDeliveryError, type SendDigitalDeliveryEmailResult } from "../agent/email-delivery";
 import { recordMessage } from "../agent/conversation.service";
 import { maskEmail } from "../../lib/email";
+import { deliverApprovedReceipt } from "./receipt-delivery";
 import { approveReceipt, associateReceiptProduct, deleteReceipt, deliverReceiptManually, getReceiptProof, ignoreReceipt, listReceipts, rejectReceipt } from "./receipts.service";
 
 export async function listReceiptsController(req: Request, res: Response) {
@@ -28,7 +29,16 @@ export async function approveReceiptController(req: Request, res: Response) {
     req.body?.productId ?? null,
     req.body?.payerPhone ?? undefined,
   );
-  return res.json(receipt);
+  // Aprobar también ENTREGA por el chat (igual que el agente al validar). Un fallo
+  // de la entrega no deshace la aprobación: se devuelve para que el panel lo muestre.
+  const entrega = await deliverApprovedReceipt(req.user!.companyId, receipt.id).catch((err) => ({
+    delivered: false,
+    sent: 0,
+    reason: err instanceof Error ? err.message : "no se pudo entregar",
+    manualNeeded: [],
+    outOfStock: [],
+  }));
+  return res.json({ ...receipt, entrega });
 }
 
 export async function associateReceiptController(req: Request, res: Response) {

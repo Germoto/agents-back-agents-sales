@@ -70,6 +70,11 @@ export async function readReceiptImage(
   imageUrl: string,
 ): Promise<ReceiptData | null> {
   try {
+    // Sin URL http(s) o data-URI no hay nada que leer: evita un 400 seguro del proveedor.
+    if (!/^(https?:\/\/|data:)/i.test(imageUrl)) {
+      console.warn(`[receipt-vision] URL de imagen inválida (${imageUrl.slice(0, 40)}): se omite la lectura`);
+      return null;
+    }
     const useJsonSchema = ai.caps?.jsonSchema !== false;
     // Inline SIEMPRE (data-URI): el comprobante es un upload nuestro y dejar que
     // el proveedor lo descargue por HTTP causa "Timeout while downloading".
@@ -97,7 +102,13 @@ export async function readReceiptImage(
         ],
     });
     if (!response.ok) {
-      console.warn(`[receipt-vision] proveedor IA ${response.status}`);
+      let detail = "";
+      try {
+        detail = (await response.text()).replace(/\s+/g, " ").slice(0, 200);
+      } catch {
+        // ignore
+      }
+      console.warn(`[receipt-vision] proveedor IA ${response.status}${detail ? `: ${detail}` : ""}`);
       return null;
     }
     const data = (await response.json()) as {

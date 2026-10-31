@@ -55,6 +55,11 @@ export async function persistInboundMedia(
   headers?: Record<string, string>,
 ): Promise<string | null> {
   try {
+    // Solo URLs http(s): un valor basura del webhook ("0") no se intenta descargar.
+    if (!/^https?:\/\//i.test(url)) {
+      console.warn(`[inbound-media] URL de media entrante inválida (${url.slice(0, 40)}): se ignora`);
+      return null;
+    }
     // Ya es una URL nuestra (p.ej. el webhook de Meta la persistió antes de
     // llamar a handleInbound): no re-descargarse a sí mismo.
     const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");

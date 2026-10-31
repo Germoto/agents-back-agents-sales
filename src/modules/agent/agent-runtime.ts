@@ -21,6 +21,26 @@ const OPT_OUT_RE =
 const FALLBACK_TEXT =
   "Disculpa, tuve un problema para procesar tu mensaje. ¿Me lo repites o me dices qué producto te interesa?";
 
+/** Respuesta literal del modelo cuando no queda nada por contestar (ver TRAILING_ASSISTANT_NOTE). */
+export const NO_REPLY_TOKEN = "SIN_RESPUESTA";
+/**
+ * Nota en rol usuario que cierra un historial que termina en mensaje del bot. Pasa
+ * cuando el cliente escribe MIENTRAS el bot responde: la respuesta se graba después
+ * del mensaje nuevo y el siguiente turno ve el historial terminando en el bot. Claude
+ * 5.x rechaza esa petición ("does not support assistant message prefill… must end
+ * with a user message"); OpenAI la toleraba. La nota deja claro qué responder.
+ */
+const TRAILING_ASSISTANT_NOTE =
+  "[Sistema: el cliente escribió sus últimos mensajes MIENTRAS respondías, así que tu última respuesta no los tuvo en cuenta. " +
+  `Responde ahora lo que haya quedado sin atender. Si tu última respuesta ya lo cubre todo, contesta exactamente ${NO_REPLY_TOKEN} (sin nada más).]`;
+
+/** Texto final del modelo → lo que se envía ("" si contestó NO_REPLY_TOKEN). */
+function finalReply(text: string | null | undefined): string {
+  const t = (text ?? "").trim();
+  // Tolera formato alrededor del token (*SIN_RESPUESTA*, "SIN_RESPUESTA.", etc.).
+  return t === NO_REPLY_TOKEN || t.replace(/[*`"'.\[\]()]/g, "").trim() === NO_REPLY_TOKEN ? "" : t;
+}
+
 /**
  * Ejecuta un turno completo. `history` debe incluir ya el último mensaje del
  * cliente (se lee de la BD después de persistirlo). Devuelve el texto final;
@@ -177,6 +197,14 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     }
   }
 
+  // El historial debe terminar en el cliente (ver TRAILING_ASSISTANT_NOTE). Va al final,
+  // después de las notas de sistema, para que sea el último mensaje de la petición.
+  const trailingAssistant = history.length > 0 && history[history.length - 1].role === "assistant";
+  if (trailingAssistant) {
+    messages.push({ role: "user", content: TRAILING_ASSISTANT_NOTE });
+    console.log(`[agent] historial termina en el bot (cliente escribió durante la respuesta): nota de cierre convo=${ctx.conversationId}`);
+  }
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await chatCompletion({
       apiKey,
@@ -219,7 +247,8 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     // cuando no se envió nada en todo el turno — y NUNCA si el comprobante del
     // cliente ya se gestionó por fuera (auto-validación), para no tapar ese
     // mensaje con el genérico "tuve un problema".
-    const final = (res.content ?? "").trim();
+    const final = finalReply(res.content);
+    if (trailingAssistant && !final) return "";
     return final || (suppressFallback(ctx, history) ? "" : FALLBACK_TEXT);
   }
 
@@ -235,7 +264,9 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     ],
   }).catch(() => null);
 
-  return (closing?.content ?? "").trim() || (suppressFallback(ctx, history) ? "" : FALLBACK_TEXT);
+  const closingText = finalReply(closing?.content);
+  if (trailingAssistant && !closingText) return "";
+  return closingText || (suppressFallback(ctx, history) ? "" : FALLBACK_TEXT);
 }
 
 /**
