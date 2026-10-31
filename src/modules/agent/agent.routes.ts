@@ -2,7 +2,7 @@ import { Router } from "express";
 import { optionalAgentApiKey } from "../../middlewares/optional-agent-api-key";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { validate } from "../../middlewares/validate";
-import { conversationsQuerySchema, messagesQuerySchema } from "./conversations.schemas";
+import { conversationsQuerySchema, messagesQuerySchema, updateReminderSchema } from "./conversations.schemas";
 import { inboundController } from "./agent.controller";
 import {
   listConversationsController,
@@ -30,6 +30,7 @@ import {
   cancelReminderController,
   cancelClientRemindersController,
   cancelRemindersBulkController,
+  updateReminderController,
 } from "../scheduler/scheduler.controller";
 
 const router = Router();
@@ -63,8 +64,9 @@ router.post("/simulate/reset", requireAuth, simulateResetController);
 
 // Reservas de servicios (panel)
 
-// Recordatorios programados (panel > Recordatorios > Programados): ver y cancelar.
+// Recordatorios programados (panel > Recordatorios > Programados): ver, editar y cancelar.
 router.get("/reminders", requireAuth, listRemindersController);
+router.patch("/reminders/:id", requireAuth, validate({ body: updateReminderSchema }), updateReminderController);
 router.post("/reminders/cancel", requireAuth, cancelClientRemindersController);
 router.post("/reminders/cancel-bulk", requireAuth, cancelRemindersBulkController);
 router.post("/reminders/:id/cancel", requireAuth, cancelReminderController);

@@ -19,3 +19,13 @@ export const messagesQuerySchema = z.object({
   before: z.string().datetime({ offset: true }).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(60),
 });
+
+/** Body de PATCH /agent/reminders/:id (todo opcional; mediaUrl null quita la multimedia). */
+export const updateReminderSchema = z
+  .object({
+    body: z.string().max(4000).optional(),
+    mediaUrl: z.string().trim().max(2048).nullable().optional(),
+    mediaType: z.enum(["image", "video", "audio", "pdf", "document"]).nullable().optional(),
+    sendAt: z.string().datetime({ offset: true }).optional(),
+  })
+  .strict();

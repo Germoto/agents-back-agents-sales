@@ -5,6 +5,7 @@
 
 import { Prisma, ScheduledMessageType, ScheduledMessageStatus } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { AppError } from "../../lib/app-error";
 import { clampToBusinessHours, normalizeQuietHours, type QuietHours } from "./quiet-hours";
 
 export async function scheduleReminder(opts: {
@@ -167,7 +168,24 @@ export type PendingReminderFilter = {
   q?: string;
   productId?: string;
   customerId?: string;
+  /** Solo los que llevan más de 1 h de atraso (misma condición que el contador `atrasados`). */
+  lateOnly?: boolean;
 };
+
+/**
+ * Condición "atrasado": hora PLANIFICADA (metadata.dueAt) hace más de 1 h o, en filas
+ * viejas sin dueAt, sendAt hace más de 1 h. El tope por hora corre sendAt hacia adelante,
+ * por eso no basta con sendAt. dueAt es ISO ⇒ la comparación de texto equivale a la de fecha.
+ */
+export function overdueRemindersWhere(now = new Date()): Prisma.ScheduledMessageWhereInput {
+  const hourAgo = new Date(now.getTime() - 60 * 60_000);
+  return {
+    OR: [
+      { metadata: { path: ["dueAt"], lt: hourAgo.toISOString() } },
+      { sendAt: { lt: hourAgo } },
+    ],
+  };
+}
 
 /** where de los recordatorios PENDING visibles en Programados (nunca los internos). */
 export function pendingRemindersWhere(companyId: string, opts: PendingReminderFilter = {}): Prisma.ScheduledMessageWhereInput {
@@ -179,6 +197,7 @@ export function pendingRemindersWhere(companyId: string, opts: PendingReminderFi
     status: ScheduledMessageStatus.PENDING,
     type: { in: types.filter((t) => LISTABLE_TYPES.includes(t)) },
     ...(opts.customerId ? { customerId: opts.customerId } : {}),
+    ...(opts.lateOnly ? overdueRemindersWhere() : {}),
     // El productId se guarda en metadata al agendar el recordatorio (scheduleAutoReminders).
     ...(productId ? { metadata: { path: ["productId"], equals: productId } } : {}),
     ...(q
@@ -250,14 +269,18 @@ export type PendingReminderRow = {
   /** Paso de la secuencia (0 = primero) y total de pasos, si aplica. */
   stepIndex: number | null;
   stepCount: number | null;
+  /** Tipo del adjunto (metadata.mediaType: image|video|audio|pdf|document), si hay mediaUrl. */
+  mediaType: string | null;
   customer: { name: string | null; phone: string };
 };
 
 export type PendingRemindersPage = {
-  /** Hasta 500 filas (por sendAt). */
+  /** Página (por sendAt); por defecto hasta 500 filas. */
   items: PendingReminderRow[];
-  /** Total REAL de pendientes que cumplen el filtro (la lista corta en 500). */
+  /** Total REAL de pendientes que cumplen el filtro. */
   total: number;
+  offset: number;
+  limit: number;
   porTipo: Partial<Record<ScheduledMessageType, number>>;
   /** Pendientes con más de 1 h de atraso respecto a su hora planificada (dueAt). */
   atrasados: number;
@@ -265,15 +288,17 @@ export type PendingRemindersPage = {
 
 export async function listPendingReminders(
   companyId: string,
-  opts?: PendingReminderFilter,
+  opts?: PendingReminderFilter & { offset?: number; limit?: number },
 ): Promise<PendingRemindersPage> {
   const where = pendingRemindersWhere(companyId, opts);
-  const hourAgo = new Date(Date.now() - 60 * 60_000);
+  const offset = Math.max(0, Math.floor(opts?.offset ?? 0));
+  const limit = Math.min(Math.max(Math.floor(opts?.limit ?? 500), 1), 500);
   const [rows, total, byType, atrasados] = await Promise.all([
     prisma.scheduledMessage.findMany({
       where,
       orderBy: { sendAt: "asc" },
-      take: 500,
+      skip: offset,
+      take: limit,
       select: {
         id: true,
         type: true,
@@ -288,12 +313,7 @@ export async function listPendingReminders(
     }),
     prisma.scheduledMessage.count({ where }),
     prisma.scheduledMessage.groupBy({ by: ["type"], where, _count: { _all: true } }),
-    // Atraso por hora PLANIFICADA (metadata.dueAt): el tope por hora corre sendAt hacia
-    // adelante y contar por sendAt escondía los atrasados reales. JSON ⇒ se filtra en JS;
-    // dueAt ≥ createdAt, así que solo pueden estar atrasados los creados hace más de 1 h.
-    prisma.scheduledMessage
-      .findMany({ where: { AND: [where, { createdAt: { lt: hourAgo } }] }, select: { sendAt: true, metadata: true } })
-      .then((cands) => cands.filter((r) => reminderDueAt(r) < hourAgo).length),
+    prisma.scheduledMessage.count({ where: { AND: [where, overdueRemindersWhere()] } }),
   ]);
   const porTipo: Partial<Record<ScheduledMessageType, number>> = {};
   for (const g of byType) porTipo[g.type] = g._count._all;
@@ -306,9 +326,99 @@ export async function listPendingReminders(
       dueAt: reminderDueAt({ sendAt: r.sendAt, metadata }),
       stepIndex: num(m.stepIndex),
       stepCount: num(m.stepCount),
+      mediaType: r.mediaUrl && typeof m.mediaType === "string" ? m.mediaType : null,
     };
   });
-  return { items, total, porTipo, atrasados };
+  return { items, total, offset, limit, porTipo, atrasados };
+}
+
+/** Campos editables de un recordatorio pendiente (panel y copiloto). */
+export type ScheduledReminderPatch = {
+  body?: string;
+  /** null quita la multimedia. */
+  mediaUrl?: string | null;
+  mediaType?: string | null;
+  sendAt?: Date;
+};
+
+/**
+ * Edita el contenido (texto y/o multimedia) y opcionalmente la hora de un recordatorio
+ * PENDIENTE. Cambiar la hora también mueve metadata.dueAt (hora planificada). Nota: si el
+ * cliente vuelve a escribir, el bot recrea la secuencia (carrito/visto) y el cambio se pierde.
+ */
+export async function updateScheduledReminder(
+  companyId: string,
+  id: string,
+  patch: ScheduledReminderPatch,
+): Promise<PendingReminderRow> {
+  const row = await prisma.scheduledMessage.findFirst({
+    where: { id, companyId, status: ScheduledMessageStatus.PENDING, type: { in: LISTABLE_TYPES } },
+    select: { id: true, body: true, mediaUrl: true, sendAt: true, metadata: true },
+  });
+  if (!row) throw new AppError("El recordatorio no existe o ya no está pendiente", 404);
+  const meta: Record<string, unknown> =
+    row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata) ? { ...(row.metadata as Record<string, unknown>) } : {};
+  const data: Prisma.ScheduledMessageUpdateInput = {};
+
+  if (patch.body !== undefined) data.body = patch.body.trim();
+  if (patch.mediaUrl !== undefined) {
+    const url = (patch.mediaUrl ?? "").trim();
+    if (url && !/^https?:\/\//i.test(url)) throw new AppError("La multimedia debe ser una URL http(s)", 400);
+    data.mediaUrl = url || null;
+    if (url) meta.mediaType = (patch.mediaType ?? "").trim() || guessMediaType(url);
+    else delete meta.mediaType;
+  } else if (patch.mediaType !== undefined && row.mediaUrl) {
+    meta.mediaType = (patch.mediaType ?? "").trim() || guessMediaType(row.mediaUrl);
+  }
+  const finalBody = (data.body as string | undefined) ?? row.body;
+  const finalMedia = patch.mediaUrl !== undefined ? (data.mediaUrl as string | null) : row.mediaUrl;
+  if (!finalBody.trim() && !finalMedia) throw new AppError("El recordatorio necesita un mensaje o una multimedia", 400);
+  if (patch.sendAt !== undefined) {
+    if (!(patch.sendAt instanceof Date) || isNaN(patch.sendAt.getTime()) || patch.sendAt.getTime() <= Date.now()) {
+      throw new AppError("La fecha del recordatorio debe ser futura", 400);
+    }
+    data.sendAt = patch.sendAt;
+    meta.dueAt = patch.sendAt.toISOString();
+  }
+  meta.editedAt = new Date().toISOString();
+  data.metadata = meta as Prisma.InputJsonObject;
+
+  const updated = await prisma.scheduledMessage.update({
+    where: { id: row.id },
+    data,
+    select: {
+      id: true,
+      type: true,
+      sendAt: true,
+      body: true,
+      mediaUrl: true,
+      customerId: true,
+      conversationId: true,
+      metadata: true,
+      customer: { select: { name: true, phone: true } },
+    },
+  });
+  const m = updated.metadata as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const { metadata, ...rest } = updated;
+  return {
+    ...rest,
+    productId: typeof m.productId === "string" ? m.productId : null,
+    dueAt: reminderDueAt({ sendAt: updated.sendAt, metadata }),
+    stepIndex: num(m.stepIndex),
+    stepCount: num(m.stepCount),
+    mediaType: updated.mediaUrl && typeof m.mediaType === "string" ? m.mediaType : null,
+  };
+}
+
+/** Tipo de adjunto por extensión (image|video|audio|pdf|document), como lo espera el worker. */
+export function guessMediaType(url: string): string {
+  const ext = (url.split("?")[0].split("#")[0].match(/\.([a-z0-9]+)$/i)?.[1] ?? "").toLowerCase();
+  if (["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) return "image";
+  if (["mp4", "mov", "webm", "3gp", "m4v"].includes(ext)) return "video";
+  if (["mp3", "ogg", "m4a", "aac", "wav", "opus"].includes(ext)) return "audio";
+  if (ext === "pdf") return "pdf";
+  return "document";
 }
 
 /**
