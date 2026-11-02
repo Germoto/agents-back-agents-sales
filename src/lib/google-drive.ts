@@ -38,8 +38,10 @@ const FOLDER_MIME = "application/vnd.google-apps.folder";
 const DOC_MIME = "application/vnd.google-apps.document";
 const API = "https://www.googleapis.com/drive/v3";
 const PAGE_SIZE = 1000;
-/** Páginas máximas por carpeta (2 000 entradas): carpetas más grandes se truncan. */
-const MAX_PAGES = 2;
+/** La API devuelve páginas PARCIALES (menos de pageSize) con nextPageToken: se sigue el token
+ *  hasta agotarlo, con tope de seguridad de páginas/entradas por carpeta. */
+const MAX_PAGES = 40;
+const MAX_ENTRIES_PER_FOLDER = 10_000;
 const CACHE_TTL_MS = 15 * 60_000;
 const MAX_CACHE_FOLDERS = 3000;
 const LIST_CONCURRENCY = 6;
@@ -235,7 +237,7 @@ async function apiJson<T>(path: string, params: Record<string, string>): Promise
   return (await res.json()) as T;
 }
 
-/** Lista una carpeta pública (hasta MAX_PAGES × PAGE_SIZE entradas), con caché. */
+/** Lista una carpeta pública completa (siguiendo nextPageToken; tope de seguridad), con caché. */
 export async function listFolder(folderId: string): Promise<{ entries: RawFile[]; truncated: boolean }> {
   const cached = cacheGet(folderCache, folderId);
   if (cached) {
@@ -265,7 +267,10 @@ export async function listFolder(folderId: string): Promise<{ entries: RawFile[]
     entries.push(...(data.files ?? []));
     pageToken = data.nextPageToken;
     if (!pageToken) break;
-    if (page === MAX_PAGES - 1) truncated = true;
+    if (page === MAX_PAGES - 1 || entries.length >= MAX_ENTRIES_PER_FOLDER) {
+      truncated = true;
+      break;
+    }
   }
   const value = { entries, truncated };
   cacheSet(folderCache, folderId, value);
@@ -357,6 +362,65 @@ export function scoreEntry(query: string, name: string, path: string): number {
   }
   if (!hits) return 0;
   // Todos los términos presentes => bonus; nombre exacto => más.
+  if (hits === tokens.length) score += 2;
+  if (n === tokens.join(" ")) score += 3;
+  return score;
+}
+
+/** Palabras normalizadas de un nombre (sin extensión), para la búsqueda aproximada. */
+export function nameWords(name: string): string[] {
+  return normalizeText(name.replace(/\.[a-z0-9]{2,5}$/i, ""))
+    .split(" ")
+    .filter(Boolean);
+}
+
+/** Distancia de edición (Levenshtein) con corte temprano en `max`. */
+export function levenshtein(a: string, b: string, max = 2): number {
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  const prev = new Array(b.length + 1);
+  const cur = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    cur[0] = i;
+    let rowMin = cur[0];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      if (cur[j] < rowMin) rowMin = cur[j];
+    }
+    if (rowMin > max) return max + 1;
+    for (let j = 0; j <= b.length; j++) prev[j] = cur[j];
+  }
+  return prev[b.length];
+}
+
+/**
+ * Puntaje aproximado: por cada término de la consulta, palabra exacta (3) > prefijo (2) >
+ * error de tipeo ≤ 2 letras (2, solo en términos de 4+ letras) > aparece en la ruta (1).
+ * Sin importar mayúsculas, tildes ni orden. Bonus si todos los términos coinciden.
+ */
+export function fuzzyScore(query: string, name: string, path: string, words?: string[]): number {
+  const tokens = tokensOf(query);
+  if (!tokens.length) return 0;
+  const ws = words ?? nameWords(name);
+  const n = ws.join(" ");
+  const p = normalizeText(path);
+  let score = 0;
+  let hits = 0;
+  for (const t of tokens) {
+    let best = 0;
+    if (ws.includes(t)) best = 3;
+    else if (ws.some((w) => w.startsWith(t) || (t.length >= 4 && t.startsWith(w) && w.length >= 3))) best = 2;
+    else if (t.length >= 4 && ws.some((w) => Math.abs(w.length - t.length) <= 2 && levenshtein(w, t, t.length >= 6 ? 2 : 1) <= (t.length >= 6 ? 2 : 1))) best = 2;
+    else if (n.includes(t)) best = 2;
+    else if (p.includes(t)) best = 1;
+    if (best) {
+      score += best;
+      hits++;
+    }
+  }
+  if (!hits) return 0;
   if (hits === tokens.length) score += 2;
   if (n === tokens.join(" ")) score += 3;
   return score;
@@ -499,7 +563,7 @@ export async function browseFolder(
   let entries = list.entries.map((raw) => toEntry(raw, folderId, base));
   if (opts.query?.trim()) {
     entries = entries
-      .map((e) => ({ e, s: scoreEntry(opts.query!, e.name, e.name) }))
+      .map((e) => ({ e, s: fuzzyScore(opts.query!, e.name, e.name) }))
       .filter((x) => x.s > 0)
       .sort((a, b) => b.s - a.s)
       .map((x) => x.e);

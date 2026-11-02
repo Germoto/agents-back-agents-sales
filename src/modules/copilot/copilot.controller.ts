@@ -15,7 +15,9 @@ import { generateImage, saveGeneratedImage, type ImageGenSize, type ImageGenQual
 import { symbolFor } from "../../lib/currency";
 import { storagePathFromUrl, resolveOwnUpload } from "../../lib/uploads";
 import { AppError } from "../../lib/app-error";
-import { deliveryDriveRefs, driveSearchEnabled, searchDrive, browseFolder, describeEntry, driveViewLink, DriveAccessError } from "../../lib/google-drive";
+import { deliveryDriveRefs, driveSearchEnabled, describeEntry, driveViewLink, driveFileKind, DRIVE_ATTACH_MAX_BYTES, DriveAccessError } from "../../lib/google-drive";
+import { searchProductDrive, browseProductFolder, pickSample } from "../drive/drive-search";
+import { indexSummary, ensureIndexNow } from "../drive/drive-index.service";
 import { chatCompletion, type ChatMessage, type ContentPart, type ToolDefinition } from "../../lib/openai";
 import { productBodySchema } from "../products/products.schemas";
 import { createProduct, updateProduct, deleteProduct, getProduct } from "../products/products.service";
@@ -1511,15 +1513,34 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "buscar_en_drive",
       description:
-        "BÚSQUEDA EN GOOGLE DRIVE: busca EN VIVO dentro de las carpetas públicas de Drive que forman la ENTREGA de un producto (los links de digitalDelivery.instructions y followupMessages). Nada se guarda en FlowApp. Sin `busqueda` ni `carpetaId` devuelve los accesos de la entrega (etiqueta, tipo y link); con `busqueda` devuelve archivos/carpetas que coinciden (nombre, tipo, tamaño, ruta, link); con `carpetaId` lista el contenido de esa carpeta. El AGENTE tiene la misma búsqueda (tools buscar_en_drive y enviar_archivo_drive para adjuntar archivos pequeños): qué comparte antes y después de la compra lo decide el PROMPT del agente (configurar_agente), no hay reglas fijas. Requiere carpetas compartidas 'cualquiera con el enlace' y la API key de Google de la plataforma (ver_configuracion → driveBusqueda). Solo lectura.",
+        "BÚSQUEDA EN GOOGLE DRIVE: busca dentro de las carpetas públicas de Drive que forman la ENTREGA de un producto (los links de digitalDelivery.instructions y followupMessages), en TODOS los niveles, usando un ÍNDICE EN MEMORIA por producto (nombres, rutas, tamaños e ids; nada se guarda en la base) que el servidor construye al arrancar, rehace cada DRIVE_INDEX_REFRESH_HOURS (12 h) y cuando cambian los links de la entrega; mientras se construye busca en vivo. Búsqueda aproximada: sin importar mayúsculas, tildes, orden ni errores pequeños ('daddy yanke' encuentra 'Daddy Yankee'). Sin `busqueda` ni `carpetaId` devuelve los accesos de la entrega y el estado del índice; con `busqueda` devuelve archivos/carpetas que coinciden (nombre, tipo, tamaño, ruta, link); con `carpetaId` lista esa carpeta (`busqueda` filtra dentro). Paginado con `offset`/`siguienteOffset`. `reindexar=true` fuerza reconstruir el índice del producto ahora (espera a que termine). El AGENTE usa la misma búsqueda (tools buscar_en_drive, obtener_muestra y enviar_archivo_drive); qué comparte lo decide su PROMPT, y el SISTEMA retira por su cuenta los links de CARPETAS de la entrega a clientes sin compra (excepto las carpetas de muestra puestas en la ficha/FAQs/recordatorios). Requiere carpetas 'cualquiera con el enlace' y la API key de Google de la plataforma (ver_configuracion → driveBusqueda). Solo lectura.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["productId"],
         properties: {
           productId: { type: "string", description: "uuid del producto (listar_productos)" },
-          busqueda: { type: "string", description: "palabras clave a buscar (tema, nicho, género, nombre de archivo)" },
+          busqueda: { type: "string", description: "palabras clave a buscar (tema, nicho, género, artista, nombre de archivo)" },
           carpetaId: { type: "string", description: "id de una carpeta (de un resultado anterior) para listar su contenido" },
+          offset: { type: "integer", minimum: 0, description: "desde qué resultado seguir (siguienteOffset de la respuesta anterior)" },
+          reindexar: { type: "boolean", description: "true = reconstruir el índice de este producto ahora mismo" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "obtener_muestra",
+      description:
+        "Devuelve UN archivo suelto (nunca carpeta) de la entrega de Drive del producto que coincide con el tema, igual que lo haría el agente con un cliente ('mándame una muestra de cumbia'): nombre, tipo, tamaño, ruta y link de archivo. Si el tema coincide con una carpeta, elige un archivo de dentro (el más pequeño que se pueda adjuntar). Sirve para probar qué recibiría el cliente. Solo lectura.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId", "tema"],
+        properties: {
+          productId: { type: "string", description: "uuid del producto" },
+          tema: { type: "string", description: "tema/nicho/género/artista" },
         },
       },
     },
@@ -2709,19 +2730,19 @@ export async function runCopilotTool(
           driveBusqueda: await (async () => {
             const digitals = await prisma.product.findMany({
               where: { companyId, productType: "DIGITAL" },
-              select: { name: true, digitalDelivery: { select: { instructions: true, followupMessages: true } } },
+              select: { id: true, name: true, digitalDelivery: { select: { instructions: true, followupMessages: true } } },
             });
             const conDrive = digitals
               .filter((p) => {
                 const fu = p.digitalDelivery?.followupMessages;
                 return deliveryDriveRefs({ instructions: p.digitalDelivery?.instructions ?? "", followupMessages: Array.isArray(fu) ? (fu as Array<{ message?: string }>) : [] }).length > 0;
               })
-              .map((p) => p.name);
+              .map((p) => ({ productId: p.id, producto: p.name, indice: indexSummary(p.id) }));
             return {
               activa: driveSearchEnabled() && conDrive.length > 0,
               keyConfigurada: driveSearchEnabled(),
               productosConDrive: conDrive,
-              nota: "El agente busca en vivo dentro de las carpetas públicas de Drive de la entrega (buscar_en_drive). Qué comparte antes/después de la compra lo define el prompt del agente. Requiere la API key de Google en el servidor y links de Drive en digitalDelivery.",
+              nota: "Índice en memoria por producto (se rehace al reiniciar y cada DRIVE_INDEX_REFRESH_HOURS). El agente busca con buscar_en_drive / obtener_muestra; qué comparte lo define su prompt; el sistema retira links de carpetas de la entrega a quien no compró. Requiere la API key de Google en el servidor y links de Drive en digitalDelivery.",
             };
           })().catch(() => null),
           tienda: await getStorefrontConfig(companyId)
@@ -4693,7 +4714,8 @@ export async function runCopilotTool(
       };
     }
 
-    case "buscar_en_drive": {
+    case "buscar_en_drive":
+    case "obtener_muestra": {
       if (!driveSearchEnabled()) {
         return {
           result: JSON.stringify({ ok: false, error: "La búsqueda en Google Drive no está activa en esta plataforma (falta la API key de Google en el servidor). El agente tampoco la tiene. Pídele al soporte de FlowApp activarla." }),
@@ -4708,21 +4730,45 @@ export async function runCopilotTool(
       });
       if (!product) return { result: JSON.stringify({ ok: false, error: "producto no encontrado" }), wrote: false };
       const fu = product.digitalDelivery?.followupMessages;
-      const refs = deliveryDriveRefs({
-        instructions: product.digitalDelivery?.instructions ?? "",
-        followupMessages: Array.isArray(fu) ? (fu as Array<{ message?: string }>) : [],
-      });
+      const driveProduct = {
+        id: product.id,
+        companyId,
+        digitalDelivery: { instructions: product.digitalDelivery?.instructions ?? "", followupMessages: Array.isArray(fu) ? (fu as Array<{ message?: string }>) : [] },
+      };
+      const refs = deliveryDriveRefs(driveProduct.digitalDelivery);
       if (!refs.length) {
         return { result: JSON.stringify({ ok: false, error: "La entrega de este producto no tiene links de Google Drive (instructions/followupMessages). Agrégalos con actualizar_producto para que el agente pueda buscar dentro." }), wrote: false };
       }
-      const query = String(args.busqueda ?? "").trim().slice(0, 120);
-      const folderId = String(args.carpetaId ?? "").trim();
       try {
+        if (name === "obtener_muestra") {
+          const tema = String(args.tema ?? "").trim().slice(0, 120);
+          if (!tema) return { result: JSON.stringify({ ok: false, error: "indica el tema" }), wrote: false };
+          const pick = await pickSample(driveProduct, tema);
+          if (!pick) return { result: JSON.stringify({ ok: true, encontrado: false, producto: product.name, indice: indexSummary(product.id), nota: "No hay archivos de ese tema en la entrega." }), wrote: false };
+          const kind = driveFileKind(pick.file);
+          const max = DRIVE_ATTACH_MAX_BYTES[kind];
+          return {
+            result: JSON.stringify({
+              ok: true,
+              encontrado: true,
+              producto: product.name,
+              archivo: describeEntry(pick.file, true),
+              ...(pick.folder ? { carpeta: describeEntry(pick.folder, true), via: "carpeta" } : { via: "archivo" }),
+              adjuntable: Boolean(max && pick.file.size != null && pick.file.size <= max),
+              indice: indexSummary(product.id),
+            }),
+            wrote: false,
+          };
+        }
+        if (args.reindexar === true) await ensureIndexNow(driveProduct, { force: true });
+        const query = String(args.busqueda ?? "").trim().slice(0, 120);
+        const folderId = String(args.carpetaId ?? "").trim();
+        const offset = Math.max(0, Number(args.offset) || 0);
         if (folderId) {
-          const r = await browseFolder(folderId, { query, limit: 40 });
+          const r = await browseProductFolder(driveProduct, folderId, { query, offset, limit: 50 });
           if (!r.folder) return { result: JSON.stringify({ ok: false, error: "esa carpeta no existe o ya no es pública" }), wrote: false };
           return {
-            result: JSON.stringify({ ok: true, producto: product.name, carpeta: describeEntry(r.folder, true), totalEnCarpeta: r.total, truncado: r.truncated, resultados: r.entries.map((e) => describeEntry(e, true)) }),
+            result: JSON.stringify({ ok: true, producto: product.name, fuente: r.fuente, carpeta: describeEntry(r.folder, true), totalEnCarpeta: r.total, offset: r.offset, siguienteOffset: r.nextOffset, truncado: r.truncated, resultados: r.entries.map((e) => describeEntry(e, true)) }),
             wrote: false,
           };
         }
@@ -4732,22 +4778,26 @@ export async function runCopilotTool(
               ok: true,
               producto: product.name,
               accesos: refs.length,
+              indice: indexSummary(product.id),
               resultados: refs.map((r) => ({ id: r.id, etiqueta: r.label, tipo: r.kind === "folder" ? "carpeta" : r.kind === "doc" ? "documento" : "archivo", link: driveViewLink({ id: r.id, isFolder: r.kind === "folder", mimeType: r.kind === "doc" ? "application/vnd.google-apps.document" : "" }) })),
-              nota: "Pasa busqueda para buscar dentro de las carpetas, o carpetaId para listar una.",
+              nota: "Pasa busqueda para buscar dentro de las carpetas, carpetaId para listar una, o reindexar=true para reconstruir el índice.",
             }),
             wrote: false,
           };
         }
-        const r = await searchDrive(refs, query, { limit: 20 });
+        const r = await searchProductDrive(driveProduct, query, { offset, limit: 20 });
         return {
           result: JSON.stringify({
             ok: true,
             producto: product.name,
-            carpetasRevisadas: r.foldersScanned,
+            fuente: r.fuente,
+            indice: r.indice,
             ...(r.inaccessible.length ? { sinAcceso: r.inaccessible } : {}),
-            total: r.entries.length,
+            total: r.total,
+            offset: r.offset,
+            siguienteOffset: r.nextOffset,
             resultados: r.entries.map((e) => describeEntry(e, true)),
-            nota: r.entries.length ? "El agente ve exactamente esto cuando busca." : "Sin coincidencias: prueba otra palabra, en inglés o explora una carpeta con carpetaId.",
+            nota: r.entries.length ? "El agente ve exactamente esto cuando busca (las carpetas de la entrega sin link para quien no compró)." : "Sin coincidencias: prueba otra palabra, en inglés, el nombre del artista o explora una carpeta con carpetaId.",
           }),
           wrote: false,
         };
@@ -4906,7 +4956,7 @@ const SYSTEM_GUIDE = [
   "- Dashboard (/dashboard): métricas del negocio.",
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}. PESTAÑA RECURSOS del chat (junto a Contacto/Respuestas/Notas): lista la BIBLIOTECA de multimedia del negocio — archivos de productos + multimedia de recordatorios (generales y por producto), banner y mensajes adicionales de presentación y mensajes post-venta — con su origen, filtro por producto y buscador; el asesor la envía al cliente con un clic, con o sin su descripción (al enviarla, el panel resuelve las variantes {a|b} y {nombre}); la misma biblioteca se consulta por aquí con listar_recursos. AVISOS AL DUEÑO: cuando el agente deriva a humano (consulta sin respuesta, negociación, reclamo, pago, flujo, campaña) y cuando un cliente escribe en un chat en atención humana, el dueño recibe un WhatsApp con el link directo al chat (flowapp.pe/conversaciones?id=…). TOMAR EL CONTROL DE UN CHAT DESDE AQUÍ (lo mismo que hace el asesor en el panel): leer_conversacion (trae el id de cada mensaje) → enviar_mensaje_cliente (texto y/o imagen/video/PDF por URL, citando con citarMensajeId; por defecto pasa el chat a atención humana) o enviar_respuesta_rapida (/comando con sus acciones) o reaccionar_mensaje (emoji) → programar_recordatorio_cliente para un seguimiento a una hora → al terminar, atencion_humana {activar:false} REACTIVA el bot (si no, el agente IA no vuelve a responderle). Reactivar el bot (desde el panel, con BOT <número> por WhatsApp o con atencion_humana) limpia la derivación: el agente retoma con lo que respondió el asesor y NO vuelve a derivar por el mismo motivo (solo si el cliente pide una persona o hay un problema nuevo). atencion_humana {activar:true} pausa el bot sin escribir. iniciar_conversacion abre un chat con un número nuevo (solo tras confirmación; en Meta no se puede sin plantilla). reiniciar_conversacion borra el historial (irreversible, solo tras confirmación). Límites automáticos de los envíos del copiloto: nunca a clientes noContactar; en Meta solo dentro de la ventana de 24 h desde el último mensaje del cliente (fuera de ella usa un recordatorio o campaña con plantilla); ritmo anti-bloqueo igual al de los recordatorios (tope por hora y separación entre clientes distintos; si devuelve reintentarEnSeg, espera). La firma del negocio se agrega sola a cada mensaje. Escribe como una persona del negocio: corto, una idea y una pregunta; precios, pagos y enlaces SOLO de ver_producto/ver_configuracion/ver_tienda, nunca inventados.",
   "- CONVERSACIONES (/conversaciones): la lista del panel busca y filtra en TODO el historial del negocio (nombre, teléfono, etapa, etiqueta, anuncio) con scroll infinito, y los mensajes de cada chat se cargan por tramos (los más recientes primero, «Cargar anteriores» arriba). En móvil: lista → chat (atrás vuelve a la lista) → herramientas en hoja inferior (Contacto, Respuestas, Notas, Recursos); el menú ⋯ del chat tiene Fijar, Etiquetas, Recordatorio, No contactar, Fondo, Reiniciar y Eliminar; escribir en un chat con el bot activo toma el control automáticamente.\n" +
-  "- BÚSQUEDA EN GOOGLE DRIVE (entrega): si la entrega de un producto digital (digitalDelivery.instructions / followupMessages) trae links de carpetas públicas de Drive, el agente puede buscar DENTRO en vivo (tool buscar_en_drive) y dar el link exacto de un archivo o subcarpeta, o mandarlo como adjunto si pesa poco (enviar_archivo_drive). Nada se guarda en FlowApp y NO hay reglas fijas: qué comparte antes del pago (p. ej. 1 archivo de muestra, nunca carpetas) y después (todo) se escribe en el PROMPT del agente (Agente → prompt/reglas, o configurar_agente); si el dueño no lo define, el agente decide con criterio comercial. Ofrécete a redactar esa instrucción. Requiere carpetas 'cualquiera con el enlace' y la API key de Google de la plataforma (ver_configuracion → driveBusqueda; no la configura el dueño). El dueño puede probar la búsqueda aquí con buscar_en_drive.",
+  "- BÚSQUEDA EN GOOGLE DRIVE (entrega): si la entrega de un producto digital (digitalDelivery.instructions / followupMessages) trae links de carpetas públicas de Drive, el servidor arma un ÍNDICE EN MEMORIA por producto (nombres, rutas, tamaños; nada en la base; se rehace al reiniciar, cada 12 h y cuando cambian los links; tope 30 000 entradas: packs enormes quedan 'parcial' y lo que falta se busca en vivo). El agente busca en TODOS los niveles con búsqueda aproximada (tool buscar_en_drive: mayúsculas, tildes, orden y errores pequeños no importan), lista carpetas paginadas (carpetaId + offset), saca UNA muestra directa (obtener_muestra: un archivo suelto, nunca carpeta) y adjunta archivos pequeños (enviar_archivo_drive). Qué comparte antes/después del pago lo escribe el dueño en el PROMPT del agente (Agente → prompt/reglas o configurar_agente), sin reglas fijas; PERO el SISTEMA, por su cuenta, retira cualquier link de CARPETA de la entrega que el bot intente mandar a un cliente que no compró (deja nota 🔒 en el chat); las carpetas de muestra que el dueño puso en la ficha, FAQs, objeciones o recordatorios del producto siempre pasan, y los links de archivos sueltos no se tocan. Con resultados de Drive en el turno, el agente NO deriva por CONSULTA. Requiere carpetas 'cualquiera con el enlace' y la API key de Google de la plataforma (ver_configuracion → driveBusqueda muestra el estado del índice por producto; no la configura el dueño). El dueño prueba aquí con buscar_en_drive / obtener_muestra (reindexar=true fuerza el índice). Comillas: el sistema decodifica entidades HTML (&quot;) en mensajes entrantes y salientes.",
   "- COLA DE RECORDATORIOS: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delays desde ese momento). El worker respeta el tope por hora y el horario; si varios pasos de un cliente están vencidos envía solo el más reciente (activando el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y cancela los demás; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre pasos atrasados. listar_recordatorios_programados muestra el total real y los atrasados: si los atrasados crecen, la capacidad (tope/hora × horas) no cubre la demanda. cancelar_recordatorios cancela uno, una selección por ids o un lote por filtro (cliente, tipo, producto, atraso): en lote primero soloContar y confirmación del dueño. editar_recordatorio cambia el texto, la multimedia o la hora de UN recordatorio pendiente (en el panel: Recordatorios → Programados → ✎ Editar); para cambiar muchos, cambia la secuencia.\n" +
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). El Inbox del panel muestra los últimos 100 contactos sin colocar con «Cargar más» y búsqueda por nombre/teléfono; los clientes siguen existiendo aunque no estén en pantalla. CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas; con quitarRespuestasFlujo borra las respuestas del chatbot 📝 que se ven en la tarjeta y en Contacto — el agente las volverá a preguntar; solo tras confirmación) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar). CALENDARIO: tras cada cita confirmada por el agente o un flujo, el cliente recibe por WhatsApp enlaces para agregarla a Google Calendar / iPhone (crear_cita devuelve esos enlaces en 'calendario' para que el dueño los pegue si la creó a mano) y, si tiene correo en su ficha, una invitación por email. El dueño ve TODAS sus citas y bloqueos en su propio calendario suscribiendo la URL ICS de Empresa → Agenda → «Calendario en tu teléfono» (iPhone: Ajustes → Calendario → Cuentas → Añadir cuenta → Otro → Añadir calendario suscrito; Google Calendar: Otros calendarios → + → Desde URL; Outlook: Agregar calendario → Suscribirse desde web). Es de UN solo sentido (FlowApp → calendario) y se refresca cada ~1 h según el dispositivo; no hay sincronización con Google OAuth. VIDEOLLAMADA (citas online): el dueño pega un enlace FIJO de Meet/Zoom en el servicio (actualizar_producto verticalData.meetingUrl) o uno por defecto para todo el negocio (configurar_empresa meetingUrl); con eso el cliente recibe '🎥 Enlace de la videollamada' junto con los enlaces de calendario al confirmar/reprogramar, en los recordatorios, en el evento del calendario (como ubicación) y en el correo. No se envía si la cita quedó como presencial (modality) o si no hay enlace. Para crear la sala fija de Meet: meet.google.com → «Nueva reunión» → «Crear una reunión para más tarde» → copiar el enlace (los clientes piden unirse y el dueño los admite; Google borra la sala si pasa 1 año sin usarse). crear_cita devuelve 'calendario.meetingUrl'. Aún no hay enlace único por cita (eso requeriría conectar Google con OAuth). REPROGRAMAR: el agente ve en su prompt la cita vigente del cliente y la MUEVE con reprogramar_cita; agendar_servicio no crea una segunda cita si ya hay una vigente (solo con adicional:true). Si el dueño ve citas duplicadas de antes de este cambio, cancele la vieja con actualizar_cita.",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. DEFAULTS SEGUROS si no se indica otra cosa: 45–90 s entre contactos, pausa 180–300 s cada 10, tope 60/día (cuenta todas las campañas del negocio), horario 09:00–21:00. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 60–120 s); en números nuevos recomienda tope diario 30–50 y subirlo de a poco; sin spintax todos reciben el mismo texto (pide ≥3 variantes en saludo, verbo y cierre; nunca en precios ni links). PROTECCIONES AUTOMÁTICAS: solo UNA campaña en curso por negocio; si 5 envíos seguidos fallan se pausa sola (pauseReason failures) y avisa al dueño por WhatsApp. Flujo seguro OBLIGATORIO: previsualizar_audiencia_campana (total real tras exclusiones) → crear borrador → mostrar total + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible) → ver_campana para el seguimiento (cómo va, por qué espera, fallidos) → pausar_campana / reanudar_campana (reversibles) o cancelar_campana (irreversible, confirmación con el nombre). MULTIMEDIA EN CAMPAÑAS: para adjuntar algo ya subido (archivo de producto, video de un recordatorio, banner de presentación) usa listar_recursos y pasa su url como mediaUrl en los mensajes — en el panel es el botón 'Insertar recurso' del paso Mensajes.",

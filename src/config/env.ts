@@ -34,6 +34,9 @@ const envSchema = z.object({
   // carpetas PÚBLICAS de Drive que viven en la entrega de los productos. Vacía = tools
   // buscar_en_drive / enviar_archivo_drive ocultas. No requiere OAuth ni verificación.
   GOOGLE_DRIVE_API_KEY: z.string().optional().default(""),
+  // Índice en memoria de Drive: tope de entradas por producto y horas entre reconstrucciones.
+  DRIVE_INDEX_MAX_FILES: z.coerce.number().int().positive().default(30000),
+  DRIVE_INDEX_REFRESH_HOURS: z.coerce.number().positive().default(12),
   // Modelo de generación de imágenes del copiloto (override sin tocar código).
   IMAGE_GEN_MODEL: z.string().default("gpt-image-2"),
   // Prioridad de la MULTIMEDIA en SMS Tools: "1" = síncrona (el gateway emite el

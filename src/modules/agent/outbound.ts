@@ -10,6 +10,7 @@ import { prisma } from "../../lib/prisma";
 import { smsTools } from "../../lib/smstools-client";
 import { metaWa, META_MEDIA_LIMITS, mediaTooLargeReason } from "../../lib/meta-wa-client";
 import { AppError } from "../../lib/app-error";
+import { decodeEntities } from "../../lib/html-entities";
 import { decryptCredential } from "../../lib/credentials-crypto";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 
@@ -92,6 +93,8 @@ export async function sendText(
   message: string,
   opts?: { quoteWamid?: string | null; quoteFrom?: "" | "me" },
 ): Promise<SendResult> {
+  // Nunca mandar entidades HTML al cliente (`&quot;` en vez de comillas).
+  message = decodeEntities(message);
   if (sender.provider === "WEB") {
     socketService.emitToWebchat(sender.conversationId, SOCKET_EVENTS.WEBCHAT_MESSAGE, {
       conversationId: sender.conversationId,
@@ -163,6 +166,7 @@ export async function sendMedia(
   caption?: string,
   fileName?: string,
 ): Promise<SendResult> {
+  if (caption) caption = decodeEntities(caption);
   if (sender.provider === "WEB") {
     socketService.emitToWebchat(sender.conversationId, SOCKET_EVENTS.WEBCHAT_MESSAGE, {
       conversationId: sender.conversationId,

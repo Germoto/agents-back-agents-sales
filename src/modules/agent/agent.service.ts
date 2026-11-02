@@ -53,6 +53,7 @@ import {
   type FlowTurnResult,
 } from "../flows/flow-engine";
 import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, type TurnContext } from "./agent-tools";
+import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-guard";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
 import { getLinkedPhone } from "../whatsapp-config/whatsapp-config.service";
@@ -858,6 +859,10 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     seenMedia.add(m.mediaUrl);
     return true;
   });
+
+  // Guarda de sistema: links de CARPETAS de la entrega de Drive no salen a un cliente
+  // que no compró (aunque el modelo los escriba). Los archivos sueltos no se tocan.
+  finalText = await applyDriveFolderGuard(ctx, finalText);
 
   // Turno silencioso (sin nada que enviar): cortar el "escribiendo…" a mano
   // para no dejar al cliente esperando un mensaje que no llegará.
@@ -1703,4 +1708,44 @@ async function handleOwnerCommand(
 
   // No es un comando: el dueño puede usar el bot como cliente.
   return false;
+}
+
+/**
+ * Retira de la respuesta (texto final, textos y captions del outbox) las URLs de
+ * carpetas de la entrega de Drive de los productos que el cliente NO compró. Deja
+ * nota SYSTEM en el chat y log. Devuelve el texto final ya limpio.
+ */
+async function applyDriveFolderGuard(ctx: TurnContext, finalText: string): Promise<string> {
+  const candidates = [finalText, ...ctx.outbox.map((m) => m.text ?? m.caption ?? ""), ...(ctx.outboxAfter ?? []).map((m) => m.text ?? m.caption ?? "")];
+  if (!candidates.some((t) => t && t.includes("drive.google.com"))) return finalText;
+  const blocked = blockedFolderIdsFor(ctx.config.products, ctx.state);
+  if (!blocked.size) return finalText;
+  let removed = 0;
+  const clean = (t: string | undefined) => {
+    if (!t) return t;
+    const r = stripBlockedFolderLinks(t, blocked);
+    removed += r.removed;
+    return r.text;
+  };
+  const text = clean(finalText) ?? "";
+  for (const list of [ctx.outbox, ctx.outboxAfter ?? []]) {
+    for (const m of list) {
+      if (m.kind === "text") m.text = clean(m.text);
+      else if (m.caption) m.caption = clean(m.caption);
+    }
+    // Un texto que quedó vacío no se envía.
+    for (let i = list.length - 1; i >= 0; i--) if (list[i].kind === "text" && !list[i].text) list.splice(i, 1);
+  }
+  if (removed) {
+    console.warn(`[drive-guard] ${removed} link(s) de carpeta retirado(s) (cliente sin compra) convo=${ctx.conversationId}`);
+    await recordMessage({
+      companyId: ctx.companyId,
+      customerId: ctx.customerId,
+      conversationId: ctx.conversationId,
+      role: "SYSTEM",
+      message: `🔒 Se retiró ${removed === 1 ? "un link de carpeta" : `${removed} links de carpetas`} de la entrega de Drive: el cliente aún no compró.`,
+      rawPayload: { source: "drive-guard", removed },
+    }).catch(() => undefined);
+  }
+  return text;
 }

@@ -11,6 +11,7 @@
  */
 
 import type { InboundMessage } from "./smstools-client";
+import { decodeEntities } from "./html-entities";
 
 export type MetaStatusUpdate = {
   wamid: string;
@@ -92,12 +93,12 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
 
   switch (msg.type) {
     case "text":
-      text = msg.text?.body ?? "";
+      text = decodeEntities(msg.text?.body ?? "");
       break;
     case "image":
       type = "image";
       mediaId = msg.image?.id ?? null;
-      text = msg.image?.caption ?? "";
+      text = decodeEntities(msg.image?.caption ?? "");
       break;
     case "sticker":
       type = "image";
@@ -106,7 +107,7 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
     case "video":
       type = "video";
       mediaId = msg.video?.id ?? null;
-      text = msg.video?.caption ?? "";
+      text = decodeEntities(msg.video?.caption ?? "");
       break;
     case "audio":
       type = "audio";
@@ -115,7 +116,7 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
     case "document":
       type = "document";
       mediaId = msg.document?.id ?? null;
-      text = msg.document?.caption ?? "";
+      text = decodeEntities(msg.document?.caption ?? "");
       break;
     case "location": {
       const l = msg.location;

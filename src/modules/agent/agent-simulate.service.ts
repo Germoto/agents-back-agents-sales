@@ -12,6 +12,7 @@ import { runAgentTurn } from "./agent-runtime";
 import { buildHistory, saveState, resetConversation, type ConversationState } from "./conversation.service";
 import { runFlowTurn, trailingUserText, getCustomerFlowVars, type FlowIO, type FlowTraceEntry, type FlowTurnResult } from "../flows/flow-engine";
 import { shouldDropFinalTextAfterPayment, type TurnContext, type OutboxMessage } from "./agent-tools";
+import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-guard";
 import { summarizeCart } from "./cart.service";
 import { resolveReminderSequence, applySpintax, type ReminderType } from "./reminder-templates";
 import { resolveAdCatalog, adCatalogEntryFor } from "../ad-catalog/ad-catalog.service";
@@ -243,6 +244,25 @@ export async function simulateTurn(
   }
   if (shouldDropFinalTextAfterPayment(ctx, finalText, trailingUserText(history))) finalText = "";
   finalText = applySpintax(finalText);
+  // Guarda de sistema (igual que en producción): sin links de carpetas de la entrega a quien no compró.
+  const blockedFolders = blockedFolderIdsFor(config.products, ctx.state);
+  let driveLinksRemoved = 0;
+  if (blockedFolders.size) {
+    const strip = (t: string | undefined) => {
+      if (!t) return t;
+      const r = stripBlockedFolderLinks(t, blockedFolders);
+      driveLinksRemoved += r.removed;
+      return r.text;
+    };
+    finalText = strip(finalText) ?? "";
+    for (const list of [ctx.outbox, ctx.outboxAfter ?? []]) {
+      for (const m of list) {
+        if (m.kind === "text") m.text = strip(m.text);
+        else if (m.caption) m.caption = strip(m.caption);
+      }
+      for (let i = list.length - 1; i >= 0; i--) if (list[i].kind === "text" && !list[i].text) list.splice(i, 1);
+    }
+  }
 
   const replies: SimMessage[] = [];
   for (const m of ctx.outbox) {
@@ -279,7 +299,10 @@ export async function simulateTurn(
   const reminders = await previewReminders(companyId, sim.customerId, ctx.state, config);
   // Notas de sistema (p. ej. "pasaría a atención humana"): el simulador no ejecuta
   // los efectos reales pero deja constancia de lo que ocurriría en producción.
-  return { replies, reminders, notices: ctx.adminNotices, ...(hybridTrace ? { trace: hybridTrace } : {}) };
+  const notices = driveLinksRemoved
+    ? [...ctx.adminNotices, `🔒 Se retiró ${driveLinksRemoved === 1 ? "un link de carpeta" : `${driveLinksRemoved} links de carpetas`} de la entrega de Drive: el cliente aún no compró.`]
+    : ctx.adminNotices;
+  return { replies, reminders, notices, ...(hybridTrace ? { trace: hybridTrace } : {}) };
 }
 
 /** Mensajes actuales de la conversación de simulación (para cargar el chat al abrir). */

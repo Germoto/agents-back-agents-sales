@@ -1,5 +1,6 @@
 import { AppError } from "./app-error";
 import { env } from "../config/env";
+import { decodeEntities } from "./html-entities";
 
 /**
  * Minimal HTTP client for the SMS TOOLS WhatsApp API.
@@ -663,7 +664,9 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
 
   const account = field(body, data, ["account", "unique", "device"]);
 
-  const text = field(body, data, ["message", "text", "body", "caption", "conversation"]) ?? "";
+  // Entidades HTML (`&quot;`, `&amp;`) que el gateway pueda escapar: se decodifican para que
+  // el modelo no las copie en sus respuestas.
+  const text = decodeEntities(field(body, data, ["message", "text", "body", "caption", "conversation"]) ?? "");
   const hasText = text.trim().length > 0;
 
   // Campos ADJUNTO-específicos: si vienen, es un adjunto real (nunca foto de perfil).

@@ -8,6 +8,7 @@ import { startReportsWorker } from "./modules/reports/reports.worker";
 import { resumeRunningCampaigns } from "./modules/campaigns/campaign-driver";
 import { startStorefrontWorker } from "./modules/storefront/storefront.worker";
 import { ensureSalesAgentBootTouchups } from "./modules/admin-console/sales-agent.service";
+import { startDriveIndexWorker } from "./modules/drive/drive-index.worker";
 
 const httpServer = createServer(app);
 
@@ -24,6 +25,8 @@ httpServer.listen(env.PORT, () => {
   startReportsWorker();
   // Tienda web: reintenta validar pedidos Yape/Plin en revisión.
   startStorefrontWorker();
+  // Índice en memoria de las carpetas de Drive de la entrega (solo con GOOGLE_DRIVE_API_KEY).
+  startDriveIndexWorker();
   // Reanuda las campañas masivas que quedaron en ejecución antes del reinicio
   void resumeRunningCampaigns();
   // Ajustes idempotentes del tenant de plataforma (agente de ventas del landing)

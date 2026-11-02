@@ -29,8 +29,6 @@ import { env } from "../../config/env";
 import {
   deliveryDriveRefs,
   driveSearchEnabled,
-  searchDrive,
-  browseFolder,
   getFile,
   driveFileKind,
   driveViewLink,
@@ -40,6 +38,8 @@ import {
   DriveAccessError,
   type DriveEntry,
 } from "../../lib/google-drive";
+import { searchProductDrive, browseProductFolder, pickSample } from "../drive/drive-search";
+import { drivePurchased, blockedFolderIds, allowedFolderIds } from "../drive/drive-guard";
 import { decryptCredential } from "../../lib/credentials-crypto";
 import { composePaymentMethodsMessage } from "./payment-methods";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
@@ -147,6 +147,7 @@ export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
   if (!driveSearchAvailable(config)) {
     hidden.add("buscar_en_drive");
     hidden.add("enviar_archivo_drive");
+    hidden.add("obtener_muestra");
   }
   return hidden.size ? TOOL_DEFINITIONS.filter((t) => !hidden.has(t.function.name)) : TOOL_DEFINITIONS;
 }
@@ -200,6 +201,9 @@ export interface TurnContext {
   customerFlowVars?: Record<string, string> | null;
   /** Acciones de CRM ya hechas por actualizar_crm en ESTE turno (tope configurable). */
   crmActionsThisTurn?: number;
+  /** Resultados que devolvió Drive (buscar_en_drive / obtener_muestra) en ESTE turno: con
+   *  resultados, derivar_humano por CONSULTA se rechaza (el agente sí puede responder). */
+  driveHitsThisTurn?: number;
 }
 
 /**
@@ -401,6 +405,23 @@ function resolveOrderPaymentMode(
 
 function findProductById(ctx: TurnContext, productId: string): BotProduct | undefined {
   return ctx.config.products.find((p) => p.id === productId || p.slug === productId);
+}
+
+/** Producto en la forma que esperan drive-search / drive-index (id + companyId + entrega). */
+function driveProductOf(ctx: TurnContext, p: BotProduct) {
+  return { id: p.id, companyId: ctx.companyId, digitalDelivery: p.digitalDelivery };
+}
+
+/**
+ * Vista de una entrada de Drive para el modelo. Cliente sin compra: las carpetas de la
+ * entrega (nivel 0, indexadas, o descubiertas en vivo DENTRO del árbol de la entrega:
+ * parentId != null) van sin link, salvo las de muestra que el dueño puso en la ficha.
+ */
+function driveEntryView(e: DriveEntry, guard: { blocked: Set<string>; allowed: Set<string> } | null) {
+  if (guard && e.isFolder && !guard.allowed.has(e.id) && (guard.blocked.has(e.id) || e.parentId)) {
+    return { ...describeEntry(e, false), nota: "carpeta de la entrega: disponible tras la compra" };
+  }
+  return describeEntry(e, true);
 }
 
 
@@ -1379,15 +1400,35 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "buscar_en_drive",
       description:
-        "Busca EN VIVO dentro de las carpetas públicas de Google Drive que forman la ENTREGA de un producto (lo que recibe quien compra). Con `busqueda` devuelve archivos y carpetas que coinciden por nombre o tema (nombre, tipo, tamaño, ruta y link exacto). Con `carpetaId` lista el contenido de esa carpeta (para explorar un resultado). Qué compartir y cuándo lo definen las instrucciones del negocio; en el estado ves si el cliente ya compró (yaCompro). Copia los links tal cual del resultado.",
+        "Busca dentro de las carpetas públicas de Google Drive que forman la ENTREGA de un producto (lo que recibe quien compra), en TODOS los niveles: archivos y subcarpetas por nombre o tema, sin importar mayúsculas, tildes, orden de palabras ni errores pequeños de tipeo. Con `busqueda` devuelve coincidencias (nombre, tipo, tamaño, ruta y link). Con `carpetaId` lista el contenido de esa carpeta (y `busqueda` filtra dentro). Paginado: `offset` + `siguienteOffset` para ver más. Las carpetas de la entrega salen SIN link si el cliente aún no compró (lo decide el sistema); los archivos sueltos sí llevan link. Copia los links tal cual del resultado.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["productId"],
         properties: {
           productId: { type: "string", description: "id del producto cuya entrega se busca" },
-          busqueda: { type: "string", description: "qué busca el cliente, en 1-4 palabras clave (tema, nicho, género, nombre): 'gatos', 'cumbia sureña', 'terror', 'prompts'" },
-          carpetaId: { type: "string", description: "id de una carpeta devuelta antes, para listar/explorar su contenido (opcionalmente filtrado con busqueda)" },
+          busqueda: { type: "string", description: "qué busca el cliente: tema, nicho, género, artista o nombre ('daddy yankee', 'cumbia sureña', 'gatos', 'prompts')" },
+          carpetaId: { type: "string", description: "id de una carpeta devuelta antes, para listar/explorar su contenido" },
+          offset: { type: "integer", minimum: 0, description: "desde qué resultado seguir (usa el siguienteOffset de la respuesta anterior)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "obtener_muestra",
+      description:
+        "Vía corta para 'mándame una muestra de X' / 'tienes de X?': devuelve UN solo archivo suelto (nunca una carpeta) de la entrega del producto que coincide con el tema: nombre, tipo, tamaño y link de archivo. Si el tema coincide con una carpeta, elige un archivo de dentro. Con `adjuntar=true` además lo envía por el chat como video/imagen/audio/PDF si pesa poco (tope de WhatsApp); si pesa más, solo devuelve el link. Si no hay nada, lo dice: no inventes.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId", "tema"],
+        properties: {
+          productId: { type: "string", description: "id del producto" },
+          tema: { type: "string", description: "tema/nicho/género/artista que pide el cliente" },
+          adjuntar: { type: "boolean", description: "true = enviarlo como adjunto por el chat (si cabe); false = solo devolver el link" },
+          texto: { type: "string", description: "texto corto que acompaña al adjunto (opcional)" },
         },
       },
     },
@@ -1397,14 +1438,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "enviar_archivo_drive",
       description:
-        "Envía por el chat, como adjunto (video, imagen, audio o PDF), UN archivo encontrado con buscar_en_drive, en vez de mandar solo el link. Solo archivos pequeños (video/audio hasta 16 MB, imagen 5 MB, PDF 20 MB, límite de WhatsApp); si pesa más, la tool devuelve el link para que lo mandes. Las carpetas no se adjuntan: se comparten por link.",
+        "Envía por el chat, como adjunto (video, imagen, audio o PDF), UN archivo encontrado con buscar_en_drive u obtener_muestra, en vez de mandar solo el link. Solo archivos pequeños (video/audio hasta 16 MB, imagen 5 MB, PDF 20 MB, límite de WhatsApp); si pesa más, la tool devuelve el link para que lo mandes. Las carpetas no se adjuntan.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["productId", "fileId"],
         properties: {
           productId: { type: "string", description: "id del producto" },
-          fileId: { type: "string", description: "id del archivo (de los resultados de buscar_en_drive)" },
+          fileId: { type: "string", description: "id del archivo (de los resultados de buscar_en_drive / obtener_muestra)" },
           texto: { type: "string", description: "texto corto que acompaña al adjunto (opcional)" },
         },
       },
@@ -2031,32 +2072,100 @@ export async function executeTool(
     case "buscar_en_drive": {
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
-      const refs = deliveryDriveRefs(product.digitalDelivery);
-      if (!refs.length) return JSON.stringify({ ok: false, error: "la entrega de este producto no tiene links de Google Drive; responde con la ficha/FAQ" });
+      if (!deliveryDriveRefs(product.digitalDelivery).length) return JSON.stringify({ ok: false, error: "la entrega de este producto no tiene links de Google Drive; responde con la ficha/FAQ" });
       const query = String(args.busqueda ?? "").trim().slice(0, 120);
       const folderId = String(args.carpetaId ?? "").trim();
+      const offset = Math.max(0, Number(args.offset) || 0);
       if (!query && !folderId) return JSON.stringify({ ok: false, error: "indica busqueda (qué busca el cliente) o carpetaId (carpeta a explorar)" });
       try {
-        let entries: DriveEntry[] = [];
-        let extra: Record<string, unknown> = {};
+        const purchased = drivePurchased(ctx.state, product);
+        const guard = purchased ? null : { blocked: blockedFolderIds(product), allowed: allowedFolderIds(product) };
+        const view = (e: DriveEntry) => driveEntryView(e, guard);
         if (folderId) {
-          const r = await browseFolder(folderId, { query, limit: 30 });
+          const r = await browseProductFolder(driveProductOf(ctx, product), folderId, { query, offset, limit: 30 });
           if (!r.folder) return JSON.stringify({ ok: false, error: "esa carpeta no existe o ya no es pública" });
-          entries = r.entries;
-          extra = { carpeta: describeEntry(r.folder, true), totalEnCarpeta: r.total, ...(r.truncated ? { aviso: "carpeta muy grande: se listaron solo las primeras 2000 entradas" } : {}) };
-        } else {
-          const r = await searchDrive(refs, query, { limit: 12 });
-          entries = r.entries;
-          extra = { carpetasRevisadas: r.foldersScanned, ...(r.inaccessible.length ? { sinAcceso: r.inaccessible.slice(0, 5) } : {}) };
+          if (r.entries.length) ctx.driveHitsThisTurn = (ctx.driveHitsThisTurn ?? 0) + r.entries.length;
+          return JSON.stringify({
+            ok: true,
+            carpeta: view(r.folder),
+            totalEnCarpeta: r.total,
+            offset: r.offset,
+            siguienteOffset: r.nextOffset,
+            resultados: r.entries.map(view),
+            nota: r.entries.length
+              ? `${r.total} elemento(s) en la carpeta${r.nextOffset != null ? `; para ver más llama de nuevo con offset=${r.nextOffset}` : ""}. Copia los links tal cual.${purchased ? "" : " Las carpetas sin link son de la entrega: disponibles tras la compra (lo decide el sistema)."}`
+              : "Carpeta vacía o sin coincidencias con ese filtro.",
+          });
         }
-        const nota = entries.length
-          ? "Links exactos de Drive: cópialos tal cual si los compartes. Sigue las instrucciones del negocio sobre qué dar antes y después de la compra."
-          : "Sin coincidencias. Prueba otra palabra clave (sinónimo, en inglés) o explora una carpeta con carpetaId; si no está, dilo con naturalidad. No inventes links ni nombres.";
-        return JSON.stringify({ ok: true, ...extra, total: entries.length, resultados: entries.map((e) => describeEntry(e, true)), nota });
+        const r = await searchProductDrive(driveProductOf(ctx, product), query, { offset, limit: 12 });
+        if (r.entries.length) ctx.driveHitsThisTurn = (ctx.driveHitsThisTurn ?? 0) + r.entries.length;
+        const indiceNota = r.indice.estado === "construyendo" || r.indice.estado === "sin indice" ? " (índice aún construyéndose: se buscó en vivo, puede faltar contenido profundo)" : r.indice.parcial ? " (índice parcial: carpetas muy grandes)" : "";
+        return JSON.stringify({
+          ok: true,
+          total: r.total,
+          offset: r.offset,
+          siguienteOffset: r.nextOffset,
+          ...(r.inaccessible.length ? { sinAcceso: r.inaccessible.slice(0, 5) } : {}),
+          resultados: r.entries.map(view),
+          nota: r.entries.length
+            ? `${r.total} coincidencia(s)${r.nextOffset != null ? `; más con offset=${r.nextOffset}` : ""}${indiceNota}. Links exactos: cópialos tal cual.${purchased ? "" : " Las carpetas sin link son de la entrega: disponibles tras la compra (lo decide el sistema)."}`
+            : `Sin coincidencias${indiceNota}. Prueba otra palabra (sinónimo, en inglés, nombre del artista o del género) o explora una carpeta con carpetaId; si no está, dilo con naturalidad. No inventes links ni nombres.`,
+        });
       } catch (error) {
         const msg = error instanceof DriveAccessError ? error.message : error instanceof Error ? error.message : "error";
         console.warn(`[drive] buscar_en_drive falló (company=${ctx.companyId} product=${product.id}): ${msg}`);
         return JSON.stringify({ ok: false, error: "Google Drive no respondió ahora; responde con la ficha/FAQ y, si hace falta, ofrece revisarlo luego. No inventes links." });
+      }
+    }
+
+    case "obtener_muestra": {
+      const product = findProductById(ctx, String(args.productId ?? ""));
+      if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
+      if (!deliveryDriveRefs(product.digitalDelivery).length) return JSON.stringify({ ok: false, error: "la entrega de este producto no tiene links de Google Drive" });
+      const tema = String(args.tema ?? "").trim().slice(0, 120);
+      if (!tema) return JSON.stringify({ ok: false, error: "indica el tema" });
+      try {
+        const pick = await pickSample(driveProductOf(ctx, product), tema);
+        if (!pick) return JSON.stringify({ ok: true, encontrado: false, nota: "No hay archivos de ese tema en la entrega. Dilo con naturalidad (o prueba otra palabra); no inventes." });
+        ctx.driveHitsThisTurn = (ctx.driveHitsThisTurn ?? 0) + 1;
+        const purchased = drivePurchased(ctx.state, product);
+        const guard = purchased ? null : { blocked: blockedFolderIds(product), allowed: allowedFolderIds(product) };
+        const archivo = describeEntry(pick.file, true);
+        const carpeta = pick.folder ? driveEntryView(pick.folder, guard) : undefined;
+        let enviado = false;
+        let motivoNoAdjunto: string | undefined;
+        if (args.adjuntar === true) {
+          const kind = driveFileKind(pick.file);
+          const mediaKind = kind === "imagen" ? "image" : kind === "video" ? "video" : kind === "audio" ? "audio" : kind === "pdf" ? "document" : null;
+          const max = DRIVE_ATTACH_MAX_BYTES[kind];
+          if (!mediaKind || !max) motivoNoAdjunto = `tipo ${kind}: no se adjunta, manda el link`;
+          else if (pick.file.size == null || pick.file.size > max) motivoNoAdjunto = `pesa ${pick.file.size != null ? Math.round(pick.file.size / 1024 / 1024) : "?"} MB (tope ${Math.round(max / 1024 / 1024)} MB): manda el link`;
+          else {
+            ctx.outbox.push({
+              kind: "media",
+              mediaUrl: driveDownloadUrl(pick.file.id),
+              mediaKind,
+              caption: typeof args.texto === "string" && args.texto.trim() ? args.texto.trim().slice(0, 600) : undefined,
+              fileName: pick.file.name,
+            });
+            enviado = true;
+          }
+        }
+        return JSON.stringify({
+          ok: true,
+          encontrado: true,
+          archivo,
+          ...(carpeta ? { carpeta, nota_carpeta: pick.via === "carpeta" ? "el tema coincidió con esta carpeta; el archivo es uno de dentro" : undefined } : {}),
+          enviado,
+          ...(motivoNoAdjunto ? { motivoNoAdjunto } : {}),
+          nota: enviado
+            ? "Ya envié el archivo como adjunto. NO pegues el link en tu texto final; cierra breve."
+            : "Comparte el link del archivo tal cual si corresponde (o adjúntalo con enviar_archivo_drive / adjuntar=true).",
+        });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "error";
+        console.warn(`[drive] obtener_muestra falló (company=${ctx.companyId} product=${product.id}): ${msg}`);
+        return JSON.stringify({ ok: false, error: "Google Drive no respondió ahora; responde con la ficha/FAQ. No inventes links." });
       }
     }
 
@@ -2078,8 +2187,11 @@ export async function executeTool(
           parentId: null,
           path: meta.name,
         };
-        const link = driveViewLink(entry);
-        if (entry.isFolder) return JSON.stringify({ ok: false, error: "es una carpeta: no se adjunta", link, nota: "compártela por link si corresponde" });
+        if (entry.isFolder) {
+          const purchased = drivePurchased(ctx.state, product);
+          const allowed = purchased || !blockedFolderIds(product).has(entry.id);
+          return JSON.stringify({ ok: false, error: "es una carpeta: no se adjunta", link: allowed ? driveViewLink(entry) : null, nota: allowed ? "compártela por link si corresponde" : "carpeta de la entrega: disponible tras la compra (lo decide el sistema)" });
+        }
         const kind = driveFileKind(entry);
         const mediaKind = kind === "imagen" ? "image" : kind === "video" ? "video" : kind === "audio" ? "audio" : kind === "pdf" ? "document" : null;
         const max = DRIVE_ATTACH_MAX_BYTES[kind];
@@ -3184,6 +3296,10 @@ export async function executeTool(
       // El motivo va tipado entre corchetes para que el aviso al dueño y el
       // panel puedan distinguir una negociación de un reclamo o un problema.
       const motivo = String(args.motivo ?? "").toUpperCase();
+      // Guarda: si en este turno Drive SÍ devolvió resultados, la consulta se puede responder.
+      if (motivo === "CONSULTA" && (ctx.driveHitsThisTurn ?? 0) > 0) {
+        return JSON.stringify({ ok: false, error: "No derives: la búsqueda en Drive de este turno SÍ trajo resultados. Responde con ellos (nombres, cantidades, links permitidos) y sigue la venta." });
+      }
       const tag = ["NEGOCIACION", "RECLAMO", "PAGO", "CONSULTA", "NO_CONTACTAR", "OTRO"].includes(motivo) ? `[${motivo}]` : "";
       markHandoff(ctx, `HUMAN${tag}: ${String(args.reason ?? "")}`);
       if (motivo === "NO_CONTACTAR") {

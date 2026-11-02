@@ -8,6 +8,7 @@ import { recordMessage, notifyOwner } from "./conversation.service";
 import { sendText, sendMedia, type WhatsappSender } from "./outbound";
 import { applyFirma } from "./firma";
 import { applySpintax } from "./reminder-templates";
+import { decodeEntities } from "../../lib/html-entities";
 import type { OutboxMessage } from "./agent-tools";
 
 /**
@@ -53,7 +54,7 @@ export async function deliver(
     if (msg.kind === "media" && msg.mediaUrl) {
       // Spintax {a|b|c} resuelto al enviar (cada cliente recibe una variante);
       // la firma se aplica solo cuando el media trae caption con texto.
-      const caption = await applyFirma(ids.companyId, msg.caption ? applySpintax(msg.caption) : msg.caption);
+      const caption = await applyFirma(ids.companyId, msg.caption ? decodeEntities(applySpintax(msg.caption)) : msg.caption);
       const r = await sendMedia(sender, to, msg.mediaKind ?? "image", msg.mediaUrl, caption ?? undefined, msg.fileName);
       await recordMessage({
         companyId: ids.companyId,
@@ -67,7 +68,7 @@ export async function deliver(
         deliveryStatus: r.gatewayId ? "pending" : null,
       });
     } else if (msg.text) {
-      const spun = applySpintax(msg.text);
+      const spun = decodeEntities(applySpintax(msg.text));
       const text = (await applyFirma(ids.companyId, spun)) ?? spun;
       const r = await sendText(sender, to, text);
       await recordMessage({
