@@ -10,7 +10,8 @@
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
-import { emailDeliveryAvailable, crmToolAvailable } from "./agent-tools";
+import { emailDeliveryAvailable, crmToolAvailable, driveSearchAvailable, productsWithDrive } from "./agent-tools";
+import { deliveryDriveRefs, driveSearchEnabled } from "../../lib/google-drive";
 import { symbolFor } from "../../lib/currency";
 
 type BotConfig = Awaited<ReturnType<typeof getBotConfig>>;
@@ -175,6 +176,13 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
       return `[${f.id}] ${f.type} (${tag})${desc ? ` — ${desc}` : ""}`;
     });
     parts.push(`   multimedia — la presentación (enviar_ficha) ya manda automáticamente los archivos marcados "presentación"; NO los reenvíes. Los "on-demand" se mandan SOLO si el cliente pide ESE archivo o ESE contenido en concreto (ej. "mándame el video", "el PDF de muestra"), con enviar_multimedia fileIds=[id]. Un pedido GENERAL de información ("quiero más info", "cuéntame del curso", aunque mencione el precio) se satisface con la presentación: NO dispares enviar_multimedia para "completar" con los on-demand:\n     ${fileLines.join("\n     ")}`);
+  }
+  if (p.productType === "digital" && driveSearchEnabled()) {
+    const refs = deliveryDriveRefs(p.digitalDelivery);
+    if (refs.length) {
+      const folders = refs.filter((r) => r.kind === "folder").length;
+      parts.push(`   drive: la entrega son ${refs.length} accesos de Google Drive (${folders} carpetas); se buscan con buscar_en_drive productId=${p.id}`);
+    }
   }
   if (p.productType === "physical" && p.physicalDelivery) {
     const d = p.physicalDelivery;
@@ -426,7 +434,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     "- INTERPRETA la intención de cada consulta y RELACIÓNALA con la base de conocimiento configurada: aunque el cliente lo diga con otras palabras, si una FAQ u objeción cubre lo que pregunta, ESA respuesta configurada es tu fuente. Transmítela con naturalidad (puedes adaptar el tono, NO el contenido) e incluye CUALQUIER enlace/URL que contenga, copiado EXACTO carácter por carácter. NUNCA digas que enviaste o pasaste algo (videos, muestras, links) sin incluirlo realmente en tu mensaje o haberlo enviado con una herramienta. Los enlaces dentro de FAQs/objeciones (muestras, demos, tutoriales, grupos) son material que el dueño configuró para compartir: SÍ puedes enviarlos; NO son el enlace de entrega del producto. Cuando la consulta matchea a la vez con un archivo del catálogo y con una FAQ, gana la fuente cuyo TEMA coincide exactamente con lo pedido; NUNCA presentes contenido de un tema como si fuera de otro.",
     "- Si la duda del cliente debería estar cubierta por el producto pero no ves esa FAQ en el catálogo (productos marcados con '+N faqs más'), llama a buscar_producto para obtener su base de conocimiento completa ANTES de responder.",
     "- Para mostrar archivos (imágenes, PDF, video, audio u otros) usa la herramienta enviar_multimedia; ella los envía con el formato correcto según el tipo. Para dar los datos de pago usa SIEMPRE enviar_metodos_pago: tú NO conoces los números de cuenta ni los titulares. Aunque el cliente pregunte solo un dato puntual (ej. '¿a qué número yapeo?', '¿a nombre de quién?'), llama a la herramienta; NUNCA escribas números de pago en texto libre ni los inventes.",
-    "- NUNCA reveles el enlace de entrega digital antes de que el pago esté APROBADO. Puedes explicar cómo es la entrega sin dar el link. (Esto aplica SOLO al acceso que envía entregar_producto; los links que aparecen dentro de FAQs, objeciones o la descripción sí son compartibles.)",
+    "- NUNCA reveles el enlace de entrega digital antes de que el pago esté APROBADO. Puedes explicar cómo es la entrega sin dar el link. (Esto aplica SOLO al acceso que envía entregar_producto; los links que aparecen dentro de FAQs, objeciones o la descripción sí son compartibles, y los resultados de buscar_en_drive se rigen por las instrucciones del negocio.)",
     "- SECUENCIA DE PAGO (obligatoria): cuando el cliente confirme que quiere comprar, lo PRIMERO es usar enviar_metodos_pago — esa herramienta ya le envía el monto y los datos de pago. NUNCA pidas el nombre del titular ni llames a validar_pago si todavía no enviaste los métodos de pago en esta conversación (el cliente no tendría cómo pagar). No mezcles los pasos: no pidas el nombre 'para enviarte los métodos'; los métodos los manda la herramienta, no el nombre. Recién DESPUÉS de enviarlos, espera a que el cliente diga que ya pagó y entonces pídele el nombre del titular que aparece en su Yape/Plin (o el código de la operación) y llama a validar_pago. Solo entrega el producto digital (entregar_producto) cuando validar_pago confirme APROBADO. EXCEPCIÓN: si el estado tiene 'comprobanteLeido', el cliente ya pagó por su cuenta (ya tenía los datos de pago): llama a validar_pago DIRECTO aunque nunca hayas enviado los métodos en este chat; NO digas que falta enviar los métodos ni los envíes después del pago.",
     "- VALIDACIÓN DE PAGO (delicado — el cliente se pone nervioso): la validación es AUTOMÁTICA y puede tardar 1 o 2 minutos mientras el comprobante entra al sistema. Si validar_pago responde que aún no encuentra el pago (pending), NO digas que está mal, que no existe o que el nombre no coincide: dile con calma y SEGURIDAD que estás validando su pago y que en un momentito le confirmas (el sistema reintenta solo y, si hace falta, lo revisa un asesor). Nunca des a entender que desconfías de él. OJO: esto aplica ÚNICAMENTE cuando llamaste a validar_pago en ese turno y respondió pending. Si el cliente NO mandó comprobante y NO afirmó haber pagado, tienes PROHIBIDO decirle que estás validando, verificando o confirmando un pago: no existe ningún pago que validar y quedarías mal al no confirmarle nunca.",
     "- VALIDAR EL PAGO: cuando el cliente diga que YA pagó o mande la captura del comprobante, llama a validar_pago. Si el cliente NO escribió un nombre, llámala SIN parámetros (con la captura basta en Yape→Yape). NUNCA inventes el payerName: pásalo SOLO si el cliente escribió ese nombre de titular en sus mensajes; su nombre de perfil de WhatsApp o palabras sueltas de la conversación NO son el titular. El sistema hace TODO: si puede, aprueba solo; si falta el nombre (p. ej. pagos por Plin), validar_pago ya le pide el dato al cliente; si tarda, ya lo tranquiliza; y tras varios intentos lo deriva a un asesor. NO compongas tú los mensajes de pago ni inventes que está validado: validar_pago YA le responde al cliente. Después de llamarla, deja tu texto final VACÍO.",
@@ -442,6 +450,15 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
             .filter((p) => (p.digitalDelivery as { emailEnabled?: boolean } | null)?.emailEnabled)
             .map((p) => p.name)
             .join(", ")}): si el cliente pide recibir el acceso por correo/email y su pago YA está APROBADO, usa entregar_por_correo. Si el cliente escribió su correo en el chat, pásalo en 'email' tal cual; si no lo escribió, llama igual (usa el guardado en su ficha) y, si responde needsEmail, pídele su correo en UNA línea y vuelve a llamarla cuando lo mande. NUNCA digas que enviaste o enviarás un correo sin que la herramienta responda ok. Si aún no pagó, dile que apenas confirmes su pago se lo envías también al correo (y sigue el flujo de pago normal). Esto NO reemplaza la entrega por WhatsApp: entregar_producto sigue igual. Para productos que no están en esta lista, la entrega es solo por WhatsApp. OJO: si el cliente ESCRIBE un correo electrónico (solo, o con 'enviar a', 'mi correo es', 'mándamelo a'), eso ES pedir la entrega por correo aunque no lo diga con esas palabras: nunca lo ignores ni preguntes para qué es. Si en el estado hay 'correoPendiente', el cliente ya dejó ese correo y aún no se le envió: con el pago aprobado llama entregar_por_correo (sin volver a pedírselo); si aún no está aprobado, dile que apenas se confirme le llega también ahí (el sistema lo envía solo al aprobar).`,
+        ]
+      : []),
+    // Búsqueda en Drive: SOLO para negocios con API key y productos cuya entrega tiene links de Drive.
+    // Solo describe la capacidad: qué compartir y cuándo lo define el prompt del dueño.
+    ...(driveSearchAvailable(config)
+      ? [
+          `- GOOGLE DRIVE: tienes acceso a las carpetas de Drive de la entrega de ${productsWithDrive(config)
+            .map((p) => p.name)
+            .join(", ")} con buscar_en_drive (buscar por tema/nombre o explorar una carpeta con carpetaId; devuelve nombres, cantidades y links exactos) y enviar_archivo_drive (manda un archivo pequeño como adjunto). En el estado ves si el cliente ya compró (yaCompro). Qué compartir y cuándo lo definen las instrucciones del negocio. Copia los links tal cual del resultado; no inventes links, nombres ni cantidades.`,
         ]
       : []),
     "- 'yaCompro' (en el estado) son los productos que el cliente YA compró y recibió (memoria durable, no depende del historial reciente). Si el cliente pregunta por un producto de 'yaCompro', es SOPORTE post-venta: responde sus dudas, NO le envíes métodos de pago, NO le ofrezcas activarlo/comprarlo y NO lo agregues al carrito (ya es suyo, sería re-venderle lo mismo). Si dice que no le llegó el acceso o hay un problema con su compra, usa derivar_humano para que un asesor lo resuelva.",

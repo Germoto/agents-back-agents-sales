@@ -30,6 +30,10 @@ const envSchema = z.object({
   REMINDER_MAX_LATE_LAST_HOURS: z.coerce.number().min(1).default(48),
   UPLOAD_DIR: z.string().default("uploads"),
   PUBLIC_BASE_URL: z.string().default("http://localhost:3000"),
+  // API key de Google (Drive API v3 habilitada) para que el agente busque dentro de las
+  // carpetas PÚBLICAS de Drive que viven en la entrega de los productos. Vacía = tools
+  // buscar_en_drive / enviar_archivo_drive ocultas. No requiere OAuth ni verificación.
+  GOOGLE_DRIVE_API_KEY: z.string().optional().default(""),
   // Modelo de generación de imágenes del copiloto (override sin tocar código).
   IMAGE_GEN_MODEL: z.string().default("gpt-image-2"),
   // Prioridad de la MULTIMEDIA en SMS Tools: "1" = síncrona (el gateway emite el
