@@ -80,7 +80,7 @@ export function accountActivatedEmail(params: { name: string; username: string; 
         o tu usuario <strong style="color:#e7eaf3;">${params.username}</strong> y la contraseña que elegiste al registrarte.
       </p>
       <p style="margin:0;font-size:13px;color:#8a93ab;">
-        Dentro del panel encontrarás la guía de Activación paso a paso y el Centro de ayuda.
+        Dentro del panel encontrarás la puesta en marcha paso a paso en Inicio y el Centro de ayuda.
       </p>
       ${button}
     `),
