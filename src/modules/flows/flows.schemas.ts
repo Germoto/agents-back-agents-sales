@@ -47,6 +47,25 @@ const answersData = z.object({
   timeoutMinutes: z.number().int().min(0).max(60 * 24 * 7).optional(),
 });
 
+const pollData = z.object({
+  message: z.string().max(255).default(""),
+  options: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        label: z.string().max(100).default(""),
+        detectText: z.string().max(200).default(""),
+        detectMode: detectModeSchema.default("contains"),
+      }),
+    )
+    .max(12)
+    .default([]),
+  repeatOnNoMatch: z.boolean().default(false),
+  noMatchMessage: z.string().max(2000).optional(),
+  saveVariable: z.string().trim().max(40).optional(),
+  timeoutMinutes: z.number().int().min(0).max(60 * 24 * 7).optional(),
+});
+
 const listData = z.object({
   title: z.string().max(120).optional(),
   body: z.string().max(4000).default(""),
@@ -186,6 +205,7 @@ export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("send-audio"), position: positionSchema, data: sendMediaData }),
   z.object({ id: z.string().min(1), type: z.literal("send-document"), position: positionSchema, data: sendMediaData }),
   z.object({ id: z.string().min(1), type: z.literal("answers"), position: positionSchema, data: answersData }),
+  z.object({ id: z.string().min(1), type: z.literal("poll"), position: positionSchema, data: pollData }),
   z.object({ id: z.string().min(1), type: z.literal("list"), position: positionSchema, data: listData }),
   z.object({ id: z.string().min(1), type: z.literal("flow-control"), position: positionSchema, data: flowControlData }),
   z.object({ id: z.string().min(1), type: z.literal("handoff"), position: positionSchema, data: handoffData }),

@@ -70,7 +70,7 @@ const PROPOSE_FLOW_TOOL: ToolDefinition = {
                 type: "string",
                 enum: [
                   "start", "send-text", "send-image", "send-video", "send-audio", "send-document",
-                  "answers", "list", "flow-control", "handoff", "reminder", "crm-move",
+                  "answers", "poll", "list", "flow-control", "handoff", "reminder", "crm-move",
                   "crm-add-tags", "crm-remove-tags", "condition", "wait", "question",
                   "validate-payment", "book-appointment", "to-agent",
                 ],

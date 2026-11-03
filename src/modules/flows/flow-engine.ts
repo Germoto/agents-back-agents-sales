@@ -31,6 +31,7 @@ import {
   type FlowTrigger,
   type AnswersData,
   type AnswersOption,
+  type PollData,
   type ListData,
   type SendTextData,
   type SendMediaData,
@@ -713,7 +714,9 @@ function resolveAwaiting(node: FlowNode, inboundText: string): Resolved {
   if (isSendNode(node.type)) {
     return { kind: "handle", handle: "reply" };
   }
-  if (node.type === "answers") {
+  if (node.type === "answers" || node.type === "poll") {
+    // Encuesta: el voto llega como texto = label exacto (paso 2 del matcher);
+    // si el cliente escribe el número o una palabra, también se acepta.
     const optId = matchAnswersOption(node.data as AnswersData, inboundText);
     return optId ? { kind: "handle", handle: `opt:${optId}` } : { kind: "no-match" };
   }
@@ -792,10 +795,30 @@ async function pickTriggeredFlow(
   return winner?.flow ?? null;
 }
 
+/** Menú numerado equivalente a una encuesta (fallback para Meta/chat web/simulador). */
+export function renderPollMenu(data: PollData, io: FlowIO): string {
+  return renderAnswersMenu({ ...data, showOptions: true }, io);
+}
+
+/** Mensaje de encuesta nativa (solo flujos): pregunta + opciones + menú de respaldo. */
+export function buildPollOutbox(data: PollData, io: FlowIO): OutboxMessage {
+  const pollQuestion = renderTemplate((data.message ?? "").trim(), io);
+  const pollOptions = (data.options ?? [])
+    .map((o) => renderTemplate((o.label ?? "").trim(), io))
+    .filter(Boolean);
+  return { kind: "poll", pollQuestion, pollOptions, pollSelectable: 1, pollFallbackText: renderPollMenu(data, io) };
+}
+
 async function emitQuestion(node: FlowNode, io: FlowIO): Promise<void> {
   if (node.type === "answers") {
     const text = renderAnswersMenu(node.data as AnswersData, io);
     if (text) await io.emit({ kind: "text", text });
+    return;
+  }
+  if (node.type === "poll") {
+    const msg = buildPollOutbox(node.data as PollData, io);
+    if (msg.pollQuestion && (msg.pollOptions?.length ?? 0) >= 2) await io.emit(msg);
+    else if (msg.pollFallbackText) await io.emit({ kind: "text", text: msg.pollFallbackText });
     return;
   }
   if (node.type === "list") {
@@ -804,7 +827,7 @@ async function emitQuestion(node: FlowNode, io: FlowIO): Promise<void> {
 }
 
 async function armTimeout(flow: LoadedFlow, node: FlowNode, io: FlowIO): Promise<void> {
-  const data = node.data as AnswersData | ListData | QuestionData;
+  const data = node.data as AnswersData | PollData | ListData | QuestionData;
   const minutes = Number(data.timeoutMinutes ?? 0);
   if (minutes > 0 && edgeFrom(flow, node.id, "timeout")) {
     await io.scheduleTimeout(flow.id, node.id, minutes);
@@ -979,6 +1002,7 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
       }
 
       case "answers":
+      case "poll":
       case "list": {
         if (emitted > 0) await pause(io);
         await emitQuestion(node, io);

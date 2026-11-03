@@ -118,6 +118,32 @@ export async function sendText(
   return { gatewayId: gatewayIdOf(res) };
 }
 
+/** Encuestas nativas de WhatsApp: solo el gateway SMS Tools las soporta. */
+export function supportsPolls(sender: WhatsappSender): boolean {
+  return sender.provider === "SMSTOOLS";
+}
+
+/**
+ * Envía una encuesta nativa (botonera). Meta Cloud API y el chat web no tienen
+ * encuestas: lanzan 422 y el caller (deliver) degrada al menú numerado.
+ */
+export async function sendPoll(
+  sender: WhatsappSender,
+  to: string,
+  poll: { question: string; options: string[]; selectable?: number },
+): Promise<SendResult> {
+  if (!supportsPolls(sender) || sender.provider !== "SMSTOOLS") {
+    throw new AppError("Este canal no soporta encuestas de WhatsApp", 422);
+  }
+  const res = await smsTools.sendPoll(
+    { apiUrl: sender.apiUrl, secret: sender.secret },
+    sender.account,
+    to,
+    { question: decodeEntities(poll.question), options: poll.options.map((o) => decodeEntities(o)), selectable: poll.selectable },
+  );
+  return { gatewayId: gatewayIdOf(res) };
+}
+
 /**
  * Reacciona con un emoji a un mensaje del chat (emoji "" = quitar). El wamid es
  * el de WhatsApp del mensaje target; fromMe=true si el target es nuestro.

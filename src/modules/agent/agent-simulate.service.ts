@@ -12,6 +12,7 @@ import { runAgentTurn } from "./agent-runtime";
 import { buildHistory, saveState, resetConversation, type ConversationState } from "./conversation.service";
 import { runFlowTurn, trailingUserText, getCustomerFlowVars, type FlowIO, type FlowTraceEntry, type FlowTurnResult } from "../flows/flow-engine";
 import { shouldDropFinalTextAfterPayment, type TurnContext, type OutboxMessage } from "./agent-tools";
+import { pollRecordText } from "./delivery";
 import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-guard";
 import { summarizeCart } from "./cart.service";
 import { resolveReminderSequence, applySpintax, type ReminderType } from "./reminder-templates";
@@ -113,6 +114,10 @@ async function loadSimConversation(companyId: string, mode: SimMode) {
 // Igual que deliver(): las variantes {a|b|c} se muestran resueltas (una combinación
 // al azar), tal como las vería el cliente — el simulador no pasa por deliver().
 function outboxText(m: OutboxMessage): string {
+  if (m.kind === "poll") {
+    // Encuesta nativa: el simulador no tiene WhatsApp, se muestra como texto.
+    return applySpintax(pollRecordText(m.pollQuestion ?? "", m.pollOptions ?? []));
+  }
   return applySpintax(m.kind === "media" ? (m.caption ?? "") : (m.text ?? ""));
 }
 
@@ -163,6 +168,7 @@ export async function simulateTurn(
     const trace: FlowTraceEntry[] = [...adNotes];
     const persistReply = async (m: OutboxMessage) => {
       const text = outboxText(m);
+      if (m.kind === "poll") trace.push({ nodeId: "-", type: "poll", event: "encuesta nativa de WhatsApp (en el simulador se muestra como texto)" });
       await prisma.conversationMessage.create({
         data: {
           companyId,

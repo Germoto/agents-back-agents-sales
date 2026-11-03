@@ -5,7 +5,7 @@
  */
 
 import { recordMessage, notifyOwner } from "./conversation.service";
-import { sendText, sendMedia, type WhatsappSender } from "./outbound";
+import { sendText, sendMedia, sendPoll, supportsPolls, type WhatsappSender } from "./outbound";
 import { applyFirma } from "./firma";
 import { applySpintax } from "./reminder-templates";
 import { decodeEntities } from "../../lib/html-entities";
@@ -39,6 +39,27 @@ export interface DeliveryIds {
   conversationId: string;
 }
 
+/** Texto legible de una encuesta para el historial/panel: «📊 pregunta» + opciones con ▢. */
+export function pollRecordText(question: string, options: string[]): string {
+  return [`📊 ${question}`, ...options.map((o) => `▢ ${o}`)].join("\n");
+}
+
+/** Envía un texto normal y lo registra (ruta compartida por texto y fallback de encuesta). */
+async function deliverText(sender: WhatsappSender, to: string, raw: string, ids: DeliveryIds): Promise<void> {
+  const spun = decodeEntities(applySpintax(raw));
+  const text = (await applyFirma(ids.companyId, spun)) ?? spun;
+  const r = await sendText(sender, to, text);
+  await recordMessage({
+    companyId: ids.companyId,
+    customerId: ids.customerId,
+    conversationId: ids.conversationId,
+    role: "ASSISTANT",
+    message: text,
+    gatewayId: r.gatewayId,
+    deliveryStatus: r.gatewayId ? "pending" : null,
+  });
+}
+
 /**
  * Envía un mensaje y lo registra en la conversación. Devuelve true si el
  * gateway lo aceptó; false si falló (el error se traga aquí para no romper el
@@ -67,19 +88,36 @@ export async function deliver(
         gatewayId: r.gatewayId,
         deliveryStatus: r.gatewayId ? "pending" : null,
       });
+    } else if (msg.kind === "poll" && msg.pollQuestion && (msg.pollOptions?.length ?? 0) >= 2) {
+      // Encuesta nativa (solo flujos). Sin firma: la pregunta tiene tope de 255
+      // caracteres y es lo que WhatsApp muestra como título de la botonera.
+      const question = decodeEntities(applySpintax(msg.pollQuestion));
+      const options = (msg.pollOptions ?? []).map((o) => decodeEntities(applySpintax(o)));
+      const fallback = msg.pollFallbackText || [question, "", ...options.map((o, i) => `${i + 1}. ${o}`)].join("\n");
+      if (!supportsPolls(sender)) {
+        // Meta / chat web: el mismo bloque se envía como menú numerado.
+        await deliverText(sender, to, fallback, ids);
+        return true;
+      }
+      try {
+        const r = await sendPoll(sender, to, { question, options, selectable: msg.pollSelectable ?? 1 });
+        await recordMessage({
+          companyId: ids.companyId,
+          customerId: ids.customerId,
+          conversationId: ids.conversationId,
+          role: "ASSISTANT",
+          message: pollRecordText(question, options),
+          gatewayId: r.gatewayId,
+          deliveryStatus: r.gatewayId ? "pending" : null,
+          rawPayload: { source: "poll", question, options, selectable: msg.pollSelectable ?? 1 },
+        });
+      } catch (err) {
+        // El gateway rechazó la encuesta: el flujo no se queda mudo, va el menú numerado.
+        console.warn("[flow] encuesta rechazada por el gateway, se envía como texto:", err instanceof Error ? err.message : err);
+        await deliverText(sender, to, fallback, ids);
+      }
     } else if (msg.text) {
-      const spun = decodeEntities(applySpintax(msg.text));
-      const text = (await applyFirma(ids.companyId, spun)) ?? spun;
-      const r = await sendText(sender, to, text);
-      await recordMessage({
-        companyId: ids.companyId,
-        customerId: ids.customerId,
-        conversationId: ids.conversationId,
-        role: "ASSISTANT",
-        message: text,
-        gatewayId: r.gatewayId,
-        deliveryStatus: r.gatewayId ? "pending" : null,
-      });
+      await deliverText(sender, to, msg.text, ids);
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);

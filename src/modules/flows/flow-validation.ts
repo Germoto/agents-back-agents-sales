@@ -7,6 +7,7 @@ import {
   type FlowNode,
   type FlowEdge,
   type AnswersData,
+  type PollData,
   type ListData,
   type FlowControlData,
   type ReminderData,
@@ -18,6 +19,10 @@ import {
   type ValidatePaymentData,
   type BookAppointmentData,
   reminderStepsOf,
+  POLL_MIN_OPTIONS,
+  POLL_MAX_OPTIONS,
+  POLL_OPTION_MAX_CHARS,
+  POLL_QUESTION_MAX_CHARS,
   type SendTextData,
   type SendMediaData,
   outputHandlesFor,
@@ -53,6 +58,7 @@ const NODE_LABEL: Record<string, string> = {
   "send-audio": "Enviar Audio",
   "send-document": "Enviar Documento",
   "answers": "Respuestas",
+  "poll": "Encuesta",
   "list": "Enviar Lista",
   "flow-control": "Control de Flujo",
   "handoff": "Derivar a humano",
@@ -241,6 +247,41 @@ export function validateFlow(
             });
             numericWarned = true;
           }
+        }
+        validateTimeout(node, data.timeoutMinutes, edgeFrom, errors, warnings);
+        break;
+      }
+      case "poll": {
+        // Encuesta nativa: WhatsApp exige 2-12 opciones distintas (≤100 chars) y pregunta ≤255.
+        const data = node.data as PollData;
+        const options = data.options ?? [];
+        const question = (data.message ?? "").trim();
+        if (!question) {
+          errors.push({ code: "TEXT_REQUIRED", message: "«Encuesta» sin pregunta.", nodeId: node.id });
+        } else if (question.length > POLL_QUESTION_MAX_CHARS) {
+          errors.push({ code: "POLL_QUESTION_TOO_LONG", message: `«Encuesta»: la pregunta supera ${POLL_QUESTION_MAX_CHARS} caracteres.`, nodeId: node.id });
+        }
+        if (options.length < POLL_MIN_OPTIONS) {
+          errors.push({ code: "POLL_MIN_OPTIONS", message: `«Encuesta» necesita al menos ${POLL_MIN_OPTIONS} opciones.`, nodeId: node.id });
+        }
+        if (options.length > POLL_MAX_OPTIONS) {
+          errors.push({ code: "POLL_MAX_OPTIONS", message: `«Encuesta» admite máximo ${POLL_MAX_OPTIONS} opciones.`, nodeId: node.id });
+        }
+        const seen = new Set<string>();
+        for (const opt of options) {
+          const label = (opt.label ?? "").trim();
+          if (!label) {
+            errors.push({ code: "POLL_OPTION_EMPTY", message: "«Encuesta» tiene una opción sin texto (es lo que ve y toca el cliente).", nodeId: node.id });
+            break;
+          }
+          if (label.length > POLL_OPTION_MAX_CHARS) {
+            errors.push({ code: "POLL_OPTION_TOO_LONG", message: `«Encuesta»: la opción «${label.slice(0, 30)}…» supera ${POLL_OPTION_MAX_CHARS} caracteres.`, nodeId: node.id });
+          }
+          const k = label.toLowerCase();
+          if (seen.has(k)) {
+            errors.push({ code: "DUPLICATE_OPTION", message: `«Encuesta» tiene dos opciones llamadas «${label}» (WhatsApp no lo permite).`, nodeId: node.id });
+          }
+          seen.add(k);
         }
         validateTimeout(node, data.timeoutMinutes, edgeFrom, errors, warnings);
         break;

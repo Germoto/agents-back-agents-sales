@@ -165,6 +165,7 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
     wamid: msg.id ?? null, // en Meta el id del mensaje ES el wamid
     targetWamid: isReaction ? msg.reaction?.message_id ?? null : null,
     quotedWamid: msg.context?.id?.trim() || null,
+    pollWamid: null, // Meta Cloud API no tiene encuestas nativas
     raw: msg,
   };
 

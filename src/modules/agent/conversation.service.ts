@@ -1119,12 +1119,27 @@ const conversationMessageSelect = {
   wamid: true,
   gatewayId: true,
   ownReaction: true,
+  // Solo para derivar encuesta/voto (no se expone al panel).
+  rawPayload: true,
 } satisfies Prisma.ConversationMessageSelect;
 
 type MessageRow = Prisma.ConversationMessageGetPayload<{ select: typeof conversationMessageSelect }>;
 
-function serializeMessage({ gatewayId, ...r }: MessageRow) {
-  return { ...r, wamid: whatsappIdOf({ wamid: r.wamid, gatewayId }) };
+/** Encuesta nativa enviada por un flujo / voto del cliente, derivados del rawPayload. */
+export function pollFieldsOf(rawPayload: unknown): { poll?: { question: string; options: string[] }; pollVote?: true } {
+  const raw = (rawPayload ?? null) as Record<string, unknown> | null;
+  if (!raw || typeof raw !== "object") return {};
+  if (raw.source === "poll" && typeof raw.question === "string" && Array.isArray(raw.options)) {
+    return { poll: { question: raw.question, options: (raw.options as unknown[]).map(String) } };
+  }
+  const data = (raw.data ?? null) as Record<string, unknown> | null;
+  const pollWamid = raw.poll_wamid ?? data?.poll_wamid;
+  if (typeof pollWamid === "string" && pollWamid.trim()) return { pollVote: true };
+  return {};
+}
+
+function serializeMessage({ gatewayId, rawPayload, ...r }: MessageRow) {
+  return { ...r, wamid: whatsappIdOf({ wamid: r.wamid, gatewayId }), ...pollFieldsOf(rawPayload) };
 }
 
 /**

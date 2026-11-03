@@ -308,6 +308,35 @@ export const smsTools = {
   },
 
   /**
+   * Envía una ENCUESTA nativa de WhatsApp (botonera): el cliente elige con un tap
+   * y el voto llega por el webhook normal como texto = opción elegida, con
+   * poll_wamid (id de la encuesta). Pregunta ≤255 chars; 2-12 opciones ≤100 chars,
+   * distintas entre sí; selectable 1 = selección única. priority=1 (síncrono).
+   */
+  async sendPoll(
+    creds: SmsToolsCredentials,
+    account: string,
+    to: string,
+    poll: { question: string; options: string[]; selectable?: number },
+  ): Promise<SmsToolsMessage> {
+    const base = deriveApiBase(creds.apiUrl);
+    const body = new URLSearchParams();
+    body.set("secret", creds.secret);
+    body.set("account", account);
+    body.set("recipient", to);
+    body.set("type", "poll");
+    body.set("message", "");
+    body.set("poll_name", poll.question);
+    body.set("poll_options", JSON.stringify(poll.options));
+    body.set("poll_selectable", String(Math.max(1, poll.selectable ?? 1)));
+    body.set("priority", "1");
+    return smsToolsRequest<SmsToolsMessage>(base, "/send/whatsapp", {
+      method: "POST",
+      body,
+    });
+  },
+
+  /**
    * Envia un mensaje de texto via WhatsApp.
    * @param account  - unique del account SMS Tools (WhatsappConfig.account)
    * @param to       - numero destino en formato internacional sin "+" (e.g. "51987654321")
@@ -566,6 +595,8 @@ export type InboundMessage = {
   targetWamid: string | null;
   /** Respuesta citando: wamid del mensaje citado */
   quotedWamid: string | null;
+  /** Voto de una encuesta nativa: wamid de la ENCUESTA respondida (text = opción elegida) */
+  pollWamid: string | null;
   /** payload crudo para auditoria */
   raw: unknown;
 };
@@ -756,6 +787,7 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     wamid: field(body, data, ["wamid"]),
     targetWamid: field(body, data, ["target_wamid"]),
     quotedWamid: field(body, data, ["quoted_wamid"]),
+    pollWamid: field(body, data, ["poll_wamid"]),
     raw,
   };
 }

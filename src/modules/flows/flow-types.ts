@@ -38,6 +38,7 @@ export type FlowNodeType =
   | "send-audio"
   | "send-document"
   | "answers"
+  | "poll"
   | "list"
   | "flow-control"
   | "handoff"
@@ -89,6 +90,27 @@ export interface AnswersData {
   /** >0 habilita la salida "timeout" (N minutos sin responder). */
   timeoutMinutes?: number;
 }
+
+/**
+ * Encuesta NATIVA de WhatsApp (botonera): la pregunta y 2-12 opciones que el
+ * cliente elige con un tap; el voto llega como texto = label exacto. Solo la
+ * envía el motor de flujos (el agente IA no manda encuestas). Con Meta/chat web
+ * se degrada al menú numerado de «answers». Selección única (una opción = una rama).
+ */
+export interface PollData {
+  message: string;
+  options: AnswersOption[];
+  repeatOnNoMatch: boolean;
+  noMatchMessage?: string;
+  saveVariable?: string;
+  /** >0 habilita la salida "timeout" (N minutos sin responder). */
+  timeoutMinutes?: number;
+}
+
+export const POLL_MIN_OPTIONS = 2;
+export const POLL_MAX_OPTIONS = 12;
+export const POLL_OPTION_MAX_CHARS = 100;
+export const POLL_QUESTION_MAX_CHARS = 255;
 
 export interface ListOption {
   id: string;
@@ -240,6 +262,7 @@ export type FlowNodeData =
   | SendTextData
   | SendMediaData
   | AnswersData
+  | PollData
   | ListData
   | FlowControlData
   | HandoffData
@@ -299,8 +322,9 @@ export function outputHandlesFor(node: FlowNode): string[] {
     case "send-audio":
     case "send-document":
       return ["next", "reply"];
-    case "answers": {
-      const data = node.data as AnswersData;
+    case "answers":
+    case "poll": {
+      const data = node.data as AnswersData | PollData;
       const opts = (data.options ?? []).map((o) => `opt:${o.id}`);
       return [...opts, "timeout"];
     }

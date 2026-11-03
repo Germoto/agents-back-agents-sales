@@ -153,13 +153,20 @@ export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
 }
 
 export interface OutboxMessage {
-  kind: "text" | "media";
+  /** "poll" = encuesta nativa de WhatsApp: SOLO la emite el motor de flujos (ninguna tool del agente). */
+  kind: "text" | "media" | "poll";
   text?: string;
   mediaUrl?: string;
   mediaKind?: "image" | "document" | "video" | "audio";
   caption?: string;
   /** nombre original del archivo (documentos): se usa como document_name en SMS Tools. */
   fileName?: string;
+  /** Encuesta: pregunta (≤255), opciones (2-12, ≤100 c/u), selección (1 = única). */
+  pollQuestion?: string;
+  pollOptions?: string[];
+  pollSelectable?: number;
+  /** Menú numerado equivalente: se envía como texto si el canal/gateway no soporta encuestas. */
+  pollFallbackText?: string;
 }
 
 /** Marca el chat como derivado a humano en este turno (guarda la etapa previa para restaurarla al reactivar). */

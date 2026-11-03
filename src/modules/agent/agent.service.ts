@@ -504,7 +504,9 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
 
   // Respuesta citando (quoted_wamid): preview del texto citado para la burbuja
   // del panel y el contexto del agente.
-  const quotedPreview = inbound.quotedWamid ? await resolveQuotedPreview(companyId, inbound.quotedWamid) : null;
+  // Voto de encuesta nativa (poll_wamid): se ancla a la encuesta como si la citara.
+  const anchorWamid = inbound.quotedWamid || inbound.pollWamid || null;
+  const quotedPreview = anchorWamid ? await resolveQuotedPreview(companyId, anchorWamid) : null;
 
   // Conversaciones y la conversación pasa a HUMANO automáticamente.
   const muted = ((config as any).agent?.mutedNumbers ?? []) as string[];
@@ -578,7 +580,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     mediaType: inbound.mediaUrl && inbound.type !== "text" ? inbound.type : null,
     gatewayId: inbound.messageId,
     wamid: inbound.wamid,
-    quotedWamid: inbound.quotedWamid,
+    quotedWamid: anchorWamid,
     quotedPreview,
     rawPayload: inbound.raw as any,
   });
