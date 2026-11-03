@@ -162,7 +162,7 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
     required: false,
     kind: "step",
     ctaLabel: "Ir a Pruebas",
-    ctaPath: "/pruebas",
+    ctaPath: "/agente?tab=probar",
     icon: "play",
   });
 

@@ -171,7 +171,7 @@ export function validateFlow(
         if (opts.botMode && opts.botMode !== "HYBRID") {
           errors.push({
             code: "TO_AGENT_REQUIRES_HYBRID",
-            message: "«Pasar al agente IA» solo funciona con la empresa en modo Híbrido (Empresa → Modo de operación).",
+            message: "«Pasar al agente IA» solo funciona con la empresa en modo Híbrido (Agente IA → Bot y avisos → Modo del bot).",
             nodeId: node.id,
           });
         }

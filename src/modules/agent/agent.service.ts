@@ -1111,8 +1111,8 @@ export async function recheckPayment(msg: {
           const adminMsg = manual.length
             ? `🔔 Pago confirmado de ${md.customerPhone ?? to}. Falta ENTREGAR MANUALMENTE: ${manual.join(", ")}.` +
               (result.outOfStock?.length ? ` ⚠️ SIN STOCK en inventario: ${result.outOfStock.join(", ")}.` : "") +
-              ` El chat quedó en atención humana (Agente IA → Atención humana).`
-            : `✅ Venta entregada a ${md.customerPhone ?? to}. Pasé el chat a atención humana automáticamente (configurado en el producto). Lo ves en Agente IA → Atención humana.`;
+              ` El chat quedó en atención humana (Agente IA → Bot y avisos → Atención humana).`
+            : `✅ Venta entregada a ${md.customerPhone ?? to}. Pasé el chat a atención humana automáticamente (configurado en el producto). Lo ves en Agente IA → Bot y avisos → Atención humana.`;
           try {
             await sendText(waSender!, adminPhone, adminMsg + emailNote);
           } catch {

@@ -296,7 +296,7 @@ async function maybeMuteAfterSale(ctx: TurnContext, opts: { forced?: boolean } =
       (opts.forced
         ? `(configurado en el producto).`
         : `(catálogo de 1 producto, sin producto de enganche).`) +
-      ` Lo ves en Agente IA → Atención humana.`,
+      ` Lo ves en Agente IA → Bot y avisos → Atención humana.`,
   );
 }
 
