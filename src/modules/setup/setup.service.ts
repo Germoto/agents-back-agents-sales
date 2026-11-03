@@ -75,7 +75,7 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
     required: true,
     kind: "step",
     ctaLabel: "Ver empresa",
-    ctaPath: "/empresa",
+    ctaPath: "/empresa?tab=negocio",
     icon: "company",
   });
 
