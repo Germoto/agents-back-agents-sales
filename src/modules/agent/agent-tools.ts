@@ -38,7 +38,13 @@ import {
   DriveAccessError,
   type DriveEntry,
 } from "../../lib/google-drive";
-import { searchProductDrive, browseProductFolder, pickSample } from "../drive/drive-search";
+import { searchProductDrive, browseProductFolder, pickSample, MATCH_LEVELS, type MatchLevel } from "../drive/drive-search";
+
+/** Valida el parámetro minCoincidencia de obtener_muestra (default parcial). */
+export function matchLevelArg(v: unknown): MatchLevel {
+  const s = String(v ?? "").toLowerCase();
+  return (MATCH_LEVELS as string[]).includes(s) ? (s as MatchLevel) : "parcial";
+}
 import { drivePurchased, blockedFolderIds, allowedFolderIds } from "../drive/drive-guard";
 import { decryptCredential } from "../../lib/credentials-crypto";
 import { composePaymentMethodsMessage } from "./payment-methods";
@@ -1426,7 +1432,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "obtener_muestra",
       description:
-        "Vía corta para 'mándame una muestra de X' / 'tienes de X?': devuelve UN solo archivo suelto (nunca una carpeta) de la entrega del producto que coincide con el tema: nombre, tipo, tamaño y link de archivo. Si el tema coincide con una carpeta, elige un archivo de dentro. Con `adjuntar=true` además lo envía por el chat como video/imagen/audio/PDF si pesa poco (tope de WhatsApp); si pesa más, solo devuelve el link. Si no hay nada, lo dice: no inventes.",
+        "Vía corta para 'mándame una muestra de X' / 'tienes de X?': devuelve UN solo archivo suelto (nunca una carpeta) de la entrega del producto que coincide con el tema: nombre, tipo, tamaño y link de archivo, más `coincidencia` (exacta | parcial | debil) y `puntaje` (0-1). Si el tema coincide con una carpeta, elige un archivo de dentro. Solo da por encontrado coincidencias exacta o parcial (palabras completas del tema en el nombre o la ruta); si solo hay parecido de letras (ej. 'metallica' ≈ 'medallita') responde encontrado:false con `sugerencias` (carpetas/categorías cercanas del pack) para que ofrezcas lo más parecido en vez de mandar algo que no es. Con `adjuntar=true` además lo envía por el chat como video/imagen/audio/PDF si pesa poco (tope de WhatsApp); si pesa más, solo devuelve el link. Si no hay nada, lo dice: no inventes.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1436,6 +1442,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           tema: { type: "string", description: "tema/nicho/género/artista que pide el cliente" },
           adjuntar: { type: "boolean", description: "true = enviarlo como adjunto por el chat (si cabe); false = solo devolver el link" },
           texto: { type: "string", description: "texto corto que acompaña al adjunto (opcional)" },
+          minCoincidencia: { type: "string", enum: ["exacta", "parcial", "debil"], description: "coincidencia mínima para dar por encontrado (default parcial)" },
         },
       },
     },
@@ -2132,8 +2139,21 @@ export async function executeTool(
       const tema = String(args.tema ?? "").trim().slice(0, 120);
       if (!tema) return JSON.stringify({ ok: false, error: "indica el tema" });
       try {
-        const pick = await pickSample(driveProductOf(ctx, product), tema);
-        if (!pick) return JSON.stringify({ ok: true, encontrado: false, nota: "No hay archivos de ese tema en la entrega. Dilo con naturalidad (o prueba otra palabra); no inventes." });
+        const minCoincidencia = matchLevelArg(args.minCoincidencia);
+        const pick = await pickSample(driveProductOf(ctx, product), tema, { minCoincidencia });
+        if (!pick.file) {
+          return JSON.stringify({
+            ok: true,
+            encontrado: false,
+            coincidencia: pick.coincidencia,
+            puntaje: pick.puntaje,
+            sugerencias: pick.sugerencias,
+            nota:
+              pick.coincidencia === "debil"
+                ? "Hay archivos que solo se PARECEN en las letras al tema, no son de ese tema: no los mandes como muestra. Ofrece lo más cercano de `sugerencias` (puedes revisar esas carpetas con buscar_en_drive) sin inventar."
+                : "No hay archivos de ese tema en la entrega. Ofrece lo más cercano de `sugerencias` o prueba otra palabra; no inventes.",
+          });
+        }
         ctx.driveHitsThisTurn = (ctx.driveHitsThisTurn ?? 0) + 1;
         const purchased = drivePurchased(ctx.state, product);
         const guard = purchased ? null : { blocked: blockedFolderIds(product), allowed: allowedFolderIds(product) };
@@ -2161,6 +2181,8 @@ export async function executeTool(
         return JSON.stringify({
           ok: true,
           encontrado: true,
+          coincidencia: pick.coincidencia,
+          puntaje: pick.puntaje,
           archivo,
           ...(carpeta ? { carpeta, nota_carpeta: pick.via === "carpeta" ? "el tema coincidió con esta carpeta; el archivo es uno de dentro" : undefined } : {}),
           enviado,

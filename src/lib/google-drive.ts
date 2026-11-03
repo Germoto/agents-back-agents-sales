@@ -330,7 +330,8 @@ export function normalizeText(s: string): string {
     .trim();
 }
 
-function tokensOf(q: string): string[] {
+/** Términos de una consulta (normalizados, ≥2 letras). */
+export function tokensOf(q: string): string[] {
   return normalizeText(q)
     .split(" ")
     .filter((t) => t.length >= 2);
