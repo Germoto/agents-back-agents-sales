@@ -1,6 +1,7 @@
 import { AppError } from "./app-error";
 import { env } from "../config/env";
 import { decodeEntities } from "./html-entities";
+import { DOCUMENT_EXTS_LABEL, DOCUMENT_MIME, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_MB, extOf, isDocumentExt } from "./document-types";
 
 /**
  * Minimal HTTP client for the SMS TOOLS WhatsApp API.
@@ -454,19 +455,48 @@ export const smsTools = {
     };
 
     if (kind === "document") {
-      // Los documentos van como BINARIO (document_file) en vez de document_url:
-      // con URL, SMS Tools descarga el archivo, hace sniffing del contenido y
-      // re-sube a WhatsApp con ese MIME — un .xlsx (contenedor zip por dentro)
-      // llegaba como application/zip aunque document_type fuera válido. Con el
-      // part binario el archivo viaja con su nombre y Content-Type reales.
+      // Documentos (pdf, zip, xlsx, …): document_type = extensión del catálogo (el gateway
+      // lo exige; otro valor → 400) y document_name = nombre visible para el cliente.
       const name = (fileName && fileName.trim()) || guessFileNameFromUrl(mediaUrl, "documento.pdf");
-      const ext = name.toLowerCase().match(/\.([a-z0-9]{1,8})$/)?.[1] ?? "pdf";
+      const ext = extOf(name) || extOf(mediaUrl);
+      if (!isDocumentExt(ext)) {
+        throw new AppError(
+          `WhatsApp no admite archivos .${ext || "?"}. Se admiten: ${DOCUMENT_EXTS_LABEL}.`,
+          422,
+        );
+      }
+      fields.document_type = ext;
+      fields.document_name = name;
+
+      // Hasta INLINE_DOCUMENT_MAX_BYTES va como BINARIO (document_file): el gateway
+      // recibe el nombre y el Content-Type reales (con document_url hacía sniffing y
+      // un .xlsx llegaba como application/zip). Más grande → document_url (el gateway
+      // lo descarga él; no lo cargamos en RAM). Más que MAX_DOCUMENT_MB → error claro.
       let fileData: Buffer | null = null;
       try {
         const res = await fetch(mediaUrl);
-        if (res.ok) fileData = Buffer.from(await res.arrayBuffer());
-      } catch {
-        /* fallback abajo */
+        if (res.ok) {
+          const declared = Number(res.headers.get("content-length") ?? 0);
+          if (declared > MAX_DOCUMENT_BYTES) {
+            await res.body?.cancel().catch(() => undefined);
+            throw new AppError(
+              `El archivo (${(declared / (1024 * 1024)).toFixed(1)} MB) supera el tope de ${MAX_DOCUMENT_MB} MB de WhatsApp.`,
+              422,
+            );
+          }
+          if (declared > INLINE_DOCUMENT_MAX_BYTES) {
+            await res.body?.cancel().catch(() => undefined);
+          } else {
+            const buf = Buffer.from(await res.arrayBuffer());
+            if (buf.length > MAX_DOCUMENT_BYTES) {
+              throw new AppError(`El archivo supera el tope de ${MAX_DOCUMENT_MB} MB de WhatsApp.`, 422);
+            }
+            fileData = buf.length > INLINE_DOCUMENT_MAX_BYTES ? null : buf;
+          }
+        }
+      } catch (err) {
+        if (err instanceof AppError) throw err;
+        /* fallback por URL abajo */
       }
 
       if (fileData) {
@@ -474,7 +504,7 @@ export const smsTools = {
           {
             name: "document_file",
             filename: name,
-            contentType: DOCUMENT_MIME[ext] ?? "application/octet-stream",
+            contentType: DOCUMENT_MIME[ext],
             data: fileData,
           },
         ]);
@@ -485,11 +515,8 @@ export const smsTools = {
         });
       }
 
-      // Fallback: no se pudo leer el archivo — enviar por URL (peor MIME que nada).
-      console.warn("[smstools] no se pudo leer el documento para envío binario, usando document_url:", mediaUrl);
+      // Por URL: el gateway descarga el archivo (archivos grandes o si no se pudo leer).
       fields.document_url = mediaUrl;
-      fields.document_name = name;
-      fields.document_type = DOCUMENT_MIME[ext] ? ext : "pdf";
     } else {
       fields.media_type = kind; // image | video | audio | sticker (.webp 512×512)
       fields.media_url = mediaUrl;
@@ -540,15 +567,8 @@ function buildMultipart(
   return { body: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
 }
 
-/** MIME por extensión para el part binario de documentos. */
-const DOCUMENT_MIME: Record<string, string> = {
-  pdf: "application/pdf",
-  xml: "application/xml",
-  xls: "application/vnd.ms-excel",
-  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  doc: "application/msword",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-};
+/** Hasta este tamaño el documento viaja como binario (document_file); más grande, por URL. */
+const INLINE_DOCUMENT_MAX_BYTES = 25 * 1024 * 1024;
 
 /** Deriva un nombre de archivo legible desde una URL (para document_name). */
 function guessFileNameFromUrl(url: string, fallback: string): string {

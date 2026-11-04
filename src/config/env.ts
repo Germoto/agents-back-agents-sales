@@ -44,6 +44,9 @@ const envSchema = z.object({
   // texto); "2" = cola del gateway (comportamiento viejo, kill-switch).
   SMSTOOLS_MEDIA_PRIORITY: z.enum(["1", "2"]).default("1"),
   MAX_UPLOAD_MB: z.coerce.number().int().positive().default(50),
+  // Tope para documentos (pdf, zip, xlsx, …) que viajan como `document` por WhatsApp.
+  // SMS Tools y Meta admiten hasta 100 MB. Imagen/video/audio siguen con MAX_UPLOAD_MB.
+  MAX_DOCUMENT_MB: z.coerce.number().int().positive().default(100),
   // Límite propio para recursos de capacitación del superadmin (PDF/videos).
   MAX_TRAINING_UPLOAD_MB: z.coerce.number().int().positive().default(500),
   // Límite del ZIP de importación de productos (manifest + multimedia).

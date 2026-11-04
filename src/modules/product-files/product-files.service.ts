@@ -5,7 +5,8 @@ import { Request, Response, NextFunction } from "express";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { env } from "../../config/env";
-import { uploadProductFileMiddleware } from "../../middlewares/upload.middleware";
+import { PRODUCT_FILE_LIMIT_MB, uploadProductFileMiddleware } from "../../middlewares/upload.middleware";
+import { DOCUMENT_MIME, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_MB, documentExtOfUpload } from "../../lib/document-types";
 import { ensureMetaCompatibleVideo } from "../../lib/video-transcode";
 
 export type UploadedProductFileResponse = {
@@ -18,11 +19,15 @@ export type UploadedProductFileResponse = {
   size: number;
 };
 
-function detectType(mimeType: string): UploadedProductFileResponse["type"] {
+/**
+ * Tipo de ProductFile. PDF conserva su tipo propio (vista previa en iframe);
+ * el resto de documentos del catálogo (zip, xlsx, docx, …) son OTHER ("Archivo").
+ */
+function detectType(mimeType: string, originalName = ""): UploadedProductFileResponse["type"] {
   if (mimeType.startsWith("image/")) return "IMAGE";
   if (mimeType.startsWith("video/")) return "VIDEO";
   if (mimeType.startsWith("audio/")) return "AUDIO";
-  if (mimeType === "application/pdf") return "PDF";
+  if (documentExtOfUpload(originalName, mimeType) === "pdf") return "PDF";
   return "OTHER";
 }
 
@@ -85,16 +90,16 @@ export async function saveBufferAsProductFile(
     "image/png": "png",
     "image/webp": "webp",
     "image/gif": "gif",
-    "application/pdf": "pdf",
+    ...Object.fromEntries(Object.entries(DOCUMENT_MIME).map(([ext, mime]) => [mime, ext])),
   };
   const extFromName = path.extname(originalName).replace(".", "").toLowerCase();
-  const extension = extByMime[cleanMime] ?? (extFromName || "bin");
+  const extension = documentExtOfUpload(originalName, cleanMime) ?? extByMime[cleanMime] ?? (extFromName || "bin");
   const rel = `products/${companyId}/${crypto.randomUUID()}.${extension}`;
   const absolute = path.resolve(process.cwd(), env.UPLOAD_DIR, rel);
   await fs.mkdir(path.dirname(absolute), { recursive: true });
   await fs.writeFile(absolute, buffer);
   return {
-    type: detectType(cleanMime),
+    type: detectType(cleanMime, originalName),
     url: buildPublicUrl(rel),
     storagePath: rel,
     originalName: originalName || `imagen.${extension}`,
@@ -123,10 +128,22 @@ export async function uploadHandler(req: Request, res: Response) {
     throw new AppError("Ruta de almacenamiento invalida", 500);
   }
 
-  const type = detectType(file.mimetype);
+  const type = detectType(file.mimetype, file.originalname);
+  const docExt = documentExtOfUpload(file.originalname, file.mimetype);
+
+  // Tope por tipo: documentos hasta MAX_DOCUMENT_MB; imagen/video/audio hasta MAX_UPLOAD_MB
+  // (multer solo aplicó el mayor de los dos).
+  const limitBytes = docExt ? MAX_DOCUMENT_BYTES : env.MAX_UPLOAD_MB * 1024 * 1024;
+  if (file.size > limitBytes) {
+    await fs.unlink(storagePathAbs).catch(() => undefined);
+    throw new AppError(`Archivo demasiado grande (max ${docExt ? MAX_DOCUMENT_MB : env.MAX_UPLOAD_MB}MB)`, 413);
+  }
+
   let ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase() || path.extname(file.filename).replace(/^\./, "").toLowerCase();
-  let mimeType = file.mimetype;
+  // MIME canónico para documentos (el navegador manda octet-stream para zip/rar/7z).
+  let mimeType = docExt ? DOCUMENT_MIME[docExt] : file.mimetype;
   let size = file.size;
+  if (docExt) ext = docExt;
 
   // Normalizar video a H.264/AAC mp4 (compatible con la API oficial de Meta).
   // Cubre TODOS los módulos: todos suben por este único endpoint. Best-effort:
@@ -196,7 +213,7 @@ export function uploadErrorTrap(err: any, _req: Request, _res: Response, next: N
   if (!err) return next();
   // Translate multer/file errors to AppError
   if (err.code === "LIMIT_FILE_SIZE") {
-    return next(new AppError(`Archivo demasiado grande (max ${env.MAX_UPLOAD_MB}MB)`, 413));
+    return next(new AppError(`Archivo demasiado grande (max ${PRODUCT_FILE_LIMIT_MB}MB)`, 413));
   }
   return next(err);
 }

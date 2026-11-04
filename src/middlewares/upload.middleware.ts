@@ -5,17 +5,20 @@ import { Request } from "express";
 import multer, { FileFilterCallback } from "multer";
 import { env } from "../config/env";
 import { AppError } from "../lib/app-error";
+import { DOCUMENT_EXTS_LABEL, MAX_DOCUMENT_MB, documentExtOfUpload } from "../lib/document-types";
 
 const ALLOWED_MIME_PREFIXES = ["image/", "video/", "audio/"];
-const ALLOWED_EXACT_MIME = new Set(["application/pdf"]);
 
 function sanitizeExtension(originalName: string, mimeType: string): string {
+  // Documentos (pdf, zip, xlsx, …): la extensión del catálogo manda, aunque el
+  // navegador haya mandado un MIME genérico (application/octet-stream).
+  const docExt = documentExtOfUpload(originalName, mimeType);
+  if (docExt) return `.${docExt}`;
   const ext = path.extname(originalName).replace(/[^a-zA-Z0-9.]/g, "").toLowerCase();
   if (ext && ext.length <= 10) {
     return ext;
   }
   // fallback mapping from common mime types
-  if (mimeType === "application/pdf") return ".pdf";
   if (mimeType.startsWith("image/")) return "." + mimeType.split("/")[1];
   if (mimeType.startsWith("video/")) return "." + mimeType.split("/")[1];
   if (mimeType.startsWith("audio/")) return "." + mimeType.split("/")[1];
@@ -44,18 +47,26 @@ const storage = multer.diskStorage({
 function fileFilter(_req: Request, file: Express.Multer.File, cb: FileFilterCallback) {
   const isAllowed =
     ALLOWED_MIME_PREFIXES.some((prefix) => file.mimetype.startsWith(prefix)) ||
-    ALLOWED_EXACT_MIME.has(file.mimetype);
+    documentExtOfUpload(file.originalname, file.mimetype) !== null;
   if (!isAllowed) {
-    return cb(new AppError(`Tipo de archivo no permitido: ${file.mimetype}`, 415));
+    return cb(
+      new AppError(
+        `Tipo de archivo no permitido (${file.mimetype}). Se admiten imagen, video, audio o archivos ${DOCUMENT_EXTS_LABEL}.`,
+        415,
+      ),
+    );
   }
   cb(null, true);
 }
+
+/** Tope de multer = el mayor de los dos límites; el tope por tipo se valida en el servicio. */
+export const PRODUCT_FILE_LIMIT_MB = Math.max(env.MAX_UPLOAD_MB, MAX_DOCUMENT_MB);
 
 export const uploadProductFileMiddleware = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: env.MAX_UPLOAD_MB * 1024 * 1024,
+    fileSize: PRODUCT_FILE_LIMIT_MB * 1024 * 1024,
   },
 }).single("file");
 

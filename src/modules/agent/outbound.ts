@@ -13,6 +13,7 @@ import { AppError } from "../../lib/app-error";
 import { decodeEntities } from "../../lib/html-entities";
 import { decryptCredential } from "../../lib/credentials-crypto";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { DOCUMENT_MIME, META_DOCUMENT_EXTS, extOf, isDocumentExt } from "../../lib/document-types";
 
 // El canal WEB (widget embebible) es un sender más: el mensaje se emite por
 // Socket.IO a la room del visitante en lugar de ir a un gateway de WhatsApp.
@@ -184,6 +185,28 @@ export async function sendTyping(
   );
 }
 
+/**
+ * Nombre visible de un documento: el que mande el caller; si no, el originalName
+ * del ProductFile con esa URL (recordatorios, followups, banner y reintentos no
+ * lo pasan); si no, el último segmento de la URL.
+ */
+export async function resolveDocumentFileName(mediaUrl: string, fileName?: string | null): Promise<string> {
+  const given = fileName?.trim();
+  if (given) return given;
+  try {
+    const pf = await prisma.productFile.findFirst({ where: { url: mediaUrl }, select: { originalName: true } });
+    if (pf?.originalName?.trim()) return pf.originalName.trim();
+  } catch {
+    /* best-effort */
+  }
+  const last = mediaUrl.split("/").pop()?.split("?")[0] ?? "";
+  try {
+    return decodeURIComponent(last) || "documento";
+  } catch {
+    return last || "documento";
+  }
+}
+
 export async function sendMedia(
   sender: WhatsappSender,
   to: string,
@@ -193,6 +216,7 @@ export async function sendMedia(
   fileName?: string,
 ): Promise<SendResult> {
   if (caption) caption = decodeEntities(caption);
+  if (kind === "document") fileName = await resolveDocumentFileName(mediaUrl, fileName);
   // Los stickers viajan sin texto: el caption (si lo hay) va como texto aparte.
   if (kind === "sticker" && caption) {
     const r = await sendMedia(sender, to, "sticker", mediaUrl);
@@ -213,9 +237,24 @@ export async function sendMedia(
     return { gatewayId: null };
   }
   if (sender.provider === "META") {
+    // Meta solo admite como `document` txt/xls/xlsx/doc/docx/ppt/pptx/pdf: el resto
+    // (zip, rar, 7z, csv, xml) se entrega como enlace para no romper el envío.
+    if (kind === "document") {
+      const ext = extOf(fileName ?? "") || extOf(mediaUrl);
+      if (!META_DOCUMENT_EXTS.has(ext)) {
+        console.warn(`[outbound] Meta no admite .${ext || "?"} como documento: se envía como enlace`);
+        const text = `📎 ${fileName ?? "Archivo"}: ${mediaUrl}${caption ? `\n\n${caption}` : ""}`;
+        const res = await metaWa.sendText(sender, to, text);
+        return { gatewayId: res.wamid };
+      }
+    }
     // Subir el archivo a Meta primero (en vez de enviarlo por link): preserva
     // el orden de la secuencia y da errores de tamaño/formato claros.
-    const { buffer, mimeType } = await fetchMediaBuffer(mediaUrl);
+    const fetched = await fetchMediaBuffer(mediaUrl);
+    const buffer = fetched.buffer;
+    // Documentos: MIME canónico por extensión (express.static puede servir octet-stream).
+    const docExt = kind === "document" ? extOf(fileName ?? "") || extOf(mediaUrl) : "";
+    const mimeType = isDocumentExt(docExt) ? DOCUMENT_MIME[docExt] : fetched.mimeType;
     // El video NO se valida por tamaño aquí: la conversión al subir ya lo
     // normaliza/comprime, y en la práctica Meta acepta videos >16MB (un video
     // de cámara de 18MB se entregó). Para image/audio/document sí se valida.
