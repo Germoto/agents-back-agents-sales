@@ -425,6 +425,7 @@ const conversationSummarySelect = {
   status: true,
   botPaused: true,
   pinnedAt: true,
+  favoriteAt: true,
   state: true,
   channel: true,
   lastMessageAt: true,
@@ -457,6 +458,7 @@ function serializeConversationSummary(c: ConversationSummaryRow, adMap: Map<stri
     status: c.status,
     botPaused: c.botPaused,
     pinnedAt: c.pinnedAt,
+    favoriteAt: c.favoriteAt,
     channel: c.channel,
     // Etapa del embudo (state.status). Distinto de `status` (OPEN/HUMAN/CLOSED).
     funnelStatus: ((c.state as ConversationState) ?? {}).status ?? null,
@@ -481,6 +483,8 @@ export interface ConversationListQuery {
   status?: string;
   tagId?: string;
   adSourceId?: string;
+  /** Solo chats marcados como favoritos. */
+  favorite?: boolean;
   sortBy?: "last" | "opened";
   dir?: "asc" | "desc";
   offset?: number;
@@ -509,6 +513,7 @@ function conversationListWhere(companyId: string, q: ConversationListQuery): Pri
   }
   if (q.tagId) customer.tagLinks = { some: { tagId: q.tagId } };
   if (q.adSourceId) customer.adSourceId = q.adSourceId;
+  if (q.favorite) where.favoriteAt = { not: null };
   const status = (q.status ?? "").trim().toUpperCase();
   if (status === "HUMANO") where.botPaused = true;
   else if (status === "NO_CONTACTAR") customer.optOutAt = { not: null };
@@ -518,7 +523,7 @@ function conversationListWhere(companyId: string, q: ConversationListQuery): Pri
 }
 
 function hasListFilters(q: ConversationListQuery): boolean {
-  return Boolean((q.q ?? "").trim() || q.status || q.tagId || q.adSourceId);
+  return Boolean((q.q ?? "").trim() || q.status || q.tagId || q.adSourceId || q.favorite);
 }
 
 /**
@@ -592,6 +597,48 @@ export async function setConversationPinned(companyId: string, conversationId: s
   if (!r.count) throw new AppError("Conversación no encontrada", 404);
   socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, { conversationId, pinnedAt });
   return { pinnedAt };
+}
+
+/** Marca / desmarca un chat como favorito (filtro «Favoritos»; no altera el orden). */
+export async function setConversationFavorite(companyId: string, conversationId: string, favorite: boolean) {
+  const favoriteAt = favorite ? new Date() : null;
+  const r = await prisma.conversation.updateMany({ where: { id: conversationId, companyId }, data: { favoriteAt } });
+  if (!r.count) throw new AppError("Conversación no encontrada", 404);
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, { conversationId, favoriteAt });
+  return { favoriteAt };
+}
+
+/**
+ * Destaca / quita la estrella de un mensaje del chat (solo en el panel: no
+ * depende del proveedor ni del wamid, funciona también en chat web).
+ */
+export async function setMessageStarred(companyId: string, conversationId: string, messageId: string, starred: boolean) {
+  const msg = await prisma.conversationMessage.findFirst({
+    where: { id: messageId, companyId, conversationId },
+    select: { id: true, customerId: true },
+  });
+  if (!msg) throw new AppError("Mensaje no encontrado", 404);
+  const starredAt = starred ? new Date() : null;
+  await prisma.conversationMessage.update({ where: { id: msg.id }, data: { starredAt } });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.MESSAGE_UPDATED, {
+    conversationId,
+    customerId: msg.customerId,
+    id: msg.id,
+    starredAt,
+  });
+  return { starredAt };
+}
+
+/** Mensajes destacados de un chat (los destacados más recientes primero, tope 100). */
+export async function listStarredMessages(companyId: string, conversationId: string) {
+  const rows = await prisma.conversationMessage.findMany({
+    where: { companyId, conversationId, starredAt: { not: null } },
+    orderBy: [{ starredAt: "desc" }, { id: "desc" }],
+    take: 100,
+    select: conversationMessageSelect,
+  });
+  const quoted = await resolveQuotedIds(companyId, conversationId, rows);
+  return rows.map((r) => serializeMessage(r, quoted));
 }
 
 /**
@@ -1114,6 +1161,7 @@ const conversationMessageSelect = {
   deliveryStatus: true,
   reaction: true,
   quotedPreview: true,
+  starredAt: true,
   // wamid (normalizado abajo): el panel decide si un mensaje ya es
   // reaccionable/citable; ownReaction: la reacción del asesor.
   wamid: true,

@@ -7,6 +7,11 @@ export const conversationsQuerySchema = z.object({
   status: z.string().trim().max(40).default(""),
   tagId: z.string().uuid().optional(),
   adSourceId: z.string().trim().max(80).optional(),
+  /** "1" | "true" = solo chats favoritos. */
+  favorite: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((v) => v === "1" || v === "true"),
   sortBy: z.enum(["last", "opened"]).default("last"),
   dir: z.enum(["asc", "desc"]).default("desc"),
   offset: z.coerce.number().int().min(0).default(0),

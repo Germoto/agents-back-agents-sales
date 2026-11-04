@@ -21,6 +21,9 @@ import {
   scheduleManualReminder,
   setConversationPinned,
   setCustomerOptOut,
+  setConversationFavorite,
+  setMessageStarred,
+  listStarredMessages,
 } from "./conversation.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
 
@@ -31,6 +34,7 @@ export const listConversationsController = asyncHandler(async (req: Request, res
     status?: string;
     tagId?: string;
     adSourceId?: string;
+    favorite?: boolean;
     sortBy?: "last" | "opened";
     dir?: "asc" | "desc";
     offset?: number;
@@ -83,6 +87,31 @@ export const pinConversationController = asyncHandler(async (req: Request, res: 
   const pinned = req.body?.pinned !== false; // default true
   const r = await setConversationPinned(companyId, String(req.params.id), pinned);
   res.json({ success: true, data: { pinned, pinnedAt: r.pinnedAt } });
+});
+
+/** Marcar / desmarcar un chat como favorito (filtro «Favoritos»). */
+export const favoriteConversationController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const favorite = req.body?.favorite !== false; // default true
+  const r = await setConversationFavorite(companyId, String(req.params.id), favorite);
+  res.json({ success: true, data: { favorite, favoriteAt: r.favoriteAt } });
+});
+
+/** Destacar / quitar estrella de un mensaje del chat. */
+export const starMessageController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const messageId = String(req.body?.messageId ?? "").trim();
+  if (!messageId) throw new AppError("Falta el mensaje a destacar (messageId)", 400);
+  const starred = req.body?.starred !== false; // default true
+  const r = await setMessageStarred(companyId, String(req.params.id), messageId, starred);
+  res.json({ success: true, data: { starred, starredAt: r.starredAt } });
+});
+
+/** Mensajes destacados de un chat. */
+export const listStarredMessagesController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const items = await listStarredMessages(companyId, String(req.params.id));
+  res.json({ success: true, data: items });
 });
 
 /** Marcar / desmarcar al cliente del chat como "no contactar". Al marcar, pausa el bot. */

@@ -10,6 +10,9 @@ import {
   listMessagesController,
   pauseConversationController,
   pinConversationController,
+  favoriteConversationController,
+  starMessageController,
+  listStarredMessagesController,
   optOutConversationController,
   replyConversationController,
   reactConversationController,
@@ -46,6 +49,9 @@ router.post("/conversations/delete-bulk", requireAuth, deleteConversationsBulkCo
 router.get("/conversations/:id/messages", requireAuth, validate({ query: messagesQuerySchema }), listMessagesController);
 router.post("/conversations/:id/pause", requireAuth, pauseConversationController);
 router.post("/conversations/:id/pin", requireAuth, pinConversationController);
+router.post("/conversations/:id/favorite", requireAuth, favoriteConversationController);
+router.post("/conversations/:id/star", requireAuth, starMessageController);
+router.get("/conversations/:id/starred", requireAuth, listStarredMessagesController);
 router.post("/conversations/:id/opt-out", requireAuth, optOutConversationController);
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);
 router.post("/conversations/:id/react", requireAuth, reactConversationController);

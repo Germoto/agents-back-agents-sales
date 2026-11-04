@@ -902,6 +902,8 @@ model ConversationMessage {
   // Respuesta citando: wamid citado + preview resuelto del texto citado (panel + contexto del agente).
   quotedWamid     String?
   quotedPreview   String?
+  // Mensaje destacado (estrella) por el equipo en el panel; null = no destacado.
+  starredAt       DateTime?
   createdAt       DateTime         @default(now())
   company         Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
   customer        Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
@@ -910,6 +912,7 @@ model ConversationMessage {
 
   @@index([companyId, customerId, createdAt])
   @@index([conversationId, createdAt])
+  @@index([conversationId, starredAt])
   @@index([deliveryStatus, createdAt])
   @@index([gatewayId])
   @@index([wamid])
@@ -929,6 +932,8 @@ model Conversation {
   botPaused     Boolean               @default(false)
   // Chat fijado en el panel de Conversaciones (orden: fijado más reciente primero).
   pinnedAt      DateTime?
+  // Chat favorito (filtro «Favoritos» en Conversaciones); distinto de fijado.
+  favoriteAt    DateTime?
   openedAt      DateTime              @default(now())
   lastMessageAt DateTime              @default(now())
   closedAt      DateTime?
@@ -942,6 +947,7 @@ model Conversation {
   @@unique([companyId, customerId, channel])
   @@index([companyId, lastMessageAt])
   @@index([companyId, pinnedAt])
+  @@index([companyId, favoriteAt])
 }
 
 // Categoría de respuestas rápidas (estilo etiquetas de Google Keep, por tenant).
