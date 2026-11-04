@@ -35,6 +35,7 @@ import {
 } from "./conversation.service";
 import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type WhatsappSender } from "./outbound";
 import { readReceiptImage } from "./receipt-vision";
+import { describeSticker } from "./sticker-vision";
 import { fulfillPendingDeliveryEmail } from "./email-delivery";
 import { runAgentTurn } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
@@ -595,8 +596,10 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     `[agent] inbound de ${inbound.fromPhone}: type=${inbound.type} media=${inbound.mediaUrl ? "yes" : "no"} textLen=${(inbound.text ?? "").trim().length} pay=${paymentsEnabled} payCtx=${isPaymentContext(convo.state)}`,
   );
   // El audio NUNCA va a visión (un .ogg no es una imagen): ya quedó transcrito arriba.
-  // Los stickers tampoco: no son comprobantes.
-  if (inbound.mediaUrl && inbound.type !== "text" && inbound.type !== "audio" && inbound.type !== "sticker") {
+  // Los stickers no son comprobantes: van por su propio camino (solo descripción).
+  if (inbound.mediaUrl && inbound.type === "sticker") {
+    await processInboundSticker(config, convo, inbound, userMessageId);
+  } else if (inbound.mediaUrl && inbound.type !== "text" && inbound.type !== "audio") {
     await processInboundReceiptImage(companyId, config, convo, inbound, userMessageId);
   }
 
@@ -1370,6 +1373,38 @@ export async function processInboundReceiptImage(
   receiptReadsInFlight.set(rk, (receiptReadsInFlight.get(rk) ?? 0) + 1);
   try {
     await handleInboundImage(companyId, config, convo, inbound, userMessageId);
+  } finally {
+    const n = (receiptReadsInFlight.get(rk) ?? 1) - 1;
+    if (n > 0) receiptReadsInFlight.set(rk, n);
+    else receiptReadsInFlight.delete(rk);
+  }
+}
+
+/**
+ * Sticker entrante: UNA llamada de visión que describe qué muestra/expresa y lo
+ * anota en el mensaje del cliente ("[El cliente envió un sticker que muestra: …]")
+ * para que buildHistory se lo pase al agente. Sin lógica de comprobante, sin aviso
+ * al admin y sin depender de que los pagos estén activos. Usa el mismo gate que la
+ * lectura de comprobantes para que un texto que llegue aparte no dispare el turno
+ * antes de tener la descripción. Best-effort: si falla, queda "[el cliente envió un sticker]".
+ */
+export async function processInboundSticker(
+  config: Awaited<ReturnType<typeof buildBotConfig>>,
+  convo: { conversationId: string },
+  inbound: Pick<InboundMessage, "fromPhone" | "mediaUrl" | "text">,
+  userMessageId: string,
+): Promise<void> {
+  const ai = (config as { openai?: import("../../lib/ai-providers").AiSettings }).openai;
+  if (!ai?.apiKey || !inbound.mediaUrl) return;
+  if (inbound.text && inbound.text.trim()) return; // ya trae texto: no lo pisamos
+  const rk = convo.conversationId;
+  receiptReadsInFlight.set(rk, (receiptReadsInFlight.get(rk) ?? 0) + 1);
+  try {
+    const description = await describeSticker(ai, inbound.mediaUrl);
+    if (description) {
+      await annotateMessageText(userMessageId, `[El cliente envió un sticker que muestra: ${description}]`);
+    }
+    console.log(`[agent] sticker de ${inbound.fromPhone}: desc="${description ?? "-"}"`);
   } finally {
     const n = (receiptReadsInFlight.get(rk) ?? 1) - 1;
     if (n > 0) receiptReadsInFlight.set(rk, n);

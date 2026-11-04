@@ -443,8 +443,10 @@ export const smsTools = {
       account,
       recipient: to.replace(/\D/g, ""),
       type: kind === "document" ? "document" : "media",
-      // Los stickers no llevan texto (el gateway lo exige vacío); el resto exige message.
-      message: kind === "sticker" ? "" : (caption && caption.trim()) || " ",
+      // `message` es OBLIGATORIO para todos los tipos (si falta: "Invalid Parameters!").
+      // Los stickers no llevan caption (el gateway lo ignora) pero el campo debe viajar:
+      // buildMultipart omite los vacíos, así que va un espacio igual que en media sin texto.
+      message: kind === "sticker" ? " " : (caption && caption.trim()) || " ",
       // "1" (default) = síncrono: el gateway descarga/emite la media ANTES de
       // responder → el orden de las secuencias queda garantizado (el texto iba
       // inmediato y con "2" en cola lo adelantaba). Kill-switch por env.
