@@ -270,6 +270,8 @@ export async function recordMessage(opts: {
   message?: string | null;
   mediaUrl?: string | null;
   mediaType?: string | null;
+  /** Nombre visible del documento adjunto. */
+  fileName?: string | null;
   productId?: string | null;
   rawPayload?: Prisma.InputJsonValue;
   gatewayId?: string | null;
@@ -287,6 +289,7 @@ export async function recordMessage(opts: {
       message: opts.message ?? null,
       mediaUrl: opts.mediaUrl ?? null,
       mediaType: opts.mediaType ?? null,
+      fileName: opts.fileName ?? null,
       productId: opts.productId ?? null,
       gatewayId: opts.gatewayId ?? null,
       deliveryStatus: opts.deliveryStatus ?? null,
@@ -295,7 +298,7 @@ export async function recordMessage(opts: {
       quotedPreview: opts.quotedPreview ?? null,
       ...(opts.rawPayload !== undefined ? { rawPayload: opts.rawPayload } : {}),
     },
-    select: { id: true, role: true, message: true, mediaUrl: true, mediaType: true, createdAt: true },
+    select: { id: true, role: true, message: true, mediaUrl: true, mediaType: true, fileName: true, createdAt: true },
   });
   // Subir el chat al tope de la lista: TODO mensaje (entrante, del bot, del humano,
   // respuesta rápida o recordatorio) actualiza lastMessageAt. listConversations ordena
@@ -311,6 +314,7 @@ export async function recordMessage(opts: {
     message: created.message,
     mediaUrl: created.mediaUrl,
     mediaType: created.mediaType,
+    fileName: created.fileName,
     createdAt: created.createdAt,
   });
   return created.id;
@@ -976,6 +980,7 @@ export async function sendHumanMedia(
     message: caption ?? null,
     mediaUrl: media.mediaUrl,
     mediaType: media.mediaKind,
+    fileName: media.mediaKind === "document" ? (media.fileName ?? null) : null,
     // Igual que el texto: checks de entrega vía el gatewayId.
     gatewayId: sent.gatewayId,
     deliveryStatus: sent.gatewayId ? "pending" : null,
@@ -1160,6 +1165,7 @@ const conversationMessageSelect = {
   message: true,
   mediaUrl: true,
   mediaType: true,
+  fileName: true,
   createdAt: true,
   // Checks de entrega, reacción anclada y preview de la cita (panel).
   deliveryStatus: true,
@@ -1274,7 +1280,7 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
     where: { conversationId, role: { in: ["USER", "ASSISTANT", "ADMIN"] } },
     orderBy: { createdAt: "desc" },
     take: limit,
-    select: { role: true, message: true, mediaUrl: true, mediaType: true, quotedPreview: true },
+    select: { role: true, message: true, mediaUrl: true, mediaType: true, fileName: true, quotedPreview: true },
   });
   rows.reverse();
   return rows.map((r) => {
@@ -1290,15 +1296,21 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
       const mediaKind = (r.mediaType ?? "").toLowerCase();
       const isAudio = mediaKind === "audio";
       const isSticker = mediaKind === "sticker";
+      const isDocument = mediaKind === "document" || mediaKind === "pdf" || mediaKind === "other";
+      const docName = r.fileName?.trim() ? `: ${r.fileName.trim()}` : "";
       content = isUser
         ? isAudio
           ? "[el cliente envió un audio que no se pudo transcribir: pídele amablemente que lo repita por texto]"
           : isSticker
             ? "[el cliente envió un sticker]"
-            : "[el cliente envió una imagen]"
+            : isDocument
+              ? `[el cliente envió un archivo${docName}]`
+              : "[el cliente envió una imagen]"
         : isSticker
           ? "[se envió un sticker al cliente]"
-          : "[se envió una imagen/archivo al cliente]";
+          : isDocument
+            ? `[se envió un archivo al cliente${docName}]`
+            : "[se envió una imagen/archivo al cliente]";
     }
     if (isHuman) content = `${HUMAN_AGENT_TAG} ${content}`;
     // Respuesta citando: el agente recibe QUÉ citó el cliente (el panel pinta su

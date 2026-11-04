@@ -10,6 +10,7 @@ import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import { env } from "../config/env";
+import { documentExtFromMime, extOf, isDocumentExt } from "./document-types";
 
 const EXT_BY_TYPE: Record<string, string> = {
   image: "jpg",
@@ -31,7 +32,7 @@ function extFromContentType(ct: string): string | null {
     "audio/mpeg": "mp3",
     "application/pdf": "pdf",
   };
-  return map[t] ?? null;
+  return map[t] ?? documentExtFromMime(t) ?? null;
 }
 
 function extFromUrl(url: string): string | null {
@@ -53,6 +54,7 @@ export async function persistInboundMedia(
   url: string,
   type: string,
   headers?: Record<string, string>,
+  fileName?: string | null,
 ): Promise<string | null> {
   try {
     // Solo URLs http(s): un valor basura del webhook ("0") no se intenta descargar.
@@ -70,7 +72,11 @@ export async function persistInboundMedia(
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length === 0) return null;
 
+    // Documentos: la extensión del nombre que mandó el cliente manda (Meta sirve la
+    // media sin extensión y con content-type genérico; sin esto un .xlsx quedaba como .pdf).
+    const nameExt = fileName ? extOf(fileName) : "";
     const ext =
+      (isDocumentExt(nameExt) ? nameExt : null) ??
       extFromContentType(res.headers.get("content-type") ?? "") ??
       extFromUrl(url) ??
       EXT_BY_TYPE[type] ??

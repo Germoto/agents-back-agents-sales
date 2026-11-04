@@ -232,7 +232,7 @@ async function loadHistory(conversationId: string) {
     where: { conversationId },
     orderBy: { createdAt: "desc" },
     take: HISTORY_LIMIT,
-    select: { id: true, role: true, message: true, mediaUrl: true, mediaType: true, createdAt: true },
+    select: { id: true, role: true, message: true, mediaUrl: true, mediaType: true, fileName: true, createdAt: true },
   });
   return rows.reverse();
 }

@@ -883,6 +883,8 @@ model ConversationMessage {
   // Tipo del adjunto ("image"|"video"|"audio"|"document") para render correcto en
   // el panel; null en históricos o texto (el frontend infiere por extensión).
   mediaType       String?
+  /** Nombre visible del documento adjunto (zip, xlsx, pdf…): lo que ve el cliente y el panel. */
+  fileName        String?
   rawPayload      Json?
   // Tracking de entrega vía gateway WhatsApp. gatewayId = messageId/wamid (del
   // envío en ASSISTANT; del inbound en USER — ancla reacciones/citas).

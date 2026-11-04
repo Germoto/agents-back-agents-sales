@@ -43,9 +43,13 @@ async function processMessage(item: MetaInboundItem): Promise<void> {
   if (item.mediaId && tenant.accessToken) {
     const info = await metaWa.getMediaInfo(tenant.accessToken, item.mediaId);
     if (info) {
-      const local = await persistInboundMedia(tenant.companyId, info.url, item.inbound.type, {
-        Authorization: `Bearer ${tenant.accessToken}`,
-      });
+      const local = await persistInboundMedia(
+        tenant.companyId,
+        info.url,
+        item.inbound.type,
+        { Authorization: `Bearer ${tenant.accessToken}` },
+        item.inbound.fileName,
+      );
       item.inbound.mediaUrl = local;
     }
     if (!item.inbound.mediaUrl) {

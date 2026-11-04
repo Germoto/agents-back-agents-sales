@@ -155,6 +155,7 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
     text,
     type,
     mediaUrl: null, // Meta entrega media id; el servicio la resuelve con el token
+    fileName: msg.type === "document" ? msg.document?.filename?.trim() || null : null,
     fromMe: false, // la Cloud API no ecoa salientes en `messages`
     // Atribución CTWA (paridad con SMS Tools): Meta la entrega en msg.referral.
     adSourceId: msg.referral?.source_id?.trim() || null,

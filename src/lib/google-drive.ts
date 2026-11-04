@@ -154,7 +154,7 @@ export function driveFileKind(entry: Pick<DriveEntry, "isFolder" | "mimeType" | 
   if (m.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) return "imagen";
   if (m.startsWith("audio/") || ["mp3", "wav", "m4a", "aac", "ogg", "flac", "aif", "aiff"].includes(ext)) return "audio";
   if (m === "application/pdf" || ext === "pdf") return "pdf";
-  if (m.startsWith("application/vnd.google-apps.") || ["doc", "docx", "txt"].includes(ext)) return "documento";
+  if (m.startsWith("application/vnd.google-apps.") || ["doc", "docx", "txt", "xls", "xlsx", "pptx", "csv", "xml"].includes(ext)) return "documento";
   return "otro";
 }
 
@@ -164,6 +164,9 @@ export const DRIVE_ATTACH_MAX_BYTES: Record<string, number> = {
   video: 16 * 1024 * 1024,
   audio: 16 * 1024 * 1024,
   pdf: 20 * 1024 * 1024,
+  // Documentos y otros (zip, xlsx, docx…): se adjuntan si su extensión está en el catálogo.
+  documento: 50 * 1024 * 1024,
+  otro: 50 * 1024 * 1024,
 };
 
 // ---------------------------------------------------------------------------

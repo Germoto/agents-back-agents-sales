@@ -2231,14 +2231,15 @@ async function takeControlByCopilot(companyId: string, convo: { id: string; botP
   return true;
 }
 
-function mediaKindFromUrl(url: string, explicit?: unknown): "image" | "video" | "document" {
+function mediaKindFromUrl(url: string, explicit?: unknown): "image" | "video" | "audio" | "document" {
   const e = String(explicit ?? "").toLowerCase();
-  if (e === "image" || e === "video" || e === "document") return e;
+  if (e === "image" || e === "video" || e === "audio" || e === "document") return e;
   const ext = (url.split("?")[0].split("#")[0].match(/\.([a-z0-9]{2,5})$/i)?.[1] ?? "").toLowerCase();
   if (["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) return "image";
   if (["mp4", "mov", "3gp", "webm"].includes(ext)) return "video";
-  const kind = mediaKindFor(ext === "pdf" ? "pdf" : "document");
-  return kind === "audio" ? "document" : kind;
+  if (["mp3", "ogg", "opus", "m4a", "aac", "wav"].includes(ext)) return "audio";
+  // pdf, zip, xlsx, docx… y cualquier otra extensión: documento (el catálogo valida al enviar).
+  return mediaKindFor("document");
 }
 
 const NOTA_ATENCION_HUMANA = "El agente IA NO responderá a este cliente hasta que lo reactives con atencion_humana {activar:false}.";

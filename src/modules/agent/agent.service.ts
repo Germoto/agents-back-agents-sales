@@ -327,7 +327,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   // renderizan en el navegador). Así se ve en el chat y en la lupa de comprobantes,
   // y queda persistida. Best-effort: si falla, se conserva la URL original.
   if (inbound.mediaUrl && inbound.type !== "text") {
-    const local = await persistInboundMedia(companyId, inbound.mediaUrl, inbound.type);
+    const local = await persistInboundMedia(companyId, inbound.mediaUrl, inbound.type, undefined, inbound.fileName);
     if (local) inbound.mediaUrl = local;
   }
 
@@ -579,6 +579,7 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     message: inbound.text || null,
     mediaUrl: inbound.mediaUrl,
     mediaType: inbound.mediaUrl && inbound.type !== "text" ? inbound.type : null,
+    fileName: inbound.mediaUrl && inbound.type === "document" ? (inbound.fileName ?? null) : null,
     gatewayId: inbound.messageId,
     wamid: inbound.wamid,
     quotedWamid: anchorWamid,
@@ -599,7 +600,9 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   // Los stickers no son comprobantes: van por su propio camino (solo descripción).
   if (inbound.mediaUrl && inbound.type === "sticker") {
     await processInboundSticker(config, convo, inbound, userMessageId);
-  } else if (inbound.mediaUrl && inbound.type !== "text" && inbound.type !== "audio") {
+  } else if (inbound.mediaUrl && inbound.type !== "text" && inbound.type !== "audio" && inbound.type !== "document") {
+    // Un documento (zip, xlsx, pdf…) no es una imagen: visión no puede leerlo y solo
+    // retrasaba el turno. El agente lo ve como "[el cliente envió un archivo: nombre]".
     await processInboundReceiptImage(companyId, config, convo, inbound, userMessageId);
   }
 

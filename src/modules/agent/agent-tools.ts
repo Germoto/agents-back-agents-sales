@@ -5,6 +5,7 @@
  * runtime vacía en orden por WhatsApp; el resto sólo devuelven datos al modelo.
  */
 
+import { extOf, isDocumentExt } from "../../lib/document-types";
 import { ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import type { ToolDefinition } from "../../lib/openai";
@@ -1122,6 +1123,22 @@ function findProductPrice(config: BotConfig, productId: string | null | undefine
  * desde `enviar_ficha` (acople determinista ficha+media) como desde el envío BULK
  * de `enviar_multimedia`, para que el modelo no pueda "olvidar" mandar la media.
  */
+/**
+ * Tipo de adjunto WhatsApp para un archivo de Drive, o null si va como link: imagen,
+ * video, audio y pdf como siempre; documentos/otros solo si su extensión está en el
+ * catálogo de documentos (zip, xlsx, docx…). Los Google Docs nativos (sin extensión)
+ * no se pueden descargar como bytes → link.
+ */
+function driveAttachKind(entry: Pick<DriveEntry, "isFolder" | "mimeType" | "name">): "image" | "video" | "audio" | "document" | null {
+  const kind = driveFileKind(entry);
+  if (kind === "imagen") return "image";
+  if (kind === "video") return "video";
+  if (kind === "audio") return "audio";
+  if (kind === "pdf") return "document";
+  if ((kind === "documento" || kind === "otro") && isDocumentExt(extOf(entry.name))) return "document";
+  return null;
+}
+
 function pushPresentationMedia(ctx: TurnContext, product: BotProduct, kind: string = "all"): number {
   const mediaSent = Array.isArray(ctx.state.mediaSentProductIds) ? ctx.state.mediaSentProductIds : [];
   if (mediaSent.includes(product.id)) return 0;
@@ -1129,6 +1146,7 @@ function pushPresentationMedia(ctx: TurnContext, product: BotProduct, kind: stri
     if (!f.showInPresentation) return false; // fuera de la presentación: solo on-demand vía fileIds
     if (kind === "all") return true;
     if (kind === "pdf") return f.type === "pdf";
+    if (kind === "document") return f.type === "pdf" || f.type === "other";
     return f.type === kind;
   });
   if (!files.length) return 0;
@@ -1403,7 +1421,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             items: { type: "string" },
             description: "ids de los archivos concretos a enviar (de la lista de multimedia del producto). Úsalo para enviar SOLO el/los archivo(s) que el cliente pide o que se relacionan con su consulta; si lo pasas, se envían esos sin importar si ya se enviaron antes.",
           },
-          kind: { type: "string", enum: ["image", "pdf", "video", "audio", "all"], description: "filtra por tipo cuando NO indicas fileIds; 'all' envía todos" },
+          kind: { type: "string", enum: ["image", "pdf", "document", "video", "audio", "all"], description: "filtra por tipo cuando NO indicas fileIds; 'document' = PDF y demás archivos (zip, Excel, Word…); 'all' envía todos" },
         },
       },
     },
@@ -2163,7 +2181,7 @@ export async function executeTool(
         let motivoNoAdjunto: string | undefined;
         if (args.adjuntar === true) {
           const kind = driveFileKind(pick.file);
-          const mediaKind = kind === "imagen" ? "image" : kind === "video" ? "video" : kind === "audio" ? "audio" : kind === "pdf" ? "document" : null;
+          const mediaKind = driveAttachKind(pick.file);
           const max = DRIVE_ATTACH_MAX_BYTES[kind];
           if (!mediaKind || !max) motivoNoAdjunto = `tipo ${kind}: no se adjunta, manda el link`;
           else if (pick.file.size == null || pick.file.size > max) motivoNoAdjunto = `pesa ${pick.file.size != null ? Math.round(pick.file.size / 1024 / 1024) : "?"} MB (tope ${Math.round(max / 1024 / 1024)} MB): manda el link`;
@@ -2222,7 +2240,7 @@ export async function executeTool(
           return JSON.stringify({ ok: false, error: "es una carpeta: no se adjunta", link: allowed ? driveViewLink(entry) : null, nota: allowed ? "compártela por link si corresponde" : "carpeta de la entrega: disponible tras la compra (lo decide el sistema)" });
         }
         const kind = driveFileKind(entry);
-        const mediaKind = kind === "imagen" ? "image" : kind === "video" ? "video" : kind === "audio" ? "audio" : kind === "pdf" ? "document" : null;
+        const mediaKind = driveAttachKind(entry);
         const max = DRIVE_ATTACH_MAX_BYTES[kind];
         if (!mediaKind || !max) return JSON.stringify({ ok: false, error: `tipo ${kind}: no se adjunta`, archivo: describeEntry(entry, true), nota: "mándalo por link" });
         if (entry.size == null || entry.size > max) {

@@ -85,6 +85,7 @@ export async function deliver(
         message: caption ?? null,
         mediaUrl: msg.mediaUrl,
         mediaType: msg.mediaKind ?? "image",
+        fileName: msg.mediaKind === "document" ? (msg.fileName ?? null) : null,
         gatewayId: r.gatewayId,
         deliveryStatus: r.gatewayId ? "pending" : null,
       });

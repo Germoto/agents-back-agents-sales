@@ -601,6 +601,8 @@ export type InboundMessage = {
   type: "text" | "image" | "video" | "document" | "audio" | "sticker";
   /** URL del adjunto si lo hay */
   mediaUrl: string | null;
+  /** Nombre del documento adjunto si el gateway lo manda (document_name/filename) */
+  fileName: string | null;
   /** true si el mensaje lo emitio el propio negocio (eco/saliente): ignorar */
   fromMe: boolean;
   // --- Atribución de anuncios Meta CTWA (SOLO en el primer mensaje del lead) ---
@@ -739,7 +741,7 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     if (rawType.includes("sticker")) return "sticker";
     if (rawType.includes("image") || rawType.includes("photo")) return "image";
     if (rawType.includes("video")) return "video";
-    if (rawType.includes("doc") || rawType.includes("pdf")) return "document";
+    if (rawType.includes("doc") || rawType.includes("pdf") || rawType.includes("file")) return "document";
     if (rawType.includes("audio") || rawType.includes("voice") || rawType.includes("ptt")) return "audio";
     return null;
   };
@@ -753,14 +755,14 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     if (mime.startsWith("image/")) return "image";
     if (mime.startsWith("video/")) return "video";
     if (mime.startsWith("audio/")) return "audio";
-    if (mime.includes("pdf") || mime.startsWith("application/")) return "document";
+    if (mime.includes("pdf") || mime.startsWith("application/") || mime.startsWith("text/")) return "document";
     return null;
   };
 
   // Tipo inferido de la extensión de la URL (cuando no hay type ni mimetype).
   const typeFromUrl = (url: string): InboundMessage["type"] => {
     const u = url.toLowerCase().split(/[?#]/)[0];
-    if (/\.(pdf|docx?|xlsx?|pptx?|txt)$/.test(u)) return "document";
+    if (isDocumentExt(extOf(u))) return "document";
     if (/\.(mp4|mov|webm|mkv|avi|3gp)$/.test(u)) return "video";
     if (/\.(ogg|opus|mp3|m4a|aac|wav)$/.test(u)) return "audio";
     // El gateway entrega los stickers por el webhook normal con attachment=URL .webp.
@@ -805,6 +807,7 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     text,
     type,
     mediaUrl: type === "text" ? null : mediaUrl,
+    fileName: type === "document" ? (field(body, data, ["filename", "file_name", "document_name", "media_name", "name"]) ?? null) : null,
     fromMe,
     // Atribución CTWA: solo puebla el primer mensaje del lead; vacío = null.
     adSourceId: field(body, data, ["ad_source_id"]),
