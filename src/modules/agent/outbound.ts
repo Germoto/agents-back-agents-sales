@@ -187,19 +187,26 @@ export async function sendTyping(
 export async function sendMedia(
   sender: WhatsappSender,
   to: string,
-  kind: "image" | "document" | "video" | "audio",
+  kind: "image" | "document" | "video" | "audio" | "sticker",
   mediaUrl: string,
   caption?: string,
   fileName?: string,
 ): Promise<SendResult> {
   if (caption) caption = decodeEntities(caption);
+  // Los stickers viajan sin texto: el caption (si lo hay) va como texto aparte.
+  if (kind === "sticker" && caption) {
+    const r = await sendMedia(sender, to, "sticker", mediaUrl);
+    await sendText(sender, to, caption).catch(() => undefined);
+    return r;
+  }
   if (sender.provider === "WEB") {
     socketService.emitToWebchat(sender.conversationId, SOCKET_EVENTS.WEBCHAT_MESSAGE, {
       conversationId: sender.conversationId,
       role: "ASSISTANT",
       message: caption ?? null,
       mediaUrl,
-      mediaType: kind,
+      // El widget web no distingue stickers: se muestra como imagen.
+      mediaType: kind === "sticker" ? "image" : kind,
       fileName: fileName ?? null,
       createdAt: new Date().toISOString(),
     });

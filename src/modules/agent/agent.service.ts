@@ -595,7 +595,8 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
     `[agent] inbound de ${inbound.fromPhone}: type=${inbound.type} media=${inbound.mediaUrl ? "yes" : "no"} textLen=${(inbound.text ?? "").trim().length} pay=${paymentsEnabled} payCtx=${isPaymentContext(convo.state)}`,
   );
   // El audio NUNCA va a visión (un .ogg no es una imagen): ya quedó transcrito arriba.
-  if (inbound.mediaUrl && inbound.type !== "text" && inbound.type !== "audio") {
+  // Los stickers tampoco: no son comprobantes.
+  if (inbound.mediaUrl && inbound.type !== "text" && inbound.type !== "audio" && inbound.type !== "sticker") {
     await processInboundReceiptImage(companyId, config, convo, inbound, userMessageId);
   }
 

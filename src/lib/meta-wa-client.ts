@@ -112,14 +112,17 @@ function normalizeTo(to: string): string {
 }
 
 /** Límites de tamaño de Meta por tipo de media (bytes). */
-export const META_MEDIA_LIMITS: Record<"image" | "video" | "audio" | "document", number> = {
+export const META_MEDIA_LIMITS: Record<"image" | "video" | "audio" | "document" | "sticker", number> = {
   image: 5 * 1024 * 1024,
+  // WebP estático ≤100 KB, animado ≤500 KB: se valida contra el mayor.
+  sticker: 500 * 1024,
   video: 16 * 1024 * 1024,
   audio: 16 * 1024 * 1024,
   document: 100 * 1024 * 1024,
 };
 
 const MEDIA_LIMIT_LABEL: Record<string, string> = {
+  sticker: "500 KB",
   image: "5 MB",
   video: "16 MB",
   audio: "16 MB",
@@ -127,7 +130,7 @@ const MEDIA_LIMIT_LABEL: Record<string, string> = {
 };
 
 /** Mensaje claro cuando un archivo excede el límite de Meta para su tipo. */
-export function mediaTooLargeReason(kind: "image" | "video" | "audio" | "document", bytes: number): string {
+export function mediaTooLargeReason(kind: "image" | "video" | "audio" | "document" | "sticker", bytes: number): string {
   const mb = (bytes / (1024 * 1024)).toFixed(1);
   return `El archivo (${mb} MB) supera el límite de ${MEDIA_LIMIT_LABEL[kind]} de WhatsApp (Meta) para ${kind}. Comprímelo o usa uno más liviano.`;
 }
@@ -221,13 +224,13 @@ export const metaWa = {
   async sendMediaById(
     creds: MetaCredentials,
     to: string,
-    kind: "image" | "document" | "video" | "audio",
+    kind: "image" | "document" | "video" | "audio" | "sticker",
     mediaId: string,
     caption?: string,
     fileName?: string,
   ): Promise<{ wamid: string | null }> {
     const media: Record<string, string> = { id: mediaId };
-    if (caption && kind !== "audio") media.caption = caption;
+    if (caption && kind !== "audio" && kind !== "sticker") media.caption = caption;
     if (fileName && kind === "document") media.filename = fileName;
     const res = await graphRequest<SendResponse>(`/${creds.phoneNumberId}/messages`, creds.accessToken, {
       method: "POST",

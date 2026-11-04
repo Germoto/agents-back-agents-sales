@@ -26,6 +26,7 @@ import {
   listStarredMessages,
 } from "./conversation.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
+import { touchStickerByUrl } from "../stickers/stickers.service";
 
 export const listConversationsController = asyncHandler(async (req: Request, res: Response) => {
   const companyId = req.user!.companyId;
@@ -155,11 +156,13 @@ export const replyConversationController = asyncHandler(async (req: Request, res
   if (!message && !mediaUrl) throw new AppError("El mensaje no puede estar vacío", 400);
   if (mediaUrl) {
     const kindRaw = String(req.body?.mediaKind ?? "image");
-    const mediaKind = (["image", "video", "audio", "document"].includes(kindRaw) ? kindRaw : "image") as
+    const mediaKind = (["image", "video", "audio", "document", "sticker"].includes(kindRaw) ? kindRaw : "image") as
       | "image"
       | "video"
       | "audio"
-      | "document";
+      | "document"
+      | "sticker";
+    if (mediaKind === "sticker") void touchStickerByUrl(companyId, mediaUrl);
     await sendHumanMedia(companyId, String(req.params.id), {
       mediaUrl,
       mediaKind,

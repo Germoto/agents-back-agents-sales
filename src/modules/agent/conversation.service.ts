@@ -949,7 +949,7 @@ export async function scheduleManualReminder(
 export async function sendHumanMedia(
   companyId: string,
   conversationId: string,
-  media: { mediaUrl: string; mediaKind: "image" | "video" | "audio" | "document"; caption?: string; fileName?: string },
+  media: { mediaUrl: string; mediaKind: "image" | "video" | "audio" | "document" | "sticker"; caption?: string; fileName?: string },
   opts?: { source?: string | null },
 ): Promise<{ messageId: string }> {
   const convo = await prisma.conversation.findFirst({
@@ -962,8 +962,12 @@ export async function sendHumanMedia(
   if (!sender) throw new AppError("No hay una cuenta de WhatsApp activa para enviar", 422);
 
   const to = convo.customer.phone.replace(/\D/g, "");
-  const caption = (await applyFirma(companyId, media.caption)) ?? media.caption;
+  // Un sticker nunca lleva texto (ni firma): el caption se manda como mensaje aparte.
+  const caption = media.mediaKind === "sticker" ? undefined : ((await applyFirma(companyId, media.caption)) ?? media.caption);
   const sent = await sendMedia(sender, to, media.mediaKind, media.mediaUrl, caption, media.fileName);
+  if (media.mediaKind === "sticker" && media.caption?.trim()) {
+    await sendHumanReply(companyId, conversationId, media.caption.trim(), { source: opts?.source ?? null }).catch(() => undefined);
+  }
   const messageId = await recordMessage({
     companyId,
     customerId: convo.customerId,
@@ -1283,12 +1287,18 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
 
     let content = (r.message ?? "").trim();
     if (!content && r.mediaUrl) {
-      const isAudio = (r.mediaType ?? "").toLowerCase() === "audio";
+      const mediaKind = (r.mediaType ?? "").toLowerCase();
+      const isAudio = mediaKind === "audio";
+      const isSticker = mediaKind === "sticker";
       content = isUser
         ? isAudio
           ? "[el cliente envió un audio que no se pudo transcribir: pídele amablemente que lo repita por texto]"
-          : "[el cliente envió una imagen]"
-        : "[se envió una imagen/archivo al cliente]";
+          : isSticker
+            ? "[el cliente envió un sticker]"
+            : "[el cliente envió una imagen]"
+        : isSticker
+          ? "[se envió un sticker al cliente]"
+          : "[se envió una imagen/archivo al cliente]";
     }
     if (isHuman) content = `${HUMAN_AGENT_TAG} ${content}`;
     // Respuesta citando: el agente recibe QUÉ citó el cliente (el panel pinta su

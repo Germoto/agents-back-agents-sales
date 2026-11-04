@@ -427,7 +427,7 @@ export const smsTools = {
     creds: SmsToolsCredentials,
     account: string,
     to: string,
-    kind: "image" | "document" | "video" | "audio",
+    kind: "image" | "document" | "video" | "audio" | "sticker",
     mediaUrl: string,
     caption?: string,
     fileName?: string,
@@ -443,7 +443,8 @@ export const smsTools = {
       account,
       recipient: to.replace(/\D/g, ""),
       type: kind === "document" ? "document" : "media",
-      message: (caption && caption.trim()) || " ",
+      // Los stickers no llevan texto (el gateway lo exige vacío); el resto exige message.
+      message: kind === "sticker" ? "" : (caption && caption.trim()) || " ",
       // "1" (default) = síncrono: el gateway descarga/emite la media ANTES de
       // responder → el orden de las secuencias queda garantizado (el texto iba
       // inmediato y con "2" en cola lo adelantaba). Kill-switch por env.
@@ -488,7 +489,7 @@ export const smsTools = {
       fields.document_name = name;
       fields.document_type = DOCUMENT_MIME[ext] ? ext : "pdf";
     } else {
-      fields.media_type = kind; // image | video | audio
+      fields.media_type = kind; // image | video | audio | sticker (.webp 512×512)
       fields.media_url = mediaUrl;
     }
 
@@ -575,7 +576,7 @@ export type InboundMessage = {
   /** texto del mensaje (puede ser caption de un adjunto) */
   text: string;
   /** tipo detectado */
-  type: "text" | "image" | "video" | "document" | "audio";
+  type: "text" | "image" | "video" | "document" | "audio" | "sticker";
   /** URL del adjunto si lo hay */
   mediaUrl: string | null;
   /** true si el mensaje lo emitio el propio negocio (eco/saliente): ignorar */
@@ -713,7 +714,8 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
 
   const rawType = (field(body, data, ["type", "message_type", "messageType", "msgtype", "msg_type"]) ?? "").toLowerCase();
   const typeFromRaw = (): InboundMessage["type"] | null => {
-    if (rawType.includes("image") || rawType.includes("photo") || rawType.includes("sticker")) return "image";
+    if (rawType.includes("sticker")) return "sticker";
+    if (rawType.includes("image") || rawType.includes("photo")) return "image";
     if (rawType.includes("video")) return "video";
     if (rawType.includes("doc") || rawType.includes("pdf")) return "document";
     if (rawType.includes("audio") || rawType.includes("voice") || rawType.includes("ptt")) return "audio";
@@ -724,6 +726,8 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
   // con caption (un mensaje de texto con foto de perfil no trae mimetype).
   const mime = (field(body, data, ["mimetype", "mime", "mime_type", "content_type", "contentType"]) ?? "").toLowerCase();
   const typeFromMime = (): InboundMessage["type"] | null => {
+    // WhatsApp manda los stickers como image/webp; las fotos llegan como jpeg.
+    if (mime === "image/webp") return "sticker";
     if (mime.startsWith("image/")) return "image";
     if (mime.startsWith("video/")) return "video";
     if (mime.startsWith("audio/")) return "audio";
@@ -737,6 +741,8 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     if (/\.(pdf|docx?|xlsx?|pptx?|txt)$/.test(u)) return "document";
     if (/\.(mp4|mov|webm|mkv|avi|3gp)$/.test(u)) return "video";
     if (/\.(ogg|opus|mp3|m4a|aac|wav)$/.test(u)) return "audio";
+    // El gateway entrega los stickers por el webhook normal con attachment=URL .webp.
+    if (/\.webp$/.test(u)) return "sticker";
     return "image";
   };
 

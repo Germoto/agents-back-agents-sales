@@ -217,6 +217,7 @@ model Company {
   creditTransactions   CreditTransaction[]
   redeemedVouchers     Voucher[]             @relation("RedeemedVouchers")
   reportConfig         ReportConfig?
+  stickerAssets          StickerAsset[]
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -916,6 +917,24 @@ model ConversationMessage {
   @@index([deliveryStatus, createdAt])
   @@index([gatewayId])
   @@index([wamid])
+}
+
+// Galería de stickers del negocio (subidos por el equipo o guardados de los chats).
+model StickerAsset {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String   @db.Uuid
+  // URL pública del .webp ya en /uploads/stickers/{companyId}/…
+  url        String
+  // UPLOAD (subido/convertido en el panel) | RECEIVED (guardado de un chat)
+  source     String   @default("UPLOAD")
+  // URL original del sticker recibido (para no guardarlo dos veces).
+  sourceUrl  String?
+  lastUsedAt DateTime?
+  createdAt  DateTime @default(now())
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, lastUsedAt])
+  @@index([companyId, sourceUrl])
 }
 
 // Conversación viva del agente con un cliente (reemplaza el staticData de n8n).

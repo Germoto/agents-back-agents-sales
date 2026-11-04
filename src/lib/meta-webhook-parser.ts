@@ -101,7 +101,7 @@ function mapMessage(msg: MetaMessage, value: MetaValue): MetaInboundItem | null 
       text = decodeEntities(msg.image?.caption ?? "");
       break;
     case "sticker":
-      type = "image";
+      type = "sticker";
       mediaId = msg.sticker?.id ?? null;
       break;
     case "video":

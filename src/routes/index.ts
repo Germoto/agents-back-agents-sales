@@ -21,6 +21,7 @@ import subscriptionsRoutes from "../modules/subscriptions/subscriptions.routes";
 import receiptsRoutes from "../modules/receipts/receipts.routes";
 import botRoutes from "../modules/bot/bot.routes";
 import agentRoutes from "../modules/agent/agent.routes";
+import stickersRoutes from "../modules/stickers/stickers.routes";
 import metaWebhookRoutes from "../modules/meta-webhook/meta-webhook.routes";
 import webchatRoutes from "../modules/webchat/webchat.routes";
 import webchatConfigRoutes from "../modules/webchat/webchat-config.routes";
@@ -62,6 +63,8 @@ router.use("/payment-config", billingGuard(), paymentConfigRoutes);
 router.use("/products", billingGuard(), productsRoutes);
 router.use("/copilot", billingGuard(), copilotRoutes);
 router.use("/product-files", billingGuard(), productFilesRoutes);
+// Galería de stickers del negocio (panel de Conversaciones)
+router.use("/stickers", billingGuard(), stickersRoutes);
 router.use("/customers", billingGuard(), customersRoutes);
 router.use("/orders", billingGuard(), ordersRoutes);
 // Agenda de citas (rubro SERVICE): disponibilidad, citas y bloqueos
