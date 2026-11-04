@@ -1119,6 +1119,8 @@ const conversationMessageSelect = {
   wamid: true,
   gatewayId: true,
   ownReaction: true,
+  // Solo para resolver el id interno del mensaje citado (no se expone al panel).
+  quotedWamid: true,
   // Solo para derivar encuesta/voto (no se expone al panel).
   rawPayload: true,
 } satisfies Prisma.ConversationMessageSelect;
@@ -1138,8 +1140,34 @@ export function pollFieldsOf(rawPayload: unknown): { poll?: { question: string; 
   return {};
 }
 
-function serializeMessage({ gatewayId, rawPayload, ...r }: MessageRow) {
-  return { ...r, wamid: whatsappIdOf({ wamid: r.wamid, gatewayId }), ...pollFieldsOf(rawPayload) };
+function serializeMessage({ gatewayId, rawPayload, quotedWamid, ...r }: MessageRow, quotedIds: Map<string, string> = new Map()) {
+  return {
+    ...r,
+    wamid: whatsappIdOf({ wamid: r.wamid, gatewayId }),
+    // Id interno del mensaje citado (si vive en esta conversación): el panel salta a él.
+    quotedMessageId: quotedWamid ? (quotedIds.get(quotedWamid) ?? null) : null,
+    ...pollFieldsOf(rawPayload),
+  };
+}
+
+/**
+ * Resuelve en UNA consulta los ids internos de los mensajes citados por un tramo
+ * (por wamid o por gatewayId, que en Meta es el propio wamid), solo dentro de la
+ * misma conversación. Los que no están (muy antiguos, de otro chat) quedan sin id.
+ */
+async function resolveQuotedIds(companyId: string, conversationId: string, rows: MessageRow[]): Promise<Map<string, string>> {
+  const wamids = Array.from(new Set(rows.map((r) => r.quotedWamid).filter((w): w is string => Boolean(w))));
+  const map = new Map<string, string>();
+  if (!wamids.length) return map;
+  const found = await prisma.conversationMessage.findMany({
+    where: { companyId, conversationId, OR: [{ wamid: { in: wamids } }, { gatewayId: { in: wamids } }] },
+    select: { id: true, wamid: true, gatewayId: true },
+  });
+  for (const f of found) {
+    if (f.wamid && wamids.includes(f.wamid)) map.set(f.wamid, f.id);
+    if (f.gatewayId && wamids.includes(f.gatewayId)) map.set(f.gatewayId, f.id);
+  }
+  return map;
 }
 
 /**
@@ -1161,7 +1189,8 @@ export async function listConversationMessages(
       take: arg,
       select: conversationMessageSelect,
     });
-    return rows.map(serializeMessage);
+    const quoted = await resolveQuotedIds(companyId, conversationId, rows);
+    return rows.map((r) => serializeMessage(r, quoted));
   }
   const limit = Math.max(1, Math.min(arg.limit ?? MESSAGES_DEFAULT_LIMIT, MESSAGES_MAX_LIMIT));
   const before = arg.before ? new Date(arg.before) : null;
@@ -1173,7 +1202,8 @@ export async function listConversationMessages(
   });
   const hasMore = rows.length > limit;
   const page = rows.slice(0, limit).reverse();
-  return { items: page.map(serializeMessage), hasMore };
+  const quoted = await resolveQuotedIds(companyId, conversationId, page);
+  return { items: page.map((r) => serializeMessage(r, quoted)), hasMore };
 }
 
 /**
