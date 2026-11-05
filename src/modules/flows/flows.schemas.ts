@@ -153,6 +153,31 @@ const bookAppointmentData = z.object({
   timeoutMinutes: z.number().int().min(0).max(60 * 24 * 7).optional(),
 });
 
+const httpKv = z.object({ key: z.string().trim().min(1).max(100), value: z.string().max(4000).default("") });
+const httpRequestInline = z.object({
+  connectionId: z.string().uuid().optional(),
+  method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("POST"),
+  url: z.string().trim().max(2000).default(""),
+  query: z.array(httpKv).max(20).default([]),
+  headers: z.array(httpKv).max(20).default([]),
+  bodyType: z.enum(["NONE", "JSON", "FORM", "RAW"]).default("JSON"),
+  body: z.string().max(16_000).optional(),
+});
+const httpRequestData = z
+  .object({
+    actionId: z.string().uuid().optional(),
+    request: httpRequestInline.optional(),
+    responseVar: z.string().trim().regex(/^[a-z][a-z0-9_]{0,30}$/).optional(),
+    errorMessage: z.string().max(2000).optional(),
+    runInSimulator: z.boolean().optional(),
+    retries: z.number().int().min(0).max(2).optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (!d.actionId && !d.request?.url?.trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Elige una acción guardada o escribe la URL", path: ["actionId"] });
+    }
+  });
+
 const crmMoveData = z.object({
   crmId: z.string().uuid().optional(),
   crmColumnId: z.string().uuid().optional(),
@@ -219,6 +244,7 @@ export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("question"), position: positionSchema, data: questionData }),
   z.object({ id: z.string().min(1), type: z.literal("validate-payment"), position: positionSchema, data: validatePaymentData }),
   z.object({ id: z.string().min(1), type: z.literal("book-appointment"), position: positionSchema, data: bookAppointmentData }),
+  z.object({ id: z.string().min(1), type: z.literal("http-request"), position: positionSchema, data: httpRequestData }),
 ]);
 
 export const flowEdgeSchema = z

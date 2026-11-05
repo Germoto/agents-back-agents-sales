@@ -18,6 +18,7 @@ import {
   type QuestionData,
   type ValidatePaymentData,
   type BookAppointmentData,
+  type HttpRequestData,
   reminderStepsOf,
   POLL_MIN_OPTIONS,
   POLL_MAX_OPTIONS,
@@ -72,6 +73,7 @@ const NODE_LABEL: Record<string, string> = {
   "question": "Pregunta",
   "validate-payment": "Validar pago",
   "book-appointment": "Agendar cita",
+  "http-request": "Petición HTTP",
 };
 
 function label(node: FlowNode): string {
@@ -409,6 +411,27 @@ export function validateFlow(
           });
         }
         validateTimeout(node, data.timeoutMinutes ?? 30, edgeFrom, errors, warnings);
+        break;
+      }
+      case "http-request": {
+        const data = node.data as HttpRequestData;
+        const url = data.request?.url?.trim() ?? "";
+        if (!data.actionId && !url) {
+          errors.push({ code: "HTTP_NO_TARGET", message: "«Petición HTTP» necesita una acción guardada o una URL.", nodeId: node.id });
+        }
+        if (!data.actionId && url && /^http:\/\//i.test(url)) {
+          errors.push({ code: "HTTP_URL_NOT_HTTPS", message: "«Petición HTTP»: la URL debe empezar con https://.", nodeId: node.id });
+        }
+        if (!edgeFrom(node.id, "success")) {
+          warnings.push({ code: "HTTP_OUTPUT_UNUSED", message: "La salida «Respuesta OK» de «Petición HTTP» no está conectada.", nodeId: node.id });
+        }
+        if (!edgeFrom(node.id, "error")) {
+          warnings.push({
+            code: "HTTP_OUTPUT_UNUSED",
+            message: "La salida «Error» de «Petición HTTP» no está conectada; si la API falla el flujo terminará en silencio.",
+            nodeId: node.id,
+          });
+        }
         break;
       }
       case "crm-move": {

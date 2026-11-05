@@ -51,6 +51,7 @@ export type FlowNodeType =
   | "question"
   | "validate-payment"
   | "book-appointment"
+  | "http-request"
   | "to-agent";
 
 export type DetectMode = "contains" | "equals" | "starts_with" | "ends_with";
@@ -218,6 +219,35 @@ export interface BookAppointmentData {
   timeoutMinutes?: number;
 }
 
+/** Petición HTTP (estilo nodo HTTP Request de n8n): acción guardada o petición inline. */
+export interface HttpRequestKV {
+  key: string;
+  value: string;
+}
+export interface HttpRequestInline {
+  /** Conexión (credencial) de Integraciones → Acciones HTTP. */
+  connectionId?: string;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  /** Absoluta (https://…) o relativa a la URL base de la conexión. Admite {{variables}}. */
+  url: string;
+  query: HttpRequestKV[];
+  headers: HttpRequestKV[];
+  bodyType: "NONE" | "JSON" | "FORM" | "RAW";
+  body?: string;
+}
+export interface HttpRequestData {
+  /** Acción guardada (Integraciones → Acciones HTTP). Si viene, se ignora `request`. */
+  actionId?: string;
+  request?: HttpRequestInline;
+  /** Prefijo de las variables de respuesta ({{api.status}}, {{api.body}}, {{api.<campo>}}); default "api". */
+  responseVar?: string;
+  /** Mensaje al cliente si la petición falla (opcional; además sale por "error"). */
+  errorMessage?: string;
+  /** En el simulador: false (default) = respuesta simulada; true = llama a la API de verdad. */
+  runInSimulator?: boolean;
+  retries?: number;
+}
+
 /** Mueve al cliente a una columna de un CRM (kanban). */
 export interface CrmMoveData {
   crmId?: string;
@@ -275,6 +305,7 @@ export type FlowNodeData =
   | QuestionData
   | ValidatePaymentData
   | BookAppointmentData
+  | HttpRequestData
   | Record<string, never>;
 
 export interface FlowNode {
@@ -355,6 +386,8 @@ export function outputHandlesFor(node: FlowNode): string[] {
       const base = ["booked", "no-slots"];
       return (data.timeoutMinutes ?? 30) > 0 ? [...base, "timeout"] : base;
     }
+    case "http-request":
+      return ["success", "error"];
     case "flow-control":
     case "handoff":
     case "to-agent":

@@ -46,6 +46,7 @@ import {
   type QuestionData,
   type ValidatePaymentData,
   type BookAppointmentData,
+  type HttpRequestData,
   reminderStepsOf,
   flattenListOptions,
   isSendNode,
@@ -58,6 +59,8 @@ import { getAvailableSlots, isSlotAvailable, formatSlotLabel } from "../bookings
 import { calendarLinksMessage } from "../bookings/calendar.service";
 import { createBooking, reasonMessage } from "../bookings/bookings.service";
 import { symbolFor } from "../../lib/currency";
+import { baseVars, loadRunnableAction } from "../http-actions/http-actions.service";
+import { runHttpAction, toRunnableConnection, toRunnableRequest } from "../http-actions/http-action-runner";
 
 // ---------------------------------------------------------------------------
 // Estado de sesión (namespace `flow` dentro de Conversation.state)
@@ -139,6 +142,8 @@ export interface FlowIO {
   gapMs?: number;
   /** Acumulador del turno (lo inicializa runFlowTurn). */
   outcome?: FlowTurnResult;
+  /** Peticiones HTTP ejecutadas en este turno (tope anti-bucle). */
+  httpCallsThisTurn?: number;
 }
 
 /**
@@ -175,6 +180,7 @@ export async function getCustomerFlowVars(customerId: string): Promise<Record<st
 }
 
 const MAX_CHAIN_PER_TURN = 10;
+const MAX_HTTP_CALLS_PER_TURN = 3;
 const MAX_TRANSFERS_PER_TURN = 3;
 
 type LoadedFlow = {
@@ -236,7 +242,8 @@ export function renderTemplate(text: string, io: FlowIO): string {
     telefono: io.customerPhone,
     ...(fs.variables ?? {}),
   };
-  return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (_m, key: string) => vars[key] ?? "");
+  // Acepta claves con puntos ({{api.data.key}}) que deja el bloque Petición HTTP.
+  return text.replace(/\{\{\s*([\w][\w.]*)\s*\}\}/g, (_m, key: string) => vars[key] ?? "");
 }
 
 /** Mensajes USER consecutivos del final del historial, unidos (la ráfaga del debounce). */
@@ -1216,6 +1223,86 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
         await armBookingTimeout(activeFlow, node, io);
         pushTrace(io, node, "awaiting-booking");
         return;
+      }
+
+      case "http-request": {
+        const data = node.data as HttpRequestData;
+        const responseVar = data.responseVar?.trim() || "api";
+        const simulated = !!io.simulate && !data.runInSimulator;
+        let ok = false;
+        let outVars: Record<string, string> = {};
+        let errorText = "";
+        if (simulated) {
+          ok = true;
+          outVars = { [`${responseVar}.status`]: "200", [`${responseVar}.ok`]: "true", [`${responseVar}.body`]: "{simulado}" };
+          pushTrace(io, node, "http:simulated");
+        } else if ((io.httpCallsThisTurn ?? 0) >= MAX_HTTP_CALLS_PER_TURN) {
+          errorText = "tope de peticiones HTTP por turno";
+          pushTrace(io, node, "http:limit");
+        } else {
+          io.httpCallsThisTurn = (io.httpCallsThisTurn ?? 0) + 1;
+          try {
+            const customer = await prisma.customer.findUnique({ where: { id: io.customerId }, select: { email: true, company: { select: { name: true } } } });
+            const vars = {
+              ...baseVars({
+                companyName: customer?.company.name ?? "",
+                customer: { id: io.customerId, name: io.customerName, phone: io.customerPhone, email: customer?.email ?? null },
+                conversationId: io.conversationId,
+              }),
+              ...(fs.variables ?? {}),
+            };
+            let runnable: { actionId: string | null; request: ReturnType<typeof toRunnableRequest>; connection: ReturnType<typeof toRunnableConnection> } | null = null;
+            if (data.actionId) {
+              const loaded = await loadRunnableAction(io.companyId, data.actionId);
+              if (loaded) runnable = { actionId: loaded.row.id, request: { ...loaded.request, responseVar }, connection: loaded.connection };
+              else errorText = "la acción guardada ya no existe";
+            } else if (data.request?.url?.trim()) {
+              const conn = data.request.connectionId
+                ? await prisma.httpConnection.findFirst({ where: { id: data.request.connectionId, companyId: io.companyId } })
+                : null;
+              runnable = {
+                actionId: null,
+                request: toRunnableRequest({ ...data.request, responseVar, retries: data.retries ?? 1 }),
+                connection: toRunnableConnection(conn),
+              };
+            } else {
+              errorText = "sin acción ni URL";
+            }
+            if (runnable) {
+              const r = await runHttpAction({
+                companyId: io.companyId,
+                actionId: runnable.actionId,
+                request: runnable.request,
+                connection: runnable.connection,
+                vars,
+                source: "FLOW",
+                refs: { customerId: io.customerId, conversationId: io.conversationId },
+              });
+              ok = r.ok;
+              outVars = r.vars;
+              if (!ok) errorText = r.error ?? `HTTP ${r.httpStatus ?? "?"}`;
+            }
+          } catch (err) {
+            ok = false;
+            errorText = err instanceof Error ? err.message : "error";
+          }
+        }
+        if (ok) {
+          fs.variables = { ...(fs.variables ?? {}), ...outVars };
+          await persistFlowVars(io);
+          if (!simulated) pushTrace(io, node, "http:ok");
+          nextHandle = "success";
+          break;
+        }
+        console.warn(`[flows] http-request falló (flow=${activeFlow.id} node=${node.id}): ${errorText}`);
+        if (data.errorMessage?.trim()) {
+          if (emitted > 0) await pause(io);
+          await io.emit({ kind: "text", text: renderTemplate(data.errorMessage.trim(), io) });
+          emitted++;
+        }
+        pushTrace(io, node, `http:error ${errorText}`.trim());
+        nextHandle = "error";
+        break;
       }
     }
 

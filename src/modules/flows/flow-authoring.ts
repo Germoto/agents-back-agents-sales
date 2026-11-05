@@ -18,6 +18,7 @@ import {
   type AnswersData,
   type PollData,
   type BookAppointmentData,
+  type HttpRequestData,
   type ConditionData,
   type CrmMoveData,
   type CrmTagsData,
@@ -50,6 +51,7 @@ export const NODE_DOCS = `BLOQUES DISPONIBLES (type → data → handles de sali
 - reminder: {steps:[{id,minutes,message}]} (máx 5, delays ACUMULATIVOS desde que el cliente deja de responder) → "next". Se cancela solo si el cliente responde.
 - validate-payment: {amountMode:"fixed"|"product", amount? (si fixed), productId? (si product), instructions?, retryMessage?, reviewMessage?, timeoutMinutes? (default 60)} → "approved", "rejected", "review" y "timeout". Cobra (Yape/Plin/Mercado Pago según lo configurado) y valida el comprobante automáticamente.
 - book-appointment: {productId? (servicio con agenda), introMessage?, noSlotsMessage?, saveVariable?, timeoutMinutes? (default 30)} → "booked", "no-slots" y "timeout". Ofrece horarios REALES de la agenda y agenda la cita; deja {{cita_fecha}}, {{cita_codigo}}, {{cita_calendario_google}}, {{cita_calendario_ics}} y {{cita_videollamada}} (enlace de Meet/Zoom del servicio o del negocio si la cita es online; el sistema ya envía solo un mensaje con el enlace de videollamada y los de calendario tras agendar).
+- http-request: {actionId? (acción guardada: usa {accion: nombre}), request?: {conexion?/connectionId?, method, url (https, admite {{variables}}), query:[{key,value}], headers:[{key,value}], bodyType:"JSON"|"FORM"|"RAW"|"NONE", body}, responseVar? (default "api"), errorMessage?} → "success" y "error". PETICIÓN HTTP (como el nodo HTTP Request de n8n): llama a una API del negocio (crear licencia, cuenta demo, consultar estado…) y deja la respuesta en variables para los bloques siguientes: {{api.status}}, {{api.body}} y el JSON aplanado {{api.<campo>}} / {{api.<campo>.<subcampo>}} / {{api.items.0.id}} (cambia "api" con responseVar). Prefiere una acción guardada (listar_acciones_http) a una petición inline; NUNCA pongas tokens ni claves en headers: la credencial vive en la conexión. Si falla sale por "error" (conecta esa rama con un texto o un handoff).
 - crm-move: {crmId, crmColumnId, crmColumnName?} → "next". Mueve al cliente a una columna del CRM.
 - crm-add-tags | crm-remove-tags: {tagIds:[uuid]} → "next". Asigna/quita etiquetas.
 - handoff: {clientText?, notifyText?} → SIN salidas (terminal). Pausa el bot y avisa a un asesor humano.
@@ -70,13 +72,14 @@ export const HARD_RULES = `REGLAS OBLIGATORIAS al proponer un flujo:
 7. Si el usuario pide modificar, parte del ESTADO ACTUAL del lienzo y conserva todo lo que no pidió cambiar (incluidas posiciones).
 8. Usa SOLO los IDs reales del negocio listados abajo para productId, crmId, crmColumnId y tagIds. Si el dato que necesitas no existe (ej. no hay productos o no hay pagos configurados), NO inventes IDs: explícalo en el resumen y usa una alternativa (ej. handoff).
 9. En el trigger: si el usuario no especifica cómo se dispara, usa keywords razonables según el tema del flujo y menciónalo en el resumen.
+11. http-request: la credencial va en una CONEXIÓN (Integraciones → Acciones HTTP), nunca en headers del bloque; usa acciones guardadas por nombre con {accion}. Conecta siempre la salida "error".
 10. answers/poll/list: UNA opción por rama, con label corto (≤ 25 caracteres) y legible porque el cliente lo ve numerado. NUNCA dupliques una opción para aceptar el número y la palabra (el número ya se acepta solo); detectText solo para sinónimos; el message es la pregunta sola, sin la lista de opciones.`;
 
 /** Facilidades SOLO para crear_flujo / editar_flujo (chat y MCP). */
 export const AUTHORING_HINTS = `FACILIDADES al usar crear_flujo / editar_flujo:
 - "position" es OPCIONAL: si algún nodo no la trae, el servidor ordena todo el flujo automáticamente (BFS desde start). Si todos los nodos la traen, se respeta.
 - Los ids de edge son opcionales (se generan) y sourceHandle vacío equivale a "next".
-- Puedes referirte a datos del negocio POR NOMBRE (o por id): en crm-move usa {tablero, columna}; en crm-add-tags / crm-remove-tags usa {etiquetas:[nombres]}; en book-appointment y validate-payment usa {producto}; en condition con source "tag" usa {etiqueta}; en flow-control transfer usa {flujo}. El servidor los convierte a ids y rechaza con un error claro los que no existan (créalos antes con crear_etiqueta / crear_columna / crear_producto).
+- Puedes referirte a datos del negocio POR NOMBRE (o por id): en crm-move usa {tablero, columna}; en crm-add-tags / crm-remove-tags usa {etiquetas:[nombres]}; en book-appointment y validate-payment usa {producto}; en condition con source "tag" usa {etiqueta}; en flow-control transfer usa {flujo}; en http-request usa {accion} (acción guardada) o request.{conexion}. El servidor los convierte a ids y rechaza con un error claro los que no existan (créalos antes con crear_etiqueta / crear_columna / crear_producto).
 - En answers/poll/list puedes omitir el id de cada opción (se genera "opt-xxxxxx"); si lo omites, en los edges usa sourceHandle "opt:<label exacto>" o "opt:<posición 1..n>" y el servidor los convierte a "opt:<id>". detectText es opcional.
 - Variables de question/answers (saveVariable) quedan en la ficha del cliente y, en HYBRID, el agente IA las recibe; para que el dueño las reciba por WhatsApp, inclúyelas en el notifyText del handoff con {{variable}}.
 - En el trigger puedes usar "anuncios": [descripciones o ids del catálogo de anuncios] en vez de adEntryIds (se convierten a ids; ver_catalogo_anuncios los lista). Si el dueño capta leads por Meta Ads, prefiere onAdLead a keywords.
@@ -204,18 +207,22 @@ interface RefCatalog {
   flows: Named[];
   /** Anuncios del catálogo: `name` = descripción. */
   ads: Named[];
+  httpActions: Named[];
+  httpConnections: Named[];
 }
 
 async function loadRefCatalog(companyId: string): Promise<RefCatalog> {
-  const [tags, boards, columns, products, flows, adRows] = await Promise.all([
+  const [tags, boards, columns, products, flows, adRows, httpActions, httpConnections] = await Promise.all([
     prisma.customerTag.findMany({ where: { companyId }, select: { id: true, name: true } }),
     prisma.crm.findMany({ where: { companyId }, select: { id: true, name: true } }),
     prisma.crmColumn.findMany({ where: { crm: { companyId } }, select: { id: true, name: true, crmId: true } }),
     prisma.product.findMany({ where: { companyId }, select: { id: true, name: true, durationMin: true } }),
     prisma.chatFlow.findMany({ where: { companyId }, select: { id: true, name: true } }),
     prisma.adCatalogEntry.findMany({ where: { companyId }, select: { id: true, description: true } }),
+    prisma.httpAction.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    prisma.httpConnection.findMany({ where: { companyId }, select: { id: true, name: true } }),
   ]);
-  return { tags, boards, columns, products, flows, ads: adRows.map((a) => ({ id: a.id, name: a.description })) };
+  return { tags, boards, columns, products, flows, ads: adRows.map((a) => ({ id: a.id, name: a.description })), httpActions, httpConnections };
 }
 
 const norm = (v: string) => v.trim().toLowerCase();
@@ -292,6 +299,28 @@ function resolveFlowReferences(rawNodes: LooseNode[], cat: RefCatalog): { nodes:
         }
         delete data.producto;
         if (n.type === "validate-payment" && data.productId && !data.amountMode) data.amountMode = "product";
+        break;
+      }
+      case "http-request": {
+        if (typeof data.accion === "string" && data.accion.trim()) {
+          const a = findNamed(cat.httpActions, data.accion);
+          if (!a) errors.push(`${label}: la acción HTTP «${data.accion}» no existe (listar_acciones_http)`);
+          else data.actionId = a.id;
+        }
+        delete data.accion;
+        const req = data.request && typeof data.request === "object" ? (data.request as Record<string, unknown>) : null;
+        if (req && typeof req.conexion === "string" && req.conexion.trim()) {
+          const c = findNamed(cat.httpConnections, req.conexion);
+          if (!c) errors.push(`${label}: la conexión «${req.conexion}» no existe (se crea en Integraciones → Acciones HTTP)`);
+          else req.connectionId = c.id;
+          delete req.conexion;
+        }
+        if (req) {
+          const hdrs = Array.isArray(req.headers) ? (req.headers as Array<{ key?: unknown }>) : [];
+          if (hdrs.some((h) => typeof h?.key === "string" && /^(authorization|x-api-key|api-key)$/i.test(h.key))) {
+            errors.push(`${label}: no pongas credenciales en headers; crea una conexión en Integraciones → Acciones HTTP y úsala con {conexion}`);
+          }
+        }
         break;
       }
       case "condition": {
@@ -375,6 +404,12 @@ export async function checkFlowReferences(
       case "validate-payment": {
         const d = n.data as ValidatePaymentData;
         if (d.productId && !cat.products.some((x) => x.id === d.productId)) errors.push(`${label}: productId no pertenece a este negocio`);
+        break;
+      }
+      case "http-request": {
+        const d = n.data as HttpRequestData;
+        if (d.actionId && !cat.httpActions.some((a) => a.id === d.actionId)) errors.push(`${label}: actionId no pertenece a este negocio`);
+        if (d.request?.connectionId && !cat.httpConnections.some((c) => c.id === d.request!.connectionId)) errors.push(`${label}: connectionId no pertenece a este negocio`);
         break;
       }
       case "flow-control": {
@@ -686,6 +721,12 @@ export async function describeFlow(
       }
       case "book-appointment":
         return `Agendar cita: «${nameOf(cat.products, (n.data as BookAppointmentData).productId)}»`;
+      case "http-request": {
+        const h = n.data as HttpRequestData;
+        const v = h.responseVar?.trim() || "api";
+        if (h.actionId) return `Petición HTTP: acción «${nameOf(cat.httpActions, h.actionId)}» → {{${v}.…}}`;
+        return `Petición HTTP: ${h.request?.method ?? "POST"} ${short(h.request?.url ?? "")} → {{${v}.…}}`;
+      }
       case "crm-move": {
         const m = n.data as CrmMoveData;
         return `Mover en CRM → tablero «${nameOf(cat.boards, m.crmId)}», columna «${nameOf(cat.columns, m.crmColumnId)}»`;
