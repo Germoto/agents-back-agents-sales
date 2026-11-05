@@ -17,6 +17,7 @@ import { loadWhatsappSender, sendText, sendMedia, sendReaction, sendTyping, webS
 import { applyFirma } from "./firma";
 import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
 import { normalizePhoneDigits } from "../../lib/identifier";
+import { decodeEntities } from "../../lib/html-entities";
 import type { ChatMessage } from "../../lib/openai";
 
 /** Estado conversacional persistido en Conversation.state (equivalente al customer.* de n8n). */
@@ -288,7 +289,8 @@ export async function recordMessage(opts: {
       customerId: opts.customerId,
       conversationId: opts.conversationId,
       role: opts.role,
-      message: opts.message ?? null,
+      // Nunca guardar entidades HTML (`&quot;`): venga de donde venga, el texto queda limpio.
+      message: opts.message ? decodeEntities(opts.message) : null,
       mediaUrl: opts.mediaUrl ?? null,
       mediaType: opts.mediaType ?? null,
       fileName: opts.fileName ?? null,
@@ -1207,6 +1209,8 @@ export function pollFieldsOf(rawPayload: unknown): { poll?: { question: string; 
 function serializeMessage({ gatewayId, rawPayload, quotedWamid, ...r }: MessageRow, quotedIds: Map<string, string> = new Map()) {
   return {
     ...r,
+    // Mensajes viejos guardados con `&quot;` (antes del arreglo): se muestran limpios.
+    message: r.message ? decodeEntities(r.message) : r.message,
     wamid: whatsappIdOf({ wamid: r.wamid, gatewayId }),
     // Id interno del mensaje citado (si vive en esta conversación): el panel salta a él.
     quotedMessageId: quotedWamid ? (quotedIds.get(quotedWamid) ?? null) : null,
@@ -1297,7 +1301,14 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
     const isHuman = r.role === "ADMIN";
     const role: "user" | "assistant" = isUser ? "user" : "assistant";
 
-    let content = (r.message ?? "").trim();
+    let content = decodeEntities((r.message ?? "").trim());
+    // Imagen/video CON texto: el modelo debe saber que hubo un adjunto (si no, solo ve el
+    // caption — p. ej. "[@Cliente]" — y trata una captura de pago como un mensaje vacío).
+    if (content && r.mediaUrl && isUser) {
+      const mk = (r.mediaType ?? "").toLowerCase();
+      if (mk === "image" || mk === "") content = `[el cliente envió una imagen con este texto] ${content}`;
+      else if (mk === "video") content = `[el cliente envió un video con este texto] ${content}`;
+    }
     if (!content && r.mediaUrl) {
       const mediaKind = (r.mediaType ?? "").toLowerCase();
       const isAudio = mediaKind === "audio";

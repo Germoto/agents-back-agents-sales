@@ -37,7 +37,7 @@ import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type Wh
 import { readReceiptImage } from "./receipt-vision";
 import { describeSticker } from "./sticker-vision";
 import { fulfillPendingDeliveryEmail } from "./email-delivery";
-import { runAgentTurn } from "./agent-runtime";
+import { runAgentTurn, isInternalNote } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
 import { alertAiProviderFailure, notifyAiProviderRecovered } from "./ai-alerts";
 import { notifyHumanChatMessage } from "./human-chat-alert";
@@ -886,6 +886,11 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
 
   // Enviar y registrar el texto final (tras una pausa si ya se envió algo, para
   // que llegue DESPUÉS de la multimedia).
+  // Red final: un comentario interno del modelo NUNCA llega al cliente.
+  if (finalText && isInternalNote(finalText)) {
+    console.warn(`[agent] nota interna descartada (convo=${conversationId}): ${finalText.slice(0, 200)}`);
+    finalText = "";
+  }
   if (finalText) {
     if (ctx.outbox.length) await sleep(gapMs);
     await deliver(sender, customerPhone, { kind: "text", text: finalText }, ctx);
@@ -1441,11 +1446,14 @@ async function handleInboundImage(
 
   // CASO B — no es comprobante: anotar la descripción y dejar que el agente converse.
   if (!treatAsReceipt) {
-    const hadCaption = !!(inbound.text && inbound.text.trim());
-    if (!hadCaption && receipt?.description) {
-      // El cliente mandó la imagen sin texto: anotamos qué muestra para que el agente
-      // (texto-only) responda en contexto en vez de asumir que es un pago.
-      await annotateMessageText(userMessageId, `[El cliente envió una imagen que muestra: ${receipt.description}]`);
+    const caption = (inbound.text ?? "").trim();
+    if (receipt?.description) {
+      // Anotamos qué muestra la imagen para que el agente (texto-only) responda en
+      // contexto en vez de asumir que es un pago. Con caption, se conserva y se suma.
+      await annotateMessageText(
+        userMessageId,
+        caption ? `${caption}\n[La imagen muestra: ${receipt.description}]` : `[El cliente envió una imagen que muestra: ${receipt.description}]`,
+      );
     }
     console.log(`[agent] imagen de ${fromPhone}: NO es comprobante (desc="${receipt?.description ?? "-"}"); el agente la interpreta en contexto`);
     return;

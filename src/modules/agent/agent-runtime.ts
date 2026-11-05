@@ -34,6 +34,24 @@ const TRAILING_ASSISTANT_NOTE =
   "[Sistema: el cliente escribió sus últimos mensajes MIENTRAS respondías, así que tu última respuesta no los tuvo en cuenta. " +
   `Responde ahora lo que haya quedado sin atender. Si tu última respuesta ya lo cubre todo, contesta exactamente ${NO_REPLY_TOKEN} (sin nada más).]`;
 
+/**
+ * ¿El texto es un comentario INTERNO del modelo y no un mensaje para el cliente?
+ * (notas entre corchetes, auto-correcciones, narración del tipo "el cliente envió…").
+ * Nunca deben llegar al cliente.
+ */
+const INTERNAL_NOTE_RE =
+  /(respuesta vac[ií]a|mi respuesta anterior|respuesta anterior (tuvo|ten[ií]a|fue)|el cliente (solo |s[oó]lo )?(envi[oó]|escribi[oó]|mand[oó])|nota interna|no hay nada nuevo que|lo [uú]ltimo que me dijiste fue|\(sin respuesta\)|\bSIN_RESPUESTA\b.+|.+\bSIN_RESPUESTA\b)/i;
+export function isInternalNote(text: string | null | undefined): boolean {
+  const t = (text ?? "").trim();
+  if (!t) return false;
+  // Todo el mensaje es UNA sola nota entre corchetes: "[Respuesta vacía: …]".
+  if (/^\[[^\]]*\]$/.test(t) && t.length > 12) return true;
+  return INTERNAL_NOTE_RE.test(t);
+}
+
+const INTERNAL_NOTE_RETRY =
+  `Tu respuesta anterior era un comentario interno y NO se envió al cliente. Escribe SOLO el mensaje que verá el cliente (natural, sin corchetes ni comentarios sobre la conversación), o exactamente ${NO_REPLY_TOKEN} si no corresponde decir nada.`;
+
 /** Texto final del modelo → lo que se envía ("" si contestó NO_REPLY_TOKEN). */
 function finalReply(text: string | null | undefined): string {
   const t = (text ?? "").trim();
@@ -205,6 +223,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     console.log(`[agent] historial termina en el bot (cliente escribió durante la respuesta): nota de cierre convo=${ctx.conversationId}`);
   }
 
+  let internalNoteRetried = false;
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await chatCompletion({
       apiKey,
@@ -248,6 +267,18 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     // cliente ya se gestionó por fuera (auto-validación), para no tapar ese
     // mensaje con el genérico "tuve un problema".
     const final = finalReply(res.content);
+    if (final && isInternalNote(final)) {
+      if (!internalNoteRetried) {
+        internalNoteRetried = true;
+        console.warn(`[agent] nota interna del modelo (reintento) convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+        messages.push({ role: "user", content: INTERNAL_NOTE_RETRY });
+        continue;
+      }
+      console.warn(`[agent] nota interna descartada tras reintento convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+      return "";
+    }
+    // Tras descartar una nota interna, el silencio es la respuesta correcta (sin el genérico).
+    if (internalNoteRetried && !final) return "";
     if (trailingAssistant && !final) return "";
     return final || (suppressFallback(ctx, history) ? "" : FALLBACK_TEXT);
   }
@@ -265,6 +296,10 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   }).catch(() => null);
 
   const closingText = finalReply(closing?.content);
+  if (closingText && isInternalNote(closingText)) {
+    console.warn(`[agent] nota interna descartada en el cierre convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
+    return "";
+  }
   if (trailingAssistant && !closingText) return "";
   return closingText || (suppressFallback(ctx, history) ? "" : FALLBACK_TEXT);
 }
