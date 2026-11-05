@@ -1093,6 +1093,10 @@ export async function resetConversation(
     where: { id: conversationId },
     data: { state: {}, status: "OPEN", botPaused: false, lastInboundId: null },
   });
+  // Acciones HTTP "una vez por cliente": reiniciar libera el bloqueo (el historial se conserva).
+  await prisma.httpActionRun
+    .updateMany({ where: { companyId, customerId, idempotencyKey: { startsWith: "agent:" } }, data: { idempotencyKey: null } })
+    .catch(() => undefined);
   socketService.emitToCompany(companyId, SOCKET_EVENTS.CONVERSATION_UPDATED, {
     conversationId,
     reset: true,

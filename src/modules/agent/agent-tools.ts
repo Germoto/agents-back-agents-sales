@@ -201,21 +201,27 @@ function httpActionToolDef(a: AgentHttpAction): ToolDefinition {
   };
 }
 
-const MAX_HTTP_ACTIONS_PER_TURN = 2;
+const MAX_HTTP_ACTIONS_PER_TURN = 3;
 
 /** Ejecuta una acción HTTP del agente (tool dinámica accion_<slug>). */
 async function runAgentHttpAction(ctx: TurnContext, action: AgentHttpAction, args: Record<string, unknown>): Promise<string> {
-  const calls = (ctx.toolsCalled ?? []).filter((n) => n.startsWith("accion_")).length;
-  if (calls >= MAX_HTTP_ACTIONS_PER_TURN) {
-    return JSON.stringify({ ok: false, error: "Límite de acciones externas por turno alcanzado.", nota: "Responde con lo que ya tienes; no reintentes en este turno." });
+  const slug = action.toolName.replace(/^accion_/, "");
+  const results = ctx.state.httpResults ?? {};
+  const resultHint = action.resultHint || "Usa estos datos en tu respuesta al cliente (cópialos tal cual); no inventes campos que no estén.";
+  // El runtime ya empujó ESTA llamada a toolsCalled: las anteriores son calls - 1.
+  const allCalls = (ctx.toolsCalled ?? []).filter((n) => n.startsWith("accion_"));
+  const previousCalls = Math.max(0, allCalls.length - 1);
+  // Misma acción repetida en el turno: devolver lo ya obtenido sin volver a llamar a la API.
+  if (allCalls.slice(0, -1).includes(action.toolName) && results[slug]) {
+    return JSON.stringify({ ok: true, repetida: true, datos: results[slug], nota: `Ya ejecutaste esta acción en este turno: usa estos datos, no la vuelvas a llamar. ${resultHint}` });
+  }
+  if (previousCalls >= MAX_HTTP_ACTIONS_PER_TURN) {
+    return JSON.stringify({ ok: false, error: `Ya ejecutaste ${MAX_HTTP_ACTIONS_PER_TURN} acciones externas en este turno.`, nota: "Responde al cliente con lo que ya tienes; si falta algo, continúa en el siguiente mensaje." });
   }
   const missing = action.params.filter((p) => p.required !== false && !String(args[p.name] ?? "").trim()).map((p) => p.name);
   if (missing.length) {
     return JSON.stringify({ ok: false, error: `Faltan datos: ${missing.join(", ")}`, nota: `Pídele al cliente ${missing.join(", ")} en UNA línea y vuelve a llamar.` });
   }
-  const slug = action.toolName.replace(/^accion_/, "");
-  const results = ctx.state.httpResults ?? {};
-  const resultHint = action.resultHint || "Usa estos datos en tu respuesta al cliente (cópialos tal cual); no inventes campos que no estén.";
 
   if (ctx.simulate) {
     const vars: FlatVars = { [`${action.responseVar}.status`]: "200", [`${action.responseVar}.ok`]: "true", [`${action.responseVar}.body`]: "{simulado}" };
@@ -253,15 +259,21 @@ async function runAgentHttpAction(ctx: TurnContext, action: AgentHttpAction, arg
       });
     }
     ctx.state.httpResults = { ...results, [slug]: result.vars };
+    if (result.reused) {
+      // "Una vez por cliente" ya usada: NO es un error. El agente aplica la regla del
+      // negocio para este caso (ofrecer el plan pagado, derivar…) con los datos previos a mano.
+      return JSON.stringify({
+        ok: true,
+        bloqueado: true,
+        motivo: "Esta acción es de una sola vez por cliente y ya se ejecutó para él.",
+        datosPrevios: result.vars,
+        nota: "NO la repitas ni digas que hubo un error. Aplica lo que indican las instrucciones del negocio para este caso (p. ej. ofrecer el plan pagado o derivar a un asesor). Si te sirven, reutiliza los datos previos.",
+      });
+    }
     // Memoria durable: las variables quedan en la ficha (como las del chatbot) para
     // turnos siguientes, flujos híbridos y la plantilla de entrega ({demo.license}).
     await mergeCustomerFlowVars(ctx.customerId, Object.fromEntries(Object.entries(result.vars).map(([k, v]) => [`${slug}.${k.replace(/^[^.]+\./, "")}`, v])));
-    return JSON.stringify({
-      ok: true,
-      ...(result.reused ? { yaEjecutada: true } : {}),
-      datos: result.vars,
-      nota: result.reused ? `Esta acción ya se había ejecutado para este cliente: estos son los mismos datos. ${resultHint}` : resultHint,
-    });
+    return JSON.stringify({ ok: true, datos: result.vars, nota: resultHint });
   } catch (err) {
     return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "error", nota: "Hubo un problema técnico; díselo al cliente sin inventar datos." });
   }
@@ -339,6 +351,8 @@ export interface TurnContext {
   customerFlowVars?: Record<string, string> | null;
   /** Acciones de CRM ya hechas por actualizar_crm en ESTE turno (tope configurable). */
   crmActionsThisTurn?: number;
+  /** Posición del aviso de CRM en adminNotices (se fusiona si la tool se llama otra vez en el turno). */
+  crmNoticeIndex?: number;
   /** Resultados que devolvió Drive (buscar_en_drive / obtener_muestra) en ESTE turno: con
    *  resultados, derivar_humano por CONSULTA se rechaza (el agente sí puede responder). */
   driveHitsThisTurn?: number;
@@ -3614,15 +3628,22 @@ export async function executeTool(
         });
       }
       const moveTo = target && !sameColumn ? target : null;
-      const tagIds = addTags.filter((t): t is NonNullable<typeof t> => !!t).map((t) => t.id);
-      const removeTagIds = removeTags.filter((t): t is NonNullable<typeof t> => !!t).map((t) => t.id);
+      // Delta real de etiquetas: no "agregar" las que ya tiene ni "quitar" las que no tiene
+      // (si no, cada llamada repetida generaba un aviso al dueño sin cambiar nada).
+      const owned = new Set(
+        (await prisma.customerTagLink.findMany({ where: { customerId: ctx.customerId }, select: { tagId: true } }).catch(() => [])).map((l) => l.tagId),
+      );
+      const addTagsDelta = addTags.filter((t): t is NonNullable<typeof t> => !!t && !owned.has(t.id));
+      const removeTagsDelta = removeTags.filter((t): t is NonNullable<typeof t> => !!t && owned.has(t.id));
+      const tagIds = addTagsDelta.map((t) => t.id);
+      const removeTagIds = removeTagsDelta.map((t) => t.id);
       if (!moveTo && !tagIds.length && !removeTagIds.length) {
-        return JSON.stringify({ ok: true, unchanged: true, note: `El cliente ya está en «${target!.name}»; no hay nada que cambiar. No lo menciones al cliente.` });
+        return JSON.stringify({ ok: true, unchanged: true, note: target ? `El cliente ya está en «${target.name}» y ya tiene esas etiquetas; no hay nada que cambiar. No lo menciones al cliente.` : "El cliente ya tenía esas etiquetas; no hay nada que cambiar. No lo menciones al cliente." });
       }
       const resumen =
         (moveTo ? `movido a «${moveTo.name}»${current ? ` (antes «${current.name}»)` : ""}` : "") +
-        (tagIds.length ? `${moveTo ? " · " : ""}etiquetas +${addTags.map((t) => t!.name).join(", ")}` : "") +
-        (removeTagIds.length ? ` · etiquetas −${removeTags.map((t) => t!.name).join(", ")}` : "");
+        (tagIds.length ? `${moveTo ? " · " : ""}etiquetas +${addTagsDelta.map((t) => t.name).join(", ")}` : "") +
+        (removeTagIds.length ? ` · etiquetas −${removeTagsDelta.map((t) => t.name).join(", ")}` : "");
       ctx.crmActionsThisTurn = (ctx.crmActionsThisTurn ?? 0) + 1;
       if (ctx.simulate) {
         ctx.adminNotices.push(`🗂️ (Simulación) El agente habría actualizado el CRM: ${resumen}. Motivo: “${motivo}”.`);
@@ -3644,7 +3665,13 @@ export async function executeTool(
         text: `🤖 Agente IA (CRM «${tool.board.name}»): ${resumen}. Motivo: “${motivo}”.`,
       }).catch((err) => console.error("[agent] nota de actualizar_crm falló:", err instanceof Error ? err.message : err));
       if (tool.notifyOwner) {
-        ctx.adminNotices.push(`🗂️ El agente actualizó el CRM de ${ctx.customerPhone}: ${resumen}. Motivo: “${motivo}”. Si no corresponde, corrígelo desde el CRM.`);
+        // Un solo aviso de CRM por turno: si ya hay uno, se fusiona el resumen.
+        const text = `🗂️ El agente actualizó el CRM de ${ctx.customerPhone}: ${resumen}. Motivo: “${motivo}”. Si no corresponde, corrígelo desde el CRM.`;
+        if (ctx.crmNoticeIndex != null && ctx.adminNotices[ctx.crmNoticeIndex]) {
+          ctx.adminNotices[ctx.crmNoticeIndex] = ctx.adminNotices[ctx.crmNoticeIndex].replace(". Si no corresponde", ` · ${resumen}. Si no corresponde`);
+        } else {
+          ctx.crmNoticeIndex = ctx.adminNotices.push(text) - 1;
+        }
       }
       return JSON.stringify({ ok: true, resumen, note: "Listo. NO le digas al cliente que lo moviste o etiquetaste; sigue la conversación con naturalidad." });
     }

@@ -38,7 +38,21 @@ export const createConnectionSchema = z.object({
 });
 export type CreateConnectionDto = z.infer<typeof createConnectionSchema>;
 
-export const updateConnectionSchema = createConnectionSchema.partial();
+/** Edición PARCIAL: todo opcional y SIN defaults (con `.partial()` Zod sí aplicaba los defaults y pisaba campos). */
+export const updateConnectionSchema = z.object({
+  name: z.string().trim().min(2, "Ingresa un nombre").max(80).optional(),
+  baseUrl: z
+    .string()
+    .trim()
+    .max(500)
+    .refine((v) => v === "" || /^https:\/\/[^\s]+$/i.test(v), "La URL base debe empezar con https://")
+    .optional(),
+  authType: z.enum(HTTP_AUTH_TYPES).optional(),
+  authName: z.string().trim().max(100).optional().nullable(),
+  authSecret: z.string().max(4000).optional().nullable(),
+  headers: headersMapSchema.optional(),
+  timeoutMs: z.coerce.number().int().min(1000).max(30000).optional(),
+});
 export type UpdateConnectionDto = z.infer<typeof updateConnectionSchema>;
 
 export const agentParamsSchema = z
@@ -76,7 +90,25 @@ export const createActionSchema = httpRequestSchema.extend({
 });
 export type CreateActionDto = z.infer<typeof createActionSchema>;
 
-export const updateActionSchema = createActionSchema.partial();
+/** Edición PARCIAL: todo opcional y SIN defaults (ver updateConnectionSchema). */
+export const updateActionSchema = z.object({
+  connectionId: z.string().uuid().optional().nullable(),
+  method: z.enum(HTTP_METHODS).optional(),
+  url: z.string().trim().min(1, "Ingresa la URL").max(2000).optional(),
+  query: kvListSchema.optional(),
+  headers: kvListSchema.optional(),
+  bodyType: z.enum(HTTP_BODY_TYPES).optional(),
+  body: z.string().max(16_000).optional().nullable(),
+  responseVar: responseVarSchema.optional(),
+  retries: z.coerce.number().int().min(0).max(2).optional(),
+  name: z.string().trim().min(2, "Ingresa un nombre").max(80).optional(),
+  description: z.string().trim().max(500).optional().nullable(),
+  agentEnabled: z.boolean().optional(),
+  agentDescription: z.string().trim().max(600).optional().nullable(),
+  agentParams: agentParamsSchema.optional(),
+  oncePerCustomer: z.boolean().optional(),
+  agentResultHint: z.string().trim().max(400).optional().nullable(),
+});
 export type UpdateActionDto = z.infer<typeof updateActionSchema>;
 
 export const idParamsSchema = z.object({ id: z.string().uuid() });

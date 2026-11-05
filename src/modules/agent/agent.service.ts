@@ -934,7 +934,7 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
   if (ctx.adminNotices.length && waSender) {
     const adminPhone = (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "");
     if (adminPhone) {
-      for (const notice of ctx.adminNotices) {
+      for (const notice of Array.from(new Set(ctx.adminNotices))) {
         try {
           await sendText(waSender, adminPhone, notice);
         } catch {

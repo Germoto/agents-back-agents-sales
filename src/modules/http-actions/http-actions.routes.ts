@@ -22,6 +22,7 @@ import {
   listActions,
   listConnections,
   listRuns,
+  releaseRun,
   testAction,
   testInline,
   updateAction,
@@ -120,6 +121,15 @@ router.get(
     const q = req.query as unknown as { actionId?: string; page: number; limit: number };
     const { items, hasMore } = await listRuns(req.user!.companyId, { actionId: q.actionId, page: q.page, limit: q.limit });
     res.json({ success: true, data: items, hasMore });
+  }),
+);
+
+// Permitir de nuevo una acción "una vez por cliente" (quita la llave de idempotencia de esa ejecución).
+router.post(
+  "/runs/:id/release",
+  validate({ params: idParamsSchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    res.json({ success: true, data: await releaseRun(req.user!.companyId, String(req.params.id)) });
   }),
 );
 

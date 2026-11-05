@@ -196,9 +196,20 @@ export async function createAction(companyId: string, dto: CreateActionDto): Pro
 }
 
 export async function updateAction(companyId: string, id: string, dto: UpdateActionDto): Promise<HttpActionView> {
-  const existing = await prisma.httpAction.findFirst({ where: { id, companyId }, select: { id: true, name: true, agentEnabled: true } });
+  const existing = await prisma.httpAction.findFirst({ where: { id, companyId }, select: { id: true, name: true, agentEnabled: true, body: true, bodyType: true } });
   if (!existing) throw new AppError("Acción no encontrada", 404);
   if (dto.connectionId !== undefined) await assertConnection(companyId, dto.connectionId);
+  // Coherencia cuerpo/tipo: una edición parcial no debe dejar la acción inservible.
+  const nextType = dto.bodyType ?? existing.bodyType;
+  const nextBody = dto.body !== undefined ? dto.body : existing.body;
+  if (dto.body !== undefined && !(nextBody ?? "").trim() && nextType !== "NONE") {
+    throw new AppError("Para quitar el cuerpo manda bodyType 'NONE'; si solo querías cambiar otra cosa, no envíes body.", 422);
+  }
+  if (dto.bodyType !== undefined && dto.body === undefined && (existing.body ?? "").trim()) {
+    const looksJson = /^\s*[[{]/.test(existing.body ?? "");
+    if (nextType === "JSON" && !looksJson) throw new AppError("El cuerpo guardado no es JSON: si cambias bodyType a JSON manda también el body.", 422);
+    if (nextType === "FORM" && looksJson) throw new AppError("El cuerpo guardado es JSON, no un formulario: manda también el body.", 422);
+  }
   await assertUniqueToolName(companyId, dto.name ?? existing.name, dto.agentEnabled ?? existing.agentEnabled, id);
   const data: Prisma.HttpActionUpdateInput = {};
   if (dto.connectionId !== undefined) data.connection = dto.connectionId ? { connect: { id: dto.connectionId } } : { disconnect: true };
@@ -356,13 +367,33 @@ export async function listRuns(companyId: string, opts: { actionId?: string; pag
       request: true,
       response: true,
       error: true,
+      idempotencyKey: true,
       createdAt: true,
       action: { select: { name: true } },
     },
   });
   const hasMore = rows.length > take;
-  const items = (hasMore ? rows.slice(0, take) : rows).map((r) => ({ ...r, actionName: r.action?.name ?? null, action: undefined }));
+  // `bloqueado`: la ejecución aún sostiene una llave de idempotencia (una vez por cliente / por venta).
+  const items = (hasMore ? rows.slice(0, take) : rows).map(({ idempotencyKey, ...r }) => ({ ...r, actionName: r.action?.name ?? null, action: undefined, bloqueado: Boolean(idempotencyKey), bloqueoTipo: idempotencyKey ? idempotencyKey.split(":")[0] : null }));
   return { items, hasMore };
+}
+
+/** Quita la llave de idempotencia de un run (permite ejecutar de nuevo una acción "una vez por cliente"). */
+export async function releaseRun(companyId: string, runId: string) {
+  const run = await prisma.httpActionRun.findFirst({ where: { id: runId, companyId }, select: { id: true, idempotencyKey: true } });
+  if (!run) throw new AppError("Ejecución no encontrada", 404);
+  if (!run.idempotencyKey) return { released: false };
+  await prisma.httpActionRun.update({ where: { id: run.id }, data: { idempotencyKey: null } });
+  return { released: true };
+}
+
+/** Libera el bloqueo "una vez por cliente" de una acción para un cliente concreto. */
+export async function releaseAgentLock(companyId: string, actionId: string, customerId: string) {
+  const r = await prisma.httpActionRun.updateMany({
+    where: { companyId, actionId, customerId, idempotencyKey: { startsWith: "agent:" } },
+    data: { idempotencyKey: null },
+  });
+  return { released: r.count };
 }
 
 /** Acciones expuestas al agente IA de un tenant (para buildBotConfig). */

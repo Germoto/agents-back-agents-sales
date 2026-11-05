@@ -470,7 +470,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     // capacidad; CUÁNDO usarlas lo dicen la descripción de cada acción y el prompt del dueño.
     ...(httpActions.length
       ? [
-          `- ACCIONES EXTERNAS del negocio (herramientas ${httpActions.map((a) => a.toolName).join(", ")}): llaman a la API del negocio (crear una licencia demo, una cuenta, consultar un estado…). Úsalas SOLO cuando el cliente lo pida o las instrucciones del negocio lo indiquen; antes pide los datos obligatorios que la herramienta señala. Copia al cliente los datos que devuelve tal cual (licencias, usuarios, enlaces); si responde ok:false, explica que hubo un problema técnico y ofrece otra vía, sin inventar datos ni reintentar solo.`,
+          `- ACCIONES EXTERNAS del negocio (herramientas ${httpActions.map((a) => a.toolName).join(", ")}): llaman a la API del negocio (crear una licencia demo, una cuenta, consultar un estado…). Úsalas SOLO cuando el cliente lo pida o las instrucciones del negocio lo indiquen; antes pide los datos obligatorios que la herramienta señala. Copia al cliente los datos que devuelve tal cual (licencias, usuarios, enlaces); si responde ok:false, explica que hubo un problema técnico y ofrece otra vía, sin inventar datos ni reintentar solo. Si responde bloqueado:true, esa acción ya se usó con este cliente (es de una sola vez): NO la reintentes ni digas que falló; sigue lo que indican las instrucciones del negocio para ese caso.`,
         ]
       : []),
     // Búsqueda en Drive: SOLO para negocios con API key y productos cuya entrega tiene links de Drive.
