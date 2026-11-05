@@ -8,6 +8,8 @@
  * scoping por companyId garantizados). Patrón heredado del copiloto de flujos.
  */
 
+import { createAction as createHttpAction, listActions as listHttpActions, listConnections as listHttpConnections, testAction as testHttpAction, updateAction as updateHttpAction } from "../http-actions/http-actions.service";
+import { createActionSchema as httpCreateActionSchema, updateActionSchema as httpUpdateActionSchema } from "../http-actions/http-actions.schemas";
 import type { Request, Response } from "express";
 import { env } from "../../config/env";
 import { prisma } from "../../lib/prisma";
@@ -1601,6 +1603,59 @@ export const TOOLS: ToolDefinition[] = [
       parameters: { type: "object", additionalProperties: false, properties: {} },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "listar_acciones_http",
+      description:
+        "ACCIONES HTTP (Integraciones → Acciones HTTP): lista las CONEXIONES (credenciales a APIs del negocio: nombre, URL base, tipo de auth; el secreto NUNCA se muestra) y las ACCIONES (peticiones guardadas: método, URL, conexión, variable de respuesta, si está disponible para el agente IA y sus parámetros, última ejecución y las claves de respuesta {{api.…}} de la última prueba). Úsala antes de poner una acción en un flujo (bloque http-request con {accion}), en la entrega de un producto (digitalDelivery.assignmentMode HTTP_ACTION + httpActionId) o para explicar qué puede hacer el agente. Solo lectura.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "probar_accion_http",
+      description:
+        "Ejecuta una acción HTTP guardada con datos de prueba (contacto ficticio) y devuelve el estado HTTP, la duración, el cuerpo recortado y las variables aplanadas ({{api.status}}, {{api.<campo>…}}) para que el dueño vea qué devuelve su API. Puedes pasar variables extra (ej. {\"param.correo\":\"ana@ejemplo.com\"}). Nunca devuelve secretos. Llama a la API real: avisa al dueño antes si la acción crea algo (una cuenta, una licencia).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["actionId"],
+        properties: {
+          actionId: { type: "string", description: "id de listar_acciones_http" },
+          variables: { type: "object", additionalProperties: { type: "string" }, description: "variables de entrada para la prueba (opcional)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "crear_accion_http",
+      description:
+        "Crea una ACCIÓN HTTP guardada (como el nodo HTTP Request de n8n) a partir de lo que describa el dueño o de un cURL: name, connectionId? (conexión EXISTENTE de listar_acciones_http; las conexiones con credencial se crean SOLO desde el panel: Integraciones → Acciones HTTP → Conexiones), method, url (https; admite {{nombre}}, {{telefono}}, {{correo}}, {{producto}}, {{precio}}, {{pedido}}, variables del flujo y {{param.<x>}}), query:[{key,value}], headers:[{key,value}] (NUNCA Authorization ni api keys: eso va en la conexión), bodyType JSON|FORM|RAW|NONE, body (JSON con variables), responseVar (default 'api'). Para exponerla al agente IA: agentEnabled=true, agentDescription (cuándo usarla, en lenguaje natural), agentParams [{name, description, required}] (datos que el agente pide al cliente → {{param.name}}), oncePerCustomer (ej. una demo por cliente), agentResultHint (qué decir con la respuesta). Luego pruébala con probar_accion_http. Llámala tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["data"],
+        properties: { data: { type: "object", description: "campos de la acción (ver descripción)" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "editar_accion_http",
+      description: "Edita una acción HTTP existente (mismos campos que crear_accion_http; data es PARCIAL). Llámala tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["actionId", "data"],
+        properties: { actionId: { type: "string" }, data: { type: "object", description: "campos a cambiar" } },
+      },
+    },
+  },
 ];
 
 /** Resuelve la URL que pasa el modelo a un adjunto REAL de la conversación.
@@ -1657,7 +1712,7 @@ function rubroGuide(vertical: string | undefined): string {
     case "STREAMER":
       return `Rubro STREAMING (cada producto = una plataforma/cuenta). ${COMMON_FIELDS} Además: category = plataforma (Netflix, Disney...); verticalData.plans = [{label, price}] para modalidades (mensual/anual, pantallas) y verticalData.durationDays (duración de la suscripción en días); digitalDelivery = {instructions (mensaje de entrega con el acceso), assignmentMode, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar), ${EMAIL_DELIVERY_FIELDS} (solo aplica en assignmentMode STATIC)}; RENOVACIÓN: reminderConfig.renewal = {enabled, daysBefore, message} (aviso al cliente N días antes del vencimiento).`;
     case "INFOPRODUCT":
-      return `Rubro INFOPRODUCTOS (cursos, ebooks, accesos). ${COMMON_FIELDS} Además: digitalDelivery = {instructions* (mensaje de entrega que incluye el link de acceso), link, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar: agradecimiento, bonus, instrucciones extra), ${EMAIL_DELIVERY_FIELDS}, storeInviteEnabled?, storeInviteText?}; benefits/faqs/objections completos son CLAVE para que el agente venda bien.`;
+      return `Rubro INFOPRODUCTOS (cursos, ebooks, accesos). ${COMMON_FIELDS} Además: digitalDelivery = {instructions* (mensaje de entrega que incluye el link de acceso; con HTTP_ACTION usa {api.campo} de la respuesta), link, assignmentMode? ('STATIC' default | 'MANUAL' | 'HTTP_ACTION' = una acción HTTP genera el acceso al confirmar el pago; requiere httpActionId de listar_acciones_http), httpActionId?, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar: agradecimiento, bonus, instrucciones extra), ${EMAIL_DELIVERY_FIELDS}, storeInviteEnabled?, storeInviteText?}; benefits/faqs/objections completos son CLAVE para que el agente venda bien.`;
     default:
       return `Rubro OTRO/general. ${COMMON_FIELDS} productType puede ser 'DIGITAL' o 'PHYSICAL'; si es físico agrega physicalDelivery; si es digital, digitalDelivery = {instructions* (mensaje de entrega con el link), followupMessages, ${EMAIL_DELIVERY_FIELDS}, storeInviteEnabled?, storeInviteText?}.`;
   }
@@ -4624,6 +4679,67 @@ export async function runCopilotTool(
       return { result: JSON.stringify({ total: subs.length, mostrados: rows.length, items: rows }), wrote: false };
     }
 
+    case "listar_acciones_http": {
+      const [conexiones, acciones] = await Promise.all([listHttpConnections(companyId), listHttpActions(companyId)]);
+      return {
+        result: JSON.stringify({
+          conexiones: conexiones.map((c) => ({ id: c.id, nombre: c.name, urlBase: c.baseUrl, auth: c.authType, secretoConfigurado: c.authSecretSet, acciones: c.actionsCount })),
+          acciones: acciones.map((a) => ({
+            id: a.id,
+            nombre: a.name,
+            descripcion: a.description,
+            conexion: a.connection?.name ?? null,
+            metodo: a.method,
+            url: a.url,
+            variableRespuesta: a.responseVar,
+            agente: a.agentEnabled ? { tool: a.toolName, cuando: a.agentDescription, parametros: a.agentParams, unaVezPorCliente: a.oncePerCustomer } : null,
+            ultimaEjecucion: a.lastRunAt ? { fecha: a.lastRunAt, ok: a.lastRunOk } : null,
+            clavesRespuesta: a.lastResponseKeys ?? null,
+          })),
+          nota: "En flujos: bloque http-request con {accion: nombre}. En productos: digitalDelivery.assignmentMode 'HTTP_ACTION' + httpActionId. Las conexiones con credencial se crean solo desde el panel (Integraciones → Acciones HTTP).",
+        }),
+        wrote: false,
+      };
+    }
+    case "probar_accion_http": {
+      const actionId = String(args.actionId ?? "").trim();
+      if (!actionId) return { result: JSON.stringify({ ok: false, error: "actionId requerido" }), wrote: false };
+      const extra = args.variables && typeof args.variables === "object" ? Object.fromEntries(Object.entries(args.variables as Record<string, unknown>).map(([k, v]) => [k, String(v ?? "")])) : {};
+      const r = await testHttpAction(companyId, actionId, extra);
+      return {
+        result: JSON.stringify({
+          ok: r.ok,
+          estadoHttp: r.httpStatus,
+          duracionMs: r.durationMs,
+          error: r.error,
+          cuerpo: r.body.slice(0, 1500),
+          variables: r.vars,
+          variablesEntrada: r.variablesEntrada,
+          nota: r.ok ? "Usa estas variables como {{clave}} en flujos o {clave} en el mensaje de entrega." : "Revisa URL, conexión y cuerpo; el historial de Integraciones guarda la petición enmascarada.",
+        }),
+        wrote: false,
+      };
+    }
+    case "crear_accion_http":
+    case "editar_accion_http": {
+      const raw = (args.data && typeof args.data === "object" ? args.data : {}) as Record<string, unknown>;
+      const hdrs = Array.isArray(raw.headers) ? (raw.headers as Array<{ key?: unknown }>) : [];
+      if (hdrs.some((h) => typeof h?.key === "string" && /^(authorization|x-api-key|api-key)$/i.test(h.key))) {
+        return { result: JSON.stringify({ ok: false, error: "No pongas credenciales en headers: el dueño debe crear una CONEXIÓN en Integraciones → Acciones HTTP y tú referenciarla con connectionId." }), wrote: false };
+      }
+      if (name === "crear_accion_http") {
+        const parsed = httpCreateActionSchema.safeParse(raw);
+        if (!parsed.success) return { result: JSON.stringify({ ok: false, error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") }), wrote: false };
+        const created = await createHttpAction(companyId, parsed.data);
+        return { result: JSON.stringify({ ok: true, accion: { id: created.id, nombre: created.name, tool: created.toolName }, nota: "Pruébala con probar_accion_http antes de usarla en un flujo o en la entrega." }), wrote: true };
+      }
+      const actionId = String(args.actionId ?? "").trim();
+      if (!actionId) return { result: JSON.stringify({ ok: false, error: "actionId requerido" }), wrote: false };
+      const parsed = httpUpdateActionSchema.safeParse(raw);
+      if (!parsed.success) return { result: JSON.stringify({ ok: false, error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") }), wrote: false };
+      const updated = await updateHttpAction(companyId, actionId, parsed.data);
+      return { result: JSON.stringify({ ok: true, accion: { id: updated.id, nombre: updated.name, tool: updated.toolName } }), wrote: true };
+    }
     case "listar_recursos": {
       const tipoRaw = String(args.tipo ?? "").toUpperCase();
       const tipo = (["IMAGE", "VIDEO", "AUDIO", "PDF", "OTHER"].includes(tipoRaw) ? tipoRaw : null) as LibraryResourceType | null;
@@ -4981,7 +5097,7 @@ const SYSTEM_GUIDE = [
   "MAPA DEL PANEL (menú lateral, cinco grupos siempre visibles): INICIO (Inicio, Dashboard), BANDEJA (Conversaciones, Comprobantes y la página del rubro: Pedidos / Reservas / Vencimientos), VENTAS (CRM, Productos, Tienda web, Campañas, Embudo), AUTOMATIZACIÓN (Agente IA, Flujos, Recordatorios, Respuestas rápidas) y CONFIGURACIÓN (Empresa, Pagos, Canales, Integraciones, Mi plan). Las páginas de configuración usan PESTAÑAS y SUB-PESTAÑAS en la URL (?tab=…&sub=…) y una sola barra flotante «Guardar cambios». Centro de ayuda está fijo al PIE del menú. En móvil hay un menú inferior con Inicio, Chats, Ventas, Agente y Más:",
   "- Inicio (/inicio): estado del sistema (WhatsApp, bot, comprobantes por revisar, chats con una persona, recordatorios atrasados, tienda web), checklist de puesta en marcha con % de avance (se oculta al 100%), cifras de hoy, atajos y la lista de chats que necesitan una persona. /activacion redirige aquí.",
   "- Dashboard (/dashboard): solo métricas, con filtro de periodo/producto y pestañas Resumen · Embudo · Por anuncio · Pagos y entregas · Reportes programados (los reportes automáticos por correo/WhatsApp se configuran AQUÍ, ya no en Empresa).",
-  "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. CHATS FAVORITOS (distinto de fijar): «Marcar favorito» en el menú ⋯ pone un corazón en la lista y el filtro «Solo favoritos» los aísla (favorito en listar_conversaciones, filtro favoritos:true). MENSAJES DESTACADOS: la estrella de cada burbuja (hover en escritorio, mantener pulsado en móvil) lo marca y la pestaña «Destacados» del panel lateral los lista y salta al mensaje (destacado:true en leer_conversacion). CITAS: tocar la cita de un mensaje salta al mensaje citado. STICKERS: los que manda el cliente se ven sin burbuja y se guardan en la galería del negocio con «Guardar sticker»; el asesor envía stickers desde el botón del composer (galería + «Subir imagen», que se convierte sola a WebP 512×512); por aquí NO se envían stickers. El agente IA SÍ 've' los stickers que manda el cliente: visión los describe en una frase (personaje, emoción, texto) y responde en contexto; no pasan por la lectura de comprobantes. NOTAS vs RESPUESTAS DEL FLUJO: la pestaña Notas son notas privadas del equipo (el agente NO las ve); las «Respuestas del flujo» (lo que el cliente contestó en bloques de pregunta de un flujo, chips 📝 en las tarjetas del CRM y lista en Contacto) SÍ entran al contexto del agente y se borran con la × (en el CRM o en Contacto) o con gestionar_cliente_crm quitarRespuestasFlujo. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}. ARCHIVOS: se puede subir y enviar cualquier archivo pdf, xml, xls/xlsx, doc/docx, zip, rar, 7z, txt, csv o pptx (hasta 100 MB; imagen/video/audio hasta 50 MB) desde Recursos, respuestas rápidas, campañas, recordatorios, flujos (bloque Enviar documento), presentación y entrega del producto, tienda y el chat; el cliente lo recibe como documento descargable con su nombre. En Meta solo txt/xls/xlsx/doc/docx/ppt/pptx/pdf viajan como documento; zip/rar/7z/csv/xml se envían como enlace. El agente IA ve los archivos que manda el cliente como '[el cliente envió un archivo: nombre]' (no los abre) y puede enviar los del producto con enviar_multimedia. PESTAÑA RECURSOS del chat (junto a Contacto/Respuestas/Notas): lista la BIBLIOTECA de multimedia del negocio — archivos de productos + multimedia de recordatorios (generales y por producto), banner y mensajes adicionales de presentación y mensajes post-venta — con su origen, filtro por producto y buscador; el asesor la envía al cliente con un clic, con o sin su descripción (al enviarla, el panel resuelve las variantes {a|b} y {nombre}); la misma biblioteca se consulta por aquí con listar_recursos. AVISOS AL DUEÑO: cuando el agente deriva a humano (consulta sin respuesta, negociación, reclamo, pago, flujo, campaña) y cuando un cliente escribe en un chat en atención humana, el dueño recibe un WhatsApp con el link directo al chat (flowapp.pe/conversaciones?id=…). TOMAR EL CONTROL DE UN CHAT DESDE AQUÍ (lo mismo que hace el asesor en el panel): leer_conversacion (trae el id de cada mensaje) → enviar_mensaje_cliente (texto y/o imagen/video/audio/archivo por URL, citando con citarMensajeId; por defecto pasa el chat a atención humana) o enviar_respuesta_rapida (/comando con sus acciones) o reaccionar_mensaje (emoji) → programar_recordatorio_cliente para un seguimiento a una hora → al terminar, atencion_humana {activar:false} REACTIVA el bot (si no, el agente IA no vuelve a responderle). Reactivar el bot (desde el panel, con BOT <número> por WhatsApp o con atencion_humana) limpia la derivación: el agente retoma con lo que respondió el asesor y NO vuelve a derivar por el mismo motivo (solo si el cliente pide una persona o hay un problema nuevo). atencion_humana {activar:true} pausa el bot sin escribir. iniciar_conversacion abre un chat con un número nuevo (solo tras confirmación; en Meta no se puede sin plantilla). reiniciar_conversacion borra el historial (irreversible, solo tras confirmación). Límites automáticos de los envíos del copiloto: nunca a clientes noContactar; en Meta solo dentro de la ventana de 24 h desde el último mensaje del cliente (fuera de ella usa un recordatorio o campaña con plantilla); ritmo anti-bloqueo igual al de los recordatorios (tope por hora y separación entre clientes distintos; si devuelve reintentarEnSeg, espera). La firma del negocio se agrega sola a cada mensaje. Escribe como una persona del negocio: corto, una idea y una pregunta; precios, pagos y enlaces SOLO de ver_producto/ver_configuracion/ver_tienda, nunca inventados.",
+  "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. CHATS FAVORITOS (distinto de fijar): «Marcar favorito» en el menú ⋯ pone un corazón en la lista y el filtro «Solo favoritos» los aísla (favorito en listar_conversaciones, filtro favoritos:true). MENSAJES DESTACADOS: la estrella de cada burbuja (hover en escritorio, mantener pulsado en móvil) lo marca y la pestaña «Destacados» del panel lateral los lista y salta al mensaje (destacado:true en leer_conversacion). CITAS: tocar la cita de un mensaje salta al mensaje citado. STICKERS: los que manda el cliente se ven sin burbuja y se guardan en la galería del negocio con «Guardar sticker»; el asesor envía stickers desde el botón del composer (galería + «Subir imagen», que se convierte sola a WebP 512×512); por aquí NO se envían stickers. El agente IA SÍ 've' los stickers que manda el cliente: visión los describe en una frase (personaje, emoción, texto) y responde en contexto; no pasan por la lectura de comprobantes. NOTAS vs RESPUESTAS DEL FLUJO: la pestaña Notas son notas privadas del equipo (el agente NO las ve); las «Respuestas del flujo» (lo que el cliente contestó en bloques de pregunta de un flujo, chips 📝 en las tarjetas del CRM y lista en Contacto) SÍ entran al contexto del agente y se borran con la × (en el CRM o en Contacto) o con gestionar_cliente_crm quitarRespuestasFlujo. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}. ACCIONES HTTP (Integraciones → Acciones HTTP, como el nodo HTTP Request de n8n): el dueño guarda CONEXIONES (URL base + credencial cifrada: Bearer, API key en cabecera o query, Basic; el secreto solo se escribe en el panel y nunca se muestra) y ACCIONES (peticiones con método, URL, query, cabeceras y cuerpo JSON con variables {{nombre}}, {{telefono}}, {{correo}}, {{producto}}, {{precio}}, {{pedido}}, variables del flujo y {{param.x}}). La respuesta queda aplanada en variables {{api.status}}, {{api.body}}, {{api.<campo>.<subcampo>}} (responseVar cambia el prefijo). Se usan en TRES lugares: (1) FLUJOS, bloque «Petición HTTP» (http-request, salidas success/error); (2) ENTREGA DEL PRODUCTO, digitalDelivery.assignmentMode 'HTTP_ACTION' + httpActionId: al confirmar el pago se llama a la API y el mensaje de entrega usa {api.campo}; si la API falla el cliente recibe 'un asesor te lo envía', el dueño un aviso con el error y la venta queda en entrega manual; no se genera dos veces para la misma venta; (3) AGENTE IA: una acción con agentEnabled se vuelve la herramienta accion_<slug> (agentDescription = cuándo usarla; agentParams = datos que pide al cliente; oncePerCustomer = una vez por cliente, p. ej. una licencia demo); CUÁNDO ofrecerla lo decide el prompt del dueño, no el sistema. Herramientas: listar_acciones_http, probar_accion_http (llama a la API real), crear_accion_http / editar_accion_http (sin credenciales en headers). El panel tiene «Importar cURL» y «Probar». Historial de ejecuciones en Integraciones → Acciones HTTP → Ejecuciones (secretos enmascarados). ARCHIVOS: se puede subir y enviar cualquier archivo pdf, xml, xls/xlsx, doc/docx, zip, rar, 7z, txt, csv o pptx (hasta 100 MB; imagen/video/audio hasta 50 MB) desde Recursos, respuestas rápidas, campañas, recordatorios, flujos (bloque Enviar documento), presentación y entrega del producto, tienda y el chat; el cliente lo recibe como documento descargable con su nombre. En Meta solo txt/xls/xlsx/doc/docx/ppt/pptx/pdf viajan como documento; zip/rar/7z/csv/xml se envían como enlace. El agente IA ve los archivos que manda el cliente como '[el cliente envió un archivo: nombre]' (no los abre) y puede enviar los del producto con enviar_multimedia. PESTAÑA RECURSOS del chat (junto a Contacto/Respuestas/Notas): lista la BIBLIOTECA de multimedia del negocio — archivos de productos + multimedia de recordatorios (generales y por producto), banner y mensajes adicionales de presentación y mensajes post-venta — con su origen, filtro por producto y buscador; el asesor la envía al cliente con un clic, con o sin su descripción (al enviarla, el panel resuelve las variantes {a|b} y {nombre}); la misma biblioteca se consulta por aquí con listar_recursos. AVISOS AL DUEÑO: cuando el agente deriva a humano (consulta sin respuesta, negociación, reclamo, pago, flujo, campaña) y cuando un cliente escribe en un chat en atención humana, el dueño recibe un WhatsApp con el link directo al chat (flowapp.pe/conversaciones?id=…). TOMAR EL CONTROL DE UN CHAT DESDE AQUÍ (lo mismo que hace el asesor en el panel): leer_conversacion (trae el id de cada mensaje) → enviar_mensaje_cliente (texto y/o imagen/video/audio/archivo por URL, citando con citarMensajeId; por defecto pasa el chat a atención humana) o enviar_respuesta_rapida (/comando con sus acciones) o reaccionar_mensaje (emoji) → programar_recordatorio_cliente para un seguimiento a una hora → al terminar, atencion_humana {activar:false} REACTIVA el bot (si no, el agente IA no vuelve a responderle). Reactivar el bot (desde el panel, con BOT <número> por WhatsApp o con atencion_humana) limpia la derivación: el agente retoma con lo que respondió el asesor y NO vuelve a derivar por el mismo motivo (solo si el cliente pide una persona o hay un problema nuevo). atencion_humana {activar:true} pausa el bot sin escribir. iniciar_conversacion abre un chat con un número nuevo (solo tras confirmación; en Meta no se puede sin plantilla). reiniciar_conversacion borra el historial (irreversible, solo tras confirmación). Límites automáticos de los envíos del copiloto: nunca a clientes noContactar; en Meta solo dentro de la ventana de 24 h desde el último mensaje del cliente (fuera de ella usa un recordatorio o campaña con plantilla); ritmo anti-bloqueo igual al de los recordatorios (tope por hora y separación entre clientes distintos; si devuelve reintentarEnSeg, espera). La firma del negocio se agrega sola a cada mensaje. Escribe como una persona del negocio: corto, una idea y una pregunta; precios, pagos y enlaces SOLO de ver_producto/ver_configuracion/ver_tienda, nunca inventados.",
   "- CONVERSACIONES (/conversaciones): la lista del panel busca y filtra en TODO el historial del negocio (nombre, teléfono, etapa, etiqueta, anuncio) con scroll infinito, y los mensajes de cada chat se cargan por tramos (los más recientes primero, «Cargar anteriores» arriba). En móvil: lista → chat (atrás vuelve a la lista) → herramientas en hoja inferior (Contacto, Respuestas, Notas, Destacados, Recursos); el menú ⋯ del chat tiene Mensajes destacados, Fijar, Marcar favorito, Etiquetas, Recordatorio, No contactar, Fondo, Reiniciar y Eliminar; escribir en un chat con el bot activo toma el control automáticamente.\n" +
   "- BÚSQUEDA EN GOOGLE DRIVE (entrega): si la entrega de un producto digital (digitalDelivery.instructions / followupMessages) trae links de carpetas públicas de Drive, el servidor arma un ÍNDICE EN MEMORIA por producto (nombres, rutas, tamaños; nada en la base; se rehace al reiniciar, cada 12 h y cuando cambian los links; tope 30 000 entradas: packs enormes quedan 'parcial' y lo que falta se busca en vivo). El agente busca en TODOS los niveles con búsqueda aproximada (tool buscar_en_drive: mayúsculas, tildes, orden y errores pequeños no importan), lista carpetas paginadas (carpetaId + offset), saca UNA muestra directa (obtener_muestra: un archivo suelto, nunca carpeta; clasifica la coincidencia exacta/parcial/débil con `puntaje` 0-1 y NO da por encontrado lo débil —solo parecido de letras, ej. 'metallica' ≈ 'medallita'—: responde encontrado:false con `sugerencias` de carpetas/categorías cercanas; `minCoincidencia` ajusta el umbral, default parcial) y adjunta archivos pequeños (enviar_archivo_drive). Qué comparte antes/después del pago lo escribe el dueño en el PROMPT del agente (Agente → prompt/reglas o configurar_agente), sin reglas fijas; PERO el SISTEMA, por su cuenta, retira cualquier link de CARPETA de la entrega que el bot intente mandar a un cliente que no compró (deja nota 🔒 en el chat); las carpetas de muestra que el dueño puso en la ficha, FAQs, objeciones o recordatorios del producto siempre pasan, y los links de archivos sueltos no se tocan. Con resultados de Drive en el turno, el agente NO deriva por CONSULTA. Requiere carpetas 'cualquiera con el enlace' y la API key de Google de la plataforma (ver_configuracion → driveBusqueda muestra el estado del índice por producto; no la configura el dueño). El dueño prueba aquí con buscar_en_drive / obtener_muestra (reindexar=true fuerza el índice). Comillas: el sistema decodifica entidades HTML (&quot;) en mensajes entrantes y salientes.",
   "- COLA DE RECORDATORIOS: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delays desde ese momento). El worker respeta el tope por hora y el horario; si varios pasos de un cliente están vencidos envía solo el más reciente (activando el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y cancela los demás; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre pasos atrasados. listar_recordatorios_programados muestra el total real y los atrasados: si los atrasados crecen, la capacidad (tope/hora × horas) no cubre la demanda. cancelar_recordatorios cancela uno, una selección por ids o un lote por filtro (cliente, tipo, producto, atraso): en lote primero soloContar y confirmación del dueño. editar_recordatorio cambia el texto, la multimedia o la hora de UN recordatorio pendiente (en el panel: Recordatorios → Programados → ✎ Editar); para cambiar muchos, cambia la secuencia.\n" +

@@ -61,7 +61,8 @@ type ProductPayload = {
   digitalDelivery?: {
     link?: string;
     instructions?: string;
-    assignmentMode?: "STATIC" | "POOL_AUTO" | "MANUAL";
+    assignmentMode?: "STATIC" | "POOL_AUTO" | "MANUAL" | "HTTP_ACTION";
+    httpActionId?: string | null;
     emailEnabled?: boolean;
     emailSubject?: string | null;
     emailBody?: string | null;
@@ -305,6 +306,7 @@ async function writeProductGraph(tx: Prisma.TransactionClient, productId: string
       link: payload.digitalDelivery.link ?? "",
       instructions: payload.digitalDelivery.instructions ?? "",
       assignmentMode: payload.digitalDelivery.assignmentMode ?? "STATIC",
+      httpActionId: payload.digitalDelivery.assignmentMode === "HTTP_ACTION" ? (payload.digitalDelivery.httpActionId ?? null) : null,
       followupMessages: cleanFollowupList(payload.digitalDelivery.followupMessages),
       // Legacy single: el front ya no los envía → quedan en "".
       followupMessage: payload.digitalDelivery.followupMessage ?? "",

@@ -1189,6 +1189,8 @@ export async function recheckPayment(msg: {
  * recheckPayment, pero sin matching (la pasarela es la fuente de verdad).
  */
 export async function handleExternalPaymentApproved(opts: {
+  /** Comprobante creado para este pago (si el caller lo tiene). */
+  receiptId?: string | null;
   companyId: string;
   conversationId: string;
   productIds: string[];
@@ -1233,6 +1235,7 @@ export async function handleExternalPaymentApproved(opts: {
       config,
       state,
       productIds: opts.productIds,
+      receiptId: opts.receiptId ?? null,
     });
 
     if ("kind" in result && result.kind === "already") {

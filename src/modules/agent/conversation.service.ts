@@ -57,6 +57,8 @@ export interface ConversationState {
   /** Memoria durable: productos que el cliente YA compró y recibió (de comprobantes APROBADOS).
    *  Se recalcula cada turno; no depende del historial reciente (los últimos 16 mensajes). */
   purchasedProductIds?: string[];
+  /** Resultados de Acciones HTTP ejecutadas por el agente en este chat (por slug de acción): variables aplanadas. */
+  httpResults?: Record<string, Record<string, string>> | null;
   /** Datos leídos del último comprobante (visión): monto, hora, N° operación y código de seguridad. */
   lastReceipt?: {
     amountText?: string | null;

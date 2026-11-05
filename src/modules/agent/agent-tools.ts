@@ -5,8 +5,10 @@
  * runtime vacía en orden por WhatsApp; el resto sólo devuelven datos al modelo.
  */
 
+import { baseVars, executeAction } from "../http-actions/http-actions.service";
+import { renderSingleBrace, type FlatVars } from "../../lib/http-template";
 import { extOf, isDocumentExt } from "../../lib/document-types";
-import { ScheduledMessageType } from "@prisma/client";
+import { Prisma, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import type { ToolDefinition } from "../../lib/openai";
 import type { getBotConfig } from "../bot/bot.service";
@@ -156,7 +158,129 @@ export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
     hidden.add("enviar_archivo_drive");
     hidden.add("obtener_muestra");
   }
-  return hidden.size ? TOOL_DEFINITIONS.filter((t) => !hidden.has(t.function.name)) : TOOL_DEFINITIONS;
+  const base = hidden.size ? TOOL_DEFINITIONS.filter((t) => !hidden.has(t.function.name)) : TOOL_DEFINITIONS;
+  const dynamic = agentHttpActionsOf(config).map(httpActionToolDef);
+  return dynamic.length ? [...base, ...dynamic] : base;
+}
+
+/** Acciones HTTP que el dueño marcó "disponible para el agente" (bot.service las carga). */
+export type AgentHttpAction = {
+  id: string;
+  name: string;
+  toolName: string;
+  description: string;
+  params: { name: string; description?: string; required?: boolean }[];
+  oncePerCustomer: boolean;
+  resultHint: string | null;
+  responseVar: string;
+};
+export function agentHttpActionsOf(config: BotConfig): AgentHttpAction[] {
+  const list = (config as { httpActions?: AgentHttpAction[] }).httpActions;
+  return Array.isArray(list) ? list : [];
+}
+
+/** Definición de tool para una acción HTTP: el "cuándo" lo decide el dueño (descripción + su prompt). */
+function httpActionToolDef(a: AgentHttpAction): ToolDefinition {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const p of a.params) {
+    if (!p?.name) continue;
+    properties[p.name] = { type: "string", description: p.description || p.name };
+    if (p.required !== false) required.push(p.name);
+  }
+  return {
+    type: "function",
+    function: {
+      name: a.toolName,
+      description:
+        `${a.description} (acción externa configurada por el negocio: llama a su API).` +
+        (a.oncePerCustomer ? " Se ejecuta UNA sola vez por cliente: si ya se hizo, devuelve los mismos datos." : "") +
+        (required.length ? ` Antes de llamarla pide al cliente: ${required.join(", ")}.` : ""),
+      parameters: { type: "object", additionalProperties: false, required, properties },
+    },
+  };
+}
+
+const MAX_HTTP_ACTIONS_PER_TURN = 2;
+
+/** Ejecuta una acción HTTP del agente (tool dinámica accion_<slug>). */
+async function runAgentHttpAction(ctx: TurnContext, action: AgentHttpAction, args: Record<string, unknown>): Promise<string> {
+  const calls = (ctx.toolsCalled ?? []).filter((n) => n.startsWith("accion_")).length;
+  if (calls >= MAX_HTTP_ACTIONS_PER_TURN) {
+    return JSON.stringify({ ok: false, error: "Límite de acciones externas por turno alcanzado.", nota: "Responde con lo que ya tienes; no reintentes en este turno." });
+  }
+  const missing = action.params.filter((p) => p.required !== false && !String(args[p.name] ?? "").trim()).map((p) => p.name);
+  if (missing.length) {
+    return JSON.stringify({ ok: false, error: `Faltan datos: ${missing.join(", ")}`, nota: `Pídele al cliente ${missing.join(", ")} en UNA línea y vuelve a llamar.` });
+  }
+  const slug = action.toolName.replace(/^accion_/, "");
+  const results = ctx.state.httpResults ?? {};
+  const resultHint = action.resultHint || "Usa estos datos en tu respuesta al cliente (cópialos tal cual); no inventes campos que no estén.";
+
+  if (ctx.simulate) {
+    const vars: FlatVars = { [`${action.responseVar}.status`]: "200", [`${action.responseVar}.ok`]: "true", [`${action.responseVar}.body`]: "{simulado}" };
+    ctx.state.httpResults = { ...results, [slug]: vars };
+    return JSON.stringify({ ok: true, simulado: true, datos: vars, nota: `(Simulación: no se llamó a la API real.) ${resultHint}` });
+  }
+
+  const product = ctx.state.selectedProductId ? findProductById(ctx, ctx.state.selectedProductId) : null;
+  const customer = await prisma.customer.findUnique({ where: { id: ctx.customerId }, select: { name: true, email: true } }).catch(() => null);
+  const vars: FlatVars = {
+    ...baseVars({
+      companyName: ctx.config.business.name,
+      customer: { id: ctx.customerId, name: customer?.name ?? null, phone: ctx.customerPhone, email: customer?.email ?? null },
+      conversationId: ctx.conversationId,
+      product: product ? { id: product.id, name: product.name, price: product.price } : null,
+    }),
+    ...(ctx.customerFlowVars ?? {}),
+  };
+  for (const p of action.params) if (p?.name) vars[`param.${p.name}`] = String(args[p.name] ?? "");
+
+  try {
+    const { result } = await executeAction({
+      companyId: ctx.companyId,
+      actionId: action.id,
+      vars,
+      source: "AGENT",
+      refs: { customerId: ctx.customerId, conversationId: ctx.conversationId, productId: product?.id ?? null },
+      idempotencyKey: action.oncePerCustomer ? `agent:${action.id}:${ctx.customerId}` : null,
+    });
+    if (!result.ok) {
+      return JSON.stringify({
+        ok: false,
+        error: result.error ?? `La API respondió ${result.httpStatus ?? "sin estado"}`,
+        nota: "Dile al cliente que hubo un problema técnico con esa gestión y ofrécele seguir por otro medio o intentarlo más tarde. NO reintentes solo ni inventes datos.",
+      });
+    }
+    ctx.state.httpResults = { ...results, [slug]: result.vars };
+    // Memoria durable: las variables quedan en la ficha (como las del chatbot) para
+    // turnos siguientes, flujos híbridos y la plantilla de entrega ({demo.license}).
+    await mergeCustomerFlowVars(ctx.customerId, Object.fromEntries(Object.entries(result.vars).map(([k, v]) => [`${slug}.${k.replace(/^[^.]+\./, "")}`, v])));
+    return JSON.stringify({
+      ok: true,
+      ...(result.reused ? { yaEjecutada: true } : {}),
+      datos: result.vars,
+      nota: result.reused ? `Esta acción ya se había ejecutado para este cliente: estos son los mismos datos. ${resultHint}` : resultHint,
+    });
+  } catch (err) {
+    return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "error", nota: "Hubo un problema técnico; díselo al cliente sin inventar datos." });
+  }
+}
+
+/** Merge de variables en Customer.metadata.flowVars (misma vía que el chatbot de flujos). */
+async function mergeCustomerFlowVars(customerId: string, vars: Record<string, string>): Promise<void> {
+  if (!Object.keys(vars).length) return;
+  try {
+    const c = await prisma.customer.findUnique({ where: { id: customerId }, select: { metadata: true } });
+    const md = (c?.metadata && typeof c.metadata === "object" && !Array.isArray(c.metadata) ? c.metadata : {}) as Record<string, unknown>;
+    const prev = (md.flowVars && typeof md.flowVars === "object" ? md.flowVars : {}) as Record<string, string>;
+    await prisma.customer.update({
+      where: { id: customerId },
+      data: { metadata: { ...md, flowVars: { ...prev, ...vars, _updatedAt: new Date().toISOString() } } as unknown as Prisma.InputJsonValue },
+    });
+  } catch (err) {
+    console.warn("[agent] flowVars de acción HTTP no se guardaron:", err instanceof Error ? err.message : err);
+  }
 }
 
 export interface OutboxMessage {
@@ -500,7 +624,7 @@ function pushCrossSell(
 // Sustituye variables de la plantilla de entrega con los datos de la credencial.
 // Si la plantilla no tiene placeholders, anexa un bloque con los datos.
 type CredentialLike = { email?: string | null; username?: string | null; password?: string | null; profileName?: string | null; pin?: string | null; extra?: string | null };
-function renderCredentialDelivery(template: string, cred: CredentialLike): string {
+function renderCredentialDelivery(template: string, cred: CredentialLike, extraVars: FlatVars = {}): string {
   const map: Record<string, string> = {
     email: cred.email ?? "",
     correo: cred.email ?? "",
@@ -516,10 +640,12 @@ function renderCredentialDelivery(template: string, cred: CredentialLike): strin
     pin: cred.pin ?? "",
     extra: cred.extra ?? "",
   };
-  const base = (template ?? "").trim();
+  // Variables de acciones HTTP ({api.data.key}, {demo.license}): se resuelven primero (con puntos).
+  const base = renderSingleBrace((template ?? "").trim(), extraVars);
   if (/\{[^}]+\}/.test(base)) {
     return base.replace(/\{(\w+)\}/g, (_, k: string) => map[k.toLowerCase()] ?? "");
   }
+  if (Object.keys(extraVars).length && !cred.email && !cred.username && !cred.password) return base;
   const lines: string[] = [];
   if (cred.email) lines.push(`Correo: ${cred.email}`);
   if (cred.username) lines.push(`Usuario: ${cred.username}`);
@@ -532,6 +658,8 @@ function renderCredentialDelivery(template: string, cred: CredentialLike): strin
 }
 
 export interface AutoSaleInfo {
+  /** Solo entregas por acción HTTP que fallaron: motivo (el dueño debe entregar a mano). */
+  error?: string;
   name: string;
   plan: string | null;
   account: string | null; // identificador de la cuenta entregada (email/usuario)
@@ -572,6 +700,8 @@ export async function assignAndBuildDelivery(
     conversationId?: string | null;
     planByProduct?: Record<string, string | undefined>;
     simulate?: boolean;
+    /** Comprobante que origina la entrega (idempotencia del modo HTTP_ACTION). */
+    receiptId?: string | null;
   },
 ): Promise<AssignedDeliveryResult> {
   const find = (id: string) => config.products.find((p) => p.id === id || p.slug === id);
@@ -654,6 +784,61 @@ export async function assignAndBuildDelivery(
       continue;
     }
 
+    if (mode === "HTTP_ACTION") {
+      const actionId = (dd as { httpActionId?: string | null }).httpActionId ?? null;
+      let vars: FlatVars | null = null;
+      let failure = "";
+      if (!actionId) {
+        failure = "sin acción HTTP configurada";
+      } else if (opts.simulate) {
+        vars = { "api.status": "200", "api.ok": "true", "api.body": "{simulado}" };
+      } else {
+        try {
+          const customer = await prisma.customer.findUnique({ where: { id: opts.customerId }, select: { name: true, phone: true, email: true, metadata: true } });
+          const md = (customer?.metadata && typeof customer.metadata === "object" && !Array.isArray(customer.metadata) ? customer.metadata : {}) as Record<string, unknown>;
+          const flowVars = (md.flowVars && typeof md.flowVars === "object" ? md.flowVars : {}) as Record<string, string>;
+          const inVars: FlatVars = {
+            ...baseVars({
+              companyName: config.business.name,
+              customer: { id: opts.customerId, name: customer?.name ?? null, phone: customer?.phone ?? null, email: customer?.email ?? null },
+              conversationId: opts.conversationId ?? null,
+              product: { id: p.id, name: p.name, price: p.price },
+              receiptId: opts.receiptId ?? null,
+            }),
+            ...Object.fromEntries(Object.entries(flowVars).filter(([k, v]) => !k.startsWith("_") && typeof v === "string")),
+          };
+          const { result } = await executeAction({
+            companyId: opts.companyId,
+            actionId,
+            vars: inVars,
+            source: "DELIVERY",
+            refs: { customerId: opts.customerId, conversationId: opts.conversationId ?? null, receiptId: opts.receiptId ?? null, productId: p.id },
+            idempotencyKey: opts.receiptId ? `delivery:${opts.receiptId}:${p.id}` : null,
+          });
+          if (result.ok) vars = result.vars;
+          else failure = result.error ?? `HTTP ${result.httpStatus ?? "?"}`;
+        } catch (err) {
+          failure = err instanceof Error ? err.message : "error";
+        }
+      }
+      if (!vars) {
+        // Igual que el pool sin stock: el cliente recibe "te lo envía un asesor" y el dueño el aviso con el motivo.
+        console.warn(`[agent] entrega HTTP_ACTION falló para "${p.name}": ${failure}`);
+        manualNeeded.push(p.name);
+        outOfStock.push(p.name);
+        autoSales.push({ name: p.name, plan: null, account: null, remaining: -1, error: failure || "la API no respondió" });
+        continue;
+      }
+      outbox.push({ kind: "text", text: renderCredentialDelivery(dd.instructions ?? "", {}, vars) });
+      pushFollowups(outbox, dd);
+      const crossId = pushCrossSell(outbox, p, dd, find, skipCrossSell);
+      if (crossId) offeredCrossSellId = crossId;
+      delivered.push(p.name);
+      deliveredIds.push(p.id);
+      if (!opts.simulate) autoSales.push({ name: p.name, plan: null, account: null, remaining: -1 });
+      continue;
+    }
+
     // STATIC (default) — comportamiento histórico (infoproducto).
     if (!dd.instructions?.trim()) continue;
     outbox.push({ kind: "text", text: dd.instructions.trim() });
@@ -733,6 +918,12 @@ export async function assignAndBuildDelivery(
 
 /** Formatea el aviso al dueño de una venta automática (entrega por inventario). */
 export function autoSaleNotice(s: AutoSaleInfo, customerPhone: string): string {
+  if (s.error) {
+    return `⚠️ Venta de *${s.name}* a ${customerPhone}: la API de entrega falló (${s.error}). Le dijimos al cliente que un asesor le envía el acceso: entrégalo a mano desde el chat.`;
+  }
+  if (s.remaining < 0) {
+    return `💰 Venta automática: *${s.name}* a ${customerPhone}. Acceso generado por tu API y entregado.`;
+  }
   return (
     `💰 Venta automática: *${s.name}*${s.plan ? ` (${s.plan})` : ""} a ${customerPhone}.` +
     (s.account ? ` Cuenta entregada: ${s.account}.` : "") +
@@ -832,6 +1023,8 @@ export async function approveExternalPayment(opts: {
   config: BotConfig;
   state: ConversationState;
   productIds?: string[];
+  /** Comprobante que origina el pago (idempotencia de la entrega por API). */
+  receiptId?: string | null;
 }): Promise<ApprovePaymentResult> {
   const { companyId, customerId, config, state } = opts;
   const status = state.status ?? "";
@@ -869,6 +1062,7 @@ export async function approveExternalPayment(opts: {
     customerId,
     conversationId: opts.conversationId,
     planByProduct,
+    receiptId: opts.receiptId ?? null,
   });
   if (del.delivered.length || del.manualNeeded.length) {
     state.status = del.delivered.length ? "ENTREGADO" : "PAGADO";
@@ -1011,6 +1205,7 @@ export async function tryApprovePayment(opts: {
         customerId,
         conversationId: opts.conversationId,
         planByProduct: planByProductFromCart(cart),
+        receiptId: (top?.id as string | undefined) ?? null,
       });
       if (del.delivered.length || del.manualNeeded.length) {
         const needsHandoff = del.manualNeeded.length > 0;
@@ -1890,6 +2085,11 @@ export async function executeTool(
   args: Record<string, any>,
   ctx: TurnContext,
 ): Promise<string> {
+  if (name.startsWith("accion_")) {
+    const action = agentHttpActionsOf(ctx.config).find((a) => a.toolName === name);
+    if (!action) return JSON.stringify({ ok: false, error: `acción no disponible: ${name}` });
+    return runAgentHttpAction(ctx, action, args);
+  }
   switch (name) {
     case "buscar_producto": {
       const product = matchProduct(String(args.query ?? ""), ctx.config.products);
@@ -2670,6 +2870,7 @@ export async function executeTool(
     }
 
     case "entregar_producto": {
+      let approvedReceiptId: string | null = null;
       // Idempotencia: si ya se entregó (p.ej. la auto-validación de la imagen ya
       // entregó), no volver a enviar el acceso.
       if (!ctx.simulate && ctx.state.status === "ENTREGADO") {
@@ -2702,6 +2903,7 @@ export async function executeTool(
         if (!approved) {
           return JSON.stringify({ ok: false, error: "No hay un pago aprobado para este cliente. No entregues nada todavía." });
         }
+        approvedReceiptId = approved.id;
         ids = approved.productIds?.length
           ? approved.productIds
           : approved.productId
@@ -2718,6 +2920,7 @@ export async function executeTool(
         conversationId: ctx.conversationId,
         planByProduct: planByProductFromCart(cartForPlan),
         simulate: ctx.simulate,
+        receiptId: approvedReceiptId,
       });
       const { delivered, offeredCatalog, offeredStore, shouldPauseHuman, manualNeeded, outOfStock } = del;
       ctx.outbox.push(...del.outbox);

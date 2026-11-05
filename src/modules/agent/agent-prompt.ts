@@ -10,7 +10,7 @@
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
-import { emailDeliveryAvailable, crmToolAvailable, driveSearchAvailable, productsWithDrive } from "./agent-tools";
+import { emailDeliveryAvailable, crmToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf } from "./agent-tools";
 import { deliveryDriveRefs, driveSearchEnabled } from "../../lib/google-drive";
 import { symbolFor } from "../../lib/currency";
 
@@ -351,6 +351,20 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
         .map(([k, v]) => `${k}: ${String(v).trim().slice(0, 300)}`)
         .join(" · ")
     : "";
+  // Resultados de acciones HTTP ya ejecutadas en este chat (licencia demo, cuenta creada…).
+  const httpResultsText = state.httpResults
+    ? Object.entries(state.httpResults)
+        .map(([slug, vars]) => {
+          const pairs = Object.entries(vars ?? {})
+            .filter(([k, v]) => !/\.(body|ok|status)$/.test(k) && typeof v === "string" && v.trim())
+            .slice(0, 12)
+            .map(([k, v]) => `${k}=${String(v).trim().slice(0, 200)}`);
+          return pairs.length ? `${slug}: ${pairs.join(", ")}` : "";
+        })
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+  const httpActions = agentHttpActionsOf(config);
   const rules = Array.isArray(config.agent.rules) ? config.agent.rules : [];
   const paymentMode = config.payment.paymentMode; // before_delivery | cash_on_delivery | manual
   const vertical = (config.business as { vertical?: string }).vertical;
@@ -452,6 +466,13 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
             .join(", ")}): si el cliente pide recibir el acceso por correo/email y su pago YA está APROBADO, usa entregar_por_correo. Si el cliente escribió su correo en el chat, pásalo en 'email' tal cual; si no lo escribió, llama igual (usa el guardado en su ficha) y, si responde needsEmail, pídele su correo en UNA línea y vuelve a llamarla cuando lo mande. NUNCA digas que enviaste o enviarás un correo sin que la herramienta responda ok. Si aún no pagó, dile que apenas confirmes su pago se lo envías también al correo (y sigue el flujo de pago normal). Esto NO reemplaza la entrega por WhatsApp: entregar_producto sigue igual. Para productos que no están en esta lista, la entrega es solo por WhatsApp. OJO: si el cliente ESCRIBE un correo electrónico (solo, o con 'enviar a', 'mi correo es', 'mándamelo a'), eso ES pedir la entrega por correo aunque no lo diga con esas palabras: nunca lo ignores ni preguntes para qué es. Si en el estado hay 'correoPendiente', el cliente ya dejó ese correo y aún no se le envió: con el pago aprobado llama entregar_por_correo (sin volver a pedírselo); si aún no está aprobado, dile que apenas se confirme le llega también ahí (el sistema lo envía solo al aprobar).`,
         ]
       : []),
+    // Acciones HTTP del negocio expuestas como herramientas (accion_<slug>): solo se describe la
+    // capacidad; CUÁNDO usarlas lo dicen la descripción de cada acción y el prompt del dueño.
+    ...(httpActions.length
+      ? [
+          `- ACCIONES EXTERNAS del negocio (herramientas ${httpActions.map((a) => a.toolName).join(", ")}): llaman a la API del negocio (crear una licencia demo, una cuenta, consultar un estado…). Úsalas SOLO cuando el cliente lo pida o las instrucciones del negocio lo indiquen; antes pide los datos obligatorios que la herramienta señala. Copia al cliente los datos que devuelve tal cual (licencias, usuarios, enlaces); si responde ok:false, explica que hubo un problema técnico y ofrece otra vía, sin inventar datos ni reintentar solo.`,
+        ]
+      : []),
     // Búsqueda en Drive: SOLO para negocios con API key y productos cuya entrega tiene links de Drive.
     // Solo describe la capacidad: qué compartir y cuándo lo define el prompt del dueño.
     ...(driveSearchAvailable(config)
@@ -534,6 +555,9 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
       : []),
     ...(extra?.flowNote?.trim()
       ? [`INSTRUCCIÓN DEL FLUJO PARA ESTE CLIENTE (el chatbot te lo pasó con esta indicación): ${extra.flowNote.trim()}`, ""]
+      : []),
+    ...(httpResultsText
+      ? [`DATOS OBTENIDOS DE ACCIONES EXTERNAS EN ESTE CHAT (ya se ejecutaron; NO las repitas para lo mismo, usa estos datos): ${httpResultsText}.`, ""]
       : []),
     `Estado actual de la conversación: ${JSON.stringify({
       status: state.status ?? "NUEVO",

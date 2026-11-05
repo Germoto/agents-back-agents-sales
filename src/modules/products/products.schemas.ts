@@ -105,7 +105,9 @@ export const productBodySchema = z.object({
   digitalDelivery: z.object({
     link: z.string().optional().default(""),
     instructions: z.string().optional().default(""),
-    assignmentMode: z.enum(["STATIC", "POOL_AUTO", "MANUAL"]).optional().default("STATIC"),
+    assignmentMode: z.enum(["STATIC", "POOL_AUTO", "MANUAL", "HTTP_ACTION"]).optional().default("STATIC"),
+    // HTTP_ACTION: acción HTTP (Integraciones → Acciones HTTP) que genera el acceso al confirmar el pago.
+    httpActionId: z.string().uuid().nullable().optional(),
     // Mensajes adicionales opcionales tras la entrega (cada uno media + texto) y cross-sell.
     followupMessages: followupListSchema,
     // Legacy single (compat; el front ya no los envía).

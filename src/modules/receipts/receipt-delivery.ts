@@ -65,6 +65,7 @@ export async function deliverApprovedReceipt(companyId: string, receiptId: strin
     companyId,
     customerId: receipt.customerId,
     conversationId: conversation.id,
+    receiptId: receipt.id,
   });
   const ids = { companyId, customerId: receipt.customerId, conversationId: conversation.id };
 

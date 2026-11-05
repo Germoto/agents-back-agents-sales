@@ -12,6 +12,7 @@
  * El registro queda en receipt.metadata.emailDeliveries (auditoría y límites).
  */
 
+import { renderSingleBrace, type FlatVars } from "../../lib/http-template";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { mailerEnabled, sendMail } from "../../lib/mailer";
@@ -97,16 +98,36 @@ export async function findEmailDeliverableReceipt(companyId: string, customerId:
         include: { digitalDelivery: true, files: { orderBy: { sortOrder: "asc" } } },
       })
     : [];
-  const eligible = products.filter(
+  const candidates = products.filter(
     (p) =>
       p.productType === "DIGITAL" &&
       p.digitalDelivery &&
-      p.digitalDelivery.assignmentMode === "STATIC" &&
+      (p.digitalDelivery.assignmentMode === "STATIC" || p.digitalDelivery.assignmentMode === "HTTP_ACTION") &&
       p.digitalDelivery.emailEnabled &&
       (p.digitalDelivery.emailBody?.trim() || p.digitalDelivery.instructions?.trim()),
   );
+  // HTTP_ACTION: el correo solo puede ir si la API ya generó el acceso para ESTE comprobante
+  // (las variables {api.…} salen de esa ejecución); si no, se entrega a mano.
+  const httpVarsByProduct: Record<string, FlatVars> = {};
+  const eligible: typeof candidates = [];
+  for (const p of candidates) {
+    if (p.digitalDelivery!.assignmentMode !== "HTTP_ACTION") {
+      eligible.push(p);
+      continue;
+    }
+    const run = await prisma.httpActionRun.findFirst({
+      where: { companyId, receiptId: receipt.id, productId: p.id, status: "OK" },
+      orderBy: { createdAt: "desc" },
+      select: { response: true },
+    });
+    const vars = (run?.response as { vars?: FlatVars } | null)?.vars;
+    if (vars && Object.keys(vars).length) {
+      httpVarsByProduct[p.id] = vars;
+      eligible.push(p);
+    }
+  }
   const skipped = products.filter((p) => !eligible.includes(p)).map((p) => p.name);
-  return { receipt, eligible, skipped };
+  return { receipt, eligible, skipped, httpVarsByProduct };
 }
 
 /**
@@ -145,7 +166,7 @@ export async function sendDigitalDeliveryEmail(input: SendDigitalDeliveryEmailIn
   if (!email) throw new EmailDeliveryError("INVALID_EMAIL", "El correo no tiene un formato válido.");
   if (!mailerEnabled()) throw new EmailDeliveryError("MAIL_DISABLED", "El envío de correos no está disponible.");
 
-  const { receipt, eligible, skipped } = await findEmailDeliverableReceipt(input.companyId, input.customerId, input.receiptId);
+  const { receipt, eligible, skipped, httpVarsByProduct } = await findEmailDeliverableReceipt(input.companyId, input.customerId, input.receiptId);
   if (!eligible.length) {
     throw new EmailDeliveryError("NO_ELIGIBLE", "Ninguno de los productos pagados tiene entrega por correo habilitada.", {
       skippedProducts: skipped,
@@ -217,7 +238,7 @@ export async function sendDigitalDeliveryEmail(input: SendDigitalDeliveryEmailIn
     }
     sections.push({
       productName: p.name,
-      bodyText: applySpintax((dd.emailBody?.trim() || dd.instructions).trim()),
+      bodyText: applySpintax(renderSingleBrace((dd.emailBody?.trim() || dd.instructions).trim(), httpVarsByProduct[p.id] ?? {})),
       extras: extras.map(applySpintax),
       links,
     });

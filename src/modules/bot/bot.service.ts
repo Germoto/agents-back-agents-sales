@@ -1,3 +1,4 @@
+import { listAgentActions } from "../http-actions/http-actions.service";
 import { AppError } from "../../lib/app-error";
 import { prisma } from "../../lib/prisma";
 import { resolveAiSettings } from "../../lib/ai-providers";
@@ -128,7 +129,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
     throw new AppError("No existe una configuracion activa de WhatsApp para el usuario indicado", 404);
   }
 
-  const [agentConfig, paymentConfig, products] = await Promise.all([
+  const [agentConfig, paymentConfig, products, httpActions] = await Promise.all([
     prisma.agentConfig.findUnique({ where: { companyId: whatsappConfig.companyId } }),
     prisma.paymentConfig.findUnique({
       where: { companyId: whatsappConfig.companyId },
@@ -146,6 +147,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
       include: productRelations,
       orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
     }),
+    // Acciones HTTP expuestas al agente IA (tool dinámica accion_<slug>).
+    listAgentActions(whatsappConfig.companyId).catch(() => []),
   ]);
 
   if (!agentConfig) {
@@ -283,6 +286,7 @@ export async function buildBotConfig(companyId: string, account?: string) {
       crmTool: await resolveAgentCrmTool(whatsappConfig.companyId, agentConfig.crmToolConfig),
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
+    httpActions,
     products: products.map((p) =>
       withVariantModifiers(
         mapBotProduct(p, {
