@@ -5,6 +5,7 @@
  * runtime vacía en orden por WhatsApp; el resto sólo devuelven datos al modelo.
  */
 
+import { isPlainAmount, planOptions } from "../products/product-plans";
 import { baseVars, executeAction } from "../http-actions/http-actions.service";
 import { renderSingleBrace, type FlatVars } from "../../lib/http-template";
 import { extOf, isDocumentExt } from "../../lib/document-types";
@@ -981,6 +982,21 @@ function parseAmountNumber(text: string | null | undefined): number | undefined 
 }
 
 /** Mapa productId -> plan elegido (opción del grupo "Plan") leído del carrito. */
+/** Guarda en el comprobante el plan elegido de cada producto (metadata.plans: [{producto, plan}]). Best-effort. */
+async function tagReceiptPlans(companyId: string, receiptId: string, config: BotConfig, planByProduct: Record<string, string | undefined>): Promise<void> {
+  const entries = Object.entries(planByProduct).filter(([, plan]) => !!plan);
+  if (!entries.length) return;
+  try {
+    const r = await prisma.paymentReceipt.findFirst({ where: { id: receiptId, companyId }, select: { metadata: true } });
+    if (!r) return;
+    const md = (r.metadata && typeof r.metadata === "object" && !Array.isArray(r.metadata) ? r.metadata : {}) as Record<string, unknown>;
+    const plans = entries.map(([pid, plan]) => ({ productId: pid, producto: config.products.find((p) => p.id === pid)?.name ?? null, plan }));
+    await prisma.paymentReceipt.update({ where: { id: receiptId }, data: { metadata: { ...md, plans } as unknown as Prisma.InputJsonValue } });
+  } catch (err) {
+    console.warn("[agent] no se pudo guardar el plan en el comprobante:", err instanceof Error ? err.message : err);
+  }
+}
+
 function planByProductFromCart(cart: Awaited<ReturnType<typeof summarizeCart>>): Record<string, string | undefined> {
   const m: Record<string, string | undefined> = {};
   for (const it of cart.items) {
@@ -1055,6 +1071,7 @@ export async function approveExternalPayment(opts: {
     ? [state.selectedProductId]
     : [];
   const planByProduct = planByProductFromCart(cart);
+  if (opts.receiptId) await tagReceiptPlans(companyId, opts.receiptId, config, planByProduct);
 
   if (cart.items.length) await checkoutCart(companyId, customerId, cart.totalText);
   state.pendingRecheckAt = null;
@@ -1188,6 +1205,7 @@ export async function tryApprovePayment(opts: {
         customerPhone: opts.customerPhone,
         productIds,
       } as any);
+      await tagReceiptPlans(companyId, top.id, config, planByProductFromCart(cart));
     } catch {
       return {
         approved: false,
@@ -1380,9 +1398,11 @@ function parseFichaPrice(value: unknown): number {
 }
 
 /** Planes/modalidades (verticalData.modifierGroups) con precio ABSOLUTO = base + delta. Solo STREAMER. */
-function streamerPlanLines(p: BotProduct, symbol: string = "S/"): string[] {
+function streamerPlanLines(p: BotProduct, symbol: string = "S/", vertical: string = "STREAMER"): string[] {
   const v = (p.verticalData ?? null) as Record<string, unknown> | null;
-  const groups = v && Array.isArray(v.modifierGroups) ? (v.modifierGroups as any[]) : [];
+  const allGroups = v && Array.isArray(v.modifierGroups) ? (v.modifierGroups as any[]) : [];
+  // Streaming: todas sus modalidades. Otros rubros: solo el grupo "Plan" (los demás son extras).
+  const groups = vertical === "STREAMER" ? allGroups : allGroups.filter((g) => /^plan(es)?$/i.test(String(g?.name ?? "").trim()));
   if (!groups.length) return [];
   const base = parseFichaPrice(p.priceText ?? p.price);
   const lines: string[] = [];
@@ -1403,7 +1423,7 @@ function renderProductFicha(p: BotProduct, vertical?: string, symbol: string = "
   if (p.includes?.length) parts.push(`*Incluye:*\n${p.includes.join("\n")}`);
   if (p.bonuses?.length) parts.push(`*Bonos:*\n${p.bonuses.join("\n")}`);
   // STREAMER con varios planes: listar cada plan con su precio (en vez de un precio fijo).
-  const planLines = vertical === "STREAMER" ? streamerPlanLines(p, symbol) : [];
+  const planLines = streamerPlanLines(p, symbol, vertical ?? "");
   if (planLines.length) {
     parts.push(`📋 *Planes y precios:*\n${planLines.join("\n")}`);
   } else {
@@ -1539,9 +1559,9 @@ function catalogProducts(products: BotProduct[]): BotProduct[] {
 function renderCustomerCatalog(products: BotProduct[], vertical?: string, symbol: string = "S/"): string {
   const line = (p: BotProduct) => {
     let price = p.priceText ?? p.price;
-    // STREAMER con varios planes: mostrar "desde S/{mínimo}" en vez de un precio fijo.
-    if (vertical === "STREAMER") {
-      const lines = streamerPlanLines(p, symbol);
+    // Con varios planes (Streaming o grupo "Plan"): mostrar "desde S/{mínimo}" en vez de un precio fijo.
+    if (vertical === "STREAMER" || planOptions(p.verticalData, p.priceText ?? p.price).length) {
+      const lines = streamerPlanLines(p, symbol, vertical ?? "");
       if (lines.length) {
         const base = parseFichaPrice(p.priceText ?? p.price);
         const v = (p.verticalData ?? null) as Record<string, unknown> | null;
@@ -2628,6 +2648,29 @@ export async function executeTool(
         const allDigital = chargeIds.every((id) => findProductById(ctx, id)?.productType !== "physical");
         if (allDigital) {
           return JSON.stringify({ ok: false, error: "El cliente YA compró este producto (es suyo); NO le cobres de nuevo ni le ofrezcas 'activarlo/comprarlo'. Es SOPORTE post-venta: responde su duda. Si dice que no le llegó el acceso o hay un problema con su compra, usa derivar_humano." });
+        }
+      }
+      // Carrito vacío: cobrar el producto seleccionado SOLO si su precio es un monto claro.
+      // Con PLANES el plan elegido tiene que estar en el carrito (si no se cobraría el "desde")
+      // y un precio de texto ("Desde S/ 19.99 al mes") nunca se manda como monto a pagar.
+      if (!cart.items.length && ctx.state.selectedProductId) {
+        const sel = findProductById(ctx, ctx.state.selectedProductId);
+        const offerSel = activeOfferFor(ctx.state, ctx.state.selectedProductId);
+        if (sel && !offerSel) {
+          const plans = planOptions(sel.verticalData, sel.priceText ?? sel.price);
+          if (plans.length) {
+            return JSON.stringify({
+              ok: false,
+              error: `«${sel.name}» tiene PLANES: agrega al carrito el plan que eligió el cliente (agregar_carrito con modifiers [{group:'Plan', option:'<plan>'}]) y vuelve a llamar enviar_metodos_pago. Si aún no eligió, pregúntale cuál quiere.`,
+              planes: plans.map((pl) => `${pl.label}: ${pl.price.toFixed(2)}`),
+            });
+          }
+          if (!isPlainAmount(sel.priceText ?? sel.price)) {
+            return JSON.stringify({
+              ok: false,
+              error: `El precio de «${sel.name}» no es un monto fijo («${sel.priceText ?? sel.price}»): no lo uses como monto a cobrar. Confirma con el cliente qué va a pagar según lo configurado; si no hay un monto claro, deriva a un asesor (derivar_humano) para que lo cobre.`,
+            });
+          }
         }
       }
       let amountText = cart.totalText;

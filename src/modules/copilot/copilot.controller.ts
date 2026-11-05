@@ -8,6 +8,7 @@
  * scoping por companyId garantizados). Patrón heredado del copiloto de flujos.
  */
 
+import { buildPlanGroup, parsePlanInput, planOptions } from "../products/product-plans";
 import { createAction as createHttpAction, listActions as listHttpActions, listConnections as listHttpConnections, releaseAgentLock as releaseHttpAgentLock, testAction as testHttpAction, updateAction as updateHttpAction } from "../http-actions/http-actions.service";
 import { createActionSchema as httpCreateActionSchema, updateActionSchema as httpUpdateActionSchema } from "../http-actions/http-actions.schemas";
 import type { Request, Response } from "express";
@@ -1706,7 +1707,9 @@ const EMAIL_DELIVERY_FIELDS =
   "emailEnabled (true = entrega por CORREO a pedido del cliente: cuando un cliente que ya pagó pide el acceso por email, el agente se lo envía con el mensaje de entrega + los followupMessages y su multimedia, igual que por WhatsApp), emailSubject? y emailBody? (opcionales; por defecto 'Tu acceso a {producto} — {negocio}' y el mismo mensaje de entrega; emailBody reemplaza SOLO el mensaje principal)";
 
 const COMMON_FIELDS =
-  "Campos comunes de `data`: name*, price* (texto, ej. '12' o '12.50', SIN símbolo — está en la MONEDA del negocio, ver_configuracion la muestra), shortDescription (1 línea vendedora), fullDescription, category, active (default true), aliases (string[] — sinónimos/abreviaturas con las que el cliente lo nombraría), benefits (string[]), includes (string[]), bonuses (string[]), faqs ([{question, answer}]), objections ([{question, answer}]), attributes (objeto clave→valor, ej. {\"Ingredientes\": \"pollo, papas\"}). " +
+  "Campos comunes de `data`: name*, price* (SOLO el monto, ej. '12' o '12.50', SIN símbolo ni palabras como 'Desde' o 'al mes' — está en la MONEDA del negocio, ver_configuracion la muestra; con texto el agente no puede cobrar), " +
+  "planes ([{nombre, precio}] — PLANES con precio propio en CUALQUIER rubro: Mensual 19.99, 3 meses 49.99, 1 año 200…; el price queda en el del plan más barato y el agente cobra y valida el precio del plan que elija el cliente; [] los quita; NO uses variants para esto), " +
+  "shortDescription (1 línea vendedora), fullDescription, category, active (default true), aliases (string[] — sinónimos/abreviaturas con las que el cliente lo nombraría), benefits (string[]), includes (string[]), bonuses (string[]), faqs ([{question, answer}]), objections ([{question, answer}]), attributes (objeto clave→valor, ej. {\"Ingredientes\": \"pollo, papas\"}). " +
   "reminderConfig (recordatorios PROPIOS de este producto — si no se envía, hereda los generales del negocio): {abandonedCart?: {enabled, steps: [{delaySeconds (SEGUNDOS, ej. 3600=1h, 86400=24h), message, offerPrice? (OFERTA ESCALONADA: al enviarse ese paso, el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje para mostrarlo)}]}, leftOnRead?: {enabled, steps: [...]}}; enviar null lo limpia (vuelve a heredar). " +
   "OFERTA CON VIGENCIA (global, todos los clientes): offerPrice (texto, ej. '49'), offerStartsAt/offerEndsAt (fecha-hora ISO, opcionales; sin fechas = activa hasta quitarla). Vigente => el agente presenta, cobra y valida ESE precio y el precio normal se muestra tachado como 'antes'. null limpia la oferta. " +
   "ENTREGA POR CORREO (a pedido del cliente): se activa POR PRODUCTO con digitalDelivery.emailEnabled=true. Con eso, cuando un cliente que YA PAGÓ pide recibir el acceso por email, el agente le pide el correo, se lo envía (el correo sale desde la dirección de FlowApp con el nombre del negocio como remitente) y guarda el correo en su ficha; la entrega por WhatsApp sigue igual. El correo replica la entrega de WhatsApp: mensaje de entrega + mensajes adicionales (followupMessages) con su multimedia adjunta. emailSubject/emailBody son opcionales (por defecto el asunto es 'Tu acceso a {producto} — {negocio}' y el cuerpo es el mismo mensaje de entrega; emailBody reemplaza solo el mensaje principal, los adicionales se agregan igual). Los archivos del producto se adjuntan ADEMÁS con configurar_archivo_producto adjuntarEnCorreo=true (tope 15 MB entre todos los adjuntos; lo que excede va como link). El servidor de correo es de la plataforma: NO se configura desde el panel ni desde aquí. Si el dueño pide activarlo 'en todos los productos', hazlo producto por producto con actualizar_producto tras UNA confirmación. Detección: basta con que el cliente ESCRIBA su correo (solo o junto al comprobante, ej. 'Enviar a: juan@gmail.com'); el sistema lo guarda como correo pendiente y envía el acceso al aprobar el pago, incluso si la aprobación fue en 2º plano (recheck o Mercado Pago). " +
@@ -1724,7 +1727,7 @@ function rubroGuide(vertical: string | undefined): string {
     case "REAL_ESTATE":
       return `Rubro INMOBILIARIA (cada producto = un inmueble). ${COMMON_FIELDS} Además: verticalData con la ficha: {operation ('venta'|'alquiler'), propertyType, areaM2, bedrooms, bathrooms, parking, location, maintenance, antiquity}; durationMin para la duración de la visita (agenda).`;
     case "STREAMER":
-      return `Rubro STREAMING (cada producto = una plataforma/cuenta). ${COMMON_FIELDS} Además: category = plataforma (Netflix, Disney...); verticalData.plans = [{label, price}] para modalidades (mensual/anual, pantallas) y verticalData.durationDays (duración de la suscripción en días); digitalDelivery = {instructions (mensaje de entrega con el acceso), assignmentMode, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar), ${EMAIL_DELIVERY_FIELDS} (solo aplica en assignmentMode STATIC)}; RENOVACIÓN: reminderConfig.renewal = {enabled, daysBefore, message} (aviso al cliente N días antes del vencimiento).`;
+      return `Rubro STREAMING (cada producto = una plataforma/cuenta). ${COMMON_FIELDS} Además: category = plataforma (Netflix, Disney...); planes = [{nombre, precio}] para modalidades (mensual/anual, pantallas) con su precio TOTAL y verticalData.durationDays (duración de la suscripción en días); digitalDelivery = {instructions (mensaje de entrega con el acceso), assignmentMode, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar), ${EMAIL_DELIVERY_FIELDS} (solo aplica en assignmentMode STATIC)}; RENOVACIÓN: reminderConfig.renewal = {enabled, daysBefore, message} (aviso al cliente N días antes del vencimiento).`;
     case "INFOPRODUCT":
       return `Rubro INFOPRODUCTOS (cursos, ebooks, accesos). ${COMMON_FIELDS} Además: digitalDelivery = {instructions* (mensaje de entrega que incluye el link de acceso; con HTTP_ACTION usa {api.campo} de la respuesta), link, assignmentMode? ('STATIC' default | 'MANUAL' | 'HTTP_ACTION' = una acción HTTP genera el acceso al confirmar el pago; requiere httpActionId de listar_acciones_http), httpActionId?, followupMessages: [{message, mediaUrl?}] (mensajes POST-VENTA que se envían inmediatamente tras entregar: agradecimiento, bonus, instrucciones extra), ${EMAIL_DELIVERY_FIELDS}, storeInviteEnabled?, storeInviteText?}; benefits/faqs/objections completos son CLAVE para que el agente venda bien.`;
     default:
@@ -1873,6 +1876,49 @@ function mergeNamed(cur: unknown, inc: unknown, key: string): Record<string, unk
  * cuando el usuario pide "agrégale X") y `null` se ignora. Con `replace=true`
  * lo enviado es la versión FINAL (así se quitan elementos) y `null` limpia.
  */
+/**
+ * PLANES con precio (cualquier rubro): `planes:[{nombre, precio}]` (alias `plans`, o
+ * verticalData.plans) -> grupo "Plan" en verticalData.modifierGroups + price = el más
+ * barato. [] quita los planes. También rechaza variantes con opciones-objeto (antes se
+ * guardaban como "[object Object]"). Devuelve un mensaje de error o null.
+ */
+function applyPlansToPayload(data: LooseData, payload: ReturnType<typeof buildPayload>): string | null {
+  const variants = (data as { variants?: unknown }).variants;
+  if (Array.isArray(variants)) {
+    for (const v of variants as Array<{ name?: unknown; options?: unknown }>) {
+      if (Array.isArray(v?.options) && (v.options as unknown[]).some((o) => o !== null && typeof o === "object")) {
+        return `Las opciones de la variante «${String(v?.name ?? "")}» deben ser texto (ej. ["S","M","L"]). Si cada opción tiene su PRECIO (planes: Mensual, 1 año…), usa planes:[{nombre, precio}] en vez de variants.`;
+      }
+    }
+  }
+  const vdIn = (data as { verticalData?: Record<string, unknown> }).verticalData;
+  const raw = (data as { planes?: unknown }).planes ?? (data as { plans?: unknown }).plans ?? (vdIn && typeof vdIn === "object" ? vdIn.plans : undefined);
+  const vd = { ...((payload.verticalData ?? {}) as Record<string, unknown>) };
+  const hadPlansKey = "plans" in vd;
+  delete vd.plans;
+  if (raw === undefined) {
+    if (hadPlansKey) payload.verticalData = vd;
+    return null;
+  }
+  const others = (Array.isArray(vd.modifierGroups) ? (vd.modifierGroups as Array<{ name?: string }>) : []).filter((g) => !/^plan(es)?$/i.test(String(g?.name ?? "").trim()));
+  const plans = parsePlanInput(raw);
+  if (!plans) return "planes debe ser una lista [{nombre, precio}]";
+  if (!plans.length) {
+    vd.modifierGroups = others;
+    payload.verticalData = vd;
+    return null;
+  }
+  try {
+    const built = buildPlanGroup(plans);
+    vd.modifierGroups = [...others, built.group];
+    payload.verticalData = vd;
+    payload.price = built.price;
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : "planes inválidos";
+  }
+}
+
 function buildPayload(data: LooseData, existing: AdminProduct | null, replace = false) {
   const e = existing;
   const additive = !replace && !!e;
@@ -2645,7 +2691,8 @@ export async function runCopilotTool(
 
     case "ver_producto": {
       const product = await getProduct(companyId, String(args.productId ?? ""));
-      return { result: JSON.stringify(product), wrote: false };
+      const planes = planOptions((product as { verticalData?: unknown }).verticalData, (product as { price?: string }).price);
+      return { result: JSON.stringify(planes.length ? { ...product, planes: planes.map((pl) => ({ nombre: pl.label, precio: pl.price })) } : product), wrote: false };
     }
 
     case "previsualizar_ficha": {
@@ -2675,6 +2722,8 @@ export async function runCopilotTool(
 
     case "crear_producto": {
       const payload = buildPayload((args.data ?? {}) as LooseData, null);
+      const planErr = applyPlansToPayload((args.data ?? {}) as LooseData, payload);
+      if (planErr) return { result: JSON.stringify({ ok: false, error: planErr }), wrote: false };
       const parsed = productBodySchema.safeParse(payload);
       if (!parsed.success) {
         return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
@@ -2704,6 +2753,8 @@ export async function runCopilotTool(
       const productId = String(args.productId ?? "");
       const existing = await getProduct(companyId, productId);
       const payload = buildPayload((args.data ?? {}) as LooseData, existing, args.reemplazar === true);
+      const planErr = applyPlansToPayload((args.data ?? {}) as LooseData, payload);
+      if (planErr) return { result: JSON.stringify({ ok: false, error: planErr }), wrote: false };
       const parsed = productBodySchema.safeParse(payload);
       if (!parsed.success) {
         return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
@@ -3555,6 +3606,7 @@ export async function runCopilotTool(
         estado: r.status,
         validacion: r.validationMode,
         producto: r.product?.name ?? null,
+        planes: ((r as { metadata?: { plans?: unknown } }).metadata?.plans as unknown) ?? undefined,
         cliente: { nombre: r.customer?.name ?? r.payerName ?? null, phone: r.customer?.phone ?? r.payerPhone ?? null },
       }));
       return { result: JSON.stringify({ total: receipts.length, mostrados: rows.length, items: rows }), wrote: false };

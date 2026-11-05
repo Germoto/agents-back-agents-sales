@@ -7,6 +7,7 @@
  * no ramas fijas. Eso elimina la rigidez ante mensajes fuera de guion.
  */
 
+import { planOptions } from "../products/product-plans";
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
@@ -52,8 +53,18 @@ function renderModalities(v: Record<string, unknown>, basePrice: string | undefi
     .join(" | ");
 }
 
-// Renderiza los datos estructurados del rubro (vertical pack) de un producto.
+// Renderiza los datos estructurados del rubro (vertical pack) de un producto. En rubros
+// distintos de Streaming (que ya lista sus modalidades) agrega los PLANES con precio.
 function renderVerticalData(vertical: string | undefined, vData: unknown, basePrice?: string, symbol: string = "S/"): string {
+  const base = renderVerticalDataBase(vertical, vData, basePrice, symbol);
+  if (vertical === "STREAMER") return base;
+  const plans = planOptions(vData, basePrice);
+  if (!plans.length) return base;
+  const plansText = `PLANES (precio exacto de cada uno) — ${plans.map((p) => `${p.label}: ${symbol} ${p.price.toFixed(2)}`).join(" / ")}`;
+  return [base, plansText].filter(Boolean).join(" · ");
+}
+
+function renderVerticalDataBase(vertical: string | undefined, vData: unknown, basePrice?: string, symbol: string = "S/"): string {
   if (!vData || typeof vData !== "object") return "";
   const v = vData as Record<string, unknown>;
   const show = (label: string, key: string) =>
@@ -471,6 +482,14 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     ...(httpActions.length
       ? [
           `- ACCIONES EXTERNAS del negocio (herramientas ${httpActions.map((a) => a.toolName).join(", ")}): llaman a la API del negocio (crear una licencia demo, una cuenta, consultar un estado…). Úsalas SOLO cuando el cliente lo pida o las instrucciones del negocio lo indiquen; antes pide los datos obligatorios que la herramienta señala. Copia al cliente los datos que devuelve tal cual (licencias, usuarios, enlaces); si responde ok:false, explica que hubo un problema técnico y ofrece otra vía, sin inventar datos ni reintentar solo. Si responde bloqueado:true, esa acción ya se usó con este cliente (es de una sola vez): NO la reintentes ni digas que falló; sigue lo que indican las instrucciones del negocio para ese caso.`,
+        ]
+      : []),
+    // Productos con PLANES (fuera de Streaming, que ya lo explica en su rubro): el plan
+    // elegido va al carrito para que el cobro y la validación usen SU precio.
+    ...((config.business as { vertical?: string }).vertical !== "STREAMER" &&
+    config.products.some((p) => planOptions(p.verticalData, p.priceText ?? p.price).length > 0)
+      ? [
+          "- PLANES: algunos productos tienen PLANES con precio propio (ver PLANES en el catálogo). Cuando el cliente elija uno, agrégalo con agregar_carrito {productId, modifiers:[{group:'Plan', option:'<plan exacto>'}]} ANTES de enviar_metodos_pago: el mensaje de cobro y la validación del pago usan el precio de ESE plan. Si cambia de plan, vuelve a llamar agregar_carrito con el nuevo (reemplaza al anterior). Cotiza siempre el precio exacto del plan, nunca el 'desde'.",
         ]
       : []),
     // Búsqueda en Drive: SOLO para negocios con API key y productos cuya entrega tiene links de Drive.

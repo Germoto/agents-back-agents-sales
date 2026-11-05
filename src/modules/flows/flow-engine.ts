@@ -11,6 +11,7 @@
  * timeouts del worker y la página Pruebas.
  */
 
+import { isPlainAmount } from "../products/product-plans";
 import { ScheduledMessageType, type ScheduledMessage, Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import type { ChatMessage } from "../../lib/openai";
@@ -1437,7 +1438,8 @@ async function preparePaymentCharge(
     const p = products.find((x) => x.id === data.productId);
     const raw = p?.priceText ?? p?.price ?? "";
     amountNum = Number(String(raw).replace(/[^\d.]/g, "")) || 0;
-    amountText = raw || `${flowSymbol} ${amountNum.toFixed(2)}`;
+    // Nunca mostrar como monto un precio de texto ("Desde S/ 19.99 al mes"): se usa el número.
+    amountText = raw && isPlainAmount(raw) ? raw : `${flowSymbol} ${amountNum.toFixed(2)}`;
     title = p?.name ?? title;
     productIds = [data.productId];
     // Para que el matching/entrega resuelvan el producto igual que el agente.

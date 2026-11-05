@@ -122,11 +122,21 @@ export async function addToCart(
   const qty = Math.max(1, quantity || 1);
 
   // Buscar una línea existente del mismo producto con los MISMOS modificadores
-  const lines = await prisma.cartItem.findMany({ where: { cartId, productId } });
+  let lines = await prisma.cartItem.findMany({ where: { cartId, productId } });
   const key = JSON.stringify(chosen);
+  // PLAN (Mensual / 1 año…): un producto lleva UN solo plan. Elegir otro reemplaza la
+  // línea anterior y repetir el mismo no suma unidades (evita cobrar 19.99 + 200).
+  const isPlan = chosen.some((c) => /^plan(es)?$/i.test((c.group ?? "").trim()));
+  if (isPlan) {
+    const stale = lines.filter((l) => JSON.stringify((l.variantChoices as unknown) ?? []) !== key).map((l) => l.id);
+    if (stale.length) await prisma.cartItem.deleteMany({ where: { id: { in: stale } } });
+    lines = lines.filter((l) => !stale.includes(l.id));
+  }
   const match = lines.find((l) => JSON.stringify((l.variantChoices as unknown) ?? []) === key);
 
-  if (match) {
+  if (match && isPlan) {
+    await prisma.cartItem.update({ where: { id: match.id }, data: { quantity: qty, unitPriceText } });
+  } else if (match) {
     await prisma.cartItem.update({
       where: { id: match.id },
       data: { quantity: { increment: qty }, unitPriceText },
