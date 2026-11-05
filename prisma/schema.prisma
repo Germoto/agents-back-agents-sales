@@ -218,6 +218,9 @@ model Company {
   redeemedVouchers     Voucher[]             @relation("RedeemedVouchers")
   reportConfig         ReportConfig?
   stickerAssets          StickerAsset[]
+  httpConnections        HttpConnection[]
+  httpActions            HttpAction[]
+  httpActionRuns         HttpActionRun[]
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
@@ -645,6 +648,9 @@ model DigitalDelivery {
   // (comportamiento por defecto, infoproducto); POOL_AUTO = toma una credencial del
   // inventario y la asigna; MANUAL = avisa al vendedor para entrega manual.
   assignmentMode             DeliveryAssignmentMode @default(STATIC)
+  // HTTP_ACTION: acción HTTP que genera el acceso (licencia, cuenta…) al confirmar el pago.
+  httpActionId               String?                @db.Uuid
+  httpAction                 HttpAction?            @relation(fields: [httpActionId], references: [id], onDelete: SetNull)
   // Mensajes adicionales opcionales tras la entrega: array de {message,mediaUrl,mediaType}.
   followupMessages           Json                   @default("[]")
   // Legacy (single) — conservados por compat; el array de arriba es la fuente de verdad.
@@ -715,6 +721,7 @@ enum DeliveryAssignmentMode {
   STATIC // mensaje fijo igual para todos (default; infoproducto)
   POOL_AUTO // toma una credencial del inventario y la asigna al aprobar el pago
   MANUAL // el bot no entrega; avisa al vendedor para entrega manual
+  HTTP_ACTION // llama a una acción HTTP (API del dueño) y entrega con su respuesta
 }
 
 enum StreamingCredentialStatus {
@@ -1939,4 +1946,115 @@ model StoreOrder {
 
   @@index([companyId, createdAt])
   @@index([companyId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Acciones HTTP (estilo nodo HTTP Request de n8n): conexiones con credencial,
+// acciones (peticiones guardadas) y su historial. Las usan los flujos (bloque
+// Petición HTTP), la entrega digital (modo HTTP_ACTION) y el agente IA (tool
+// dinámica accion_<slug>).
+// ---------------------------------------------------------------------------
+
+enum HttpAuthType {
+  NONE
+  BEARER // Authorization: Bearer <secreto>
+  HEADER // <authName>: <secreto>
+  QUERY // ?<authName>=<secreto>
+  BASIC // Authorization: Basic base64(<authName>:<secreto>)
+}
+
+enum HttpBodyType {
+  NONE
+  JSON
+  FORM
+  RAW
+}
+
+model HttpConnection {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String       @db.Uuid
+  name       String
+  baseUrl    String
+  authType   HttpAuthType @default(NONE)
+  // Nombre de la cabecera/parámetro (HEADER/QUERY) o usuario (BASIC).
+  authName   String?
+  // Secreto cifrado (credentials-crypto). Write-only: nunca vuelve al panel.
+  authSecret String?
+  // Cabeceras fijas {nombre: valor}.
+  headers    Json         @default("{}")
+  timeoutMs  Int          @default(15000)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  company    Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  actions    HttpAction[]
+
+  @@index([companyId])
+}
+
+model HttpAction {
+  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId        String            @db.Uuid
+  connectionId     String?           @db.Uuid
+  name             String
+  description      String?
+  method           String            @default("POST")
+  // Absoluta (https://…) o relativa a connection.baseUrl.
+  url              String
+  // [{key, value}] con variables {{…}}.
+  query            Json              @default("[]")
+  headers          Json              @default("[]")
+  bodyType         HttpBodyType      @default(JSON)
+  body             String?
+  // Prefijo de las variables de respuesta ({{api.…}}).
+  responseVar      String            @default("api")
+  retries          Int               @default(1)
+  // Disponible como herramienta del agente IA (accion_<slug>).
+  agentEnabled     Boolean           @default(false)
+  agentDescription String?
+  // [{name, description, required}]: datos que el agente pide al cliente → {{param.<name>}}.
+  agentParams      Json              @default("[]")
+  oncePerCustomer  Boolean           @default(false)
+  agentResultHint  String?
+  lastRunAt        DateTime?
+  lastRunOk        Boolean?
+  // Claves aplanadas de la última prueba (autocompletado de {{api.…}} en el panel).
+  lastResponseKeys Json?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  company          Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  connection       HttpConnection?   @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  runs             HttpActionRun[]
+  deliveries       DigitalDelivery[]
+
+  @@index([companyId])
+}
+
+model HttpActionRun {
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String      @db.Uuid
+  actionId       String?     @db.Uuid
+  // TEST | FLOW | DELIVERY | AGENT
+  source         String
+  customerId     String?     @db.Uuid
+  conversationId String?     @db.Uuid
+  receiptId      String?     @db.Uuid
+  productId      String?     @db.Uuid
+  // delivery:<receiptId>:<productId> | agent:<actionId>:<customerId> — evita generar dos veces.
+  idempotencyKey String?     @unique
+  // OK | ERROR | TIMEOUT | BLOCKED
+  status         String
+  httpStatus     Int?
+  durationMs     Int         @default(0)
+  // {url, method, headers (enmascaradas), body (recortado)}
+  request        Json
+  // {status, contentType, body (recortado), vars}
+  response       Json?
+  error          String?
+  createdAt      DateTime    @default(now())
+  company        Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  action         HttpAction? @relation(fields: [actionId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, createdAt])
+  @@index([actionId, createdAt])
+  @@index([actionId, customerId])
 }

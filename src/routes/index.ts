@@ -28,6 +28,7 @@ import webchatConfigRoutes from "../modules/webchat/webchat-config.routes";
 import { mcpPublicRoutes, mcpConfigRoutes } from "../modules/mcp/mcp.routes";
 import adCatalogRoutes from "../modules/ad-catalog/ad-catalog.routes";
 import metaCapiRoutes from "../modules/meta-capi/meta-capi.routes";
+import httpActionsRoutes from "../modules/http-actions/http-actions.routes";
 import quickRepliesRoutes from "../modules/quick-replies/quick-replies.routes";
 import crmRoutes from "../modules/crm/crm.routes";
 import campaignsRoutes from "../modules/campaigns/campaigns.routes";
@@ -98,6 +99,8 @@ router.use("/mcp-config", billingGuard(), mcpConfigRoutes);
 router.use("/ad-catalog", billingGuard(), adCatalogRoutes);
 // Meta Conversions API (reportar ventas al anuncio de origen)
 router.use("/meta-capi-config", billingGuard(), metaCapiRoutes);
+// Acciones HTTP (conexiones, acciones y su historial): flujos, entrega por API y tools del agente
+router.use("/http-actions", billingGuard(), httpActionsRoutes);
 // Respuestas rápidas del panel de conversaciones
 router.use("/quick-replies", billingGuard({ module: "QUICK_REPLIES" }), quickRepliesRoutes);
 // CRM kanban (tableros, etiquetas internas, valores de negocio). El embudo
