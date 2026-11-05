@@ -120,6 +120,45 @@ export function toRunnableConnection(row: {
   };
 }
 
+/**
+ * Campos de un cuerpo de formulario. Acepta los tres formatos en que puede llegar
+ * (panel, cURL pegado o Copiloto): una línea por campo `clave=valor`, todo en una
+ * línea unido con `&` (estilo cURL), o un objeto JSON {clave: valor}. Los valores
+ * que ya vienen codificados (%2B, %40, +) se decodifican para no codificarlos dos veces.
+ */
+export function parseFormBody(raw: string): Array<[string, string]> {
+  const text = raw.trim();
+  if (!text) return [];
+  if (/^\s*\{/.test(text)) {
+    try {
+      const obj = JSON.parse(text) as Record<string, unknown>;
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        return Object.entries(obj).map(([k, v]) => [k, v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v)]);
+      }
+    } catch {
+      /* no era JSON: sigue como texto */
+    }
+  }
+  const pieces = text.includes("\n") ? text.split(/\r?\n/) : text.split("&");
+  const out: Array<[string, string]> = [];
+  for (const piece of pieces) {
+    const idx = piece.indexOf("=");
+    if (idx <= 0) continue;
+    const key = piece.slice(0, idx).trim();
+    let value = piece.slice(idx + 1).trim();
+    // Ya codificado (viene de un cURL): decodificar; `+` es espacio solo en ese caso.
+    if (/%[0-9a-fA-F]{2}/.test(value)) {
+      try {
+        value = decodeURIComponent(value.replace(/\+/g, " "));
+      } catch {
+        /* se deja tal cual */
+      }
+    }
+    out.push([key, value]);
+  }
+  return out;
+}
+
 function joinUrl(baseUrl: string, url: string): string {
   if (/^https?:\/\//i.test(url)) return url;
   if (!baseUrl) return url;
@@ -194,12 +233,9 @@ export function buildHttpRequest(req: RunnableRequest, conn: RunnableConnection 
       }
       if (!hasCt) headers["Content-Type"] = "application/json";
     } else if (req.bodyType === "FORM") {
-      // Una línea por campo: clave=valor (con variables).
       const params = new URLSearchParams();
-      for (const line of (req.body ?? "").split(/\r?\n/)) {
-        const idx = line.indexOf("=");
-        if (idx <= 0) continue;
-        params.set(renderVars(line.slice(0, idx).trim(), vars), renderVars(line.slice(idx + 1).trim(), vars));
+      for (const [k, v] of parseFormBody(req.body ?? "")) {
+        params.set(renderVars(k, vars), renderVars(v, vars));
       }
       body = params.toString();
       if (!hasCt) headers["Content-Type"] = "application/x-www-form-urlencoded";
