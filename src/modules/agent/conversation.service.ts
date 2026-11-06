@@ -18,6 +18,8 @@ import { applyFirma } from "./firma";
 import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
 import { normalizePhoneDigits } from "../../lib/identifier";
 import { decodeEntities } from "../../lib/html-entities";
+import { resolveAiSettings } from "../../lib/ai-providers";
+import { transcribeAudio } from "./audio-transcribe";
 import type { ChatMessage } from "../../lib/openai";
 
 /** Estado conversacional persistido en Conversation.state (equivalente al customer.* de n8n). */
@@ -400,6 +402,40 @@ export async function applyReaction(companyId: string, targetWamid: string, emoj
     reaction: emoji.trim() || null,
   });
   return true;
+}
+
+/**
+ * Transcripción MANUAL de un audio del chat (la pide el asesor, p. ej. en atención humana
+ * o si la automática falló). Guarda el texto en el mensaje y avisa al panel; NO dispara
+ * al agente. Si el mensaje ya tenía texto, la transcripción se agrega debajo.
+ */
+export async function transcribeConversationMessage(companyId: string, conversationId: string, messageId: string) {
+  const msg = await prisma.conversationMessage.findFirst({
+    where: { id: messageId, companyId, conversationId },
+    select: { id: true, customerId: true, message: true, mediaUrl: true, mediaType: true },
+  });
+  if (!msg) throw new AppError("Mensaje no encontrado", 404);
+  const isAudio = (msg.mediaType ?? "").toLowerCase() === "audio" || /\.(ogg|oga|opus|mp3|m4a|aac|wav)(\?|$)/i.test(msg.mediaUrl ?? "");
+  if (!msg.mediaUrl || !isAudio) throw new AppError("Ese mensaje no es un audio", 400);
+  const cfg = await prisma.agentConfig.findUnique({
+    where: { companyId },
+    select: { aiProvider: true, openaiModel: true, openaiApiKey: true, transcriptionApiKey: true, temperature: true },
+  });
+  const key = cfg ? resolveAiSettings(cfg).transcriptionApiKey : null;
+  if (!key) throw new AppError("Para transcribir configura la key de OpenAI para audios en Agente IA → Modelo.", 422);
+  const transcript = await transcribeAudio(key, msg.mediaUrl);
+  if (!transcript?.trim()) throw new AppError("No se pudo transcribir el audio; intenta de nuevo.", 502);
+  // Re-transcribir no duplica: la transcripción manual previa (🎙️ …) se reemplaza; el resto del texto se conserva.
+  const base = (msg.message ?? "").replace(/\n?🎙️[\s\S]*$/u, "").trim();
+  const text = base ? `${base}\n🎙️ ${transcript.trim()}` : `🎙️ ${transcript.trim()}`;
+  await prisma.conversationMessage.update({ where: { id: msg.id }, data: { message: text } });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.MESSAGE_UPDATED, {
+    conversationId,
+    customerId: msg.customerId,
+    id: msg.id,
+    message: text,
+  });
+  return { id: msg.id, message: text };
 }
 
 /** Preview del mensaje citado (por wamid, misma empresa) para burbuja y contexto del agente. */

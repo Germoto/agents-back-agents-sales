@@ -12,6 +12,7 @@ import {
   pinConversationController,
   favoriteConversationController,
   starMessageController,
+  transcribeMessageController,
   listStarredMessagesController,
   optOutConversationController,
   replyConversationController,
@@ -51,6 +52,7 @@ router.post("/conversations/:id/pause", requireAuth, pauseConversationController
 router.post("/conversations/:id/pin", requireAuth, pinConversationController);
 router.post("/conversations/:id/favorite", requireAuth, favoriteConversationController);
 router.post("/conversations/:id/star", requireAuth, starMessageController);
+router.post("/conversations/:id/messages/:messageId/transcribe", requireAuth, transcribeMessageController);
 router.get("/conversations/:id/starred", requireAuth, listStarredMessagesController);
 router.post("/conversations/:id/opt-out", requireAuth, optOutConversationController);
 router.post("/conversations/:id/reply", requireAuth, replyConversationController);

@@ -23,6 +23,7 @@ import {
   setCustomerOptOut,
   setConversationFavorite,
   setMessageStarred,
+  transcribeConversationMessage,
   listStarredMessages,
 } from "./conversation.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
@@ -106,6 +107,13 @@ export const starMessageController = asyncHandler(async (req: Request, res: Resp
   const starred = req.body?.starred !== false; // default true
   const r = await setMessageStarred(companyId, String(req.params.id), messageId, starred);
   res.json({ success: true, data: { starred, starredAt: r.starredAt } });
+});
+
+/** Transcribir a mano un audio del chat (no dispara al agente). */
+export const transcribeMessageController = asyncHandler(async (req: Request, res: Response) => {
+  const companyId = req.user!.companyId;
+  const data = await transcribeConversationMessage(companyId, String(req.params.id), String(req.params.messageId));
+  res.json({ success: true, data });
 });
 
 /** Mensajes destacados de un chat. */
