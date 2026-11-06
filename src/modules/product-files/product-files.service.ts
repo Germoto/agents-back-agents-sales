@@ -117,7 +117,14 @@ export async function uploadHandler(req: Request, res: Response) {
   if (!file) {
     throw new AppError("Archivo no recibido", 400);
   }
+  return res.status(201).json(await finalizeUploadedFile(companyId, file));
+}
 
+/**
+ * Núcleo de la subida (panel y enlace de subida): valida la ruta y el tope por tipo,
+ * fija el MIME canónico de documentos y normaliza video. Devuelve el shape de ProductFile.
+ */
+export async function finalizeUploadedFile(companyId: string, file: Express.Multer.File): Promise<UploadedProductFileResponse> {
   let storagePathAbs = file.path;
   const baseDir = path.resolve(process.cwd(), env.UPLOAD_DIR);
   let relativePath = toForwardSlashes(path.relative(baseDir, storagePathAbs));
@@ -159,7 +166,7 @@ export async function uploadHandler(req: Request, res: Response) {
     }
   }
 
-  const response: UploadedProductFileResponse = {
+  return {
     type,
     url: buildPublicUrl(relativePath),
     storagePath: relativePath,
@@ -168,8 +175,6 @@ export async function uploadHandler(req: Request, res: Response) {
     mimeType,
     size,
   };
-
-  return res.status(201).json(response);
 }
 
 export async function deletePersistedHandler(req: Request, res: Response) {

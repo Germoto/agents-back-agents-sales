@@ -75,3 +75,20 @@ export function verifyEmailUnsubToken(token: string): EmailUnsubPayload {
   if (payload?.kind !== "email-unsub" || !payload.companyId || !payload.customerId) throw new Error("Token de baja inválido");
   return payload;
 }
+
+// ---------------------------------------------------------------------------
+// Enlace temporal de SUBIDA de archivos a un producto (Copiloto/MCP en Claude.ai:
+// el dueño abre el enlace y arrastra los archivos). `kind: "product-upload"`, 30 min.
+// ---------------------------------------------------------------------------
+
+export type ProductUploadJwtPayload = { kind: "product-upload"; companyId: string; productId: string; jti: string; exp?: number };
+
+export function signProductUploadToken(payload: { companyId: string; productId: string; jti: string }) {
+  return jwt.sign({ kind: "product-upload", ...payload }, env.JWT_SECRET, { expiresIn: "30m" });
+}
+
+export function verifyProductUploadToken(token: string): ProductUploadJwtPayload {
+  const payload = jwt.verify(token, env.JWT_SECRET) as ProductUploadJwtPayload;
+  if (payload?.kind !== "product-upload" || !payload.companyId || !payload.productId) throw new Error("Enlace de subida inválido");
+  return payload;
+}

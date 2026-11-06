@@ -47,6 +47,7 @@ import billingPublicRoutes from "../modules/billing/billing-public.routes";
 import storefrontPublicRoutes from "../modules/storefront/storefront.public.routes";
 import storefrontRoutes from "../modules/storefront/storefront.routes";
 import downloadPublicRoutes from "../modules/product-files/download.public.routes";
+import uploadLinkPublicRoutes from "../modules/product-files/upload-link.public.routes";
 import { billingGuard } from "../middlewares/billing.middleware";
 
 const router = Router();
@@ -133,6 +134,8 @@ router.use("/webhooks", webhooksRoutes);
 router.use("/public/store", storefrontPublicRoutes);
 // Descarga de archivos privados de entrega con enlace firmado (sin auth; token en ?t=).
 router.use("/public/dl", downloadPublicRoutes);
+// Enlace temporal de subida a un producto (Copiloto/MCP; sin auth, token JWT de 30 min).
+router.use("/public/upload", uploadLinkPublicRoutes);
 // Config pública del landing (animación 3D elegida por el superadmin)
 router.use("/public/landing", platformConfigPublicRoutes);
 // Billing del tenant (Mi plan, canje de vales, créditos). Debe funcionar

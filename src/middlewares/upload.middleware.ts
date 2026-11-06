@@ -25,9 +25,11 @@ function sanitizeExtension(originalName: string, mimeType: string): string {
   return ".bin";
 }
 
-const storage = multer.diskStorage({
+/** Storage de archivos de producto; el companyId sale de `getCompanyId` (sesión o enlace de subida). */
+function productStorage(getCompanyId: (req: Request) => string | undefined) {
+  return multer.diskStorage({
   destination: (req: Request, _file, cb) => {
-    const companyId = req.user?.companyId;
+    const companyId = getCompanyId(req);
     if (!companyId) {
       return cb(new AppError("No autenticado", 401), "");
     }
@@ -42,7 +44,8 @@ const storage = multer.diskStorage({
     const id = crypto.randomUUID();
     cb(null, `${id}${ext}`);
   },
-});
+  });
+}
 
 function fileFilter(_req: Request, file: Express.Multer.File, cb: FileFilterCallback) {
   const isAllowed =
@@ -62,13 +65,18 @@ function fileFilter(_req: Request, file: Express.Multer.File, cb: FileFilterCall
 /** Tope de multer = el mayor de los dos límites; el tope por tipo se valida en el servicio. */
 export const PRODUCT_FILE_LIMIT_MB = Math.max(env.MAX_UPLOAD_MB, MAX_DOCUMENT_MB);
 
-export const uploadProductFileMiddleware = multer({
-  storage,
-  fileFilter,
-  limits: {
-    fileSize: PRODUCT_FILE_LIMIT_MB * 1024 * 1024,
-  },
-}).single("file");
+/** Multer de archivos de producto con el companyId que indique el caller. */
+export function makeProductFileUpload(getCompanyId: (req: Request) => string | undefined) {
+  return multer({
+    storage: productStorage(getCompanyId),
+    fileFilter,
+    limits: {
+      fileSize: PRODUCT_FILE_LIMIT_MB * 1024 * 1024,
+    },
+  }).single("file");
+}
+
+export const uploadProductFileMiddleware = makeProductFileUpload((req) => req.user?.companyId);
 
 // ---------------------------------------------------------------------------
 // Recursos de capacitación (superadmin): carpeta global fija `training/`
