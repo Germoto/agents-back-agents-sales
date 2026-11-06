@@ -32,6 +32,7 @@ import {
   type ConversationState,
   setCustomerOptOut,
   clearHumanHandoff,
+  notifyOwner,
 } from "./conversation.service";
 import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type WhatsappSender } from "./outbound";
 import { readReceiptImage } from "./receipt-vision";
@@ -262,6 +263,22 @@ export async function handleTypingEvent(event: TypingEvent): Promise<void> {
 }
 
 /** Procesa un mensaje entrante. Pensado para correr en background (no bloquea el webhook). */
+
+// Aviso al dueño cuando llegan audios y no hay key de transcripción: una vez
+// cada 24 h por empresa (en memoria; un reinicio puede repetirlo, es aceptable).
+const TRANSCRIPTION_WARN_MS = 24 * 60 * 60 * 1000;
+const transcriptionWarnedAt = new Map<string, number>();
+
+async function warnMissingTranscriptionKey(companyId: string): Promise<void> {
+  const last = transcriptionWarnedAt.get(companyId) ?? 0;
+  if (Date.now() - last < TRANSCRIPTION_WARN_MS) return;
+  transcriptionWarnedAt.set(companyId, Date.now());
+  await notifyOwner(
+    companyId,
+    "🎙️ Un cliente mandó un audio y no se pudo transcribir: configura la key de OpenAI para audios en Agente IA → Modelo. Mientras tanto el agente le pide que lo escriba.",
+  ).catch(() => undefined);
+}
+
 export async function handleInbound(inbound: InboundMessage): Promise<void> {
   if (inbound.fromMe) {
     return; // eco de un mensaje saliente del propio negocio
@@ -337,10 +354,14 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
   if (inbound.type === "audio" && inbound.mediaUrl) {
     // Whisper solo existe en OpenAI: si el proveedor es otro, usa la key de
     // transcripción dedicada (resolveAiSettings ya eligió la correcta).
-    const transcript = await transcribeAudio((config as any).openai?.transcriptionApiKey, inbound.mediaUrl);
+    const transcriptionKey = (config as any).openai?.transcriptionApiKey as string | null | undefined;
+    const transcript = await transcribeAudio(transcriptionKey, inbound.mediaUrl);
     if (transcript) {
       inbound.text = inbound.text?.trim() ? `${inbound.text}\n${transcript}` : transcript;
       console.log(`[agent] audio transcrito (${transcript.length} chars) de ${inbound.fromPhone}`);
+    } else if (!transcriptionKey) {
+      console.warn(`[agent] audio de ${inbound.fromPhone} sin transcribir: falta la key de OpenAI para audios`);
+      void warnMissingTranscriptionKey(companyId);
     } else {
       console.warn(`[agent] no se pudo transcribir el audio de ${inbound.fromPhone}`);
     }

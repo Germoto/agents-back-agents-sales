@@ -15,6 +15,7 @@ import {
   levenshtein,
   driveViewLink,
   driveFileKind,
+  driveMediaPlayable,
   deliveryDriveRefs,
   DRIVE_ATTACH_MAX_BYTES,
   type DriveEntry,
@@ -255,7 +256,7 @@ function smallestAttachable(candidates: DriveEntry[]): DriveEntry {
     .filter((e) => {
       const kind = driveFileKind(e);
       const max = DRIVE_ATTACH_MAX_BYTES[kind];
-      return max && e.size != null && e.size <= max;
+      return max && e.size != null && e.size <= max && driveMediaPlayable(e);
     })
     .sort((a, b) => (a.size ?? 0) - (b.size ?? 0));
   return attachable[0] ?? candidates[0];
@@ -284,7 +285,10 @@ export async function pickSample(product: DriveProductLike, tema: string, opts: 
     const m = classifyMatch(tema, f);
     note(m);
     if (!meets(m.nivel, min)) continue;
-    if (!bestFile || MATCH_RANK[m.nivel as MatchLevel] > MATCH_RANK[bestFile.m.nivel as MatchLevel]) bestFile = { file: f, m };
+    const rank = MATCH_RANK[m.nivel as MatchLevel];
+    const bestRank = bestFile ? MATCH_RANK[bestFile.m.nivel as MatchLevel] : 0;
+    // Empate de nivel: gana el que WhatsApp reproduce (mp4/mp3/jpg) sobre .mov/.wav…
+    if (!bestFile || rank > bestRank || (rank === bestRank && driveMediaPlayable(f) && !driveMediaPlayable(bestFile.file))) bestFile = { file: f, m };
   }
   if (bestFile) return { file: bestFile.file, via: "archivo", coincidencia: bestFile.m.nivel as MatchLevel, puntaje: bestFile.m.puntaje };
 

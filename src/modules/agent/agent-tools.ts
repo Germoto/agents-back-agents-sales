@@ -35,6 +35,8 @@ import {
   driveSearchEnabled,
   getFile,
   driveFileKind,
+  driveMediaPlayable,
+  driveFormatLabel,
   driveViewLink,
   driveDownloadUrl,
   describeEntry,
@@ -305,6 +307,8 @@ export interface OutboxMessage {
   caption?: string;
   /** nombre original del archivo (documentos): se usa como document_name en SMS Tools. */
   fileName?: string;
+  /** Adjunto de Drive: link /file/d/… que el sistema manda solo si el adjunto no llega (delivery-status.worker). */
+  fallbackLink?: string;
   /** Encuesta: pregunta (≤255), opciones (2-12, ≤100 c/u), selección (1 = única). */
   pollQuestion?: string;
   pollOptions?: string[];
@@ -1366,6 +1370,25 @@ function driveAttachKind(entry: Pick<DriveEntry, "isFolder" | "mimeType" | "name
   return null;
 }
 
+/**
+ * ¿Se puede adjuntar este archivo de Drive por WhatsApp? Tipo soportado, formato
+ * que el celular reproduce y peso bajo el tope. Si no, el motivo para el agente.
+ */
+function driveAttachCheck(entry: DriveEntry): { mediaKind: "image" | "video" | "audio" | "document" } | { motivo: string } {
+  const kind = driveFileKind(entry);
+  const mediaKind = driveAttachKind(entry);
+  const max = DRIVE_ATTACH_MAX_BYTES[kind];
+  if (!mediaKind || !max) return { motivo: `tipo ${kind}: no se adjunta, manda el link` };
+  if (!driveMediaPlayable(entry)) return { motivo: `formato ${driveFormatLabel(entry)}: WhatsApp no lo reproduce, manda el link` };
+  if (entry.size == null || entry.size > max) {
+    return { motivo: `pesa ${entry.size != null ? Math.round(entry.size / 1024 / 1024) : "?"} MB (tope ${Math.round(max / 1024 / 1024)} MB): manda el link` };
+  }
+  return { mediaKind };
+}
+
+const DRIVE_SENT_NOTE =
+  "El archivo se está enviando como adjunto: NO afirmes que ya le llegó ni pegues el link en tu texto final; cierra breve. Si no se le abre, el sistema le manda el link solo.";
+
 function pushPresentationMedia(ctx: TurnContext, product: BotProduct, kind: string = "all"): number {
   const mediaSent = Array.isArray(ctx.state.mediaSentProductIds) ? ctx.state.mediaSentProductIds : [];
   if (mediaSent.includes(product.id)) return 0;
@@ -1679,7 +1702,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "obtener_muestra",
       description:
-        "Vía corta para 'mándame una muestra de X' / 'tienes de X?': devuelve UN solo archivo suelto (nunca una carpeta) de la entrega del producto que coincide con el tema: nombre, tipo, tamaño y link de archivo, más `coincidencia` (exacta | parcial | debil) y `puntaje` (0-1). Si el tema coincide con una carpeta, elige un archivo de dentro. Solo da por encontrado coincidencias exacta o parcial (palabras completas del tema en el nombre o la ruta); si solo hay parecido de letras (ej. 'metallica' ≈ 'medallita') responde encontrado:false con `sugerencias` (carpetas/categorías cercanas del pack) para que ofrezcas lo más parecido en vez de mandar algo que no es. Con `adjuntar=true` además lo envía por el chat como video/imagen/audio/PDF si pesa poco (tope de WhatsApp); si pesa más, solo devuelve el link. Si no hay nada, lo dice: no inventes.",
+        "Vía corta para 'mándame una muestra de X' / 'tienes de X?': devuelve UN solo archivo suelto (nunca una carpeta) de la entrega del producto que coincide con el tema: nombre, tipo, tamaño y link de archivo, más `coincidencia` (exacta | parcial | debil) y `puntaje` (0-1). Si el tema coincide con una carpeta, elige un archivo de dentro. Solo da por encontrado coincidencias exacta o parcial (palabras completas del tema en el nombre o la ruta); si solo hay parecido de letras (ej. 'metallica' ≈ 'medallita') responde encontrado:false con `sugerencias` (carpetas/categorías cercanas del pack) para que ofrezcas lo más parecido en vez de mandar algo que no es. Con `adjuntar=true` además lo envía por el chat como video/imagen/audio/PDF si pesa poco (tope de WhatsApp) y su formato se reproduce en WhatsApp (mp4/3gp, mp3/m4a/aac/ogg, jpg/png; prefiere esos); si no, solo devuelve el link y el motivo. Si no hay nada, lo dice: no inventes.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1699,7 +1722,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "enviar_archivo_drive",
       description:
-        "Envía por el chat, como adjunto (video, imagen, audio o PDF), UN archivo encontrado con buscar_en_drive u obtener_muestra, en vez de mandar solo el link. Solo archivos pequeños (video/audio hasta 16 MB, imagen 5 MB, PDF 20 MB, límite de WhatsApp); si pesa más, la tool devuelve el link para que lo mandes. Las carpetas no se adjuntan.",
+        "Envía por el chat, como adjunto (video, imagen, audio o PDF), UN archivo encontrado con buscar_en_drive u obtener_muestra, en vez de mandar solo el link. Solo archivos pequeños (video/audio hasta 16 MB, imagen 5 MB, PDF 20 MB, límite de WhatsApp) y en formatos que WhatsApp reproduce (video mp4/3gp, audio mp3/m4a/aac/ogg, imagen jpg/png); si no cumple, la tool devuelve el motivo y el link para que lo mandes. Las carpetas no se adjuntan.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -2414,18 +2437,16 @@ export async function executeTool(
         let enviado = false;
         let motivoNoAdjunto: string | undefined;
         if (args.adjuntar === true) {
-          const kind = driveFileKind(pick.file);
-          const mediaKind = driveAttachKind(pick.file);
-          const max = DRIVE_ATTACH_MAX_BYTES[kind];
-          if (!mediaKind || !max) motivoNoAdjunto = `tipo ${kind}: no se adjunta, manda el link`;
-          else if (pick.file.size == null || pick.file.size > max) motivoNoAdjunto = `pesa ${pick.file.size != null ? Math.round(pick.file.size / 1024 / 1024) : "?"} MB (tope ${Math.round(max / 1024 / 1024)} MB): manda el link`;
+          const check = driveAttachCheck(pick.file);
+          if ("motivo" in check) motivoNoAdjunto = check.motivo;
           else {
             ctx.outbox.push({
               kind: "media",
               mediaUrl: driveDownloadUrl(pick.file.id),
-              mediaKind,
+              mediaKind: check.mediaKind,
               caption: typeof args.texto === "string" && args.texto.trim() ? args.texto.trim().slice(0, 600) : undefined,
               fileName: pick.file.name,
+              fallbackLink: driveViewLink(pick.file),
             });
             enviado = true;
           }
@@ -2440,8 +2461,10 @@ export async function executeTool(
           enviado,
           ...(motivoNoAdjunto ? { motivoNoAdjunto } : {}),
           nota: enviado
-            ? "Ya envié el archivo como adjunto. NO pegues el link en tu texto final; cierra breve."
-            : "Comparte el link del archivo tal cual si corresponde (o adjúntalo con enviar_archivo_drive / adjuntar=true).",
+            ? DRIVE_SENT_NOTE
+            : motivoNoAdjunto
+              ? "No se adjuntó (ver motivoNoAdjunto): comparte el link del archivo tal cual."
+              : "Comparte el link del archivo tal cual si corresponde (o adjúntalo con enviar_archivo_drive / adjuntar=true).",
         });
       } catch (error) {
         const msg = error instanceof Error ? error.message : "error";
@@ -2473,21 +2496,17 @@ export async function executeTool(
           const allowed = purchased || !blockedFolderIds(product).has(entry.id);
           return JSON.stringify({ ok: false, error: "es una carpeta: no se adjunta", link: allowed ? driveViewLink(entry) : null, nota: allowed ? "compártela por link si corresponde" : "carpeta de la entrega: disponible tras la compra (lo decide el sistema)" });
         }
-        const kind = driveFileKind(entry);
-        const mediaKind = driveAttachKind(entry);
-        const max = DRIVE_ATTACH_MAX_BYTES[kind];
-        if (!mediaKind || !max) return JSON.stringify({ ok: false, error: `tipo ${kind}: no se adjunta`, archivo: describeEntry(entry, true), nota: "mándalo por link" });
-        if (entry.size == null || entry.size > max) {
-          return JSON.stringify({ ok: false, error: `pesa ${entry.size != null ? Math.round(entry.size / 1024 / 1024) : "?"} MB (tope ${Math.round(max / 1024 / 1024)} MB): no se adjunta`, archivo: describeEntry(entry, true), nota: "mándalo por link" });
-        }
+        const check = driveAttachCheck(entry);
+        if ("motivo" in check) return JSON.stringify({ ok: false, error: check.motivo, archivo: describeEntry(entry, true), nota: "mándalo por link" });
         ctx.outbox.push({
           kind: "media",
           mediaUrl: driveDownloadUrl(entry.id),
-          mediaKind,
+          mediaKind: check.mediaKind,
           caption: typeof args.texto === "string" && args.texto.trim() ? args.texto.trim().slice(0, 600) : undefined,
           fileName: entry.name,
+          fallbackLink: driveViewLink(entry),
         });
-        return JSON.stringify({ ok: true, enviado: true, archivo: describeEntry(entry, true), nota: "Ya envié el archivo como adjunto. NO lo describas de nuevo ni pegues el link en tu texto final; cierra breve." });
+        return JSON.stringify({ ok: true, enviado: true, archivo: describeEntry(entry, true), nota: `${DRIVE_SENT_NOTE} No lo describas de nuevo.` });
       } catch (error) {
         const msg = error instanceof Error ? error.message : "error";
         console.warn(`[drive] enviar_archivo_drive falló (company=${ctx.companyId} file=${fileId}): ${msg}`);

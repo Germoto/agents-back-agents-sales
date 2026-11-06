@@ -10,15 +10,22 @@
  */
 
 import cron from "node-cron";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { smsTools } from "../../lib/smstools-client";
 import { loadWhatsappSender, sendText, sendMedia } from "./outbound";
 import { notifyOwner } from "./conversation.service";
+import { deliver, fallbackLinkText } from "./delivery";
 
 const BATCH = 200;
 const WINDOW_MIN = 30; // solo mensajes de los últimos 30 min
 const GIVEUP_MIN = 10; // si tras 10 min no aparece en wa.sent, dejar de rastrear
 const MAX_RETRIES = 2;
+// Adjuntos de Drive: si a los 3 min no llegaron (1 check) pero un mensaje posterior
+// del mismo chat sí, el celular está en línea y fue el adjunto: se manda el link.
+const DRIVE_FALLBACK_AFTER_MIN = 3;
+const DRIVE_FALLBACK_WINDOW_MIN = 60;
+const fallbackInFlight = new Set<string>();
 let started = false;
 
 export function startDeliveryStatusWorker(): void {
@@ -27,6 +34,9 @@ export function startDeliveryStatusWorker(): void {
   cron.schedule("* * * * *", () => {
     void reconcile().catch((err) =>
       console.error("[delivery] tick error:", err instanceof Error ? err.message : err),
+    );
+    void driveLinkFallback().catch((err) =>
+      console.error("[delivery] respaldo de Drive falló:", err instanceof Error ? err.message : err),
     );
   });
   console.log("[delivery] worker de estado de entrega iniciado (cada 60s)");
@@ -57,7 +67,7 @@ export async function reconcile(): Promise<void> {
     take: BATCH,
     select: {
       id: true, companyId: true, customerId: true, gatewayId: true, deliveryRetries: true,
-      message: true, mediaUrl: true, createdAt: true,
+      message: true, mediaUrl: true, createdAt: true, rawPayload: true,
       customer: { select: { phone: true } },
     },
   });
@@ -105,6 +115,11 @@ export async function reconcile(): Promise<void> {
       }
 
       if (kind === "failed") {
+        if (isDriveAttachment(m.rawPayload)) {
+          // Reintentar el mismo adjunto fallaría igual: driveLinkFallback manda el link.
+          await prisma.conversationMessage.update({ where: { id: m.id }, data: { deliveryStatus: "failed" } });
+          continue;
+        }
         if (m.deliveryRetries < MAX_RETRIES) {
           // Claim del reintento (evita doble envío si dos ticks se solapan).
           const claim = await prisma.conversationMessage.updateMany({
@@ -139,6 +154,79 @@ export async function reconcile(): Promise<void> {
       if (now - m.createdAt.getTime() > GIVEUP_MIN * 60_000) {
         await prisma.conversationMessage.update({ where: { id: m.id }, data: { deliveryStatus: "unknown" } });
       }
+    }
+  }
+}
+
+function payloadOf(raw: unknown): Record<string, unknown> | null {
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+}
+
+function isDriveAttachment(raw: unknown): boolean {
+  const p = payloadOf(raw);
+  return p?.source === "drive" && typeof p.fallbackLink === "string";
+}
+
+/**
+ * Respaldo de adjuntos de Drive que no llegaron al celular: si el gateway lo
+ * marcó fallido, o sigue sin "delivered" mientras un mensaje POSTERIOR del bot
+ * en el mismo chat sí llegó, se manda el link /file/d/… (una sola vez).
+ */
+export async function driveLinkFallback(): Promise<void> {
+  const now = Date.now();
+  const candidates = await prisma.conversationMessage.findMany({
+    where: {
+      role: "ASSISTANT",
+      createdAt: { gte: new Date(now - DRIVE_FALLBACK_WINDOW_MIN * 60_000), lte: new Date(now - DRIVE_FALLBACK_AFTER_MIN * 60_000) },
+      rawPayload: { path: ["source"], equals: "drive" },
+      deliveryStatus: { notIn: ["delivered", "read"] },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 50,
+    select: {
+      id: true, companyId: true, customerId: true, conversationId: true, createdAt: true,
+      deliveryStatus: true, rawPayload: true,
+      customer: { select: { phone: true } },
+    },
+  });
+
+  for (const m of candidates) {
+    const payload = payloadOf(m.rawPayload);
+    const link = typeof payload?.fallbackLink === "string" ? payload.fallbackLink : null;
+    const conversationId = m.conversationId;
+    if (!payload || !link || !conversationId || payload.fallbackSentAt || fallbackInFlight.has(m.id)) continue;
+
+    if (m.deliveryStatus !== "failed") {
+      const laterArrived = await prisma.conversationMessage.findFirst({
+        where: {
+          conversationId,
+          role: "ASSISTANT",
+          createdAt: { gt: m.createdAt },
+          deliveryStatus: { in: ["delivered", "read"] },
+        },
+        select: { id: true },
+      });
+      if (!laterArrived) continue; // celular sin conexión o aún sin checks: esperar
+    }
+
+    fallbackInFlight.add(m.id);
+    try {
+      // Marcar primero: nunca mandar el link dos veces.
+      await prisma.conversationMessage.update({
+        where: { id: m.id },
+        data: { rawPayload: { ...payload, fallbackSentAt: new Date().toISOString() } as Prisma.InputJsonValue },
+      });
+      const sender = await loadWhatsappSender(m.companyId);
+      if (!sender) continue;
+      const to = m.customer.phone.replace(/\D/g, "");
+      await deliver(sender, to, { kind: "text", text: fallbackLinkText(link) }, {
+        companyId: m.companyId,
+        customerId: m.customerId,
+        conversationId,
+      });
+      console.log(`[delivery] adjunto de Drive sin entregar (${m.id}): se envió el link de respaldo`);
+    } finally {
+      fallbackInFlight.delete(m.id);
     }
   }
 }

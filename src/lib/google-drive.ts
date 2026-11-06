@@ -158,6 +158,34 @@ export function driveFileKind(entry: Pick<DriveEntry, "isFolder" | "mimeType" | 
   return "otro";
 }
 
+/**
+ * Formatos multimedia que WhatsApp reproduce en el celular. Un video/audio/imagen
+ * fuera de esta lista (.mov, .mkv, .avi, .wav, .gif…) el gateway lo "envía" pero
+ * el cliente lo ve con 1 check o no lo abre: ese va por link, no adjunto.
+ */
+const PLAYABLE_EXTS: Record<string, string[]> = {
+  video: ["mp4", "3gp"],
+  audio: ["mp3", "m4a", "aac", "ogg", "opus", "amr"],
+  imagen: ["jpg", "jpeg", "png"],
+};
+const PLAYABLE_MIMES = ["video/mp4", "video/3gpp", "audio/mpeg", "audio/mp4", "audio/aac", "audio/ogg", "audio/amr", "image/jpeg", "image/png"];
+
+/** true si es video/audio/imagen en un formato que WhatsApp reproduce (los demás tipos: true, no aplica). */
+export function driveMediaPlayable(entry: Pick<DriveEntry, "isFolder" | "mimeType" | "name">): boolean {
+  const kind = driveFileKind(entry);
+  const exts = PLAYABLE_EXTS[kind];
+  if (!exts) return true;
+  const ext = (entry.name.match(/\.([a-z0-9]{2,5})$/i)?.[1] ?? "").toLowerCase();
+  if (ext) return exts.includes(ext);
+  return PLAYABLE_MIMES.includes((entry.mimeType ?? "").split(";")[0].trim().toLowerCase());
+}
+
+/** Extensión (o tipo) para explicar por qué no se adjunta: ".mov". */
+export function driveFormatLabel(entry: Pick<DriveEntry, "mimeType" | "name">): string {
+  const ext = entry.name.match(/\.([a-z0-9]{2,5})$/i)?.[1];
+  return ext ? `.${ext.toLowerCase()}` : entry.mimeType || "desconocido";
+}
+
 /** Tope para mandar el archivo como adjunto por WhatsApp (por encima va solo el link). */
 export const DRIVE_ATTACH_MAX_BYTES: Record<string, number> = {
   imagen: 5 * 1024 * 1024,

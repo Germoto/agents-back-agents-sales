@@ -44,6 +44,11 @@ export function pollRecordText(question: string, options: string[]): string {
   return [`📊 ${question}`, ...options.map((o) => `▢ ${o}`)].join("\n");
 }
 
+/** Texto que acompaña el link de respaldo de un adjunto de Drive que no llegó. */
+export function fallbackLinkText(link: string): string {
+  return `Por si el archivo no se abre, aquí lo tienes: ${link}`;
+}
+
 /** Envía un texto normal y lo registra (ruta compartida por texto y fallback de encuesta). */
 async function deliverText(sender: WhatsappSender, to: string, raw: string, ids: DeliveryIds): Promise<void> {
   const spun = decodeEntities(applySpintax(raw));
@@ -88,6 +93,8 @@ export async function deliver(
         fileName: msg.mediaKind === "document" ? (msg.fileName ?? null) : null,
         gatewayId: r.gatewayId,
         deliveryStatus: r.gatewayId ? "pending" : null,
+        // Adjunto de Drive: el worker de entrega manda este link si el adjunto no llega.
+        ...(msg.fallbackLink ? { rawPayload: { source: "drive", fallbackLink: msg.fallbackLink } } : {}),
       });
     } else if (msg.kind === "poll" && msg.pollQuestion && (msg.pollOptions?.length ?? 0) >= 2) {
       // Encuesta nativa (solo flujos). Sin firma: la pregunta tiene tope de 255
@@ -131,6 +138,15 @@ export async function deliver(
         ids.companyId,
         `⚠️ No se pudo enviar un archivo al cliente por WhatsApp (Meta).\nMotivo: ${reason}`,
       ).catch(() => undefined);
+    }
+    // Adjunto de Drive rechazado en el acto: el cliente recibe el link en su lugar.
+    if (msg.kind === "media" && msg.fallbackLink) {
+      try {
+        await deliverText(sender, to, fallbackLinkText(msg.fallbackLink), ids);
+        return true;
+      } catch (e) {
+        console.error("[agent] tampoco se pudo enviar el link de respaldo:", e instanceof Error ? e.message : e);
+      }
     }
     return false;
   }
