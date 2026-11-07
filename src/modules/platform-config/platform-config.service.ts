@@ -40,12 +40,18 @@ export async function getEnabledVerticals(): Promise<BusinessVertical[]> {
 }
 
 // Animaciones disponibles para el landing público (Three.js en el frontend).
-export const LANDING_SCENES: { value: string; label: string }[] = [
-  { value: "constelacion", label: "Constelación (icosaedro + partículas)" },
-  { value: "ondas", label: "Ondas (malla de partículas en movimiento)" },
-  { value: "nebulosa", label: "Nebulosa (espiral de partículas)" },
-  { value: "tunel", label: "Túnel (warp de partículas hacia la cámara)" },
-  { value: "lluvia", label: "Lluvia digital (partículas cayendo)" },
+export const LANDING_SCENES: { value: string; label: string; description: string }[] = [
+  { value: "constelacion", label: "Constelación", description: "Icosaedro, anillo y partículas en órbita" },
+  { value: "ondas", label: "Ondas", description: "Malla de partículas que ondula como un océano" },
+  { value: "nebulosa", label: "Nebulosa", description: "Espiral de partículas tipo galaxia" },
+  { value: "tunel", label: "Túnel", description: "Partículas que viajan hacia la cámara" },
+  { value: "lluvia", label: "Lluvia digital", description: "Partículas cayendo con deriva" },
+  { value: "rejilla", label: "Rejilla en perspectiva", description: "Piso de cuadrícula que ondula y sigue al mouse" },
+  { value: "red", label: "Red de nodos", description: "Puntos que se conectan cuando se acercan" },
+  { value: "aurora", label: "Aurora", description: "Cintas de luz suaves que fluyen" },
+  { value: "orbes", label: "Orbes", description: "Esferas difusas flotando con profundidad" },
+  { value: "hexagonos", label: "Hexágonos", description: "Panal que se ilumina en ondas" },
+  { value: "flujo", label: "Flujo", description: "Corrientes de partículas atraídas por el mouse" },
 ];
 
 const LANDING_SCENE_VALUES = LANDING_SCENES.map((s) => s.value);
