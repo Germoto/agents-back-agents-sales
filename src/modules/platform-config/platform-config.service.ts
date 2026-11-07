@@ -52,6 +52,18 @@ export const LANDING_SCENES: { value: string; label: string; description: string
   { value: "orbes", label: "Orbes", description: "Esferas difusas flotando con profundidad" },
   { value: "hexagonos", label: "Hexágonos", description: "Panal que se ilumina en ondas" },
   { value: "flujo", label: "Flujo", description: "Corrientes de partículas atraídas por el mouse" },
+  { value: "malla", label: "Malla", description: "Cuadrícula fina que se deforma en ondas, con puntos que laten" },
+  { value: "esferas", label: "Esferas", description: "Esferas wireframe anidadas girando" },
+  { value: "anillos", label: "Anillos", description: "Ondas concéntricas que se expanden desde el centro" },
+  { value: "estrellas", label: "Estrellas", description: "Cielo de estrellas que titilan con parallax" },
+  { value: "helice", label: "Hélice", description: "Doble hélice de puntos girando" },
+  { value: "cubos", label: "Cubos", description: "Cubos wireframe flotando y rotando" },
+  { value: "nudo", label: "Nudo", description: "Nudo toroidal wireframe girando" },
+  { value: "lineas", label: "Líneas de sonido", description: "Líneas horizontales que ondulan con el mouse" },
+  { value: "burbujas", label: "Burbujas", description: "Círculos que suben y se desvanecen" },
+  { value: "terreno", label: "Terreno", description: "Relieve low-poly que avanza hacia ti" },
+  { value: "enjambre", label: "Enjambre", description: "Partículas que persiguen al mouse" },
+  { value: "latido", label: "Latido", description: "Grilla de puntos que pulsa en ondas" },
 ];
 
 const LANDING_SCENE_VALUES = LANDING_SCENES.map((s) => s.value);
