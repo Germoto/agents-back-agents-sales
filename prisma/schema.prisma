@@ -230,6 +230,8 @@ model PlatformConfig {
   id                   String             @id @default("global")
   enabledVerticals     BusinessVertical[]
   landingScene         String             @default("constelacion")
+  // Color de acento de la landing pública (#rrggbb); independiente del tema de cada usuario.
+  landingAccent        String?            @default("#3451b2")
   // Agente de ventas de la PLATAFORMA (chat del landing que capta tenants):
   // puntero al tenant oculto "FlowApp Ventas" + base de conocimiento estructurada.
   salesAgentCompanyId  String?            @db.Uuid

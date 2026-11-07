@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { asyncHandler } from "../../lib/async-handler";
-import { getLandingScene, getPublicSalesChatToken } from "./platform-config.service";
+import { getLandingConfig, getPublicSalesChatToken } from "./platform-config.service";
 
 const router = Router();
 
@@ -9,8 +9,8 @@ const router = Router();
 router.get(
   "/",
   asyncHandler(async (_req, res) => {
-    const [scene, salesToken] = await Promise.all([getLandingScene(), getPublicSalesChatToken()]);
-    return res.json({ scene, salesChat: salesToken ? { token: salesToken } : null });
+    const [{ scene, accent }, salesToken] = await Promise.all([getLandingConfig(), getPublicSalesChatToken()]);
+    return res.json({ scene, accent, salesChat: salesToken ? { token: salesToken } : null });
   }),
 );
 

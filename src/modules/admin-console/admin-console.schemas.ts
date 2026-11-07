@@ -60,9 +60,12 @@ export const updateClientStatusSchema = z.object({
   isActive: z.boolean(),
 });
 
-export const updateLandingSceneSchema = z.object({
-  scene: z.string().min(2).max(40),
-});
+export const updateLandingSceneSchema = z
+  .object({
+    scene: z.string().min(2).max(40).optional(),
+    accent: z.string().regex(/^#[0-9a-fA-F]{6}$/, "Color inválido (#rrggbb)").optional(),
+  })
+  .refine((v) => v.scene !== undefined || v.accent !== undefined, { message: "Nada que actualizar" });
 
 // Agente de ventas de la plataforma (chat del landing que capta tenants)
 export const updateSalesAgentSchema = z.object({

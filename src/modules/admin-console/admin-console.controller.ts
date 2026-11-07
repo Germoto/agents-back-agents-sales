@@ -20,6 +20,9 @@ import {
   setPlatformMpBilling,
   getNotifyConfig,
   updateNotifyConfig,
+  getLandingConfig,
+  LANDING_ACCENTS,
+  setLandingAccent,
 } from "../platform-config/platform-config.service";
 import {
   ensureSalesAgentTenant,
@@ -97,13 +100,15 @@ export async function updateNotifyConfigController(req: Request, res: Response) 
 }
 
 export async function getLandingSceneController(_req: Request, res: Response) {
-  const scene = await getLandingScene();
-  return res.json({ all: LANDING_SCENES, scene });
+  const { scene, accent } = await getLandingConfig();
+  return res.json({ all: LANDING_SCENES, scene, accents: LANDING_ACCENTS, accent });
 }
 
 export async function updateLandingSceneController(req: Request, res: Response) {
-  const scene = await setLandingScene(req.body.scene);
-  return res.json({ all: LANDING_SCENES, scene });
+  if (typeof req.body.scene === "string") await setLandingScene(req.body.scene);
+  if (typeof req.body.accent === "string") await setLandingAccent(req.body.accent);
+  const { scene, accent } = await getLandingConfig();
+  return res.json({ all: LANDING_SCENES, scene, accents: LANDING_ACCENTS, accent });
 }
 
 // ---------------------------------------------------------------------------

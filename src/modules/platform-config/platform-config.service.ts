@@ -58,6 +58,45 @@ export async function getLandingScene(): Promise<string> {
   return config?.landingScene ?? "constelacion";
 }
 
+// Acentos sugeridos para la landing (el superadmin puede escribir cualquier #rrggbb).
+export const LANDING_ACCENTS: { value: string; label: string }[] = [
+  { value: "#3451b2", label: "Índigo (marca)" },
+  { value: "#1d6fa5", label: "Azul" },
+  { value: "#1f7a4d", label: "Verde WhatsApp" },
+  { value: "#0f766e", label: "Teal" },
+  { value: "#c2410c", label: "Naranja" },
+  { value: "#8a2a4a", label: "Vino" },
+  { value: "#3f4756", label: "Gris" },
+  { value: "#5b4bd6", label: "Violeta" },
+];
+export const DEFAULT_LANDING_ACCENT = "#3451b2";
+const HEX_RE = /^#[0-9a-f]{6}$/i;
+
+export async function getLandingAccent(): Promise<string> {
+  const config = await prisma.platformConfig.findUnique({
+    where: { id: PLATFORM_CONFIG_ID },
+    select: { landingAccent: true },
+  });
+  const value = config?.landingAccent ?? DEFAULT_LANDING_ACCENT;
+  return HEX_RE.test(value) ? value.toLowerCase() : DEFAULT_LANDING_ACCENT;
+}
+
+export async function setLandingAccent(accent: string): Promise<string> {
+  if (!HEX_RE.test(accent)) throw new AppError("Color de acento no válido (usa #rrggbb).", 400);
+  const config = await prisma.platformConfig.upsert({
+    where: { id: PLATFORM_CONFIG_ID },
+    update: { landingAccent: accent.toLowerCase() },
+    create: { id: PLATFORM_CONFIG_ID, enabledVerticals: ALL_VERTICALS, landingAccent: accent.toLowerCase() },
+  });
+  return config.landingAccent ?? DEFAULT_LANDING_ACCENT;
+}
+
+/** Config de la landing que ve el superadmin y, sin secretos, el público. */
+export async function getLandingConfig(): Promise<{ scene: string; accent: string }> {
+  const [scene, accent] = await Promise.all([getLandingScene(), getLandingAccent()]);
+  return { scene, accent };
+}
+
 export async function setLandingScene(scene: string): Promise<string> {
   if (!LANDING_SCENE_VALUES.includes(scene)) {
     throw new AppError("Animación de landing no válida.", 400);
