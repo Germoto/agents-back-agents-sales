@@ -1,3 +1,4 @@
+import type { BusinessVertical } from "@prisma/client";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
 import { prisma } from "../../lib/prisma";
@@ -29,6 +30,8 @@ function generateCode(): string {
 
 export interface CreatePreRegistrationInput {
   planId?: string;
+  /** Rubro preseleccionado desde /soluciones/<rubro> (opcional; el superadmin lo puede cambiar). */
+  vertical?: BusinessVertical;
   companyName: string;
   fullName: string;
   email: string; // ya lowercase por el schema
@@ -108,6 +111,7 @@ export async function createPreRegistration(input: CreatePreRegistrationInput) {
 
   const data = {
     planId: input.planId ?? null,
+    ...(input.vertical ? { vertical: input.vertical } : {}),
     companyName: input.companyName,
     fullName: input.fullName,
     email: input.email,

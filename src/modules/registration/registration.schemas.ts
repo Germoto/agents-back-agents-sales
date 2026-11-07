@@ -15,8 +15,20 @@ export const passwordPolicySchema = z
   .regex(/[0-9]/, "Debe incluir un número")
   .regex(/[^A-Za-z0-9]/, "Debe incluir un símbolo (ej. * . - _ @)");
 
+export const businessVerticalSchema = z.enum([
+  "INFOPRODUCT",
+  "PHYSICAL_GOODS",
+  "RESTAURANT",
+  "STREAMER",
+  "SERVICE",
+  "REAL_ESTATE",
+  "OTHER",
+]);
+
 export const createPreRegistrationSchema = z.object({
   planId: z.string().uuid().optional(),
+  // Rubro preseleccionado desde /soluciones/<rubro> en la landing (opcional).
+  vertical: businessVerticalSchema.optional(),
   companyName: z.string().trim().min(2, "Ingresa el nombre de tu negocio").max(80),
   fullName: z.string().trim().min(2, "Ingresa tu nombre").max(80),
   email: z.string().trim().toLowerCase().email("Correo inválido"),
@@ -37,16 +49,6 @@ export const preRegIdParamsSchema = z.object({
 // ---------------------------------------------------------------------------
 // Consola superadmin: edición y conversión de pre-registros.
 // ---------------------------------------------------------------------------
-
-export const businessVerticalSchema = z.enum([
-  "INFOPRODUCT",
-  "PHYSICAL_GOODS",
-  "RESTAURANT",
-  "STREAMER",
-  "SERVICE",
-  "REAL_ESTATE",
-  "OTHER",
-]);
 
 export const listPreRegistrationsQuerySchema = z.object({
   status: z.enum(["EMAIL_PENDING", "VERIFIED", "CONVERTED", "REJECTED"]).optional(),
