@@ -203,6 +203,8 @@ model Company {
   storeEmailCampaigns  StoreEmailCampaign[]
   quickReplies         QuickReply[]
   quickReplyCategories QuickReplyCategory[]
+  onboarding           CompanyOnboarding?
+  copilotThreads       CopilotThread[]
   crms                 Crm[]
   crmColumns           CrmColumn[]
   crmCards             CrmCard[]
@@ -280,7 +282,43 @@ model User {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
   company            Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  copilotThreads     CopilotThread[]
 
+  @@index([companyId])
+}
+
+// Asistente de arranque (/bienvenida): paso en curso, borrador del paso, cuántas
+// veces lo saltó el dueño y si ya pidió ver el panel completo. El avance real
+// (productos, pagos, prueba, WhatsApp) se deriva de los datos, no de aquí.
+model CompanyOnboarding {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String    @unique @db.Uuid
+  step           Int       @default(1)
+  draft          Json?
+  skipCount      Int       @default(0)
+  lastSkippedAt  DateTime?
+  completedAt    DateTime?
+  fullMenu       Boolean   @default(false)
+  // Rubro con el que se aplicaron las plantillas (para reemplazarlas si cambia sin productos).
+  presetVertical String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  company        Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+// Historial del Copiloto por usuario y contexto (panel | onboarding): últimos 40 mensajes.
+model CopilotThread {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String   @db.Uuid
+  userId    String   @db.Uuid
+  kind      String   @default("panel")
+  messages  Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, kind])
   @@index([companyId])
 }
 

@@ -126,6 +126,16 @@ export async function updateBusinessProfile(companyId: string, data: {
   });
   // La firma se cachea en el módulo de entrega: invalidar tras guardar.
   invalidateFirmaCache(companyId);
+  // Cambio de rubro sin productos: las plantillas del rubro (prompt, CRM,
+  // respuestas rápidas) se reemplazan por las del nuevo si no fueron tocadas.
+  if (data.vertical !== existing.vertical) {
+    try {
+      const { applyVerticalPresets } = await import("../onboarding/onboarding.service");
+      await applyVerticalPresets(companyId, data.vertical);
+    } catch (err) {
+      console.warn("[business] plantillas por rubro fallaron:", err instanceof Error ? err.message : err);
+    }
+  }
   const { _count, ...company } = updated;
   return { ...company, productCount: _count.products };
 }

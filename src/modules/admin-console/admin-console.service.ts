@@ -405,6 +405,14 @@ export async function provisionClient(payload: ProvisionClientInput) {
 
   // Plan Personalizado elegido en el registro: trial de acceso completo por N
   // días (fuera de la transacción: upsertea el snapshot "Prueba gratuita").
+  // Plantillas por rubro (prompt, CRM, respuestas rápidas, recordatorios): best-effort.
+  try {
+    const { applyVerticalPresets } = await import("../onboarding/onboarding.service");
+    await applyVerticalPresets(company.id, payload.vertical ?? company.vertical);
+  } catch (err) {
+    console.warn("[provision] plantillas por rubro fallaron:", err instanceof Error ? err.message : err);
+  }
+
   if ((!plan || payload.forceTrial) && (payload.trialDays ?? 0) > 0) {
     const { assignTrialSubscription } = await import("../billing/billing-admin.service");
     await assignTrialSubscription(company.id, payload.trialDays);
