@@ -44,3 +44,10 @@ export const copilotSuggestionsQuerySchema = z.object({
   mode: z.enum(["panel", "onboarding"]).optional(),
   step: z.coerce.number().int().min(1).max(4).optional(),
 });
+
+/** Historial del Copiloto (se guarda tal cual lo muestra el panel; tope 40). */
+export const putCopilotThreadSchema = z.object({
+  kind: z.enum(["panel", "onboarding"]).default("panel"),
+  messages: z.array(z.record(z.string(), z.unknown())).max(60),
+});
+

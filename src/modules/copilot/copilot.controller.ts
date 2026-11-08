@@ -24,7 +24,7 @@ import { AppError } from "../../lib/app-error";
 import { deliveryDriveRefs, driveSearchEnabled, describeEntry, driveViewLink, driveFileKind, DRIVE_ATTACH_MAX_BYTES, DriveAccessError } from "../../lib/google-drive";
 import { searchProductDrive, browseProductFolder, pickSample } from "../drive/drive-search";
 import { indexSummary, ensureIndexNow } from "../drive/drive-index.service";
-import { chatCompletion, type ChatMessage, type ContentPart, type ToolDefinition } from "../../lib/openai";
+import { chatCompletion, chatCompletionStream, type ChatMessage, type ContentPart, type ToolDefinition } from "../../lib/openai";
 import { productBodySchema } from "../products/products.schemas";
 import { createProduct, updateProduct, deleteProduct, getProduct } from "../products/products.service";
 import { updateBusinessProfile, type DeliveryConfigInput } from "../business/business.service";
@@ -5435,10 +5435,59 @@ export async function buildSystem(companyId: string, opts: { mode?: "panel" | "o
 // ---------------------------------------------------------------------------
 // Controller
 // ---------------------------------------------------------------------------
-export async function copilotChatController(req: Request, res: Response) {
-  const companyId = req.user!.companyId;
-  const body = req.body as CopilotBody;
+/** Eventos del turno del Copiloto (stream): progreso de herramientas y texto en vivo. */
+export type CopilotTurnEvent =
+  | { type: "status"; tool: string; label: string }
+  | { type: "tool_done"; tool: string; label: string; ok: boolean }
+  | { type: "delta"; text: string };
 
+const TOOL_LABELS: Record<string, string> = {
+  crear_producto: "Creando producto",
+  actualizar_producto: "Actualizando producto",
+  eliminar_producto: "Eliminando producto",
+  listar_productos: "Revisando tu catálogo",
+  ver_producto: "Leyendo el producto",
+  previsualizar_ficha: "Previsualizando la ficha",
+  adjuntar_foto_producto: "Adjuntando la foto",
+  generar_imagen: "Generando la imagen",
+  ver_configuracion: "Revisando tu configuración",
+  configurar_empresa: "Guardando datos del negocio",
+  configurar_agente: "Ajustando tu agente",
+  configurar_pagos: "Guardando métodos de pago",
+  configurar_recordatorios: "Configurando recordatorios",
+  configurar_tienda: "Configurando la tienda web",
+  configurar_chat_web: "Configurando el chat web",
+  ver_crm: "Revisando tu CRM",
+  crear_crm: "Creando el tablero",
+  crear_columna: "Creando columna",
+  crear_etiqueta: "Creando etiqueta",
+  crear_respuesta_rapida: "Creando respuesta rápida",
+  ver_metricas: "Calculando tus métricas",
+  listar_conversaciones: "Revisando conversaciones",
+  leer_conversacion: "Leyendo la conversación",
+  crear_flujo: "Armando el flujo",
+  activar_flujo: "Activando el flujo",
+  crear_campana: "Creando la campaña",
+  proponer_productos: "Armando la lista de productos",
+  proponer_formulario: "Pasando los datos al formulario",
+  ofrecer_opciones: "Preparando opciones",
+};
+
+function toolLabel(name: string): string {
+  if (TOOL_LABELS[name]) return TOOL_LABELS[name];
+  if (name.startsWith("accion_")) return `Ejecutando ${name.replace("accion_", "").replace(/[-_]/g, " ")}`;
+  return name.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
+/**
+ * Un turno completo del Copiloto (bucle de herramientas). Lo comparten el
+ * endpoint normal (JSON) y el de stream (SSE); onEvent es opcional.
+ */
+export async function runCopilotTurn(
+  companyId: string,
+  body: CopilotBody,
+  onEvent?: (e: CopilotTurnEvent) => void,
+): Promise<{ reply: string; wrote: boolean; ui?: CopilotUi }> {
   const agentConfig = await prisma.agentConfig.findUnique({ where: { companyId } });
   if (!agentConfig?.openaiApiKey) {
     throw new AppError("Falta la API key de IA. Configúrala en Configuración del Agente para usar el Copiloto.", 422);
@@ -5499,19 +5548,44 @@ export async function copilotChatController(req: Request, res: Response) {
   let wroteAny = false;
   const ui: CopilotUi = {};
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const r = await chatCompletion({
-      apiKey,
-      model,
-      baseUrl,
-      temperature: 0.3,
-      maxTokens: 2500,
-      messages,
-      tools: TOOLS,
-      toolChoice: "auto",
-    });
+    // En stream, el texto que el modelo escribe ANTES de llamar herramientas no
+    // se emite (suele ser un "voy a…" redundante); solo el texto final llega en vivo.
+    let buffered = "";
+    let streamed = "";
+    const r = onEvent
+      ? await chatCompletionStream({
+          apiKey,
+          model,
+          baseUrl,
+          temperature: 0.3,
+          maxTokens: 2500,
+          messages,
+          tools: TOOLS,
+          toolChoice: "auto",
+          onDelta: (text) => {
+            buffered += text;
+          },
+        }).catch(async (err) => {
+          // Proveedor que no soporta stream con tools: reintento sin stream.
+          console.warn("[copilot] stream falló, reintento sin stream:", err instanceof Error ? err.message : err);
+          return chatCompletion({ apiKey, model, baseUrl, temperature: 0.3, maxTokens: 2500, messages, tools: TOOLS, toolChoice: "auto" });
+        })
+      : await chatCompletion({ apiKey, model, baseUrl, temperature: 0.3, maxTokens: 2500, messages, tools: TOOLS, toolChoice: "auto" });
+    void caps;
 
     if (!r.toolCalls.length) {
-      return res.json({ reply: r.content?.trim() || "¿En qué te ayudo con la configuración? 🙂", wrote: wroteAny, ui: Object.keys(ui).length ? ui : undefined });
+      const reply = r.content?.trim() || "¿En qué te ayudo con la configuración? 🙂";
+      if (onEvent) {
+        // Emitimos el texto final en vivo (troceado si vino completo).
+        const text = buffered || reply;
+        for (let p = 0; p < text.length; p += 24) {
+          const chunk = text.slice(p, p + 24);
+          streamed += chunk;
+          onEvent({ type: "delta", text: chunk });
+        }
+        void streamed;
+      }
+      return { reply, wrote: wroteAny, ui: Object.keys(ui).length ? ui : undefined };
     }
 
     messages.push({ role: "assistant", content: r.content, tool_calls: r.toolCalls });
@@ -5523,23 +5597,86 @@ export async function copilotChatController(req: Request, res: Response) {
         messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ ok: false, error: "argumentos JSON inválidos" }) });
         continue;
       }
+      const label = toolLabel(call.function.name);
+      onEvent?.({ type: "status", tool: call.function.name, label });
       try {
         collectUi(ui, call.function.name, parsedArgs);
         const { result, wrote } = await runCopilotTool(companyId, call.function.name, parsedArgs, attachmentsByUrl);
         wroteAny = wroteAny || wrote;
         messages.push({ role: "tool", tool_call_id: call.id, content: result });
+        let ok = true;
+        try {
+          ok = (JSON.parse(result) as { ok?: boolean }).ok !== false;
+        } catch {
+          ok = true;
+        }
+        onEvent?.({ type: "tool_done", tool: call.function.name, label, ok });
       } catch (err) {
         const message = err instanceof Error ? err.message : "error ejecutando la herramienta";
         messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ ok: false, error: message }) });
+        onEvent?.({ type: "tool_done", tool: call.function.name, label, ok: false });
       }
     }
   }
 
-  return res.json({
+  return {
     reply: "Hice varias operaciones seguidas y me quedé sin turno 😅. Dime si seguimos con lo que faltó.",
     wrote: wroteAny,
     ui: Object.keys(ui).length ? ui : undefined,
+  };
+}
+
+export async function copilotChatController(req: Request, res: Response) {
+  const result = await runCopilotTurn(req.user!.companyId, req.body as CopilotBody);
+  return res.json(result);
+}
+
+/**
+ * Mismo turno, en SSE: `status`/`tool_done` por herramienta, `delta` con el
+ * texto final en vivo y `done` con {reply, wrote, ui}. Errores → evento `error`.
+ */
+export async function copilotChatStreamController(req: Request, res: Response) {
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+  const write = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+  const keepAlive = setInterval(() => res.write(": ping\n\n"), 15_000);
+  try {
+    const result = await runCopilotTurn(req.user!.companyId, req.body as CopilotBody, (e) => write(e.type, e));
+    write("done", result);
+  } catch (err) {
+    const message = err instanceof AppError ? err.message : err instanceof Error ? err.message : "No pude responder. Intenta de nuevo.";
+    write("error", { message, status: err instanceof AppError ? err.statusCode : 500 });
+  } finally {
+    clearInterval(keepAlive);
+    res.end();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Historial del Copiloto por usuario (panel | onboarding): últimos 40 mensajes.
+// ---------------------------------------------------------------------------
+const THREAD_LIMIT = 40;
+
+export async function getCopilotThreadController(req: Request, res: Response) {
+  const kind = req.query.kind === "onboarding" ? "onboarding" : "panel";
+  const row = await prisma.copilotThread.findUnique({ where: { userId_kind: { userId: req.user!.id, kind } } });
+  return res.json({ kind, messages: Array.isArray(row?.messages) ? row.messages : [], updatedAt: row?.updatedAt ?? null });
+}
+
+export async function putCopilotThreadController(req: Request, res: Response) {
+  const kind = req.body.kind === "onboarding" ? "onboarding" : "panel";
+  const messages = (Array.isArray(req.body.messages) ? req.body.messages : []).slice(-THREAD_LIMIT);
+  const row = await prisma.copilotThread.upsert({
+    where: { userId_kind: { userId: req.user!.id, kind } },
+    update: { messages },
+    create: { companyId: req.user!.companyId, userId: req.user!.id, kind, messages },
   });
+  return res.json({ kind, messages: row.messages, updatedAt: row.updatedAt });
 }
 
 /** Acumula los bloques de UI que piden las herramientas de interfaz. */
