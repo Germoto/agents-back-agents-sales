@@ -1,4 +1,5 @@
 import { prisma } from "../../lib/prisma";
+import { getPlatformAiQuota } from "../agent/platform-ai-quota";
 
 /**
  * Estado de activación del tenant (onboarding). Deriva el progreso de los datos
@@ -43,7 +44,7 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
       prisma.product.count({ where: { companyId, active: true } }),
       prisma.agentConfig.findUnique({
         where: { companyId },
-        select: { openaiApiKey: true, basePrompt: true },
+        select: { openaiApiKey: true, basePrompt: true, aiKeySource: true },
       }),
       prisma.whatsappConfig.findUnique({
         where: { companyId },
@@ -108,11 +109,19 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
     });
   }
   if (botMode !== "FLOW") {
-    const agentDone = !!agentConfig?.openaiApiKey && !!agentConfig?.basePrompt?.trim();
+    // IA de prueba de la plataforma: cuenta como key hasta que se agote el tope.
+    const quota = agentConfig?.aiKeySource === "PLATFORM" ? await getPlatformAiQuota(companyId) : null;
+    const hasKey = !!agentConfig?.openaiApiKey && !quota?.exhausted;
+    const agentDone = hasKey && !!agentConfig?.basePrompt?.trim();
+    const description = quota?.exhausted
+      ? `Se acabaron tus ${quota.cap} respuestas de prueba de la IA: agrega tu propia API key para que el agente siga respondiendo.`
+      : quota
+        ? `Tu agente ya habla con la IA de prueba de FlowApp (${quota.used} de ${quota.cap} respuestas). Define cómo debe vender y, cuando quieras, pon tu propia API key.`
+        : "Agrega tu API key de IA y define cómo debe vender tu agente.";
     steps.push({
       key: "agent",
       title: "Configura tu agente IA",
-      description: "Agrega tu API key de OpenAI y define cómo debe vender tu agente.",
+      description,
       done: agentDone,
       required: true,
       kind: "step",

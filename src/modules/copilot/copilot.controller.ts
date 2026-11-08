@@ -9,6 +9,7 @@
  */
 
 import crypto from "crypto";
+import { consumePlatformAi, getPlatformAiQuota } from "../agent/platform-ai-quota";
 import { signProductUploadToken } from "../../lib/jwt";
 import { buildPlanGroup, parsePlanInput, planOptions } from "../products/product-plans";
 import { createAction as createHttpAction, listActions as listHttpActions, listConnections as listHttpConnections, releaseAgentLock as releaseHttpAgentLock, testAction as testHttpAction, updateAction as updateHttpAction } from "../http-actions/http-actions.service";
@@ -2866,11 +2867,22 @@ export async function runCopilotTool(
       });
       const { followupConfig: _fu, crmToolConfig: _crmTool, ...agentRest } = agent ?? { followupConfig: null, crmToolConfig: null };
       const crmToolView = await describeCrmToolConfig(companyId, agent?.crmToolConfig);
+      const aiQuota = await getPlatformAiQuota(companyId);
       void _fu;
       return {
         result: JSON.stringify({
           empresa: company ? { ...company, productCount: company._count.products, _count: undefined } : null,
-          agente: agent ? { ...agentRest, herramientaCrm: crmToolView } : null,
+          agente: agent
+            ? {
+                ...agentRest,
+                herramientaCrm: crmToolView,
+                // Key de IA: propia del dueño o la IA de prueba de FlowApp (con tope de respuestas).
+                ia:
+                  aiQuota.source === "PLATFORM"
+                    ? { fuenteKey: "plataforma", mensajesPrueba: { usados: aiQuota.used, tope: aiQuota.cap, agotado: aiQuota.exhausted } }
+                    : { fuenteKey: "propia" },
+              }
+            : null,
           recordatorios: {
             abandonedCart: seqInfo(fu?.abandonedCart),
             leftOnRead: seqInfo(fu?.leftOnRead),
@@ -5243,6 +5255,7 @@ const SYSTEM_GUIDE = [
   "- FLUJOS — secuencia OBLIGATORIA: (1) ver_bloques_flujo y ver_crm ANTES de diseñar (nunca inventes ids: usa nombres o los ids reales); (2) propón al dueño el flujo en lenguaje llano — qué pregunta y qué opciones numeradas verá el cliente (muéstrale el texto tal cual le llegará), qué etiqueta/columna pone cada rama, cuándo avisa al dueño, si agenda cita — y espera su confirmación; (3) crear_flujo con soloValidar=true para comprobar, luego sin él; (4) muéstrale el link /flujos/<id> y las warnings; (5) activar_flujo SOLO tras confirmación explícita, avisando que en modo FLOW el bot calla si ningún flujo se dispara (en HYBRID responde el agente) y que el modo se cambia con configurar_empresa botMode; (6) para modificar uno existente, ver_flujo primero y devuelve el grafo COMPLETO conservando ids y posiciones. GOTCHAS: en HYBRID termina el flujo de calificación con to-agent (clientText opcional + note con lo que el agente debe hacer) en vez de handoff, salvo que el dueño quiera atender él; las respuestas del flujo (saveVariable) quedan en la ficha del cliente (Conversaciones → Contacto, tarjeta del CRM, ver_cliente/leer_conversacion) y el agente las recibe como contexto; si el dueño capta leads por Meta Ads, propón trigger onAdLead (no keywords) y acciones CRM en el anuncio (configurar_anuncio); etiquetas según rango (presupuesto, tipo de cliente) requieren un bloque answers (opciones numeradas; el cliente responde con el número o el nombre) con una rama por opción, no question libre; en answers el message es SOLO la pregunta: la lista «1. … 2. …» la agrega el sistema y NUNCA se crean opciones separadas para «1»,«2»… (duplicarían ramas); para menús de 7+ opciones usa list; BOTONES: answers/list son texto numerado, pero el bloque poll envía una ENCUESTA NATIVA de WhatsApp (botonera real, 2-12 opciones, un tap; solo por SMS Tools, en Meta/chat web se degrada sola a menú numerado) — propón poll cuando el dueño pida botones; el agente IA NO envía encuestas (solo los flujos); las variables guardadas (saveVariable) solo llegan al dueño si el notifyText del handoff las incluye con {{variable}}; book-appointment necesita un servicio con durationMin; un flujo de captación típico: answers (qué necesita, una opción por servicio) → crm-add-tags → crm-move → answers (tipo/presupuesto) → crm-add-tags → question (descripción) → to-agent (HYBRID) o handoff con aviso que incluya {{nombre}} {{telefono}} y las variables (ver_bloques_flujo trae un EJEMPLO completo).",
   "- Campañas: además de mensajes, cada campaña puede llevar PASOS por contacto (esperar N segundos, etiquetar/quitar etiquetas, mover a una columna del CRM, pasar a modo humano) y etiquetas de contexto a cada alcanzado (crear_campana pasos / etiquetasContexto, actualizar_campana en borrador, eliminar_campana tras confirmación). Las respuestas rápidas también ejecutan ACCIONES al enviarse: mover al CRM, etiquetar/quitar etiquetas, marcar entregado y fijar el producto presentado (crear/actualizar_respuesta_rapida acciones por nombres).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
+  "- IA DE PRUEBA: las cuentas que se registran solas pueden nacer con la key de IA de FlowApp (ver_configuracion → agente.ia.fuenteKey 'plataforma') con un TOPE de respuestas (agente + Copiloto). Al agotarse, el agente deja de responder y el Copiloto devuelve error hasta que el dueño ponga su PROPIA API key en Agente IA → Modelo (desde el panel; nunca por chat): con key propia no hay tope. Si el dueño pregunta por qué el bot no responde, revisa primero agente.ia.mensajesPrueba.agotado.",
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación. Por chat: listar_comprobantes (con id) y, tras confirmación explícita, aprobar_comprobante (cuenta como venta y entrega), rechazar_comprobante, ignorar_comprobante y asociar_comprobante (producto/teléfono). Desde la ficha del cliente (Conversaciones → pestaña Contacto) el asesor también puede reenviar el acceso de una compra aprobada POR CORREO (si el producto tiene entrega por correo activa).",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (Canales → pestaña Reservas online, /whatsapp?tab=reservas): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
   "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat). Los productos digitales pueden tener ENTREGA POR CORREO a pedido del cliente (editar producto → pestaña 'Entrega del acceso' → sub-pestaña 'Correo', o digitalDelivery.emailEnabled por chat): si el cliente que ya pagó pide el acceso por email, el agente se lo envía y guarda su correo. También pueden tener INVITACIÓN A LA TIENDA (sub-pestaña 'Tienda' o digitalDelivery.storeInviteEnabled): el último mensaje tras entregar invita a visitar la tienda web con su link (reemplaza al cross-sell y al catálogo; requiere tienda publicada). Cada producto puede tener OFERTA con vigencia (precio de oferta + desde/hasta): vigente, el agente la presenta, cobra y valida ese precio y el normal sale tachado como 'antes'. Además hay OFERTAS ESCALONADAS en los recordatorios: cada paso puede llevar su precio (si el cliente no compra, el recordatorio 1 ofrece un precio y el 2 uno mejor — solo para ese cliente). La PRESENTACIÓN (mensaje fijo presentationMessage, banner y mensajes adicionales) se edita en editar producto → pestaña 'Detalles' (en Infoproducto se llama 'Contenido') → sub-pestaña 'Lo que envía al presentar', en todos los rubros salvo Restaurante y Streaming; si no hay mensaje fijo, la ficha se arma sola con descripción, beneficios, 'incluye' y precio (previsualizar_ficha la muestra).",
@@ -5276,11 +5289,16 @@ export async function buildSystem(companyId: string): Promise<string> {
     prisma.paymentConfig.findUnique({ where: { companyId }, select: { enabled: true, methods: { select: { id: true }, take: 1 } } }),
     getLivePlansPromptSection().catch(() => ""),
   ]);
+  const aiQuota = await getPlatformAiQuota(companyId).catch(() => null);
   const vertical = company?.vertical ?? "OTHER";
   return [
     `Eres el COPILOTO de FlowApp para el negocio "${company?.name ?? "—"}". Ayudas al dueño (usuario NO técnico) en español, rápido y sin formularios: CONFIGURAS su negocio conversando y ANALIZAS sus datos reales (ventas, conversiones, conversaciones).`,
     "",
-    `ESTADO DEL NEGOCIO: rubro ${vertical}; ${productCount} producto(s) en el catálogo; pagos ${payment?.enabled && payment.methods.length ? "configurados" : "SIN configurar (recuérdale ir a Pagos)"}; agente ${agent?.basePrompt?.trim() ? "configurado" : "sin prompt (recuérdale ir a Agente IA)"}.`,
+    `ESTADO DEL NEGOCIO: rubro ${vertical}; ${productCount} producto(s) en el catálogo; pagos ${payment?.enabled && payment.methods.length ? "configurados" : "SIN configurar (recuérdale ir a Pagos)"}; agente ${agent?.basePrompt?.trim() ? "configurado" : "sin prompt (recuérdale ir a Agente IA)"}${
+      aiQuota?.source === "PLATFORM"
+        ? `; IA DE PRUEBA de FlowApp: ${aiQuota.used}/${aiQuota.cap} respuestas usadas${aiQuota.exhausted ? " (AGOTADA: el agente no responde hasta que ponga su propia API key en Agente IA → Modelo)" : ""}`
+        : ""
+    }.`,
     // Fecha/hora actual: necesaria para traducir vigencias relativas ("hasta el
     // domingo", "esta semana") a fechas ISO correctas en las ofertas.
     `FECHA Y HORA ACTUAL: ${new Intl.DateTimeFormat("es-PE", {
@@ -5328,6 +5346,15 @@ export async function copilotChatController(req: Request, res: Response) {
   if (!agentConfig?.openaiApiKey) {
     throw new AppError("Falta la API key de IA. Configúrala en Configuración del Agente para usar el Copiloto.", 422);
   }
+  // IA de prueba de la plataforma: cada mensaje del Copiloto cuenta contra el tope.
+  const aiQuota = await getPlatformAiQuota(companyId);
+  if (aiQuota.exhausted) {
+    throw new AppError(
+      `Se acabaron los ${aiQuota.cap} mensajes de prueba de la IA de FlowApp. Agrega tu propia API key en Agente IA → Modelo para seguir usando el Copiloto y el agente.`,
+      422,
+    );
+  }
+  void consumePlatformAi(companyId).catch(() => undefined);
   const { apiKey, model, baseUrl, caps } = resolveAiSettings(agentConfig);
 
   const system = await buildSystem(companyId);

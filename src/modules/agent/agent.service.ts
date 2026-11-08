@@ -34,6 +34,7 @@ import {
   clearHumanHandoff,
   notifyOwner,
 } from "./conversation.service";
+import { consumePlatformAi, getPlatformAiQuota, warnPlatformAiExhausted } from "./platform-ai-quota";
 import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type WhatsappSender } from "./outbound";
 import { readReceiptImage } from "./receipt-vision";
 import { describeSticker } from "./sticker-vision";
@@ -856,10 +857,21 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
   // cliente. Solo SMS Tools (Meta no soporta typing saliente). WhatsApp expira
   // el indicador a los ~10s → keepalive cada 8s hasta terminar de pensar; el
   // primer mensaje enviado lo corta solo.
+  // IA de prueba de la plataforma: con el tope agotado el agente no responde y
+  // el dueño recibe el aviso (una vez cada 24 h) para poner su propia key.
+  const aiQuota = await getPlatformAiQuota(companyId);
+  if (aiQuota.exhausted) {
+    console.warn(`[agent] IA de prueba agotada (${aiQuota.used}/${aiQuota.cap}) company=${companyId}; turno omitido`);
+    void warnPlatformAiExhausted(companyId, aiQuota).catch(() => undefined);
+    return;
+  }
+
   const stopTyping = startTypingKeepalive(sender, customerPhone);
   let finalText: string;
   try {
     finalText = await runAgentTurn(ctx, history);
+    // Cuenta la respuesta contra el tope de la IA de prueba (no hace nada con key propia).
+    void consumePlatformAi(companyId).catch(() => undefined);
     // Si veníamos de una falla accionable (sin créditos/key), avisar al dueño
     // que el agente ya se recuperó (una sola vez).
     void notifyAiProviderRecovered(companyId).catch(() => undefined);

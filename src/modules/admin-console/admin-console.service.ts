@@ -10,6 +10,7 @@ import { addMonthsUtc } from "../billing/billing.service";
 import { deriveBillingState } from "../billing/entitlements";
 import { findUserByIdentifier } from "../auth/auth.service";
 import { normalizeUsername, normalizePhoneDigits } from "../../lib/identifier";
+import { getTrialAiMessageCap } from "../platform-config/platform-config.service";
 
 function defaultRules() {
   return [
@@ -29,11 +30,12 @@ const CLIENT_INCLUDE = {
   _count: { select: { products: true } },
   platformSubscription: { include: { plan: true } },
   wallet: true,
+  agentConfig: { select: { aiKeySource: true, platformAiUsed: true, platformAiCap: true } },
 } satisfies Prisma.CompanyInclude;
 
 type ClientRow = Prisma.CompanyGetPayload<{ include: typeof CLIENT_INCLUDE }>;
 
-function mapClient(company: ClientRow) {
+function mapClient(company: ClientRow, globalAiCap: number | null = null) {
   const adminUser =
     company.users.find((user) => user.role === "ADMIN") ??
     company.users.find((user) => user.role === "SUPERADMIN") ??
@@ -75,6 +77,15 @@ function mapClient(company: ClientRow) {
         }
       : null,
     balancePen,
+    // IA de prueba de la plataforma (solo cuentas con aiKeySource = PLATFORM).
+    platformAi:
+      company.agentConfig?.aiKeySource === "PLATFORM"
+        ? {
+            used: company.agentConfig.platformAiUsed,
+            cap: company.agentConfig.platformAiCap ?? globalAiCap,
+            override: company.agentConfig.platformAiCap,
+          }
+        : null,
   };
 }
 
@@ -131,12 +142,15 @@ export async function getAuthenticatedSuperadmin(userId: string) {
 }
 
 export async function listClients() {
-  const companies = await prisma.company.findMany({
-    include: CLIENT_INCLUDE,
-    orderBy: [{ createdAt: "desc" }],
-  });
+  const [companies, globalAiCap] = await Promise.all([
+    prisma.company.findMany({
+      include: CLIENT_INCLUDE,
+      orderBy: [{ createdAt: "desc" }],
+    }),
+    getTrialAiMessageCap().catch(() => null),
+  ]);
 
-  return companies.map(mapClient);
+  return companies.map((c) => mapClient(c, globalAiCap));
 }
 
 export interface ProvisionClientInput {
@@ -468,6 +482,10 @@ export interface UpdateClientInput {
   adminPhone?: string;
   newPassword?: string;
   timezone?: string;
+  /** Tope de IA de prueba propio del cliente (null = usar el global). */
+  platformAiCap?: number | null;
+  /** Reinicia el contador de respuestas de la IA de prueba. */
+  resetPlatformAi?: boolean;
 }
 
 /**
@@ -541,7 +559,21 @@ export async function updateClient(companyId: string, input: UpdateClientInput) 
     return tx.company.findUniqueOrThrow({ where: { id: companyId }, include: CLIENT_INCLUDE });
   });
 
-  return { ...mapClient(updated), phoneChanged };
+  // IA de prueba: tope propio del cliente y/o reinicio del contador.
+  if (input.platformAiCap !== undefined || input.resetPlatformAi) {
+    await prisma.agentConfig.updateMany({
+      where: { companyId },
+      data: {
+        ...(input.platformAiCap !== undefined ? { platformAiCap: input.platformAiCap } : {}),
+        ...(input.resetPlatformAi ? { platformAiUsed: 0 } : {}),
+      },
+    });
+  }
+  const globalAiCap = await getTrialAiMessageCap().catch(() => null);
+  const fresh = await prisma.company.findUniqueOrThrow({ where: { id: companyId }, include: CLIENT_INCLUDE });
+  void updated;
+
+  return { ...mapClient(fresh, globalAiCap), phoneChanged };
 }
 
 export async function deleteClient(companyId: string) {

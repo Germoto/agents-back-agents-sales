@@ -3,6 +3,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { decryptCredential, encryptCredential } from "../../lib/credentials-crypto";
 import { providerOf } from "../../lib/ai-providers";
+import { getPlatformAiQuota } from "../agent/platform-ai-quota";
 
 /** Máscara para el panel: la key completa NUNCA sale del backend. */
 function maskApiKey(stored: string | null): string | null {
@@ -43,6 +44,8 @@ function mapAgentConfig(config: {
   return {
     ...rest,
     aiProvider: config.aiProvider ?? "OPENAI",
+    // OWN = key del dueño; PLATFORM = IA de prueba de FlowApp (con tope; ver platformAi).
+    aiKeySource: (config as { aiKeySource?: string }).aiKeySource === "PLATFORM" ? "PLATFORM" : "OWN",
     // Seguridad: las keys no se exponen; el panel solo sabe si existen (+ máscara).
     apiKeySet: !!openaiApiKey,
     openaiApiKeyMasked: maskApiKey(openaiApiKey),
@@ -65,9 +68,16 @@ function mapAgentConfig(config: {
   };
 }
 
+/** Agrega el estado de la IA de prueba (usados/tope) cuando la key es de la plataforma. */
+async function withPlatformAi<T extends { companyId: string; aiKeySource: string } | null>(mapped: T) {
+  if (!mapped || mapped.aiKeySource !== "PLATFORM") return mapped ? { ...mapped, platformAi: null } : mapped;
+  const q = await getPlatformAiQuota(mapped.companyId);
+  return { ...mapped, platformAi: { used: q.used, cap: q.cap, exhausted: q.exhausted } };
+}
+
 export async function getAgentConfig(companyId: string) {
   const config = await prisma.agentConfig.findUnique({ where: { companyId } });
-  return mapAgentConfig(config);
+  return withPlatformAi(mapAgentConfig(config));
 }
 
 // Guarda solo el NÚCLEO (modelo + prompt). NO toca followupConfig/replyMode/
@@ -113,8 +123,9 @@ export async function upsertAgentConfig(companyId: string, data: {
     aiProvider,
     openaiModel: data.openaiModel,
     // Solo se escribe si el usuario tipeó una key nueva (guardar sin tocar el
-    // campo conserva la actual); se cifra en reposo (AES-256-GCM).
-    ...(typedKey ? { openaiApiKey: encryptCredential(data.openaiApiKey!.trim()) } : {}),
+    // campo conserva la actual); se cifra en reposo (AES-256-GCM). Una key
+    // propia reemplaza la IA de prueba de la plataforma (se acaba el tope).
+    ...(typedKey ? { openaiApiKey: encryptCredential(data.openaiApiKey!.trim()), aiKeySource: "OWN" } : {}),
     ...(data.transcriptionApiKey && data.transcriptionApiKey.trim()
       ? { transcriptionApiKey: encryptCredential(data.transcriptionApiKey.trim()) }
       : {}),
@@ -144,7 +155,7 @@ export async function upsertAgentConfig(companyId: string, data: {
     update: core,
     create: { companyId, ...core },
   });
-  return mapAgentConfig(config);
+  return withPlatformAi(mapAgentConfig(config));
 }
 
 // Actualiza solo los recordatorios (followupConfig). El registro ya existe (onboarding).

@@ -25,6 +25,9 @@ export const updateClientSchema = z.object({
   adminPhone: z.string().trim().regex(/^\+?\d{8,20}$/).optional(),
   newPassword: z.string().min(8, "Mínimo 8 caracteres").max(100).optional(),
   timezone: z.string().min(3).optional(),
+  // IA de prueba: tope propio (null = global) y reinicio del contador.
+  platformAiCap: z.coerce.number().int().min(1).max(100000).nullable().optional(),
+  resetPlatformAi: z.boolean().optional(),
 });
 
 export const createClientSchema = z.object({

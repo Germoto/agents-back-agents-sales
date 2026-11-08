@@ -50,9 +50,25 @@ export async function getBillingMe(companyId: string) {
   const sub = ent.legacy
     ? null
     : await prisma.companySubscription.findUnique({ where: { companyId }, include: { plan: true } });
+  const trial = sub?.source === "TRIAL";
+
+  // Plan que el cliente eligió al registrarse (registro en un solo paso): se
+  // sugiere en Mi plan mientras dure la prueba, si sigue público y activo.
+  let suggestedPlan: { id: string; name: string; pricePen: number } | null = null;
+  if (trial) {
+    const prereg = await prisma.preRegistration.findFirst({
+      where: { convertedCompanyId: companyId, planId: { not: null } },
+      select: { plan: { select: { id: true, name: true, pricePen: true, isActive: true, isPublic: true } } },
+    });
+    if (prereg?.plan?.isActive && prereg.plan.isPublic) {
+      suggestedPlan = { id: prereg.plan.id, name: prereg.plan.name, pricePen: Number(prereg.plan.pricePen) };
+    }
+  }
 
   return {
     legacy: ent.legacy,
+    trial,
+    suggestedPlan,
     status: sub ? deriveBillingState(sub, balancePen).status : ent.status,
     plan: sub
       ? {
