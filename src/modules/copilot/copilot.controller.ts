@@ -120,6 +120,8 @@ import {
   deleteAdCatalogEntry,
 } from "../ad-catalog/ad-catalog.service";
 import { prepareImageUrl, resolveAiSettings } from "../../lib/ai-providers";
+import { onboardingScript, onboardingSuggestions, type OnboardingStep } from "./onboarding-script";
+import { getOnboarding } from "../onboarding/onboarding.service";
 
 const MAX_ITERATIONS = 8;
 const HISTORY_LIMIT = 16;
@@ -142,6 +144,19 @@ interface CopilotBody {
     /** Legado: solo URLs para visión. */
     imageUrls?: string[];
   }>;
+  /** Asistente de arranque: guion por paso. */
+  mode?: "panel" | "onboarding";
+  step?: OnboardingStep;
+}
+
+/** Herramientas SOLO de interfaz (no escriben; el panel las dibuja). No se exportan al MCP. */
+export const UI_ONLY_TOOLS = new Set(["proponer_productos", "proponer_formulario", "ofrecer_opciones"]);
+
+/** Bloques de UI que el Copiloto puede devolver junto con el texto. */
+export interface CopilotUi {
+  options?: { pregunta?: string; opciones: { etiqueta: string; enviar: string }[] };
+  products?: Array<Record<string, unknown>>;
+  form?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1703,6 +1718,73 @@ export const TOOLS: ToolDefinition[] = [
       },
     },
   },
+  // --- Herramientas de interfaz (asistente de arranque y botones del Copiloto). No escriben nada. ---
+  {
+    type: "function",
+    function: {
+      name: "proponer_productos",
+      description:
+        "SOLO en el asistente de arranque (paso 2): propone la lista de productos leída de una foto o dictada por el dueño para que aparezca en la tabla editable del panel. NO crea nada; el dueño confirma con «Crear N productos». Pásala COMPLETA cada vez (también al corregir un ítem).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productos"],
+        properties: {
+          productos: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: true,
+              required: ["name", "price"],
+              properties: {
+                name: { type: "string" },
+                price: { type: "string", description: "Solo el número, ej. '18' o '18.50'; vacío si no se lee" },
+                category: { type: "string", description: "Sección o categoría" },
+                shortDescription: { type: "string" },
+                durationMin: { type: "number", description: "Servicios: duración en minutos" },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "proponer_formulario",
+      description:
+        "SOLO en el asistente de arranque: vuelca al formulario del paso los datos que el dueño dictó (paso 1: businessHours, deliveryConfig, meetingUrl, modality, address, durationMin, bookingLeadMinutes; paso 3: methods[{method, number, holder}], paymentMode, notificationPhone). NO guarda: el dueño confirma con «Continuar».",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["campos"],
+        properties: { campos: { type: "object", additionalProperties: true } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ofrecer_opciones",
+      description:
+        "Muestra 2 a 4 botones de respuesta bajo tu mensaje (sí/no, alternativas, confirmación). Úsala cuando la respuesta esperada sea corta y cerrada; el texto de 'enviar' es lo que se mandará como mensaje del dueño al tocar el botón.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["opciones"],
+        properties: {
+          pregunta: { type: "string" },
+          opciones: {
+            type: "array",
+            minItems: 2,
+            maxItems: 4,
+            items: { type: "object", additionalProperties: false, required: ["etiqueta", "enviar"], properties: { etiqueta: { type: "string" }, enviar: { type: "string" } } },
+          },
+        },
+      },
+    },
+  },
 ];
 
 /** Resuelve la URL que pasa el modelo a un adjunto REAL de la conversación.
@@ -2868,10 +2950,15 @@ export async function runCopilotTool(
       const { followupConfig: _fu, crmToolConfig: _crmTool, ...agentRest } = agent ?? { followupConfig: null, crmToolConfig: null };
       const crmToolView = await describeCrmToolConfig(companyId, agent?.crmToolConfig);
       const aiQuota = await getPlatformAiQuota(companyId);
+      const onboardingState = await getOnboarding(companyId).catch(() => null);
       void _fu;
       return {
         result: JSON.stringify({
           empresa: company ? { ...company, productCount: company._count.products, _count: undefined } : null,
+          // Asistente de arranque (/bienvenida) y menú simple.
+          puestaEnMarcha: onboardingState
+            ? { completa: onboardingState.complete, pasoActual: onboardingState.nextStep, menuSimple: onboardingState.simpleMenu, porcentaje: onboardingState.setup.percent }
+            : null,
           agente: agent
             ? {
                 ...agentRest,
@@ -5224,6 +5311,13 @@ export async function runCopilotTool(
       };
     }
 
+    case "proponer_productos":
+    case "proponer_formulario":
+    case "ofrecer_opciones": {
+      // Herramientas de interfaz: el panel dibuja el bloque; aquí solo se confirma al modelo.
+      return { result: JSON.stringify({ ok: true, nota: "Mostrado en el panel. Continúa con una frase corta." }), wrote: false };
+    }
+
     default:
       return { result: JSON.stringify({ ok: false, error: `herramienta desconocida: ${name}` }), wrote: false };
   }
@@ -5255,6 +5349,7 @@ const SYSTEM_GUIDE = [
   "- FLUJOS — secuencia OBLIGATORIA: (1) ver_bloques_flujo y ver_crm ANTES de diseñar (nunca inventes ids: usa nombres o los ids reales); (2) propón al dueño el flujo en lenguaje llano — qué pregunta y qué opciones numeradas verá el cliente (muéstrale el texto tal cual le llegará), qué etiqueta/columna pone cada rama, cuándo avisa al dueño, si agenda cita — y espera su confirmación; (3) crear_flujo con soloValidar=true para comprobar, luego sin él; (4) muéstrale el link /flujos/<id> y las warnings; (5) activar_flujo SOLO tras confirmación explícita, avisando que en modo FLOW el bot calla si ningún flujo se dispara (en HYBRID responde el agente) y que el modo se cambia con configurar_empresa botMode; (6) para modificar uno existente, ver_flujo primero y devuelve el grafo COMPLETO conservando ids y posiciones. GOTCHAS: en HYBRID termina el flujo de calificación con to-agent (clientText opcional + note con lo que el agente debe hacer) en vez de handoff, salvo que el dueño quiera atender él; las respuestas del flujo (saveVariable) quedan en la ficha del cliente (Conversaciones → Contacto, tarjeta del CRM, ver_cliente/leer_conversacion) y el agente las recibe como contexto; si el dueño capta leads por Meta Ads, propón trigger onAdLead (no keywords) y acciones CRM en el anuncio (configurar_anuncio); etiquetas según rango (presupuesto, tipo de cliente) requieren un bloque answers (opciones numeradas; el cliente responde con el número o el nombre) con una rama por opción, no question libre; en answers el message es SOLO la pregunta: la lista «1. … 2. …» la agrega el sistema y NUNCA se crean opciones separadas para «1»,«2»… (duplicarían ramas); para menús de 7+ opciones usa list; BOTONES: answers/list son texto numerado, pero el bloque poll envía una ENCUESTA NATIVA de WhatsApp (botonera real, 2-12 opciones, un tap; solo por SMS Tools, en Meta/chat web se degrada sola a menú numerado) — propón poll cuando el dueño pida botones; el agente IA NO envía encuestas (solo los flujos); las variables guardadas (saveVariable) solo llegan al dueño si el notifyText del handoff las incluye con {{variable}}; book-appointment necesita un servicio con durationMin; un flujo de captación típico: answers (qué necesita, una opción por servicio) → crm-add-tags → crm-move → answers (tipo/presupuesto) → crm-add-tags → question (descripción) → to-agent (HYBRID) o handoff con aviso que incluya {{nombre}} {{telefono}} y las variables (ver_bloques_flujo trae un EJEMPLO completo).",
   "- Campañas: además de mensajes, cada campaña puede llevar PASOS por contacto (esperar N segundos, etiquetar/quitar etiquetas, mover a una columna del CRM, pasar a modo humano) y etiquetas de contexto a cada alcanzado (crear_campana pasos / etiquetasContexto, actualizar_campana en borrador, eliminar_campana tras confirmación). Las respuestas rápidas también ejecutan ACCIONES al enviarse: mover al CRM, etiquetar/quitar etiquetas, marcar entregado y fijar el producto presentado (crear/actualizar_respuesta_rapida acciones por nombres).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
+  "- ASISTENTE DE ARRANQUE (/bienvenida): las cuentas nuevas aterrizan ahí en 4 pasos (Tu negocio → Tus productos, con foto de la carta → Cómo cobras → Pruébalo en el simulador y conectar WhatsApp). Se puede salir con «Lo hago después» y retomar desde Inicio («Retomar el asistente»); vuelve a abrirse al entrar hasta completarse (deja de abrirse solo tras 3 salidas) y se puede repetir desde el Centro de ayuda. MODO SIMPLE: mientras la puesta en marcha no esté completa el menú muestra solo Inicio, Conversaciones, Productos, Agente IA, Pagos y WhatsApp (+ Pedidos/Reservas según rubro) y un enlace «Ver todo el panel» que despliega el resto. PLANTILLAS POR RUBRO: toda cuenta nueva nace con prompt y reglas del rubro, un tablero de CRM con columnas y etiquetas, respuestas rápidas básicas y el recordatorio de compra pendiente activado; todo es editable y, si cambia de rubro sin productos, se reemplaza por la plantilla del nuevo rubro. ver_configuracion → puestaEnMarcha muestra si está completa, el paso actual y si el menú está en modo simple.",
   "- IA DE PRUEBA: las cuentas que se registran solas pueden nacer con la key de IA de FlowApp (ver_configuracion → agente.ia.fuenteKey 'plataforma') con un TOPE de respuestas (agente + Copiloto). Al agotarse, el agente deja de responder y el Copiloto devuelve error hasta que el dueño ponga su PROPIA API key en Agente IA → Modelo (desde el panel; nunca por chat): con key propia no hay tope. Si el dueño pregunta por qué el bot no responde, revisa primero agente.ia.mensajesPrueba.agotado.",
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación. Por chat: listar_comprobantes (con id) y, tras confirmación explícita, aprobar_comprobante (cuenta como venta y entrega), rechazar_comprobante, ignorar_comprobante y asociar_comprobante (producto/teléfono). Desde la ficha del cliente (Conversaciones → pestaña Contacto) el asesor también puede reenviar el acceso de una compra aprobada POR CORREO (si el producto tiene entrega por correo activa).",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (Canales → pestaña Reservas online, /whatsapp?tab=reservas): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
@@ -5281,7 +5376,7 @@ const SYSTEM_GUIDE = [
 // ---------------------------------------------------------------------------
 // System prompt + snapshot del negocio
 // ---------------------------------------------------------------------------
-export async function buildSystem(companyId: string): Promise<string> {
+export async function buildSystem(companyId: string, opts: { mode?: "panel" | "onboarding"; step?: OnboardingStep } = {}): Promise<string> {
   const [company, productCount, agent, payment, plansSection] = await Promise.all([
     prisma.company.findUnique({ where: { id: companyId }, select: { name: true, vertical: true, timezone: true } }),
     prisma.product.count({ where: { companyId } }),
@@ -5332,6 +5427,8 @@ export async function buildSystem(companyId: string): Promise<string> {
     "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación 1:1 desde Inicio (/inicio). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",
     "- Tras crear/modificar, resume QUÉ quedó hecho y sugiere el siguiente paso (revisar en el panel, probar en el simulador...).",
     "- Respuestas cortas y claras. Una pregunta a la vez. Los datos que devuelven las herramientas son la fuente de verdad.",
+    "- BOTONES: cuando la respuesta esperada sea corta y cerrada (confirmar, sí/no, elegir entre pocas alternativas) acompaña tu mensaje con ofrecer_opciones; el panel los dibuja como botones.",
+    ...(opts.mode === "onboarding" ? ["", onboardingScript(vertical, opts.step ?? 1)] : []),
   ].join("\n");
 }
 
@@ -5357,7 +5454,7 @@ export async function copilotChatController(req: Request, res: Response) {
   void consumePlatformAi(companyId).catch(() => undefined);
   const { apiKey, model, baseUrl, caps } = resolveAiSettings(agentConfig);
 
-  const system = await buildSystem(companyId);
+  const system = await buildSystem(companyId, { mode: body.mode, step: body.step });
   const history = body.messages.slice(-HISTORY_LIMIT);
 
   // Adjuntos disponibles en TODA la conversación (para adjuntar_foto_producto,
@@ -5400,6 +5497,7 @@ export async function copilotChatController(req: Request, res: Response) {
   ];
 
   let wroteAny = false;
+  const ui: CopilotUi = {};
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const r = await chatCompletion({
       apiKey,
@@ -5413,7 +5511,7 @@ export async function copilotChatController(req: Request, res: Response) {
     });
 
     if (!r.toolCalls.length) {
-      return res.json({ reply: r.content?.trim() || "¿En qué te ayudo con la configuración? 🙂", wrote: wroteAny });
+      return res.json({ reply: r.content?.trim() || "¿En qué te ayudo con la configuración? 🙂", wrote: wroteAny, ui: Object.keys(ui).length ? ui : undefined });
     }
 
     messages.push({ role: "assistant", content: r.content, tool_calls: r.toolCalls });
@@ -5426,6 +5524,7 @@ export async function copilotChatController(req: Request, res: Response) {
         continue;
       }
       try {
+        collectUi(ui, call.function.name, parsedArgs);
         const { result, wrote } = await runCopilotTool(companyId, call.function.name, parsedArgs, attachmentsByUrl);
         wroteAny = wroteAny || wrote;
         messages.push({ role: "tool", tool_call_id: call.id, content: result });
@@ -5439,5 +5538,78 @@ export async function copilotChatController(req: Request, res: Response) {
   return res.json({
     reply: "Hice varias operaciones seguidas y me quedé sin turno 😅. Dime si seguimos con lo que faltó.",
     wrote: wroteAny,
+    ui: Object.keys(ui).length ? ui : undefined,
   });
+}
+
+/** Acumula los bloques de UI que piden las herramientas de interfaz. */
+function collectUi(ui: CopilotUi, name: string, args: LooseData): void {
+  if (name === "ofrecer_opciones" && Array.isArray(args.opciones)) {
+    ui.options = {
+      pregunta: typeof args.pregunta === "string" ? args.pregunta : undefined,
+      opciones: (args.opciones as Array<Record<string, unknown>>)
+        .map((o) => ({ etiqueta: String(o.etiqueta ?? ""), enviar: String(o.enviar ?? o.etiqueta ?? "") }))
+        .filter((o) => o.etiqueta)
+        .slice(0, 4),
+    };
+  } else if (name === "proponer_productos" && Array.isArray(args.productos)) {
+    ui.products = (args.productos as Array<Record<string, unknown>>).slice(0, 60);
+  } else if (name === "proponer_formulario" && args.campos && typeof args.campos === "object") {
+    ui.form = { ...(ui.form ?? {}), ...(args.campos as Record<string, unknown>) };
+  }
+}
+
+/** Sugerencias (chips) del Copiloto según modo/paso y rubro. */
+export async function copilotSuggestionsController(req: Request, res: Response) {
+  const companyId = req.user!.companyId;
+  const mode = (req.query.mode as string | undefined) === "onboarding" ? "onboarding" : "panel";
+  const step = Math.min(4, Math.max(1, Number(req.query.step ?? 1))) as OnboardingStep;
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { vertical: true } });
+  const vertical = company?.vertical ?? "OTHER";
+  if (mode === "onboarding") return res.json({ suggestions: onboardingSuggestions(vertical, step) });
+  const onboarding = await getOnboarding(companyId).catch(() => null);
+  const base = onboarding && !onboarding.complete
+    ? ["¿Qué me falta configurar para empezar a vender?", "Te mando la foto de mi carta para que crees los productos", "Configura mis métodos de pago (Yape/Plin)"]
+    : ["¿Cómo van mis ventas este mes?", "Quiero crear una promoción", "Revisa mis últimas conversaciones y dime qué mejorar"];
+  return res.json({ suggestions: [...base, "¿Cómo conecto mi WhatsApp?", "Crea un flujo de bienvenida que califique a mis leads"] });
+}
+
+/** Creación en lote desde el asistente (paso 2): cada ítem pasa por el mismo armado que crear_producto. */
+export async function bulkCreateProductsController(req: Request, res: Response) {
+  const companyId = req.user!.companyId;
+  const items = (req.body as { productos: LooseData[] }).productos;
+  const created: Array<{ id: string; name: string }> = [];
+  const errors: Array<{ name: string; error: string }> = [];
+  for (const data of items) {
+    const payload = buildPayload(data, null);
+    const planErr = applyPlansToPayload(data, payload);
+    if (planErr) {
+      errors.push({ name: String(data.name ?? "?"), error: planErr });
+      continue;
+    }
+    const parsed = productBodySchema.safeParse(payload);
+    if (!parsed.success) {
+      errors.push({ name: String(data.name ?? "?"), error: zodErrorsText(parsed.error) });
+      continue;
+    }
+    try {
+      const product = await createProduct(companyId, parsed.data as Parameters<typeof createProduct>[1]);
+      created.push({ id: product.id, name: product.name });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "no se pudo crear";
+      if (/unique|duplicad|P2002/i.test(message)) {
+        try {
+          parsed.data.slug = `${parsed.data.slug}-${Math.random().toString(36).slice(2, 6)}`;
+          const product = await createProduct(companyId, parsed.data as Parameters<typeof createProduct>[1]);
+          created.push({ id: product.id, name: product.name });
+          continue;
+        } catch (err2) {
+          errors.push({ name: String(data.name ?? "?"), error: err2 instanceof Error ? err2.message : "no se pudo crear" });
+          continue;
+        }
+      }
+      errors.push({ name: String(data.name ?? "?"), error: message });
+    }
+  }
+  return res.status(created.length ? 201 : 400).json({ created, errors });
 }

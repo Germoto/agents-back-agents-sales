@@ -30,4 +30,17 @@ export const copilotChatSchema = z.object({
     .min(1)
     .max(30)
     .refine((msgs) => msgs[msgs.length - 1]?.role === "user", "El último mensaje debe ser del usuario"),
+  // Asistente de arranque: el Copiloto sigue el guion del paso (1 negocio, 2 productos, 3 cobros, 4 prueba).
+  mode: z.enum(["panel", "onboarding"]).optional(),
+  step: z.number().int().min(1).max(4).optional(),
+});
+
+/** Creación en lote desde el asistente (paso 2): mismos campos laxos que crear_producto.data. */
+export const bulkProductsSchema = z.object({
+  productos: z.array(z.record(z.string(), z.unknown())).min(1).max(60),
+});
+
+export const copilotSuggestionsQuerySchema = z.object({
+  mode: z.enum(["panel", "onboarding"]).optional(),
+  step: z.coerce.number().int().min(1).max(4).optional(),
 });

@@ -13,6 +13,7 @@
 import type { Request, Response } from "express";
 import {
   TOOLS,
+  UI_ONLY_TOOLS,
   runCopilotTool,
   buildSystem,
   type CopilotAttachment,
@@ -104,7 +105,8 @@ export async function mcpHttpController(req: Request, res: Response) {
       case "tools/list":
         return res.json(
           rpcResult(id, {
-            tools: TOOLS.map((t) => ({
+            // Las herramientas de interfaz (botones, propuestas del asistente) no aplican fuera del panel.
+            tools: TOOLS.filter((t) => !UI_ONLY_TOOLS.has(t.function.name)).map((t) => ({
               name: t.function.name,
               description: t.function.description,
               inputSchema: t.function.parameters,
