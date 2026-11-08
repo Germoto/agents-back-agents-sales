@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { storeSlugProblem } from "../../lib/slug";
 import { usernameSchema } from "../../lib/identifier";
 
 // ---------------------------------------------------------------------------
@@ -70,7 +71,8 @@ export const convertPreRegistrationSchema = z.object({
   slug: z
     .string()
     .min(2, "Ingresa un slug")
-    .regex(/^[a-z0-9-]+$/, "Usa solo minusculas, numeros y guiones"),
+    .regex(/^[a-z0-9-]+$/, "Usa solo minusculas, numeros y guiones")
+    .refine((v) => !storeSlugProblem(v), { message: "Ese slug es reservado o no sirve como subdominio de la tienda" }),
   planMonths: z.coerce.number().int().min(1).max(36).default(1),
   // Días de prueba para pre-registros SIN plan (Personalizado). Default 7.
   trialDays: z.coerce.number().int().min(1).max(90).optional(),

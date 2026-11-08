@@ -3,6 +3,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { encryptCredential, decryptCredential } from "../../lib/credentials-crypto";
 import { mpGetMe } from "../../lib/mercadopago-client";
+import { AI_PROVIDERS, providerOf, type AiProviderId } from "../../lib/ai-providers";
 
 const PLATFORM_CONFIG_ID = "global";
 
@@ -308,4 +309,156 @@ export async function updateNotifyConfig(input: {
     select: { alertEmail: true, alertPhone: true },
   });
   return { alertEmail: config.alertEmail ?? null, alertPhone: config.alertPhone ?? null };
+}
+
+// ---------------------------------------------------------------------------
+// Registro en un solo paso (activación automática) + IA de prueba de la plataforma
+// ---------------------------------------------------------------------------
+
+const REGISTRATION_SELECT = {
+  autoActivateRegistrations: true,
+  autoActivateTrialDays: true,
+  trialAiEnabled: true,
+  trialAiProvider: true,
+  trialAiModel: true,
+  trialAiApiKey: true,
+  trialAiMessageCap: true,
+} as const;
+
+export interface RegistrationSettingsAdmin {
+  autoActivate: boolean;
+  trialDays: number;
+  trialAi: {
+    enabled: boolean;
+    provider: AiProviderId;
+    model: string;
+    /** Key enmascarada (nunca completa); null si no hay. */
+    maskedKey: string | null;
+    connected: boolean;
+    messageCap: number;
+  };
+}
+
+function trialAiModelFor(provider: AiProviderId, model: string | null | undefined): string {
+  const info = AI_PROVIDERS[provider];
+  const wanted = model?.trim();
+  return wanted && info.models.some((m) => m.id === wanted) ? wanted : info.models[0].id;
+}
+
+export async function getRegistrationSettingsAdmin(): Promise<RegistrationSettingsAdmin> {
+  const row = await prisma.platformConfig.findUnique({ where: { id: PLATFORM_CONFIG_ID }, select: REGISTRATION_SELECT });
+  const provider = providerOf(row?.trialAiProvider).id;
+  const key = decryptCredential(row?.trialAiApiKey);
+  return {
+    autoActivate: row?.autoActivateRegistrations ?? false,
+    trialDays: row?.autoActivateTrialDays ?? 7,
+    trialAi: {
+      enabled: row?.trialAiEnabled ?? false,
+      provider,
+      model: trialAiModelFor(provider, row?.trialAiModel),
+      maskedKey: key ? maskToken(key) : null,
+      connected: !!key,
+      messageCap: row?.trialAiMessageCap ?? 200,
+    },
+  };
+}
+
+/** Lo que necesita el formulario público de /registro para adaptar textos y rubros. */
+export async function getRegistrationPublicConfig(): Promise<{
+  autoActivate: boolean;
+  trialDays: number;
+  verticals: { value: BusinessVertical; label: string }[];
+}> {
+  const [row, enabled] = await Promise.all([
+    prisma.platformConfig.findUnique({
+      where: { id: PLATFORM_CONFIG_ID },
+      select: { autoActivateRegistrations: true, autoActivateTrialDays: true },
+    }),
+    getEnabledVerticals(),
+  ]);
+  return {
+    autoActivate: row?.autoActivateRegistrations ?? false,
+    trialDays: row?.autoActivateTrialDays ?? 7,
+    verticals: VERTICALS.filter((v) => enabled.includes(v.value)),
+  };
+}
+
+export async function getAutoActivateConfig(): Promise<{ enabled: boolean; trialDays: number }> {
+  const row = await prisma.platformConfig.findUnique({
+    where: { id: PLATFORM_CONFIG_ID },
+    select: { autoActivateRegistrations: true, autoActivateTrialDays: true },
+  });
+  return { enabled: row?.autoActivateRegistrations ?? false, trialDays: row?.autoActivateTrialDays ?? 7 };
+}
+
+/** Key de IA de prueba lista para aprovisionar (ya cifrada); null si está apagada o no hay key. */
+export async function getTrialAiProvision(): Promise<{ provider: AiProviderId; model: string; apiKeyEncrypted: string } | null> {
+  const row = await prisma.platformConfig.findUnique({ where: { id: PLATFORM_CONFIG_ID }, select: REGISTRATION_SELECT });
+  if (!row?.trialAiEnabled || !row.trialAiApiKey) return null;
+  const provider = providerOf(row.trialAiProvider).id;
+  return { provider, model: trialAiModelFor(provider, row.trialAiModel), apiKeyEncrypted: row.trialAiApiKey };
+}
+
+/** Tope global de respuestas de IA de prueba por cliente. */
+export async function getTrialAiMessageCap(): Promise<number> {
+  const row = await prisma.platformConfig.findUnique({ where: { id: PLATFORM_CONFIG_ID }, select: { trialAiMessageCap: true } });
+  return row?.trialAiMessageCap ?? 200;
+}
+
+export async function setRegistrationSettings(input: {
+  autoActivate?: boolean;
+  trialDays?: number;
+  trialAi?: {
+    enabled?: boolean;
+    provider?: AiProviderId;
+    model?: string;
+    /** undefined = no cambiar; null = quitar; string = reemplazar */
+    apiKey?: string | null;
+    messageCap?: number;
+  };
+}): Promise<RegistrationSettingsAdmin> {
+  const current = await getRegistrationSettingsAdmin();
+  const update: Record<string, unknown> = {};
+  if (input.autoActivate !== undefined) update.autoActivateRegistrations = input.autoActivate;
+  if (input.trialDays !== undefined) update.autoActivateTrialDays = input.trialDays;
+
+  const ai = input.trialAi;
+  const provider = ai?.provider ?? current.trialAi.provider;
+  const model = trialAiModelFor(provider, ai?.model ?? (ai?.provider && ai.provider !== current.trialAi.provider ? null : current.trialAi.model));
+  let keyChanged = false;
+  if (ai) {
+    if (ai.enabled !== undefined) update.trialAiEnabled = ai.enabled;
+    if (ai.messageCap !== undefined) update.trialAiMessageCap = ai.messageCap;
+    update.trialAiProvider = provider;
+    update.trialAiModel = model;
+    if (ai.apiKey === null) {
+      update.trialAiApiKey = null;
+      update.trialAiEnabled = false;
+      keyChanged = true;
+    } else if (ai.apiKey && ai.apiKey.trim()) {
+      update.trialAiApiKey = encryptCredential(ai.apiKey.trim());
+      keyChanged = true;
+    }
+    if (ai.enabled && !current.trialAi.connected && !(ai.apiKey && ai.apiKey.trim())) {
+      throw new AppError("Para activar la IA de prueba primero ingresa una API key.", 400);
+    }
+  }
+
+  const saved = await prisma.platformConfig.upsert({
+    where: { id: PLATFORM_CONFIG_ID },
+    update,
+    create: { id: PLATFORM_CONFIG_ID, enabledVerticals: ALL_VERTICALS, ...update },
+    select: REGISTRATION_SELECT,
+  });
+
+  // Los clientes que usan la key de prueba siguen la key/proveedor/modelo de la
+  // plataforma: al cambiar cualquiera de los tres se actualizan en bloque.
+  const providerChanged = provider !== current.trialAi.provider || model !== current.trialAi.model;
+  if ((keyChanged || providerChanged) && saved.trialAiApiKey) {
+    await prisma.agentConfig.updateMany({
+      where: { aiKeySource: "PLATFORM" },
+      data: { openaiApiKey: saved.trialAiApiKey, aiProvider: provider, openaiModel: model },
+    });
+  }
+  return getRegistrationSettingsAdmin();
 }

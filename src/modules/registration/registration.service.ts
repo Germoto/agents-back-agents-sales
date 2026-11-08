@@ -9,6 +9,7 @@ import { verificationCodeEmail, newPreRegistrationAdminEmail } from "./registrat
 import { notifyPlatformAdmin } from "../platform-config/platform-notify.service";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { env } from "../../config/env";
+import { autoActivatePreRegistration } from "./registration-activation.service";
 
 // ---------------------------------------------------------------------------
 // Pre-registro público: el cliente se registra desde el landing, verifica su
@@ -162,6 +163,21 @@ export async function verifyEmailCode(id: string, code: string) {
     },
   });
 
+  // Registro en un solo paso: si el superadmin activó la opción, la cuenta se
+  // crea aquí mismo y el cliente entra directo al panel con la sesión devuelta.
+  // Si falla, el pre-registro queda VERIFIED y sigue el camino manual.
+  try {
+    const activated = await autoActivatePreRegistration(id);
+    if (activated) return { verified: true, activated: true, session: activated.session };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error("[registration] activación automática falló:", reason);
+    void notifyAdminPreRegistrationReady(id, `La activación automática falló (${reason}). Actívalo a mano.`).catch((e) =>
+      console.warn("[registration] aviso al admin falló:", e instanceof Error ? e.message : e),
+    );
+    return { verified: true, activated: false };
+  }
+
   // Avisar al dueño de la plataforma que hay un cliente LISTO para aprobar
   // (email + WhatsApp si está configurado + badge en vivo del Control Room).
   // Fire-and-forget: un aviso fallido jamás rompe la verificación del cliente.
@@ -169,13 +185,13 @@ export async function verifyEmailCode(id: string, code: string) {
     console.warn("[registration] aviso al admin falló:", err instanceof Error ? err.message : err),
   );
 
-  return { verified: true };
+  return { verified: true, activated: false };
 }
 
 /** Caché del companyId del superadmin (para el socket del Control Room). */
 let superadminCompanyCache: { id: string | null; at: number } = { id: null, at: 0 };
 
-async function superadminCompanyId(): Promise<string | null> {
+export async function superadminCompanyId(): Promise<string | null> {
   if (Date.now() - superadminCompanyCache.at < 10 * 60 * 1000 && superadminCompanyCache.id) {
     return superadminCompanyCache.id;
   }
@@ -184,7 +200,7 @@ async function superadminCompanyId(): Promise<string | null> {
   return superadminCompanyCache.id;
 }
 
-async function notifyAdminPreRegistrationReady(id: string): Promise<void> {
+async function notifyAdminPreRegistrationReady(id: string, note?: string): Promise<void> {
   const row = await prisma.preRegistration.findUnique({
     where: { id },
     select: {
@@ -216,6 +232,7 @@ async function notifyAdminPreRegistrationReady(id: string): Promise<void> {
     planName: row.plan?.name ?? "—",
     vertical: row.vertical ?? "—",
     consoleUrl,
+    note,
   });
   await notifyPlatformAdmin({
     subject: mail.subject,
@@ -223,6 +240,7 @@ async function notifyAdminPreRegistrationReady(id: string): Promise<void> {
     text:
       `🔔 *Nuevo pre-registro listo para aprobar*\n\n` +
       `Empresa: ${row.companyName}\nContacto: ${row.fullName}\nTel: +${row.phone}\nPlan: ${row.plan?.name ?? "—"}\n\n` +
+      (note ? `⚠️ ${note}\n\n` : "") +
       `Actívalo en el Control Room${consoleUrl ? `: ${consoleUrl}` : "."}`,
   });
 }

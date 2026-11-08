@@ -9,6 +9,8 @@ import {
   getLandingSceneController,
   getNotifyConfigController,
   updateNotifyConfigController,
+  getRegistrationSettingsController,
+  updateRegistrationSettingsController,
   getVerticalsController,
   impersonateClientController,
   listClientsController,
@@ -31,6 +33,7 @@ import {
   updateClientSchema,
   updateClientStatusSchema,
   updateLandingSceneSchema,
+  updateRegistrationSettingsSchema,
   updateVerticalsSchema,
   updateSalesAgentSchema,
   updatePlatformMpSchema,
@@ -121,6 +124,15 @@ router.put(
 
 // Config global de plataforma: animación 3D del landing público.
 router.get("/config/notifications", requireAuth, requireRole("SUPERADMIN"), asyncHandler(getNotifyConfigController));
+// Registro en un solo paso: activación automática al verificar el correo + IA de prueba con tope.
+router.get("/config/registration", requireAuth, requireRole("SUPERADMIN"), asyncHandler(getRegistrationSettingsController));
+router.put(
+  "/config/registration",
+  requireAuth,
+  requireRole("SUPERADMIN"),
+  validate({ body: updateRegistrationSettingsSchema }),
+  asyncHandler(updateRegistrationSettingsController),
+);
 router.put("/config/notifications", requireAuth, requireRole("SUPERADMIN"), asyncHandler(updateNotifyConfigController));
 router.get("/config/landing", requireAuth, requireRole("SUPERADMIN"), asyncHandler(getLandingSceneController));
 router.put(

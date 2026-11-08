@@ -23,6 +23,8 @@ import {
   getLandingConfig,
   LANDING_ACCENTS,
   setLandingAccent,
+  getRegistrationSettingsAdmin,
+  setRegistrationSettings,
 } from "../platform-config/platform-config.service";
 import {
   ensureSalesAgentTenant,
@@ -141,4 +143,16 @@ export async function getPlatformMpController(_req: Request, res: Response) {
 
 export async function updatePlatformMpController(req: Request, res: Response) {
   return res.json(await setPlatformMpBilling(req.body));
+}
+
+// ---------------------------------------------------------------------------
+// Registro en un solo paso (activación automática) + IA de prueba
+// ---------------------------------------------------------------------------
+
+export async function getRegistrationSettingsController(_req: Request, res: Response) {
+  return res.json(await getRegistrationSettingsAdmin());
+}
+
+export async function updateRegistrationSettingsController(req: Request, res: Response) {
+  return res.json(await setRegistrationSettings(req.body ?? {}));
 }

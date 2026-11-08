@@ -80,3 +80,19 @@ export const updatePlatformMpSchema = z.object({
   accessToken: z.string().trim().max(300).nullish(),
   enabled: z.boolean(),
 });
+
+// Registro en un solo paso + IA de prueba (superadmin → Pre-registros)
+export const updateRegistrationSettingsSchema = z.object({
+  autoActivate: z.boolean().optional(),
+  trialDays: z.coerce.number().int().min(1).max(90).optional(),
+  trialAi: z
+    .object({
+      enabled: z.boolean().optional(),
+      provider: z.enum(["OPENAI", "ANTHROPIC", "GOOGLE"]).optional(),
+      model: z.string().trim().min(2).max(80).optional(),
+      // undefined = no cambiar; null = quitar; string = reemplazar
+      apiKey: z.string().trim().max(300).nullish(),
+      messageCap: z.coerce.number().int().min(1).max(100000).optional(),
+    })
+    .optional(),
+});

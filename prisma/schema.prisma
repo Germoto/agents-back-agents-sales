@@ -244,6 +244,17 @@ model PlatformConfig {
   // email destino y teléfono WhatsApp (requiere el tenant de ventas con WA activo).
   alertEmail           String?
   alertPhone           String?
+  // Registro en un solo paso: al verificar el correo se crea la cuenta sola
+  // (sin aprobación del superadmin) con N días de prueba de acceso completo.
+  autoActivateRegistrations Boolean       @default(false)
+  autoActivateTrialDays     Int           @default(7)
+  // IA de prueba: key de la PLATAFORMA que reciben las cuentas auto-activadas
+  // (cifrada con credentials-crypto) con tope de respuestas de IA por cliente.
+  trialAiEnabled       Boolean            @default(false)
+  trialAiProvider      String             @default("OPENAI")
+  trialAiModel         String?
+  trialAiApiKey        String?
+  trialAiMessageCap    Int                @default(200)
   updatedAt            DateTime           @updatedAt
 }
 
@@ -285,6 +296,11 @@ model AgentConfig {
   // Key de OpenAI para transcribir notas de voz (Whisper) y generar imágenes
   // del copiloto (gpt-image) cuando aiProvider != OPENAI. Cifrada como openaiApiKey.
   transcriptionApiKey  String?
+  // Origen de la key: OWN (del cliente) | PLATFORM (IA de prueba de FlowApp, con
+  // tope de respuestas: platformAiCap o el global de PlatformConfig).
+  aiKeySource          String   @default("OWN")
+  platformAiUsed       Int      @default(0)
+  platformAiCap        Int?
   temperature          Decimal  @default(0.25) @db.Decimal(4, 2)
   basePrompt           String
   salesStyle           String
@@ -430,6 +446,9 @@ model WhatsappConfig {
   metaWabaId        String?
   // Cache del display_phone_number (UI / setup / getLinkedPhone)
   metaDisplayPhone  String?
+  // SMS Tools no respondió al crear la cuenta durante el alta automática:
+  // secret vacío hasta que el worker de aprovisionamiento lo complete.
+  provisionPending  Boolean              @default(false)
   isActive          Boolean              @default(true)
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt

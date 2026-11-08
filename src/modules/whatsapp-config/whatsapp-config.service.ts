@@ -26,6 +26,9 @@ async function getCredentials(companyId: string): Promise<SmsToolsCredentials> {
   if (config.provider === "META") {
     throw new AppError("Esta operación corresponde al proveedor SMS Tools; tu canal usa la API oficial de Meta.", 400);
   }
+  if (config.provisionPending) {
+    throw new AppError("Estamos preparando tu canal de WhatsApp. Vuelve a intentarlo en un minuto.", 400);
+  }
   if (!config.secret || !config.apiUrl) {
     throw new AppError("La configuracion de WhatsApp esta incompleta.", 400);
   }

@@ -26,3 +26,33 @@ export function storeSlugProblem(slug: string | null | undefined): string | null
   }
   return null;
 }
+
+/** Normaliza un nombre a slug (minúsculas, sin tildes, guiones). "" si no queda nada. */
+export function slugify(name: string, maxLen = 40): string {
+  return name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLen)
+    .replace(/-+$/g, "");
+}
+
+/**
+ * Slug de empresa único y válido como subdominio a partir del nombre del negocio.
+ * Si choca con una empresa existente o con una palabra reservada, agrega -2, -3…
+ * `exists` recibe el candidato y responde si ya está tomado.
+ */
+export async function uniqueCompanySlug(name: string, exists: (slug: string) => Promise<boolean>): Promise<string> {
+  let base = slugify(name, 36);
+  if (base.length < 3) base = `${base}${base ? "-" : ""}negocio`.replace(/^-/, "");
+  if (!STORE_SLUG_RE.test(base)) base = "negocio";
+  for (let i = 1; i <= 200; i++) {
+    const candidate = i === 1 ? base : `${base}-${i}`;
+    if (RESERVED_SLUGS.has(candidate) || !STORE_SLUG_RE.test(candidate)) continue;
+    if (!(await exists(candidate))) return candidate;
+  }
+  // Último recurso: sufijo aleatorio.
+  return `${base}-${Math.random().toString(36).slice(2, 7)}`;
+}

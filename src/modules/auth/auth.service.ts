@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import bcrypt from "bcrypt";
-import { Prisma } from "@prisma/client";
+import { Prisma, type UserRole } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { signAccessToken } from "../../lib/jwt";
@@ -41,6 +41,24 @@ export async function login(identifier: string, password: string) {
     throw new AppError("Credenciales invalidas", 401);
   }
 
+  return issueSession(user);
+}
+
+/**
+ * Emite la sesión (JWT + payload de usuario) para un User ya autenticado.
+ * Compartido por el login y por la activación automática del registro, que
+ * entrega la sesión al verificar el correo para entrar directo al panel.
+ */
+export function issueSession(user: {
+  id: string;
+  name: string;
+  phone: string;
+  username: string | null;
+  email: string | null;
+  companyId: string;
+  role: UserRole;
+  uiTheme: unknown;
+}) {
   const accessToken = signAccessToken({
     sub: user.id,
     companyId: user.companyId,

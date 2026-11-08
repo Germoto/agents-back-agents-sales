@@ -54,6 +54,7 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
           provider: true,
           metaAccessToken: true,
           metaPhoneNumberId: true,
+          provisionPending: true,
         },
       }),
       prisma.paymentConfig.findUnique({
@@ -143,7 +144,9 @@ export async function getSetupStatus(companyId: string): Promise<SetupStatus> {
   steps.push({
     key: "whatsapp",
     title: "Conecta tu WhatsApp",
-    description: "Vincula tu número para que tu agente empiece a responder 24/7.",
+    description: whatsapp?.provisionPending
+      ? "Estamos preparando tu canal de WhatsApp; en un minuto podrás vincular tu número."
+      : "Vincula tu número para que tu agente empiece a responder 24/7.",
     done: whatsappDone,
     required: true,
     kind: "step",

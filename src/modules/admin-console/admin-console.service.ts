@@ -157,6 +157,12 @@ export interface ProvisionClientInput {
   planMonths?: number;
   /** Días de prueba gratis (plan Personalizado sin planId). 0/ausente = LEGACY. */
   trialDays?: number;
+  /** Activación automática: prueba gratis AUNQUE haya planId (el plan queda sugerido en Mi plan, se paga después). */
+  forceTrial?: boolean;
+  /** Si SMS Tools falla, crear la cuenta igual con el canal pendiente (lo completa el worker). */
+  smsToolsLazy?: boolean;
+  /** IA de prueba de la plataforma: key ya cifrada; la cuenta nace con aiKeySource = PLATFORM. */
+  aiKey?: { provider: string; model: string; apiKeyEncrypted: string };
   vertical?: BusinessVertical;
   /** Username único de login (lowercase) — opcional. */
   username?: string | null;
@@ -216,6 +222,7 @@ export async function provisionClient(payload: ProvisionClientInput) {
   //    Con proveedor META no hay nada que aprovisionar en SMS Tools.
   let smsToolsUserId: number | null = null;
   let smsToolsSecret: string | null = null;
+  let provisionPending = false;
   if (provider === "SMSTOOLS") {
   try {
     const createdUser = await smsToolsAdmin.createUser({
@@ -249,13 +256,25 @@ export async function provisionClient(payload: ProvisionClientInput) {
         /* ignore secondary error */
       }
     }
-    if (error instanceof AppError) throw error;
-    throw new AppError(
-      error instanceof Error
-        ? `No se pudo aprovisionar la cuenta de SMS TOOLS: ${error.message}`
-        : "No se pudo aprovisionar la cuenta de SMS TOOLS.",
-      502,
-    );
+    if (payload.smsToolsLazy) {
+      // Alta automática: la cuenta nace igual; el worker de aprovisionamiento
+      // reintenta crear el usuario/API key de SMS Tools cada minuto.
+      console.warn(
+        `[provision] SMS Tools no respondió para ${payload.slug}; canal pendiente:`,
+        error instanceof Error ? error.message : error,
+      );
+      smsToolsUserId = null;
+      smsToolsSecret = null;
+      provisionPending = true;
+    } else {
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        error instanceof Error
+          ? `No se pudo aprovisionar la cuenta de SMS TOOLS: ${error.message}`
+          : "No se pudo aprovisionar la cuenta de SMS TOOLS.",
+        502,
+      );
+    }
   }
   }
 
@@ -289,8 +308,10 @@ export async function provisionClient(payload: ProvisionClientInput) {
     await tx.agentConfig.create({
       data: {
         companyId: createdCompany.id,
-        openaiModel: "gpt-4.1-mini",
-        openaiApiKey: "",
+        // IA de prueba de la plataforma (alta automática) o sin key hasta que el cliente ponga la suya.
+        ...(payload.aiKey
+          ? { aiProvider: payload.aiKey.provider, openaiModel: payload.aiKey.model, openaiApiKey: payload.aiKey.apiKeyEncrypted, aiKeySource: "PLATFORM" }
+          : { openaiModel: "gpt-4.1-mini", openaiApiKey: "" }),
         temperature: "0.25",
         basePrompt: "Eres un agente vendedor por WhatsApp. Responde claro, breve y enfocado en cerrar la venta con honestidad.",
         salesStyle: "consultivo",
@@ -307,7 +328,9 @@ export async function provisionClient(payload: ProvisionClientInput) {
       },
     });
 
-    if (plan) {
+    // Con forceTrial el plan elegido NO se concede: la cuenta arranca en prueba
+    // y el plan queda sugerido en Mi plan hasta que lo pague.
+    if (plan && !payload.forceTrial) {
       const now = new Date();
       const months = payload.planMonths ?? 1;
       await tx.companySubscription.create({
@@ -341,8 +364,9 @@ export async function provisionClient(payload: ProvisionClientInput) {
         data: {
           companyId: createdCompany.id,
           apiUrl: env.SMSTOOLS_API_URL,
-          secret: smsToolsSecret!,
+          secret: smsToolsSecret ?? "",
           smsToolsUserId: smsToolsUserId,
+          provisionPending,
           isActive: payload.isActive,
         },
       });
@@ -367,7 +391,7 @@ export async function provisionClient(payload: ProvisionClientInput) {
 
   // Plan Personalizado elegido en el registro: trial de acceso completo por N
   // días (fuera de la transacción: upsertea el snapshot "Prueba gratuita").
-  if (!plan && (payload.trialDays ?? 0) > 0) {
+  if ((!plan || payload.forceTrial) && (payload.trialDays ?? 0) > 0) {
     const { assignTrialSubscription } = await import("../billing/billing-admin.service");
     await assignTrialSubscription(company.id, payload.trialDays);
     const fresh = await prisma.company.findUnique({ where: { id: company.id }, include: CLIENT_INCLUDE });

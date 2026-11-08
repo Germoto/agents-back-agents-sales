@@ -4,6 +4,7 @@ import { validate } from "../../middlewares/validate";
 import { makeRateLimiter } from "../../middlewares/rate-limit.middleware";
 import {
   createPreRegistrationController,
+  registrationPublicConfigController,
   resendPreRegistrationCodeController,
   verifyPreRegistrationController,
 } from "./registration.controller";
@@ -23,6 +24,7 @@ const verifyLimiter = makeRateLimiter({
   message: "Demasiados intentos. Espera unos minutos.",
 });
 
+router.get("/config", asyncHandler(registrationPublicConfigController));
 router.post("/", createLimiter, validate({ body: createPreRegistrationSchema }), asyncHandler(createPreRegistrationController));
 router.post(
   "/:id/verify",

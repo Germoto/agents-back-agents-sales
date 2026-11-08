@@ -115,6 +115,12 @@ export interface ConvertPreRegistrationInput {
   slug: string;
   planMonths?: number;
   trialDays?: number;
+  /** Activación automática: prueba gratis aunque el cliente haya elegido un plan. */
+  forceTrial?: boolean;
+  /** Activación automática: si SMS Tools falla, la cuenta nace con el canal pendiente. */
+  smsToolsLazy?: boolean;
+  /** IA de prueba de la plataforma (key cifrada). */
+  aiKey?: { provider: string; model: string; apiKeyEncrypted: string };
   whatsappProvider?: "SMSTOOLS" | "META";
   isActive?: boolean;
   metaAccessToken?: string;
@@ -149,8 +155,11 @@ export async function convertPreRegistration(id: string, input: ConvertPreRegist
     whatsappProvider: input.whatsappProvider ?? "SMSTOOLS",
     planId: prereg.planId ?? undefined,
     planMonths: input.planMonths ?? 1,
-    // Personalizado (sin plan elegido): trial de acceso completo (default 7 días).
-    trialDays: prereg.planId ? undefined : input.trialDays ?? 7,
+    // Personalizado (sin plan elegido) o activación automática: trial de acceso completo (default 7 días).
+    trialDays: !prereg.planId || input.forceTrial ? input.trialDays ?? 7 : undefined,
+    forceTrial: input.forceTrial,
+    smsToolsLazy: input.smsToolsLazy,
+    aiKey: input.aiKey,
     vertical: prereg.vertical,
     username: prereg.username,
     email: prereg.email,

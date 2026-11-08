@@ -9,6 +9,8 @@ export function newPreRegistrationAdminEmail(params: {
   planName: string;
   vertical: string;
   consoleUrl?: string;
+  /** Nota extra (p. ej. por qué falló la activación automática). */
+  note?: string;
 }) {
   const row = (label: string, value: string) =>
     `<tr><td style="padding:4px 12px 4px 0;color:#8a93ab;font-size:13px;">${label}</td><td style="padding:4px 0;color:#e7eaf3;font-size:13px;font-weight:bold;">${value}</td></tr>`;
@@ -27,6 +29,7 @@ export function newPreRegistrationAdminEmail(params: {
       ${row("Plan", params.planName)}
       ${row("Rubro", params.vertical)}
     </table>
+    ${params.note ? `<p style="margin:16px 0 0;color:#ffb4a2;font-size:13px;">${params.note}</p>` : ""}
     ${
       params.consoleUrl
         ? `<a href="${params.consoleUrl}" style="display:inline-block;margin-top:20px;background:#7c5cff;color:#fff;text-decoration:none;border-radius:10px;padding:10px 18px;font-size:14px;font-weight:bold;">Revisar en el Control Room</a>`
@@ -84,5 +87,45 @@ export function accountActivatedEmail(params: { name: string; username: string; 
       </p>
       ${button}
     `),
+  };
+}
+
+/** Aviso al dueño de la plataforma: un cliente se activó solo (registro en un solo paso). */
+export function newClientActivatedAdminEmail(params: {
+  companyName: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  planName: string;
+  vertical: string;
+  trialDays: number;
+  slug: string;
+  consoleUrl?: string;
+}) {
+  const row = (label: string, value: string) =>
+    `<tr><td style="padding:4px 12px 4px 0;color:#8a93ab;font-size:13px;">${label}</td><td style="padding:4px 0;color:#e7eaf3;font-size:13px;font-weight:bold;">${value}</td></tr>`;
+  return {
+    subject: `🟢 Nuevo cliente activado: ${params.companyName}`,
+    html: `
+<div style="background:#0d1220;padding:32px 16px;font-family:Arial,Helvetica,sans-serif;">
+  <div style="max-width:480px;margin:0 auto;background:#151b2e;border-radius:16px;padding:32px 28px;color:#e7eaf3;">
+    <h2 style="margin:0 0 6px;font-size:18px;">🟢 Nuevo cliente activado</h2>
+    <p style="margin:0 0 16px;color:#8a93ab;font-size:13px;">Se registró, verificó su correo y su cuenta quedó activa sola con ${params.trialDays} días de prueba.</p>
+    <table style="border-collapse:collapse;">
+      ${row("Empresa", params.companyName)}
+      ${row("Identificador", params.slug)}
+      ${row("Contacto", params.fullName)}
+      ${row("Email", params.email)}
+      ${row("Teléfono", `+${params.phone}`)}
+      ${row("Plan de interés", params.planName)}
+      ${row("Rubro", params.vertical)}
+    </table>
+    ${
+      params.consoleUrl
+        ? `<a href="${params.consoleUrl}" style="display:inline-block;margin-top:20px;background:#7c5cff;color:#fff;text-decoration:none;border-radius:10px;padding:10px 18px;font-size:14px;font-weight:bold;">Ver en el Control Room</a>`
+        : ""
+    }
+  </div>
+</div>`,
   };
 }
