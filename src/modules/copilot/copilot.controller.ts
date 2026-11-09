@@ -26,6 +26,7 @@ import { searchProductDrive, browseProductFolder, pickSample } from "../drive/dr
 import { indexSummary, ensureIndexNow } from "../drive/drive-index.service";
 import { chatCompletion, chatCompletionStream, type ChatMessage, type ContentPart, type ToolDefinition } from "../../lib/openai";
 import { productBodySchema } from "../products/products.schemas";
+import { matchProductFile } from "../../lib/product";
 import { createProduct, updateProduct, deleteProduct, getProduct } from "../products/products.service";
 import { updateBusinessProfile, type DeliveryConfigInput } from "../business/business.service";
 import { upsertAgentConfig, updateAgentReminders } from "../agent-config/agent-config.service";
@@ -300,7 +301,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_archivo_producto",
       description:
-        "Edita la METADATA de un archivo YA SUBIDO de un producto (no sube archivos nuevos): showInPresentation (true = se adjunta al presentar la ficha; false = queda on-demand y el agente lo envía solo si el cliente lo pide), description (ayuda al agente a saber cuándo enviarlo), principal (true = primero de la ficha/catálogo) y adjuntarEnCorreo (true = el archivo va ADJUNTO en el correo de entrega cuando el cliente pide recibir el acceso por email; requiere digitalDelivery.emailEnabled en el producto; si los adjuntos superan 15 MB van como links). Identifica el archivo por su URL exacta o su nombre. Verifica después con previsualizar_ficha. Llámala tras confirmación.",
+        "Edita la METADATA de un archivo YA SUBIDO de un producto (no sube archivos nuevos): showInPresentation (true = se adjunta al presentar la ficha; false = queda on-demand y el agente lo envía solo si el cliente lo pide), description (ayuda al agente a saber cuándo enviarlo), principal (true = primero de la ficha/catálogo), orden (posición 1-based: el orden del panel es el orden en que el agente ve y envía los archivos) y adjuntarEnCorreo (true = el archivo va ADJUNTO en el correo de entrega cuando el cliente pide recibir el acceso por email; requiere digitalDelivery.emailEnabled en el producto; si los adjuntos superan 15 MB van como links). Identifica el archivo por su URL exacta o su nombre. Verifica después con previsualizar_ficha. Llámala tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -311,8 +312,27 @@ export const TOOLS: ToolDefinition[] = [
           showInPresentation: { type: "boolean" },
           description: { type: "string" },
           principal: { type: "boolean" },
+          orden: { type: "integer", minimum: 1, description: "Nueva posición del archivo (1 = primero). Los demás conservan su orden relativo." },
           adjuntarEnCorreo: { type: "boolean", description: "true = adjuntar en el correo de entrega del producto" },
           privado: { type: "boolean", description: "true = archivo PROTEGIDO: sale de la URL pública y solo se descarga con enlace firmado de 7 días (correo, página de gracias, chat). Para archivos de entrega, no para imágenes de presentación." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "eliminar_archivo_producto",
+      description:
+        "ELIMINA definitivamente un archivo YA SUBIDO de un producto (fila y archivo físico). Llámala SOLO si el dueño lo pidió y CONFIRMÓ el nombre del archivo. Identifica el archivo por su URL exacta o su nombre. Si el archivo se usa además como banner, mensaje adicional de presentación/entrega o en un recordatorio, la respuesta lo avisa (requiereConfirmacion) y NO borra hasta que llames de nuevo con confirmar=true. Para quitar un recurso que NO es archivo del producto (banner, seguimiento, recordatorio) usa actualizar_producto o configurar_recordatorios.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["productId", "archivo"],
+        properties: {
+          productId: { type: "string" },
+          archivo: { type: "string", description: "URL exacta o nombre (originalName) del archivo a eliminar" },
+          confirmar: { type: "boolean", description: "true = borrar aunque el archivo esté referenciado en otros lugares (el dueño ya lo confirmó)" },
         },
       },
     },
@@ -1865,7 +1885,7 @@ const COMMON_FIELDS =
   "OFERTA CON VIGENCIA (global, todos los clientes): offerPrice (texto, ej. '49'), offerStartsAt/offerEndsAt (fecha-hora ISO, opcionales; sin fechas = activa hasta quitarla). Vigente => el agente presenta, cobra y valida ESE precio y el precio normal se muestra tachado como 'antes'. null limpia la oferta. " +
   "ENTREGA POR CORREO (a pedido del cliente): se activa POR PRODUCTO con digitalDelivery.emailEnabled=true. Con eso, cuando un cliente que YA PAGÓ pide recibir el acceso por email, el agente le pide el correo, se lo envía (el correo sale desde la dirección de FlowApp con el nombre del negocio como remitente) y guarda el correo en su ficha; la entrega por WhatsApp sigue igual. El correo replica la entrega de WhatsApp: mensaje de entrega + mensajes adicionales (followupMessages) con su multimedia adjunta. emailSubject/emailBody son opcionales (por defecto el asunto es 'Tu acceso a {producto} — {negocio}' y el cuerpo es el mismo mensaje de entrega; emailBody reemplaza solo el mensaje principal, los adicionales se agregan igual). Los archivos del producto se adjuntan ADEMÁS con configurar_archivo_producto adjuntarEnCorreo=true (tope 15 MB entre todos los adjuntos; lo que excede va como link). El servidor de correo es de la plataforma: NO se configura desde el panel ni desde aquí. Si el dueño pide activarlo 'en todos los productos', hazlo producto por producto con actualizar_producto tras UNA confirmación. Detección: basta con que el cliente ESCRIBA su correo (solo o junto al comprobante, ej. 'Enviar a: juan@gmail.com'); el sistema lo guarda como correo pendiente y envía el acceso al aprobar el pago, incluso si la aprobación fue en 2º plano (recheck o Mercado Pago). " +
   "INVITACIÓN A LA TIENDA (por producto): digitalDelivery.storeInviteEnabled=true hace que el ÚLTIMO mensaje de la entrega por WhatsApp sea una invitación a visitar la tienda web con su link (storeInviteText opcional, admite {tienda} para el link y spintax; vacío = '🛍️ Tenemos más productos que te pueden interesar. Visita nuestra tienda: {tienda}'). Si está activa REEMPLAZA al cross-sell y a la frase genérica del catálogo (un solo cierre). Solo se envía si la tienda está publicada (ver_tienda → lista); si no, el cierre es el de siempre. Si el dueño pide activarla 'en todos los productos', hazlo producto por producto con actualizar_producto tras UNA confirmación. " +
-  "PRESENTACIÓN: presentationMessage (mensaje de presentación FIJO — si existe, la ficha se envía tal cual en vez de auto-generarse); presentationMessageMediaUrl/presentationMessageMediaType (banner adjunto al mensaje: la ficha viaja como media con el texto de caption; usa la URL de un archivo del producto o un adjunto de esta conversación; '' lo quita); presentationFollowups = [{message, mediaUrl?, mediaType?}] (secuencia que se envía DESPUÉS de la ficha — al enviarla REEMPLAZA la lista completa: manda la versión final; [] la limpia). Los archivos ya subidos se gestionan con configurar_archivo_producto (showInPresentation true = va adjunto en la presentación, false = on-demand; description; principal). SPINTAX ANTI-BLOQUEO: presentationMessage, presentationFollowups, la description de los archivos (va como caption), digitalDelivery.instructions/followupMessages/crossSellPitch/storeInviteText y los mensajes de recordatorios/campañas admiten variantes {Hola|Buenas|Qué tal} — cada cliente recibe una combinación distinta y así la ficha no llega idéntica a todos; recomiéndalo (3 o más variantes en saludo, verbo y cierre; nunca en precios ni links). La ficha AUTOMÁTICA (sin presentationMessage) no admite variantes en sus títulos. Tras cambiar la presentación, VERIFICA con previsualizar_ficha (muestra UNA variante).";
+  "PRESENTACIÓN: presentationMessage (mensaje de presentación FIJO — si existe, la ficha se envía tal cual en vez de auto-generarse); presentationMessageMediaUrl/presentationMessageMediaType (banner adjunto al mensaje: la ficha viaja como media con el texto de caption; usa la URL de un archivo del producto o un adjunto de esta conversación; '' lo quita); presentationFollowups = [{message, mediaUrl?, mediaType?}] (secuencia que se envía DESPUÉS de la ficha — al enviarla REEMPLAZA la lista completa: manda la versión final; [] la limpia). Los archivos ya subidos se gestionan con configurar_archivo_producto (showInPresentation true = va adjunto en la presentación, false = on-demand; description; principal; orden=N para moverlo a esa posición) y se borran con eliminar_archivo_producto (tras confirmación; avisa si el archivo se usa como banner, seguimiento o recordatorio). El agente VE TODOS los archivos del producto (hasta 60 en su prompt, ver_producto muestra posicion) y envía hasta 12 por llamada; el orden del panel = orden en que los ve. SPINTAX ANTI-BLOQUEO: presentationMessage, presentationFollowups, la description de los archivos (va como caption), digitalDelivery.instructions/followupMessages/crossSellPitch/storeInviteText y los mensajes de recordatorios/campañas admiten variantes {Hola|Buenas|Qué tal} — cada cliente recibe una combinación distinta y así la ficha no llega idéntica a todos; recomiéndalo (3 o más variantes en saludo, verbo y cierre; nunca en precios ni links). La ficha AUTOMÁTICA (sin presentationMessage) no admite variantes en sus títulos. Tras cambiar la presentación, VERIFICA con previsualizar_ficha (muestra UNA variante).";
 
 function rubroGuide(vertical: string | undefined): string {
   switch (vertical) {
@@ -2775,27 +2795,20 @@ export async function runCopilotTool(
       if (!files.length) {
         return { result: JSON.stringify({ ok: false, error: "Este producto no tiene archivos subidos (súbelos desde el panel, paso Archivos)." }), wrote: false };
       }
-      // Match tolerante: URL exacta → nombre exacto → único match parcial (url o nombre).
+      // Match tolerante compartido (lib/product): id → URL exacta → nombre exacto → único match parcial.
       const key = String(args.archivo ?? "").trim();
-      const keyLower = key.toLowerCase();
-      let matches = files.filter((f) => f.url === key);
-      if (!matches.length) matches = files.filter((f) => (f.originalName ?? "").toLowerCase() === keyLower);
-      if (!matches.length) {
-        matches = files.filter(
-          (f) => (f.url ?? "").toLowerCase().includes(keyLower) || (f.originalName ?? "").toLowerCase().includes(keyLower),
-        );
-      }
+      const { match, matches } = matchProductFile(files, key);
       const available = files.map((f) => ({ nombre: f.originalName ?? "", url: f.url ?? "" }));
       if (!matches.length) {
         return { result: JSON.stringify({ ok: false, error: "No encontré ese archivo en el producto.", archivosDisponibles: available }), wrote: false };
       }
-      if (matches.length > 1) {
+      if (!match) {
         return {
           result: JSON.stringify({ ok: false, error: "Hay varios archivos que coinciden — usa la URL exacta.", coincidencias: matches.map((f) => f.url) }),
           wrote: false,
         };
       }
-      const target = matches[0];
+      const target = match;
       const updated = files.map((f) =>
         f === target
           ? {
@@ -2807,13 +2820,17 @@ export async function runCopilotTool(
             }
           : f,
       );
-      // principal=true: el archivo pasa a ser el primero (ficha/catálogo); el resto conserva su orden relativo.
+      // principal=true: el archivo pasa a ser el primero (ficha/catálogo); orden=N lo mueve a esa
+      // posición (1-based). El resto conserva su orden relativo; sortOrder se renumera.
+      const ordenRaw = Number(args.orden);
+      const wantedIndex = args.principal === true ? 0 : Number.isFinite(ordenRaw) && ordenRaw >= 1 ? Math.min(Math.round(ordenRaw), updated.length) - 1 : null;
       const ordered =
-        args.principal === true
+        wantedIndex != null
           ? (() => {
               const rest = updated.filter((f) => f.url !== target.url);
-              const first = updated.find((f) => f.url === target.url)!;
-              return [first, ...rest].map((f, i) => ({ ...f, sortOrder: i }));
+              const moved = updated.find((f) => f.url === target.url)!;
+              rest.splice(wantedIndex, 0, moved);
+              return rest.map((f, i) => ({ ...f, sortOrder: i }));
             })()
           : updated;
       const payload = buildPayload({}, existing);
@@ -2828,7 +2845,61 @@ export async function runCopilotTool(
           ok: true,
           product: existing.name,
           archivo: target.originalName ?? target.url,
+          ...(wantedIndex != null ? { posicion: wantedIndex + 1 } : {}),
           nota: "Metadata actualizada. Verifica la presentación resultante con previsualizar_ficha.",
+        }),
+        wrote: true,
+      };
+    }
+
+    case "eliminar_archivo_producto": {
+      const productId = String(args.productId ?? "");
+      const existing = await getProduct(companyId, productId);
+      const files = (existing.files ?? []) as Array<{ url?: string; originalName?: string } & Record<string, unknown>>;
+      if (!files.length) {
+        return { result: JSON.stringify({ ok: false, error: "Este producto no tiene archivos subidos." }), wrote: false };
+      }
+      const { match, matches } = matchProductFile(files, String(args.archivo ?? ""));
+      if (!matches.length) {
+        return {
+          result: JSON.stringify({ ok: false, error: "No encontré ese archivo en el producto.", archivosDisponibles: files.map((f) => ({ nombre: f.originalName ?? "", url: f.url ?? "" })) }),
+          wrote: false,
+        };
+      }
+      if (!match) {
+        return { result: JSON.stringify({ ok: false, error: "Hay varios archivos que coinciden — usa la URL exacta.", coincidencias: matches.map((f) => f.url) }), wrote: false };
+      }
+      // ¿Se usa en otro lugar (banner, seguimientos, entrega, recordatorios)? La biblioteca ya lo sabe (tambienEn).
+      const baseUrl = String(match.url ?? "").split("?")[0];
+      const biblioteca = await listResourceLibrary(companyId, { productId }).catch(() => []);
+      const entry = biblioteca.find((r) => r.origen === "archivo" && r.url.split("?")[0] === baseUrl);
+      const referencias = entry?.tambienEn ?? [];
+      if (referencias.length && args.confirmar !== true) {
+        return {
+          result: JSON.stringify({
+            ok: false,
+            requiereConfirmacion: true,
+            archivo: match.originalName ?? match.url,
+            referencias,
+            nota: "Este archivo también se usa en esos lugares; al borrarlo dejarán de enviarse. Si el dueño confirma, vuelve a llamar con confirmar=true.",
+          }),
+          wrote: false,
+        };
+      }
+      const payload = buildPayload({}, existing);
+      payload.files = files.filter((f) => f !== match).map((f, i) => ({ ...f, sortOrder: i })) as never[];
+      const parsed = productBodySchema.safeParse(payload);
+      if (!parsed.success) {
+        return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
+      }
+      await updateProduct(companyId, productId, parsed.data as Parameters<typeof updateProduct>[2]);
+      return {
+        result: JSON.stringify({
+          ok: true,
+          product: existing.name,
+          archivoEliminado: match.originalName ?? match.url,
+          archivosRestantes: files.length - 1,
+          ...(referencias.length ? { aviso: `Seguía referenciado en: ${referencias.join("; ")}. Revisa esos mensajes.` } : {}),
         }),
         wrote: true,
       };
@@ -2847,7 +2918,9 @@ export async function runCopilotTool(
     case "ver_producto": {
       const product = await getProduct(companyId, String(args.productId ?? ""));
       const planes = planOptions((product as { verticalData?: unknown }).verticalData, (product as { price?: string }).price);
-      return { result: JSON.stringify(planes.length ? { ...product, planes: planes.map((pl) => ({ nombre: pl.label, precio: pl.price })) } : product), wrote: false };
+      // posicion (1-based) = orden en que el agente ve y envía los archivos (configurar_archivo_producto orden=N lo cambia).
+      const withPos = { ...product, files: ((product.files ?? []) as Array<Record<string, unknown>>).map((f, i) => ({ ...f, posicion: i + 1 })) };
+      return { result: JSON.stringify(planes.length ? { ...withPos, planes: planes.map((pl) => ({ nombre: pl.label, precio: pl.price })) } : withPos), wrote: false };
     }
 
     case "previsualizar_ficha": {
