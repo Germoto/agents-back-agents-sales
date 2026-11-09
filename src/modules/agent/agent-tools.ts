@@ -5,6 +5,7 @@
  * runtime vacía en orden por WhatsApp; el resto sólo devuelven datos al modelo.
  */
 
+import { matchProductFile } from "../../lib/product";
 import { isPlainAmount, planOptions } from "../products/product-plans";
 import { baseVars, executeAction } from "../http-actions/http-actions.service";
 import { renderSingleBrace, type FlatVars } from "../../lib/http-template";
@@ -79,6 +80,9 @@ import { createSubscriptionForSale, type RenewalReminderConfig } from "../subscr
 import { mailerEnabled } from "../../lib/mailer";
 import { sendDigitalDeliveryEmail, EmailDeliveryError } from "./email-delivery";
 import { applySpintax } from "./reminder-templates";
+
+/** Tope de archivos por envío (enviar_multimedia con fileIds y presentación). */
+const MAX_FILES_PER_SEND = 12;
 
 /** Comparación laxa de nombres (acentos/orden) para detectar confusión de titular. */
 function looseNameNorm(s: string): string {
@@ -1491,7 +1495,7 @@ export function buildFichaPreview(
   const presentationMessage = p.presentationMessage?.trim();
   const followups = p.presentationFollowups ?? [];
 
-  const presentationFiles = (product.files ?? []).filter((f) => f.showInPresentation).slice(0, 6);
+  const presentationFiles = (product.files ?? []).filter((f) => f.showInPresentation).slice(0, MAX_FILES_PER_SEND);
   const pushPresentationFiles = () => {
     for (const f of presentationFiles) {
       mensajes.push({
@@ -1671,7 +1675,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           fileIds: {
             type: "array",
             items: { type: "string" },
-            description: "ids de los archivos concretos a enviar (de la lista de multimedia del producto). Úsalo para enviar SOLO el/los archivo(s) que el cliente pide o que se relacionan con su consulta; si lo pasas, se envían esos sin importar si ya se enviaron antes.",
+            description: "ids (o nombres exactos) de los archivos concretos a enviar, de la lista de multimedia del producto (hasta 12 por llamada). Úsalo para enviar SOLO el/los archivo(s) que el cliente pide o que se relacionan con su consulta; si lo pasas, se envían esos sin importar si ya se enviaron antes. Si ninguno coincide, la respuesta trae archivosDisponibles para corregir.",
           },
           kind: { type: "string", enum: ["image", "pdf", "document", "video", "audio", "all"], description: "filtra por tipo cuando NO indicas fileIds; 'document' = PDF y demás archivos (zip, Excel, Word…); 'all' envía todos" },
         },
@@ -2168,10 +2172,14 @@ export async function executeTool(
           faqs: product.faqs,
           objections: product.objections,
           hasMedia: (product.files?.length ?? 0) > 0,
-          media: (product.files ?? []).slice(0, 8).map((f) => ({
+          mediaCount: product.files?.length ?? 0,
+          media: (product.files ?? []).map((f, i) => ({
             id: f.id,
+            posicion: i + 1,
             type: f.type,
+            nombre: f.originalName ?? null,
             description: f.description ?? null,
+            enPresentacion: f.showInPresentation !== false,
           })),
         },
       });
@@ -2317,9 +2325,15 @@ export async function executeTool(
         ? args.fileIds.map((x: unknown) => String(x)).filter(Boolean)
         : [];
       if (requestedIds.length) {
-        let files = allFiles.filter((f) => requestedIds.includes(f.id));
+        // Cada entrada puede ser el id, la URL o el nombre del archivo (match tolerante).
+        const resolved = requestedIds.map((k) => matchProductFile(allFiles, k).match).filter((f): f is NonNullable<typeof f> => Boolean(f));
+        let files = allFiles.filter((f) => resolved.includes(f));
         if (!files.length) {
-          return JSON.stringify({ ok: false, error: "no encontré ese archivo en el producto; revisa los ids de multimedia del catálogo" });
+          return JSON.stringify({
+            ok: false,
+            error: "no encontré ese archivo en el producto; elige uno de archivosDisponibles (por id o nombre) y vuelve a llamar",
+            archivosDisponibles: allFiles.map((f, i) => ({ id: f.id, posicion: i + 1, type: f.type, nombre: f.originalName ?? null, description: f.description || null })),
+          });
         }
         // GUARDA: si el producto se acaba de PRESENTAR en este mismo turno, NO "completar"
         // mandando los archivos on-demand (showInPresentation=false). La presentación ya envió
@@ -2334,7 +2348,7 @@ export async function executeTool(
             }
           }
         }
-        for (const f of files.slice(0, 6)) {
+        for (const f of files.slice(0, MAX_FILES_PER_SEND)) {
           ctx.outbox.push({
             kind: "media",
             mediaUrl: f.url,
@@ -2343,7 +2357,7 @@ export async function executeTool(
             fileName: f.originalName || undefined,
           });
         }
-        return JSON.stringify({ ok: true, sent: Math.min(files.length, 6), nota: "Ya reenvié el/los archivo(s) pedido(s) al cliente. NO describas su contenido en tu texto final; cierra breve o deja el texto vacío." });
+        return JSON.stringify({ ok: true, sent: Math.min(files.length, MAX_FILES_PER_SEND), nota: "Ya reenvié el/los archivo(s) pedido(s) al cliente. NO describas su contenido en tu texto final; cierra breve o deja el texto vacío." });
       }
 
       // Envío BULK (presentación/info inicial): solo los archivos marcados para la

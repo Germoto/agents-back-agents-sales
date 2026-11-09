@@ -315,3 +315,24 @@ export function mapBotProduct(
         : null,
   };
 }
+
+/**
+ * Localiza un archivo de producto por id, URL exacta, nombre exacto (originalName)
+ * o único match parcial (url o nombre), sin importar mayúsculas. Compartido por el
+ * agente (enviar_multimedia por nombre) y el Copiloto/MCP (configurar/eliminar
+ * archivo). `matches` trae todas las coincidencias cuando no es único.
+ */
+export function matchProductFile<T extends { id?: string; url?: string | null; originalName?: string | null }>(
+  files: T[],
+  key: string,
+): { match: T | null; matches: T[] } {
+  const k = key.trim();
+  if (!k) return { match: null, matches: [] };
+  const kl = k.toLowerCase();
+  let matches = files.filter((f) => f.id === k || f.url === k);
+  if (!matches.length) matches = files.filter((f) => (f.originalName ?? "").toLowerCase() === kl);
+  if (!matches.length) {
+    matches = files.filter((f) => (f.url ?? "").toLowerCase().includes(kl) || (f.originalName ?? "").toLowerCase().includes(kl));
+  }
+  return { match: matches.length === 1 ? matches[0] : null, matches };
+}

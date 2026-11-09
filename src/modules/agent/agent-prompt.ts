@@ -181,12 +181,15 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
     // Listamos cada archivo con su id, tipo, descripción y si entra en la
     // presentación inicial. Así el modelo puede responder desde esas descripciones
     // y enviar SOLO el archivo que corresponda (enviar_multimedia con fileIds=[id]).
-    const fileLines = p.files.slice(0, 8).map((f) => {
-      const desc = (f.description ?? "").replace(/\s+/g, " ").trim().slice(0, 90);
+    const MAX_FILES_IN_PROMPT = 60;
+    const fileLines = p.files.slice(0, MAX_FILES_IN_PROMPT).map((f) => {
+      const desc = (f.description ?? "").replace(/\s+/g, " ").trim().slice(0, 70);
       const tag = (f as { showInPresentation?: boolean }).showInPresentation === false ? "on-demand" : "presentación";
-      return `[${f.id}] ${f.type} (${tag})${desc ? ` — ${desc}` : ""}`;
+      const name = (f as { originalName?: string | null }).originalName;
+      return `[${f.id}] ${f.type} (${tag})${name ? ` ${name}` : ""}${desc ? ` — ${desc}` : ""}`;
     });
-    parts.push(`   multimedia — la presentación (enviar_ficha) ya manda automáticamente los archivos marcados "presentación"; NO los reenvíes. Los "on-demand" se mandan SOLO si el cliente pide ESE archivo o ESE contenido en concreto (ej. "mándame el video", "el PDF de muestra"), con enviar_multimedia fileIds=[id]. Un pedido GENERAL de información ("quiero más info", "cuéntame del curso", aunque mencione el precio) se satisface con la presentación: NO dispares enviar_multimedia para "completar" con los on-demand:\n     ${fileLines.join("\n     ")}`);
+    const moreFiles = p.files.length > MAX_FILES_IN_PROMPT ? `\n     (+${p.files.length - MAX_FILES_IN_PROMPT} más: llama buscar_producto para verlos todos)` : "";
+    parts.push(`   multimedia (${p.files.length} archivo(s), TODOS disponibles) — la presentación (enviar_ficha) ya manda automáticamente los archivos marcados "presentación"; NO los reenvíes. Los "on-demand" se mandan SOLO si el cliente pide ESE archivo o ESE contenido en concreto (ej. "mándame el video", "el PDF de muestra"), con enviar_multimedia fileIds=[id] (también acepta el nombre del archivo). Un pedido GENERAL de información ("quiero más info", "cuéntame del curso", aunque mencione el precio) se satisface con la presentación: NO dispares enviar_multimedia para "completar" con los on-demand. Si piden un archivo que NO está en esta lista o la herramienta no lo encuentra, NO le digas al cliente que "no pudiste enviarlo" ni que "el equipo se lo hará llegar": sigue lo que indique el prompt del negocio y, si no dice nada, deriva con derivar_humano motivo CONSULTA:\n     ${fileLines.join("\n     ")}${moreFiles}`);
   }
   if ((p as { deliveryMissing?: boolean }).deliveryMissing) {
     parts.push("   entrega: AÚN SIN mensaje/link de entrega configurado → tras validar el pago NO prometas acceso inmediato: di que el negocio le enviará el acceso en breve (el dueño recibe el aviso y entrega a mano).");
