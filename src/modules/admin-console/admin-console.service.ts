@@ -10,7 +10,7 @@ import { addMonthsUtc } from "../billing/billing.service";
 import { deriveBillingState } from "../billing/entitlements";
 import { findUserByIdentifier } from "../auth/auth.service";
 import { normalizeUsername, normalizePhoneDigits } from "../../lib/identifier";
-import { getTrialAiMessageCap } from "../platform-config/platform-config.service";
+import { getTrialAiMessageCap, getTrialAiProvision } from "../platform-config/platform-config.service";
 
 function defaultRules() {
   return [
@@ -35,7 +35,7 @@ const CLIENT_INCLUDE = {
 
 type ClientRow = Prisma.CompanyGetPayload<{ include: typeof CLIENT_INCLUDE }>;
 
-function mapClient(company: ClientRow, globalAiCap: number | null = null) {
+function mapClient(company: ClientRow, globalAiCap: number | null = null, trialAiAvailable = false) {
   const adminUser =
     company.users.find((user) => user.role === "ADMIN") ??
     company.users.find((user) => user.role === "SUPERADMIN") ??
@@ -77,15 +77,16 @@ function mapClient(company: ClientRow, globalAiCap: number | null = null) {
         }
       : null,
     balancePen,
-    // IA de prueba de la plataforma (solo cuentas con aiKeySource = PLATFORM).
-    platformAi:
-      company.agentConfig?.aiKeySource === "PLATFORM"
-        ? {
-            used: company.agentConfig.platformAiUsed,
-            cap: company.agentConfig.platformAiCap ?? globalAiCap,
-            override: company.agentConfig.platformAiCap,
-          }
-        : null,
+    // IA de prueba de la plataforma: source PLATFORM = usa la key de FlowApp (con tope);
+    // OWN = key propia (o ninguna). available = el superadmin tiene la IA de prueba encendida
+    // y puede asignarla desde Clientes → Editar.
+    platformAi: {
+      source: company.agentConfig?.aiKeySource === "PLATFORM" ? ("PLATFORM" as const) : ("OWN" as const),
+      used: company.agentConfig?.aiKeySource === "PLATFORM" ? company.agentConfig.platformAiUsed : 0,
+      cap: company.agentConfig?.platformAiCap ?? globalAiCap,
+      override: company.agentConfig?.aiKeySource === "PLATFORM" ? company.agentConfig.platformAiCap : null,
+      available: trialAiAvailable,
+    },
   };
 }
 
@@ -142,15 +143,16 @@ export async function getAuthenticatedSuperadmin(userId: string) {
 }
 
 export async function listClients() {
-  const [companies, globalAiCap] = await Promise.all([
+  const [companies, globalAiCap, trialAi] = await Promise.all([
     prisma.company.findMany({
       include: CLIENT_INCLUDE,
       orderBy: [{ createdAt: "desc" }],
     }),
     getTrialAiMessageCap().catch(() => null),
+    getTrialAiProvision().catch(() => null),
   ]);
 
-  return companies.map((c) => mapClient(c, globalAiCap));
+  return companies.map((c) => mapClient(c, globalAiCap, Boolean(trialAi)));
 }
 
 export interface ProvisionClientInput {
@@ -494,6 +496,8 @@ export interface UpdateClientInput {
   platformAiCap?: number | null;
   /** Reinicia el contador de respuestas de la IA de prueba. */
   resetPlatformAi?: boolean;
+  /** PLATFORM = asignar la IA de prueba de FlowApp a esta cuenta; OWN = volver a key propia (queda sin key). */
+  aiKeySource?: "OWN" | "PLATFORM";
 }
 
 /**
@@ -567,6 +571,28 @@ export async function updateClient(companyId: string, input: UpdateClientInput) 
     return tx.company.findUniqueOrThrow({ where: { id: companyId }, include: CLIENT_INCLUDE });
   });
 
+  // IA de prueba: asignarla a una cuenta existente (nació con key propia) o quitarla.
+  if (input.aiKeySource === "PLATFORM" && company.agentConfig?.aiKeySource !== "PLATFORM") {
+    const trialAi = await getTrialAiProvision();
+    if (!trialAi) throw new AppError("Enciende la IA de prueba (Pre-registros) antes de asignarla", 409);
+    const data = { aiProvider: trialAi.provider, openaiModel: trialAi.model, openaiApiKey: trialAi.apiKeyEncrypted, aiKeySource: "PLATFORM", platformAiUsed: 0 };
+    await prisma.agentConfig.upsert({
+      where: { companyId },
+      update: data,
+      create: {
+        companyId,
+        ...data,
+        temperature: "0.25",
+        basePrompt: "Eres un agente vendedor por WhatsApp. Responde claro, breve y enfocado en cerrar la venta con honestidad.",
+        salesStyle: "consultivo",
+        rules: defaultRules(),
+      },
+    });
+  } else if (input.aiKeySource === "OWN" && company.agentConfig?.aiKeySource === "PLATFORM") {
+    // La key de FlowApp no se le deja al cliente: queda sin key hasta que ponga la suya.
+    await prisma.agentConfig.updateMany({ where: { companyId }, data: { aiKeySource: "OWN", openaiApiKey: null } });
+  }
+
   // IA de prueba: tope propio del cliente y/o reinicio del contador.
   if (input.platformAiCap !== undefined || input.resetPlatformAi) {
     await prisma.agentConfig.updateMany({
@@ -577,11 +603,14 @@ export async function updateClient(companyId: string, input: UpdateClientInput) 
       },
     });
   }
-  const globalAiCap = await getTrialAiMessageCap().catch(() => null);
-  const fresh = await prisma.company.findUniqueOrThrow({ where: { id: companyId }, include: CLIENT_INCLUDE });
+  const [globalAiCap, trialAvailable, fresh] = await Promise.all([
+    getTrialAiMessageCap().catch(() => null),
+    getTrialAiProvision().then(Boolean).catch(() => false),
+    prisma.company.findUniqueOrThrow({ where: { id: companyId }, include: CLIENT_INCLUDE }),
+  ]);
   void updated;
 
-  return { ...mapClient(fresh, globalAiCap), phoneChanged };
+  return { ...mapClient(fresh, globalAiCap, trialAvailable), phoneChanged };
 }
 
 export async function deleteClient(companyId: string) {

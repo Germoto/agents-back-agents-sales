@@ -28,6 +28,8 @@ export const updateClientSchema = z.object({
   // IA de prueba: tope propio (null = global) y reinicio del contador.
   platformAiCap: z.coerce.number().int().min(1).max(100000).nullable().optional(),
   resetPlatformAi: z.boolean().optional(),
+  // PLATFORM = asignar la IA de prueba de FlowApp a una cuenta existente; OWN = volver a key propia.
+  aiKeySource: z.enum(["OWN", "PLATFORM"]).optional(),
 });
 
 export const createClientSchema = z.object({
