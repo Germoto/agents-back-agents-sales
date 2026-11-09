@@ -150,13 +150,21 @@ interface CopilotBody {
 }
 
 /** Herramientas SOLO de interfaz (no escriben; el panel las dibuja). No se exportan al MCP. */
-export const UI_ONLY_TOOLS = new Set(["proponer_productos", "proponer_formulario", "ofrecer_opciones"]);
+export const UI_ONLY_TOOLS = new Set(["proponer_productos", "proponer_formulario", "ofrecer_opciones", "mostrar_grafico"]);
+/** Paso 2 del asistente: el modelo SOLO propone (la tabla del panel y «Crear N productos» hacen la creación). */
+const ONBOARDING_STEP2_BLOCKED = new Set(["crear_producto", "actualizar_producto", "eliminar_producto"]);
+function toolsFor(mode?: "panel" | "onboarding", step?: number): ToolDefinition[] {
+  if (mode === "onboarding" && step === 2) return TOOLS.filter((t) => !ONBOARDING_STEP2_BLOCKED.has(t.function.name));
+  return TOOLS;
+}
 
 /** Bloques de UI que el Copiloto puede devolver junto con el texto. */
 export interface CopilotUi {
   options?: { pregunta?: string; opciones: { etiqueta: string; enviar: string }[] };
   products?: Array<Record<string, unknown>>;
   form?: Record<string, unknown>;
+  /** Gráfico de barras o tarjetas de métricas dibujado por el panel (mostrar_grafico). */
+  chart?: { titulo?: string; tipo: "barras" | "tarjetas"; series: { label: string; value: number; hint?: string }[] };
 }
 
 // ---------------------------------------------------------------------------
@@ -1742,6 +1750,7 @@ export const TOOLS: ToolDefinition[] = [
                 category: { type: "string", description: "Sección o categoría" },
                 shortDescription: { type: "string" },
                 durationMin: { type: "number", description: "Servicios: duración en minutos" },
+                entrega: { type: "string", description: "Infoproductos/streaming: link o mensaje de entrega del acceso, si el dueño lo dio; vacío si lo entrega a mano" },
               },
             },
           },
@@ -1780,6 +1789,34 @@ export const TOOLS: ToolDefinition[] = [
             minItems: 2,
             maxItems: 4,
             items: { type: "object", additionalProperties: false, required: ["etiqueta", "enviar"], properties: { etiqueta: { type: "string" }, enviar: { type: "string" } } },
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mostrar_grafico",
+      description:
+        "Dibuja en el panel un gráfico de barras (comparar cifras: ventas por día/producto, embudo, campañas) o tarjetas de métricas (3-4 indicadores clave). Úsalo SIEMPRE que reportes números comparables en vez de listarlos en texto; acompáñalo de 1-2 frases de lectura.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["tipo", "series"],
+        properties: {
+          titulo: { type: "string" },
+          tipo: { type: "string", enum: ["barras", "tarjetas"] },
+          series: {
+            type: "array",
+            minItems: 1,
+            maxItems: 12,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["label", "value"],
+              properties: { label: { type: "string" }, value: { type: "number" }, hint: { type: "string", description: "Texto corto bajo el valor, ej. 'S/ 1 240' o '+12 %'" } },
+            },
           },
         },
       },
@@ -1864,7 +1901,8 @@ function slugify(name: string): string {
     .slice(0, 60) || "producto";
 }
 
-const asStr = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+// Acepta números (el modelo manda price: 18 en vez de "18").
+const asStr = (v: unknown): string | undefined => (typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : undefined);
 const asStrList = (v: unknown): string[] | undefined =>
   Array.isArray(v) ? v.map((x) => String(x)).filter((s) => s.trim()) : undefined;
 const asOrdered = (v: unknown): Array<{ value: string; sortOrder: number }> | undefined =>
@@ -2095,7 +2133,8 @@ function buildPayload(data: LooseData, existing: AdminProduct | null, replace = 
       data.bookingLeadMinutes !== undefined ? Number(data.bookingLeadMinutes) || null : (e?.bookingLeadMinutes ?? null),
     bookingHorizonDays:
       data.bookingHorizonDays !== undefined ? Number(data.bookingHorizonDays) || null : (e?.bookingHorizonDays ?? null),
-    shortDescription: asStr(data.shortDescription) ?? e?.shortDescription ?? "",
+    // Sin descripción corta → el nombre (zod la exige; el modelo suele omitirla).
+    shortDescription: asStr(data.shortDescription)?.trim() || e?.shortDescription || (asStr(data.name) ?? e?.name ?? "").trim().slice(0, 120),
     fullDescription: asStr(data.fullDescription) ?? e?.fullDescription ?? "",
     presentationMessage:
       data.presentationMessage !== undefined ? asStr(data.presentationMessage) ?? null : (e?.presentationMessage ?? null),
@@ -2957,7 +2996,14 @@ export async function runCopilotTool(
           empresa: company ? { ...company, productCount: company._count.products, _count: undefined } : null,
           // Asistente de arranque (/bienvenida) y menú simple.
           puestaEnMarcha: onboardingState
-            ? { completa: onboardingState.complete, pasoActual: onboardingState.nextStep, menuSimple: onboardingState.simpleMenu, porcentaje: onboardingState.setup.percent }
+            ? {
+                completa: onboardingState.complete,
+                pasoActual: onboardingState.nextStep,
+                menuSimple: onboardingState.simpleMenu,
+                porcentaje: onboardingState.setup.percent,
+                // Digitales sin mensaje/link de entrega: el agente los vende y avisa al dueño para entregar a mano.
+                productosSinEntrega: onboardingState.productsMissingDelivery,
+              }
             : null,
           agente: agent
             ? {
@@ -5313,7 +5359,8 @@ export async function runCopilotTool(
 
     case "proponer_productos":
     case "proponer_formulario":
-    case "ofrecer_opciones": {
+    case "ofrecer_opciones":
+    case "mostrar_grafico": {
       // Herramientas de interfaz: el panel dibuja el bloque; aquí solo se confirma al modelo.
       return { result: JSON.stringify({ ok: true, nota: "Mostrado en el panel. Continúa con una frase corta." }), wrote: false };
     }
@@ -5349,6 +5396,7 @@ const SYSTEM_GUIDE = [
   "- FLUJOS — secuencia OBLIGATORIA: (1) ver_bloques_flujo y ver_crm ANTES de diseñar (nunca inventes ids: usa nombres o los ids reales); (2) propón al dueño el flujo en lenguaje llano — qué pregunta y qué opciones numeradas verá el cliente (muéstrale el texto tal cual le llegará), qué etiqueta/columna pone cada rama, cuándo avisa al dueño, si agenda cita — y espera su confirmación; (3) crear_flujo con soloValidar=true para comprobar, luego sin él; (4) muéstrale el link /flujos/<id> y las warnings; (5) activar_flujo SOLO tras confirmación explícita, avisando que en modo FLOW el bot calla si ningún flujo se dispara (en HYBRID responde el agente) y que el modo se cambia con configurar_empresa botMode; (6) para modificar uno existente, ver_flujo primero y devuelve el grafo COMPLETO conservando ids y posiciones. GOTCHAS: en HYBRID termina el flujo de calificación con to-agent (clientText opcional + note con lo que el agente debe hacer) en vez de handoff, salvo que el dueño quiera atender él; las respuestas del flujo (saveVariable) quedan en la ficha del cliente (Conversaciones → Contacto, tarjeta del CRM, ver_cliente/leer_conversacion) y el agente las recibe como contexto; si el dueño capta leads por Meta Ads, propón trigger onAdLead (no keywords) y acciones CRM en el anuncio (configurar_anuncio); etiquetas según rango (presupuesto, tipo de cliente) requieren un bloque answers (opciones numeradas; el cliente responde con el número o el nombre) con una rama por opción, no question libre; en answers el message es SOLO la pregunta: la lista «1. … 2. …» la agrega el sistema y NUNCA se crean opciones separadas para «1»,«2»… (duplicarían ramas); para menús de 7+ opciones usa list; BOTONES: answers/list son texto numerado, pero el bloque poll envía una ENCUESTA NATIVA de WhatsApp (botonera real, 2-12 opciones, un tap; solo por SMS Tools, en Meta/chat web se degrada sola a menú numerado) — propón poll cuando el dueño pida botones; el agente IA NO envía encuestas (solo los flujos); las variables guardadas (saveVariable) solo llegan al dueño si el notifyText del handoff las incluye con {{variable}}; book-appointment necesita un servicio con durationMin; un flujo de captación típico: answers (qué necesita, una opción por servicio) → crm-add-tags → crm-move → answers (tipo/presupuesto) → crm-add-tags → question (descripción) → to-agent (HYBRID) o handoff con aviso que incluya {{nombre}} {{telefono}} y las variables (ver_bloques_flujo trae un EJEMPLO completo).",
   "- Campañas: además de mensajes, cada campaña puede llevar PASOS por contacto (esperar N segundos, etiquetar/quitar etiquetas, mover a una columna del CRM, pasar a modo humano) y etiquetas de contexto a cada alcanzado (crear_campana pasos / etiquetasContexto, actualizar_campana en borrador, eliminar_campana tras confirmación). Las respuestas rápidas también ejecutan ACCIONES al enviarse: mover al CRM, etiquetar/quitar etiquetas, marcar entregado y fijar el producto presentado (crear/actualizar_respuesta_rapida acciones por nombres).",
   "- Embudo (/embudo): embudo de ventas (módulo Embudo).",
+  "- ENTREGA POR DEFECTO: un producto FÍSICO creado sin physicalDelivery hereda la entrega del negocio (configurar_empresa deliveryConfig: costo, tiempo, zonas, recojo); un producto DIGITAL (infoproductos/streaming) sin mensaje/link de entrega NO rompe al agente: queda en entrega manual (el agente vende, valida el pago, dice que el acceso llega en breve y avisa al dueño para que lo entregue a mano). ver_configuracion → puestaEnMarcha.productosSinEntrega los cuenta; sugiere completar el mensaje de entrega con actualizar_producto digitalDelivery.instructions.",
   "- ASISTENTE DE ARRANQUE (/bienvenida): las cuentas nuevas aterrizan ahí en 4 pasos (Tu negocio → Tus productos, con foto de la carta → Cómo cobras → Pruébalo en el simulador y conectar WhatsApp). Se puede salir con «Lo hago después» y retomar desde Inicio («Retomar el asistente»); vuelve a abrirse al entrar hasta completarse (deja de abrirse solo tras 3 salidas) y se puede repetir desde el Centro de ayuda. MODO SIMPLE: mientras la puesta en marcha no esté completa el menú muestra solo Inicio, Conversaciones, Productos, Agente IA, Pagos y WhatsApp (+ Pedidos/Reservas según rubro) y un enlace «Ver todo el panel» que despliega el resto. PLANTILLAS POR RUBRO: toda cuenta nueva nace con prompt y reglas del rubro, un tablero de CRM con columnas y etiquetas, respuestas rápidas básicas y el recordatorio de compra pendiente activado; todo es editable y, si cambia de rubro sin productos, se reemplaza por la plantilla del nuevo rubro. ver_configuracion → puestaEnMarcha muestra si está completa, el paso actual y si el menú está en modo simple.",
   "- IA DE PRUEBA: las cuentas que se registran solas pueden nacer con la key de IA de FlowApp (ver_configuracion → agente.ia.fuenteKey 'plataforma') con un TOPE de respuestas (agente + Copiloto). Al agotarse, el agente deja de responder y el Copiloto devuelve error hasta que el dueño ponga su PROPIA API key en Agente IA → Modelo (desde el panel; nunca por chat): con key propia no hay tope. El superadmin puede asignar o quitar la IA de prueba a una cuenta ya existente desde Clientes → Editar. Si el dueño pregunta por qué el bot no responde, revisa primero agente.ia.mensajesPrueba.agotado.",
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación. Por chat: listar_comprobantes (con id) y, tras confirmación explícita, aprobar_comprobante (cuenta como venta y entrega), rechazar_comprobante, ignorar_comprobante y asociar_comprobante (producto/teléfono). Desde la ficha del cliente (Conversaciones → pestaña Contacto) el asesor también puede reenviar el acceso de una compra aprobada POR CORREO (si el producto tiene entrega por correo activa).",
@@ -5427,7 +5475,7 @@ export async function buildSystem(companyId: string, opts: { mode?: "panel" | "o
     "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación 1:1 desde Inicio (/inicio). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",
     "- Tras crear/modificar, resume QUÉ quedó hecho y sugiere el siguiente paso (revisar en el panel, probar en el simulador...).",
     "- Respuestas cortas y claras. Una pregunta a la vez. Los datos que devuelven las herramientas son la fuente de verdad.",
-    "- BOTONES: cuando la respuesta esperada sea corta y cerrada (confirmar, sí/no, elegir entre pocas alternativas) acompaña tu mensaje con ofrecer_opciones; el panel los dibuja como botones.",
+    "- BOTONES: cuando la respuesta esperada sea corta y cerrada (confirmar, sí/no, elegir entre pocas alternativas) acompaña tu mensaje con ofrecer_opciones; el panel los dibuja como botones. TABLAS: una lista de 4+ ítems con 2 o más datos cada uno (nombre/precio/categoría, ventas por producto…) va en tabla markdown, no en párrafo. GRÁFICOS: cifras comparables (ventas por día/semana/producto, embudo, campañas, 3-4 indicadores) van con mostrar_grafico (barras o tarjetas) más 1-2 frases de lectura. El dueño lee en el celular: frases cortas, negritas en lo importante, nada de bloques largos.",
     ...(opts.mode === "onboarding" ? ["", onboardingScript(vertical, opts.step ?? 1)] : []),
   ].join("\n");
 }
@@ -5547,7 +5595,15 @@ export async function runCopilotTurn(
 
   let wroteAny = false;
   const ui: CopilotUi = {};
+  const tools = toolsFor(body.mode, body.step);
+  // Paso 2 del asistente: si el dueño manda la foto o una lista con precios, la primera
+  // iteración DEBE proponer (Haiku tendía a saltarse el guion y crear directo).
+  const lastUser = [...history].reverse().find((m) => m.role === "user");
+  const looksLikeList = (lastUser?.content ?? "").split("\n").filter((l) => /\d/.test(l)).length >= 3;
+  const forceProposal = body.mode === "onboarding" && body.step === 2 && Boolean(lastUser && ((lastUser.attachments?.length ?? 0) > 0 || (lastUser.imageUrls?.length ?? 0) > 0 || looksLikeList));
   for (let i = 0; i < MAX_ITERATIONS; i++) {
+    const toolChoice: "auto" | { type: "function"; function: { name: string } } =
+      i === 0 && forceProposal ? { type: "function", function: { name: "proponer_productos" } } : "auto";
     // En stream, el texto que el modelo escribe ANTES de llamar herramientas no
     // se emite (suele ser un "voy a…" redundante); solo el texto final llega en vivo.
     let buffered = "";
@@ -5560,17 +5616,17 @@ export async function runCopilotTurn(
           temperature: 0.3,
           maxTokens: 2500,
           messages,
-          tools: TOOLS,
-          toolChoice: "auto",
+          tools,
+          toolChoice,
           onDelta: (text) => {
             buffered += text;
           },
         }).catch(async (err) => {
           // Proveedor que no soporta stream con tools: reintento sin stream.
           console.warn("[copilot] stream falló, reintento sin stream:", err instanceof Error ? err.message : err);
-          return chatCompletion({ apiKey, model, baseUrl, temperature: 0.3, maxTokens: 2500, messages, tools: TOOLS, toolChoice: "auto" });
+          return chatCompletion({ apiKey, model, baseUrl, temperature: 0.3, maxTokens: 2500, messages, tools, toolChoice });
         })
-      : await chatCompletion({ apiKey, model, baseUrl, temperature: 0.3, maxTokens: 2500, messages, tools: TOOLS, toolChoice: "auto" });
+      : await chatCompletion({ apiKey, model, baseUrl, temperature: 0.3, maxTokens: 2500, messages, tools, toolChoice });
     void caps;
 
     if (!r.toolCalls.length) {
@@ -5693,6 +5749,12 @@ function collectUi(ui: CopilotUi, name: string, args: LooseData): void {
     ui.products = (args.productos as Array<Record<string, unknown>>).slice(0, 60);
   } else if (name === "proponer_formulario" && args.campos && typeof args.campos === "object") {
     ui.form = { ...(ui.form ?? {}), ...(args.campos as Record<string, unknown>) };
+  } else if (name === "mostrar_grafico" && Array.isArray(args.series)) {
+    const series = (args.series as Array<Record<string, unknown>>)
+      .map((s) => ({ label: String(s.label ?? ""), value: Number(s.value), hint: typeof s.hint === "string" ? s.hint : undefined }))
+      .filter((s) => s.label && Number.isFinite(s.value))
+      .slice(0, 12);
+    if (series.length) ui.chart = { titulo: typeof args.titulo === "string" ? args.titulo : undefined, tipo: args.tipo === "tarjetas" ? "tarjetas" : "barras", series };
   }
 }
 

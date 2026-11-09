@@ -384,6 +384,24 @@ export async function getProduct(companyId: string, productId: string) {
 
 export async function createProduct(companyId: string, payload: ProductPayload) {
   const productType = await resolveProductType(companyId, payload.productType);
+  // Producto físico sin entrega propia (Copiloto, asistente, import): hereda la entrega
+  // del negocio (Empresa → Entrega) para que el agente tenga costo/zonas desde el día 1.
+  if (productType === "PHYSICAL" && !payload.physicalDelivery) {
+    const company = await prisma.company.findUnique({ where: { id: companyId }, select: { vertical: true, deliveryConfig: true } });
+    if (company?.vertical === "PHYSICAL_GOODS" || company?.vertical === "OTHER") {
+      const d = (company.deliveryConfig ?? {}) as { cost?: string | null; time?: string | null; areas?: string[]; pickupAvailable?: boolean; requiresAddress?: boolean };
+      payload = {
+        ...payload,
+        physicalDelivery: {
+          requiresAddress: d.requiresAddress ?? true,
+          deliveryCost: d.cost ?? null,
+          deliveryTime: d.time ?? null,
+          pickupAvailable: Boolean(d.pickupAvailable),
+          deliveryAreas: Array.isArray(d.areas) ? d.areas : [],
+        },
+      };
+    }
+  }
   const product = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     // El orden ya no se teclea: se auto-asigna al final (max + 1) salvo que venga explícito.
     let sortOrder = payload.sortOrder;

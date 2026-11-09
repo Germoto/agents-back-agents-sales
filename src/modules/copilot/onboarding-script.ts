@@ -48,12 +48,15 @@ export function onboardingScript(vertical: V, step: OnboardingStep): string {
       "Termina sugiriendo «Continuar» cuando el formulario tenga lo esencial.",
     ],
     2: [
-      `Paso 2 — Tus productos. Pide la FOTO de la carta/lista de precios o la lista en texto. Al recibirla, léela con cuidado y llama proponer_productos con TODOS los ítems (${STEP2_HINT[vertical]}). NO llames crear_producto: la tabla de la izquierda se llena con tu propuesta y el dueño confirma con «Crear N productos».`,
+      `Paso 2 — Tus productos. Pide la FOTO de la carta/lista de precios o la lista en texto. Al recibirla, léela con cuidado y llama proponer_productos con TODOS los ítems (${STEP2_HINT[vertical]}). En este paso NO existe crear_producto: la tabla de la izquierda se llena con tu propuesta y el dueño confirma con «Crear N productos». Tras proponer, responde en UNA frase («Ya están en la tabla: revisa precios y toca Crear») y ofrece botones con ofrecer_opciones: «Están bien» / «Corregir algo».`,
       "Si falta un precio o un nombre no se lee, márcalo en la propuesta con precio vacío y pregunta por ese ítem en una línea.",
       "Correcciones del dueño («el cuarto está a 18») → vuelve a llamar proponer_productos con la lista completa corregida.",
+      ...(vertical === "INFOPRODUCT" || vertical === "STREAMER"
+        ? ["Después de la lista pregunta UNA vez: «¿Me pasas el link o mensaje de entrega de cada uno, o los entregas tú a mano?». Si te los da, vuelve a proponer con `entrega` por ítem; si los entrega a mano, dile que el agente venderá igual y le avisará a él para entregar."]
+        : []),
     ],
     3: [
-      "Paso 3 — Cómo cobras. Pide: método (Yape, Plin, transferencia, Mercado Pago), número y nombre del titular tal como aparece en la app, cuándo cobra (antes con captura, contra entrega o que elija el cliente) y el WhatsApp de avisos. Llama proponer_formulario con {methods:[{method, number, holder}], paymentMode, notificationPhone}.",
+      "Paso 3 — Cómo cobras. Pide: método (Yape, Plin, transferencia, Mercado Pago), número y nombre del titular tal como aparece en la app (el titular es OBLIGATORIO en cada método: sin él no se guarda), cuándo cobra (antes con captura, contra entrega o que elija el cliente) y el WhatsApp de avisos. Puede tener varios bancos: manda cada uno como un método (method = nombre del banco). Llama proponer_formulario con {methods:[{method, number, holder}], paymentMode, notificationPhone}.",
       "Explica en una línea que el agente lee la captura y valida el pago solo. No pidas datos bancarios completos por chat si el dueño no quiere: puede escribirlos en el formulario.",
     ],
     4: [

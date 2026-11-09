@@ -95,7 +95,19 @@ export interface OnboardingState {
   simpleMenu: boolean;
   /** Primer paso con algo pendiente (1 negocio, 2 productos, 3 cobros, 4 prueba). */
   nextStep: number;
+  /** Digitales (infoproducto/streaming) activos sin mensaje/link de entrega: el agente los vende y avisa al dueño para entregar a mano. */
+  productsMissingDelivery: number;
   setup: SetupStatus;
+}
+
+async function countProductsMissingDelivery(companyId: string): Promise<number> {
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { vertical: true } });
+  if (company?.vertical !== "INFOPRODUCT" && company?.vertical !== "STREAMER") return 0;
+  const rows = await prisma.product.findMany({
+    where: { companyId, active: true, productType: "DIGITAL" },
+    select: { digitalDelivery: { select: { assignmentMode: true, instructions: true } } },
+  });
+  return rows.filter((r) => (r.digitalDelivery?.assignmentMode ?? "STATIC") === "STATIC" && !r.digitalDelivery?.instructions?.trim()).length;
 }
 
 function stepDone(setup: SetupStatus, key: string): boolean {
@@ -103,9 +115,10 @@ function stepDone(setup: SetupStatus, key: string): boolean {
 }
 
 export async function getOnboarding(companyId: string): Promise<OnboardingState> {
-  const [row, setup] = await Promise.all([
+  const [row, setup, productsMissingDelivery] = await Promise.all([
     prisma.companyOnboarding.findUnique({ where: { companyId } }),
     getSetupStatus(companyId),
+    countProductsMissingDelivery(companyId).catch(() => 0),
   ]);
   const products = stepDone(setup, "products");
   const payments = stepDone(setup, "payments");
@@ -130,6 +143,7 @@ export async function getOnboarding(companyId: string): Promise<OnboardingState>
     showAssistant,
     simpleMenu,
     nextStep: row && row.step > 1 && !products ? row.step : nextStep,
+    productsMissingDelivery,
     setup,
   };
 }

@@ -188,6 +188,9 @@ function renderProduct(p: BotProduct, index: number, vertical: string | undefine
     });
     parts.push(`   multimedia — la presentación (enviar_ficha) ya manda automáticamente los archivos marcados "presentación"; NO los reenvíes. Los "on-demand" se mandan SOLO si el cliente pide ESE archivo o ESE contenido en concreto (ej. "mándame el video", "el PDF de muestra"), con enviar_multimedia fileIds=[id]. Un pedido GENERAL de información ("quiero más info", "cuéntame del curso", aunque mencione el precio) se satisface con la presentación: NO dispares enviar_multimedia para "completar" con los on-demand:\n     ${fileLines.join("\n     ")}`);
   }
+  if ((p as { deliveryMissing?: boolean }).deliveryMissing) {
+    parts.push("   entrega: AÚN SIN mensaje/link de entrega configurado → tras validar el pago NO prometas acceso inmediato: di que el negocio le enviará el acceso en breve (el dueño recibe el aviso y entrega a mano).");
+  }
   if (p.productType === "digital" && driveSearchEnabled()) {
     const refs = deliveryDriveRefs(p.digitalDelivery);
     if (refs.length) {
@@ -394,7 +397,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     if (d.time) parts.push(`tiempo: ${d.time}`);
     if (d.pickupAvailable) parts.push("recojo en local disponible");
     if (Array.isArray(d.areas) && d.areas.length) parts.push(`zonas: ${(d.areas as string[]).slice(0, 10).join(", ")}`);
-    if (parts.length) deliveryLine = `Entrega del negocio (aplica a todo el catálogo): ${parts.join(" · ")}. Valida la dirección del cliente contra estas zonas.`;
+    if (d.requiresAddress === false) parts.push("no requiere dirección");
+    if (parts.length) deliveryLine = `Entrega del negocio (aplica a todo el catálogo y a los productos sin envío propio): ${parts.join(" · ")}. Valida la dirección del cliente contra estas zonas.`;
   }
 
   // Fecha/hora actual en la TZ del negocio: sin esto el modelo no puede

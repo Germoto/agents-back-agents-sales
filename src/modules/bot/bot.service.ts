@@ -168,26 +168,19 @@ export async function buildBotConfig(companyId: string, account?: string) {
     throw new AppError("Falta PaymentConfig para esta empresa", 422);
   }
 
-  // Validación de entrega rubro-aware: digitales (infoproducto/streaming) requieren
-  // el mensaje de entrega (instructions; el link va dentro); físico requiere entrega
-  // por producto; restaurante usa la entrega del negocio (no por plato); servicio no
-  // requiere entrega (reserva del agente).
+  // Entrega rubro-aware SIN tumbar el agente (antes un solo producto incompleto daba
+  // 422 para toda la empresa; los creados por Copiloto/asistente/import no traían
+  // estos campos). Ahora: físico sin physicalDelivery → mapBotProduct arma el objeto
+  // por defecto y el prompt usa la entrega del negocio (deliveryConfig); digital
+  // (infoproducto/streaming) en modo STATIC sin mensaje de entrega → se trata como
+  // entrega MANUAL (el agente vende, valida el pago y avisa al dueño para que entregue)
+  // y se marca deliveryMissing para que el prompt lo diga y el panel lo avise.
   const vertical = whatsappConfig.company.vertical;
-  for (const product of botMode === "FLOW" ? [] : products) {
-    if ((vertical === "INFOPRODUCT" || vertical === "STREAMER") && product.productType === "DIGITAL") {
-      // El mensaje de entrega (instructions) solo es obligatorio en modo STATIC (mensaje
-      // fijo). En POOL_AUTO la entrega usa la credencial del inventario (plantilla opcional)
-      // y en MANUAL la entrega la hace un asesor → no requieren instructions. Exigirlo a
-      // todos rompía el agente de la empresa cuando había un producto MANUAL/POOL_AUTO.
-      const mode = (product.digitalDelivery as { assignmentMode?: string } | null)?.assignmentMode ?? "STATIC";
-      if (mode === "STATIC" && !product.digitalDelivery?.instructions?.trim()) {
-        throw new AppError(`El producto digital ${product.slug} no tiene mensaje de entrega configurado`, 422);
-      }
-    }
-    if (vertical === "PHYSICAL_GOODS" && product.productType === "PHYSICAL" && !product.physicalDelivery) {
-      throw new AppError(`El producto fisico ${product.slug} no tiene physicalDelivery`, 422);
-    }
-  }
+  const digitalMissingDelivery = (product: { productType: string; digitalDelivery: { assignmentMode?: string | null; instructions?: string | null } | null }) =>
+    (vertical === "INFOPRODUCT" || vertical === "STREAMER") &&
+    product.productType === "DIGITAL" &&
+    (product.digitalDelivery?.assignmentMode ?? "STATIC") === "STATIC" &&
+    !product.digitalDelivery?.instructions?.trim();
 
   // Tenant de plataforma (agente de ventas del landing): anexar al prompt los
   // paquetes públicos EN VIVO — precios siempre actualizados sin recompilar.
@@ -287,14 +280,20 @@ export async function buildBotConfig(companyId: string, account?: string) {
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
     httpActions,
-    products: products.map((p) =>
-      withVariantModifiers(
+    products: products.map((p) => {
+      const mapped = withVariantModifiers(
         mapBotProduct(p, {
           timezone: whatsappConfig.company.timezone,
           currencySymbol: symbolFor(whatsappConfig.company.currency),
         }),
-      ),
-    ),
+      );
+      if (!digitalMissingDelivery(p) || !mapped.digitalDelivery) return mapped;
+      return {
+        ...mapped,
+        deliveryMissing: true,
+        digitalDelivery: { ...mapped.digitalDelivery, assignmentMode: "MANUAL" },
+      };
+    }),
   };
 }
 
@@ -304,7 +303,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
  * ya sabe resolver, sin pisar modifierGroups reales (restaurante).
  */
 function withVariantModifiers(p: ReturnType<typeof mapBotProduct>): ReturnType<typeof mapBotProduct> {
-  if (p.productType !== "PHYSICAL" || !Array.isArray(p.variants) || !p.variants.length) return p;
+  // mapBotProduct deja productType en minúsculas ("physical"); comparar sin distinguir mayúsculas.
+  if (String(p.productType).toUpperCase() !== "PHYSICAL" || !Array.isArray(p.variants) || !p.variants.length) return p;
   const vd = (p.verticalData ?? {}) as Record<string, unknown>;
   const existing = Array.isArray(vd.modifierGroups) ? (vd.modifierGroups as unknown[]) : [];
   const groups = (p.variants as Array<{ name: string; options: string[] }>).map((v) => ({
