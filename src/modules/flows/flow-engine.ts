@@ -1426,7 +1426,14 @@ async function preparePaymentCharge(
     methods: Array<{ method: string; number: string; holder: string }>;
     // chatMode ON_REQUEST: el bloque no envía el link (no hay modelo que lo pida después),
     // salvo que el negocio no tenga métodos manuales — lo resuelve composePaymentMethodsMessage.
-    mp?: { enabled?: boolean; accessTokenEnc?: string | null; chatEnabled?: boolean; chatMode?: string | null } | null;
+    // chatLinkExpiryDays: la vigencia del link del chat también aplica al que envía este bloque.
+    mp?: {
+      enabled?: boolean;
+      accessTokenEnc?: string | null;
+      chatEnabled?: boolean;
+      chatMode?: string | null;
+      chatLinkExpiryDays?: number | null;
+    } | null;
   };
   if (!payment?.enabled || (!payment.methods.length && !payment.mp?.enabled)) return null;
 

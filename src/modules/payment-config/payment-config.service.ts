@@ -3,6 +3,7 @@ import { AppError } from "../../lib/app-error";
 import { encryptCredential, decryptCredential } from "../../lib/credentials-crypto";
 import { mpGetMe } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
+import { DEFAULT_MP_LINK_MESSAGE } from "../agent/payment-methods";
 
 /** Mercado Pago es un módulo de paquete: las empresas legacy pasan. */
 async function assertMpAllowedByPlan(companyId: string) {
@@ -32,9 +33,24 @@ function mapMpConfig(config: {
   mpChatEnabled: boolean;
   mpStoreEnabled: boolean;
   mpChatMode: string;
+  mpChatLinkMessage: string | null;
+  mpChatLinkExpiryDays: number | null;
 } | null) {
   if (!config) {
-    return { enabled: false, connected: false, feeMode: "TENANT", feePercent: 3.99, feeFixed: 1, feeIgv: true, chatEnabled: true, storeEnabled: true, chatMode: "ALWAYS" };
+    return {
+      enabled: false,
+      connected: false,
+      feeMode: "TENANT",
+      feePercent: 3.99,
+      feeFixed: 1,
+      feeIgv: true,
+      chatEnabled: true,
+      storeEnabled: true,
+      chatMode: "ALWAYS",
+      chatLinkMessage: null,
+      chatLinkExpiryDays: null,
+      defaultChatLinkMessage: DEFAULT_MP_LINK_MESSAGE,
+    };
   }
   const plain = config.mpAccessToken ? decryptCredential(config.mpAccessToken) : "";
   return {
@@ -48,6 +64,10 @@ function mapMpConfig(config: {
     chatEnabled: config.mpChatEnabled,
     storeEnabled: config.mpStoreEnabled,
     chatMode: config.mpChatMode === "ON_REQUEST" ? "ON_REQUEST" : "ALWAYS",
+    // Mensaje del link enviado aparte (null = el de fábrica, que viaja como referencia) y vigencia en días.
+    chatLinkMessage: config.mpChatLinkMessage,
+    chatLinkExpiryDays: config.mpChatLinkExpiryDays,
+    defaultChatLinkMessage: DEFAULT_MP_LINK_MESSAGE,
   };
 }
 
@@ -119,6 +139,8 @@ export async function updateMercadoPagoConfig(
     chatEnabled?: boolean;
     storeEnabled?: boolean;
     chatMode?: "ALWAYS" | "ON_REQUEST";
+    chatLinkMessage?: string | null;
+    chatLinkExpiryDays?: number | null;
   },
 ) {
   // Conectar o activar MP exige el módulo del paquete; desconectar siempre se permite.
@@ -135,6 +157,8 @@ export async function updateMercadoPagoConfig(
     ...(data.chatEnabled !== undefined ? { mpChatEnabled: data.chatEnabled } : {}),
     ...(data.storeEnabled !== undefined ? { mpStoreEnabled: data.storeEnabled } : {}),
     ...(data.chatMode !== undefined ? { mpChatMode: data.chatMode } : {}),
+    ...(data.chatLinkMessage !== undefined ? { mpChatLinkMessage: data.chatLinkMessage?.trim() || null } : {}),
+    ...(data.chatLinkExpiryDays !== undefined ? { mpChatLinkExpiryDays: data.chatLinkExpiryDays } : {}),
   };
 
   if (data.accessToken === null) {

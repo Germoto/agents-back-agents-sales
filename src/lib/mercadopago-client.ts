@@ -68,6 +68,8 @@ export function mpCreatePreference(
     backUrls?: { success: string; failure: string; pending: string };
     /** Con backUrls: volver automáticamente al aprobar. */
     autoReturn?: boolean;
+    /** Vigencia del link: pasada esa fecha Mercado Pago lo muestra como no disponible. Sin valor = no vence. */
+    expiresAt?: Date;
   },
 ): Promise<MpPreference> {
   return mpFetch<MpPreference>(accessToken, "/checkout/preferences", {
@@ -83,8 +85,20 @@ export function mpCreatePreference(
       ...(opts.notificationUrl ? { notification_url: opts.notificationUrl } : {}),
       ...(opts.backUrls ? { back_urls: opts.backUrls } : {}),
       ...(opts.backUrls && opts.autoReturn ? { auto_return: "approved" } : {}),
+      ...(opts.expiresAt
+        ? {
+            expires: true,
+            expiration_date_from: mpDate(new Date()),
+            expiration_date_to: mpDate(opts.expiresAt),
+          }
+        : {}),
     }),
   });
+}
+
+/** Fecha en el formato que documenta Mercado Pago: ISO 8601 con milisegundos y desfase ("2017-02-28T12:00:00.000-04:00"). */
+function mpDate(date: Date): string {
+  return date.toISOString().replace("Z", "+00:00");
 }
 
 export interface MpPayment {

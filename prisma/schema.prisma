@@ -518,6 +518,10 @@ model PaymentConfig {
   // Link en el chat: ALWAYS = dentro del mensaje de cobro (histórico);
   // ON_REQUEST = solo cuando el cliente lo pide (el agente lo envía aparte).
   mpChatMode        String          @default("ALWAYS")
+  // Link enviado aparte en el chat: mensaje propio (null = el de fábrica) y
+  // vigencia del link en días (null = no vence).
+  mpChatLinkMessage    String?
+  mpChatLinkExpiryDays Int?
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
   company           Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)

@@ -33,4 +33,8 @@ export const updateMercadoPagoSchema = z.object({
   storeEnabled: z.boolean().optional(),
   // Link en el chat (omitido = no cambia): siempre en el cobro o solo cuando el cliente lo pide.
   chatMode: z.enum(["ALWAYS", "ON_REQUEST"]).optional(),
+  // Mensaje del link enviado aparte (omitido = no cambia; null o vacío = el de fábrica).
+  chatLinkMessage: z.string().trim().max(600).nullable().optional(),
+  // Vigencia del link del chat en días (omitido = no cambia; null = no vence).
+  chatLinkExpiryDays: z.number().int().min(1).max(30).nullable().optional(),
 });

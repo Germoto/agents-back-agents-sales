@@ -246,6 +246,9 @@ export async function buildBotConfig(companyId: string, account?: string) {
         chatEnabled: paymentConfig.mpChatEnabled,
         // ALWAYS = el link va en el mensaje de cobro; ON_REQUEST = solo si el cliente lo pide.
         chatMode: paymentConfig.mpChatMode === "ON_REQUEST" ? "ON_REQUEST" : "ALWAYS",
+        // Link enviado aparte: mensaje propio (null = el de fábrica) y vigencia en días (null = no vence).
+        chatLinkMessage: paymentConfig.mpChatLinkMessage,
+        chatLinkExpiryDays: paymentConfig.mpChatLinkExpiryDays,
       },
     },
     agent: {

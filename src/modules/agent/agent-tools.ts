@@ -2801,6 +2801,7 @@ export async function executeTool(
         productIds: newIds.length ? newIds : chargeIds,
         simulate: ctx.simulate,
         mpLink: soloLink ? "only" : "auto",
+        timezone: (ctx.config.business as { timezone?: string }).timezone,
       });
       // Sin link no hay nada que enviar: que el agente no lo prometa.
       if (soloLink && !text) {
