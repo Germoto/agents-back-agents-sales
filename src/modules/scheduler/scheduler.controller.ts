@@ -16,6 +16,12 @@ import {
   FOLLOWUP_TYPES,
   LISTABLE_TYPES,
 } from "./scheduler.service";
+import { getAiReviewOverview } from "./reminder-ai-review";
+
+/** GET /agent/reminders/ai-review-stats → uso de hoy de la revisión con IA (revisados, omitidos, tope). */
+export const aiReviewStatsController = asyncHandler(async (req: Request, res: Response) => {
+  res.json(await getAiReviewOverview(req.user!.companyId));
+});
 
 /** GET /agent/reminders?type=&q=&productId=&late=1&offset=&limit= → página de recordatorios pendientes. */
 export const listRemindersController = asyncHandler(async (req: Request, res: Response) => {

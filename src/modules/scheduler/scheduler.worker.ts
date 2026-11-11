@@ -32,6 +32,8 @@ import {
   type MetaTemplateConfig,
 } from "../agent/session-window";
 import { symbolFor } from "../../lib/currency";
+import { normalizeSmartFollowup, type SmartFollowup } from "./smart-followup";
+import { reviewReminderBeforeSend } from "./reminder-ai-review";
 
 // La mayoría de filas vencidas de una pasada solo se REPROGRAMAN (pacing), así
 // que el lote puede ser amplio sin que una empresa con muchos vencidos deje sin
@@ -57,6 +59,8 @@ type QuietConfig = {
   quiet: QuietHours;
   pacing: ReminderPacing;
   metaTemplate: MetaTemplateConfig | null;
+  /** Seguimiento inteligente (revisión con IA antes de enviar, entre otros). */
+  smart: SmartFollowup;
 };
 
 /** Carga (y cachea por batch) la zona horaria + ventana de horario + ritmo del tenant. */
@@ -80,6 +84,7 @@ async function getQuietConfig(companyId: string, cache: Map<string, QuietConfig>
     // Plantilla de respaldo (tenants META) para recordatorios fuera de la
     // ventana de 24h. Sin plantilla, esos recordatorios se marcan FAILED.
     metaTemplate: parseMetaTemplate(followup?.metaTemplate),
+    smart: normalizeSmartFollowup(followup),
   };
   cache.set(companyId, cfg);
   return cfg;
@@ -208,7 +213,9 @@ export async function processDue(): Promise<void> {
   // Clientes que ya recibieron un recordatorio VISIBLE en esta pasada: el resto de
   // sus recordatorios se reprograma para no encimarse.
   const sentToCustomer = new Set<string>();
-  const stats = { sent: 0, paced: 0, capped: 0, spread: 0, cancelled: 0, failed: 0, collapsed: 0, expired: 0 };
+  // Revisiones con IA usadas hoy por empresa (se carga una vez por pasada y se va sumando).
+  const aiReviewUsage = new Map<string, number>();
+  const stats = { sent: 0, paced: 0, capped: 0, spread: 0, cancelled: 0, failed: 0, collapsed: 0, expired: 0, aiSkipped: 0 };
 
   for (const msg of due) {
     const isInternal =
@@ -386,6 +393,31 @@ export async function processDue(): Promise<void> {
         continue;
       }
 
+      // Revisión con IA (opcional, apagada por defecto): va DESPUÉS del claim para que
+      // dos pasadas del cron no paguen dos consultas. Si la IA dice que no conviene,
+      // la fila queda CANCELLED con el motivo, no consume ritmo y el dueño ve una nota.
+      if (SEQUENCE_TYPES.includes(msg.type)) {
+        const qc = await getQuietConfig(msg.companyId, quietCache);
+        if (qc.smart.aiReview.enabled) {
+          const verdict = await reviewReminderBeforeSend(msg, { smart: qc.smart, tz: qc.tz, now, usage: aiReviewUsage });
+          if (verdict.reviewed && !verdict.send) {
+            stats.aiSkipped += 1;
+            if (msg.conversationId) {
+              await recordMessage({
+                companyId: msg.companyId,
+                customerId: msg.customerId,
+                conversationId: msg.conversationId,
+                role: "SYSTEM",
+                message: `🤖 Recordatorio no enviado (revisión con IA): ${verdict.reason}.`,
+                rawPayload: { source: "reminder-ai-review" },
+              }).catch(() => undefined);
+            }
+            console.log(`[scheduler] recordatorio ${msg.type} omitido por revisión IA cliente=${msg.customerId}: ${verdict.reason}`);
+            continue;
+          }
+        }
+      }
+
       if (!senderCache.has(msg.companyId)) {
         senderCache.set(msg.companyId, await loadWhatsappSender(msg.companyId));
       }
@@ -502,9 +534,9 @@ export async function processDue(): Promise<void> {
     }
   }
 
-  if (stats.sent || stats.paced || stats.capped || stats.spread || stats.failed || stats.collapsed || stats.expired) {
+  if (stats.sent || stats.paced || stats.capped || stats.spread || stats.failed || stats.collapsed || stats.expired || stats.aiSkipped) {
     console.log(
-      `[scheduler] pasada due=${due.length} enviados=${stats.sent} pacing=${stats.paced} tope=${stats.capped} dispersados=${stats.spread} cancelados=${stats.cancelled} colapsados=${stats.collapsed} vencidos=${stats.expired} fallidos=${stats.failed}`,
+      `[scheduler] pasada due=${due.length} enviados=${stats.sent} pacing=${stats.paced} tope=${stats.capped} dispersados=${stats.spread} cancelados=${stats.cancelled} colapsados=${stats.collapsed} vencidos=${stats.expired} omitidosIA=${stats.aiSkipped} fallidos=${stats.failed}`,
     );
   }
 

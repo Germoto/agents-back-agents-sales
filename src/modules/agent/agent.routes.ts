@@ -35,6 +35,7 @@ import {
   cancelClientRemindersController,
   cancelRemindersBulkController,
   updateReminderController,
+  aiReviewStatsController,
 } from "../scheduler/scheduler.controller";
 
 const router = Router();
@@ -74,6 +75,7 @@ router.post("/simulate/reset", requireAuth, simulateResetController);
 
 // Recordatorios programados (panel > Recordatorios > Programados): ver, editar y cancelar.
 router.get("/reminders", requireAuth, listRemindersController);
+router.get("/reminders/ai-review-stats", requireAuth, aiReviewStatsController);
 router.patch("/reminders/:id", requireAuth, validate({ body: updateReminderSchema }), updateReminderController);
 router.post("/reminders/cancel", requireAuth, cancelClientRemindersController);
 router.post("/reminders/cancel-bulk", requireAuth, cancelRemindersBulkController);
