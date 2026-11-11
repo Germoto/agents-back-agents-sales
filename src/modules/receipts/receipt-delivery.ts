@@ -15,6 +15,7 @@ import { assignAndBuildDelivery, autoSaleNotice, muteCustomerToHuman } from "../
 import { flushOutbox, gapMsFor } from "../agent/delivery";
 import { getConversationRuntime, recordMessage, saveState, type ConversationState } from "../agent/conversation.service";
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
+import { markFollowupReset } from "../scheduler/smart-followup";
 
 export type ApprovedReceiptDelivery = {
   /** true = se enviaron mensajes de entrega por el chat. */
@@ -90,6 +91,8 @@ export async function deliverApprovedReceipt(companyId: string, receiptId: strin
   state.purchasedProductIds = Array.from(new Set([...purchased, receipt.productId]));
   state.activeOffer = null;
   state.pendingRecheckAt = null;
+  // Una compra futura empieza su seguimiento desde el paso 1 y sin pausa.
+  markFollowupReset(state);
   if (del.offeredCrossSellId) state.offeredCrossSellProductId = del.offeredCrossSellId;
   await saveState(conversation.id, state);
   if (receipt.digitalSaleId) {

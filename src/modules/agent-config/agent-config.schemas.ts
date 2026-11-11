@@ -58,6 +58,28 @@ const metaTemplateSchema = z
   .nullable()
   .optional();
 
+// Seguimiento inteligente (todo apagado por defecto; clave ausente = comportamiento de siempre).
+// resume: la secuencia continúa en el paso siguiente en vez de repetir los ya enviados.
+const resumeSchema = z.object({ enabled: z.boolean().default(false) }).optional();
+// postpone: el agente puede posponer el seguimiento cuando el cliente lo pide (tool posponer_seguimiento).
+const postponeSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    // Espera cuando el cliente no dice cuándo ("lo vemos después").
+    defaultHours: z.coerce.number().int().min(1).max(720).default(24),
+    // Hora del día cuando el cliente dice el día pero no la hora ("el sábado").
+    defaultHour: z.coerce.number().int().min(0).max(23).default(10),
+  })
+  .optional();
+// aiReview: antes de enviar un recordatorio a un cliente que respondió, la IA lee el chat y decide.
+const aiReviewSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    dailyLimit: z.coerce.number().int().min(10).max(2000).default(100),
+    criteria: z.string().trim().max(600).nullable().optional(),
+  })
+  .optional();
+
 // Config de recordatorios/seguimientos que consume el agente y el scheduler.
 export const followupConfigSchema = z
   .object({
@@ -66,6 +88,9 @@ export const followupConfigSchema = z
     quietHours: quietHoursSchema,
     pacing: pacingSchema,
     metaTemplate: metaTemplateSchema,
+    resume: resumeSchema,
+    postpone: postponeSchema,
+    aiReview: aiReviewSchema,
   })
   .nullable()
   .optional();

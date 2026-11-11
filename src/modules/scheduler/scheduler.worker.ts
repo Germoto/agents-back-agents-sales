@@ -142,7 +142,12 @@ export function startScheduler(): void {
 }
 
 type DueRow = Prisma.ScheduledMessageGetPayload<{ include: { customer: { select: { phone: true; name: true; optOutAt: true } } } }>;
-type SeqMeta = { stepIndex?: unknown; dueAt?: unknown; offerPrice?: unknown; manual?: unknown; productId?: unknown };
+type SeqMeta = { stepIndex?: unknown; dueAt?: unknown; offerPrice?: unknown; manual?: unknown; productId?: unknown; postponed?: unknown };
+
+/** Mensaje pospuesto a pedido del cliente (posponer_seguimiento): no es un paso de la secuencia. */
+function isPostponed(row: { metadata: Prisma.JsonValue | null }): boolean {
+  return metaOf(row).postponed === true;
+}
 
 function metaOf(row: { metadata: Prisma.JsonValue | null }): SeqMeta {
   const m = row.metadata;
@@ -165,7 +170,7 @@ function isNewer(a: { sendAt: Date; metadata: Prisma.JsonValue | null }, b: { se
   if (ia !== null && ib !== null && ia !== ib) return ia > ib;
   return dueAtOf(a) > dueAtOf(b);
 }
-/** Prioridad de envío: 0 = internos, citas, renovaciones, manuales y el PRIMER paso de una secuencia. */
+/** Prioridad de envío: 0 = internos, citas, renovaciones, manuales, pospuestos a pedido del cliente y el PRIMER paso de una secuencia. */
 function priorityOf(row: DueRow): number {
   if (
     row.type === ScheduledMessageType.FLOW_TIMEOUT ||
@@ -174,7 +179,7 @@ function priorityOf(row: DueRow): number {
     row.type === ScheduledMessageType.RENEWAL
   ) return 0;
   const meta = metaOf(row);
-  if (meta.manual === true) return 0;
+  if (meta.manual === true || meta.postponed === true) return 0;
   if (SEQUENCE_TYPES.includes(row.type) && stepIndexOf(row) === 0) return 0;
   return 1;
 }
@@ -285,7 +290,8 @@ export async function processDue(): Promise<void> {
     // Secuencias (carrito abandonado / dejado en visto): si este paso ya venció o
     // hay varios pasos atrasados del mismo cliente, se envía SOLO el más reciente
     // (con el precio de la oferta escalonada más avanzada) y el resto se cancela.
-    if (SEQUENCE_TYPES.includes(msg.type)) {
+    // El mensaje pospuesto a pedido del cliente queda fuera: es una promesa, no un paso.
+    if (SEQUENCE_TYPES.includes(msg.type) && !isPostponed(msg)) {
       const verdict = await collapseOverdueSiblings(msg, now, stats, batchById);
       if (verdict === "skip") continue;
     }
@@ -526,11 +532,14 @@ async function collapseOverdueSiblings(
   stats: { collapsed: number; expired: number },
   batchById: Map<string, DueRow>,
 ): Promise<"send" | "skip"> {
-  const siblings = await prisma.scheduledMessage.findMany({
-    where: { companyId: msg.companyId, customerId: msg.customerId, type: msg.type, status: ScheduledMessageStatus.PENDING },
-    orderBy: { sendAt: "asc" },
-    select: { id: true, sendAt: true, metadata: true },
-  });
+  // Se excluye en JS el mensaje pospuesto (el filtro JSON de Prisma no ve claves ausentes).
+  const siblings = (
+    await prisma.scheduledMessage.findMany({
+      where: { companyId: msg.companyId, customerId: msg.customerId, type: msg.type, status: ScheduledMessageStatus.PENDING },
+      orderBy: { sendAt: "asc" },
+      select: { id: true, sendAt: true, metadata: true },
+    })
+  ).filter((r) => !isPostponed(r));
   const me = siblings.find((r) => r.id === msg.id) ?? { id: msg.id, sendAt: msg.sendAt, metadata: msg.metadata };
   const nowMs = now.getTime();
   const lateMs = nowMs - dueAtOf(me);

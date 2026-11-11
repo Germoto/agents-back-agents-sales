@@ -6,6 +6,7 @@ import { persistInboundMedia } from "../../lib/inbound-media";
 import { env } from "../../config/env";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { ConversationState, saveState } from "../agent/conversation.service";
+import { markFollowupReset } from "../scheduler/smart-followup";
 import { resumeFlowOnPaymentOutcome } from "../flows/flow-engine";
 import { reportCtwaConversion } from "../meta-capi/meta-capi.service";
 
@@ -350,6 +351,8 @@ export async function deliverReceiptManually(
     if (conversation) {
       const state = ((conversation.state as ConversationState) ?? {}) as ConversationState;
       state.status = "ENTREGADO";
+      // Una compra futura empieza su seguimiento desde el paso 1 y sin pausa.
+      markFollowupReset(state);
       const purchased = Array.isArray(state.purchasedProductIds) ? state.purchasedProductIds : [];
       state.purchasedProductIds = Array.from(new Set([...purchased, params.productId]));
       await saveState(conversation.id, state);

@@ -17,6 +17,7 @@ import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-gua
 import { summarizeCart } from "./cart.service";
 import { resolveReminderSequence, applySpintax, type ReminderType } from "./reminder-templates";
 import { resolveAdCatalog, adCatalogEntryFor } from "../ad-catalog/ad-catalog.service";
+import { normalizeSmartFollowup, activePostpone } from "../scheduler/smart-followup";
 
 const SIM_PHONE = "SIMULADOR"; // identidad del "cliente" de simulación (no es un número real)
 
@@ -81,15 +82,23 @@ async function previewReminders(
   if (status === "ESPERANDO_PAGO" && (cart.items.length || state.selectedProductId)) types.push("abandonedCart");
   types.push("leftOnRead");
 
+  // Seguimiento pospuesto a pedido del cliente: primero sale el mensaje acordado
+  // y la secuencia se cuenta DESDE esa fecha (igual que scheduleAutoReminders).
+  const smart = normalizeSmartFollowup(followup);
+  const postponed = smart.postpone.enabled ? activePostpone(state) : null;
+  const baseSeconds = postponed ? Math.max(0, Math.round((postponed.until.getTime() - Date.now()) / 60000)) * 60 : 0;
+
   const out: SimReminderPreview[] = [];
   for (const type of types) {
     const seq = resolveReminderSequence(followup, type, productReminder, vars);
-    if (!seq.enabled || !seq.steps.length) continue;
-    out.push({
-      type,
-      label: REMINDER_LABEL[type],
-      steps: seq.steps.map((s) => ({ delaySeconds: s.delaySeconds, text: s.message, mediaUrl: s.mediaUrl })),
-    });
+    const steps: SimReminderPreview["steps"] = [];
+    // El mensaje acordado sale una sola vez (en la primera secuencia que aplique).
+    if (postponed?.body && !out.length) steps.push({ delaySeconds: baseSeconds, text: postponed.body });
+    if (seq.enabled) {
+      for (const s of seq.steps) steps.push({ delaySeconds: baseSeconds + s.delaySeconds, text: s.message, mediaUrl: s.mediaUrl });
+    }
+    if (!steps.length) continue;
+    out.push({ type, label: postponed ? `${REMINDER_LABEL[type]} (pospuesto a pedido del cliente)` : REMINDER_LABEL[type], steps });
   }
   return out;
 }

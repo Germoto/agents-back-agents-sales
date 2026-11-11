@@ -11,7 +11,8 @@ import { planOptions } from "../products/product-plans";
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
-import { emailDeliveryAvailable, crmToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf } from "./agent-tools";
+import { emailDeliveryAvailable, crmToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable } from "./agent-tools";
+import { activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
 import { deliveryDriveRefs, driveSearchEnabled } from "../../lib/google-drive";
 import { symbolFor } from "../../lib/currency";
 
@@ -407,6 +408,10 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
   // Fecha/hora actual en la TZ del negocio: sin esto el modelo no puede
   // convertir "mañana" o "miércoles 05/08" a una fecha real (agenda, vencimientos).
   const tz = (config.business as { timezone?: string }).timezone || "America/Lima";
+  const postponed = postponeAvailable(config) ? activePostpone(state) : null;
+  const postponedLine = postponed
+    ? `SEGUIMIENTO POSPUESTO hasta ${formatPostponeDate(postponed.until, tz)} (a pedido del cliente): hasta entonces no le salen recordatorios automáticos y ese día se le enviará: «${postponed.body.slice(0, 300)}». Ya está programado: no hace falta volver a prometérselo. Si retoma la compra ahora, llama posponer_seguimiento con cancelar:true; si pide otra fecha, vuelve a llamarla con la nueva.`
+    : null;
   let nowLine = "";
   try {
     const nowFmt = new Intl.DateTimeFormat("es-PE", {
@@ -514,6 +519,13 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     "- Productos FÍSICOS: informa, ayuda a cerrar y pide los datos de entrega (nombre de quien recibe, dirección completa, referencia, cantidad y variante si el producto tiene variantes). Valida la dirección contra las zonas de envío configuradas; si está fuera de zona, dilo y ofrece alternativas (recojo si está disponible). Luego registra el pedido con registrar_pedido. Nunca envíes enlaces digitales para un físico.",
     `- Modo de pago del negocio: *${paymentMode}*. before_delivery = cobra y valida el pago (enviar_metodos_pago + validar_pago) ANTES de registrar el pedido. cash_on_delivery = toma los datos y registra el pedido (paga contra entrega), sin cobrar antes. manual = registra el pedido y coordina el pago con un asesor. customer_choice = el CLIENTE elige: antes de enviar métodos de pago PREGÚNTALE si prefiere pago adelantado o contra entrega; si elige adelantado sigue el flujo de before_delivery, si elige contra entrega registra el pedido sin cobrar; al registrar pasa cobro:'adelantado' o cobro:'contra_entrega' según lo que eligió (la herramienta lo exige).`,
     "- Si el cliente se enfría, deja en visto o tiene un carrito sin pagar, puedes programar un recordatorio con agendar_recordatorio.",
+    // Posponer el seguimiento: SOLO si el dueño lo activó. Se describe la capacidad;
+    // cuándo usarla (y con qué tono) lo deciden las instrucciones del negocio.
+    ...(postponeAvailable(config)
+      ? [
+          "- POSPONER SEGUIMIENTO (herramienta posponer_seguimiento): cuando el cliente pide que lo contacten más adelante, pospone los recordatorios automáticos hasta ese momento y deja programado el mensaje que tú redactas. Calcula la fecha y la hora con la 'Fecha y hora actual' de arriba; si el cliente no dice cuándo, llámala sin fecha ni hora (se usa la espera configurada). La herramienta devuelve 'programadoPara': confírmale ese momento al cliente. Si más adelante retoma la compra antes de la fecha, llámala con cancelar:true.",
+        ]
+      : []),
     unknownHandoff
       ? "- Usa derivar_humano si el cliente pide EXPLÍCITAMENTE hablar con una persona/asesor, si hay un problema real fuera de tu alcance (un reclamo, un error de pago, un pedido muy especial) o, con motivo CONSULTA, cuando no puedas responder con lo configurado (regla anterior). NUNCA derives por saludos, por dudas normales ni por preguntas que sí puedes responder con la ficha o el catálogo."
       : "- Usa derivar_humano SOLO si el cliente pide EXPLÍCITAMENTE hablar con una persona/asesor, o si hay un problema real fuera de tu alcance (un reclamo, un error de pago, un pedido muy especial). NUNCA derives por preguntas que puedes responder, por no encontrar un producto (ofrece el catálogo) ni por saludos o dudas normales. Ante una duda: pregunta o responde, no derives.",
@@ -574,6 +586,9 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
           "",
         ]
       : []),
+    // Pausa de seguimiento vigente (la pidió el cliente): sin esto el modelo no sabe que
+    // ya quedó en escribirle y vuelve a prometerlo o a insistir.
+    ...(postponedLine ? [postponedLine, ""] : []),
     ...(flowVarsText
       ? [
           `DATOS QUE EL CLIENTE YA DIO EN EL CHATBOT DE FLUJOS (NO los vuelvas a preguntar; úsalos para personalizar y avanzar): ${flowVarsText}.`,

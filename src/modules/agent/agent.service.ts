@@ -63,10 +63,11 @@ import { getLinkedPhone } from "../whatsapp-config/whatsapp-config.service";
 import {
   scheduleReminder,
   cancelPendingReminders,
+  lastSentSequenceStep,
   minutesFromNow,
-  secondsFromNow,
 } from "../scheduler/scheduler.service";
 import { resolveReminderSequence, type ReminderType } from "./reminder-templates";
+import { normalizeSmartFollowup, activePostpone, followupMemoryCutoff, resumeOffsets } from "../scheduler/smart-followup";
 import { getEntitlements } from "../billing/entitlements";
 import { gateNewLead } from "../billing/billing.service";
 import { transcribeAudio } from "./audio-transcribe";
@@ -1579,14 +1580,46 @@ async function scheduleAutoReminders(
   };
   const followup = config.agent.followupConfig;
   const productReminder = (product as { reminderConfig?: unknown } | undefined)?.reminderConfig;
+  const quietHours = (followup as { quietHours?: unknown } | null)?.quietHours;
 
-  // Programa TODA la secuencia (varios mensajes) de un tipo: un ScheduledMessage por
-  // step, cada uno con su delay (absoluto desde ahora) y su contenido.
+  // Seguimiento inteligente (apagado por defecto): pausa pedida por el cliente y memoria
+  // de pasos ya enviados. Sin esas opciones todo sale como siempre, contado desde ahora.
+  const smart = normalizeSmartFollowup(followup);
+  const now = new Date();
+  const postponed = smart.postpone.enabled ? activePostpone(state, now) : null;
+  const baseMs = postponed ? postponed.until.getTime() : now.getTime();
+
+  // Programa la secuencia (varios mensajes) de un tipo: un ScheduledMessage por step,
+  // cada uno con su delay (absoluto desde el momento base) y su contenido.
   const scheduleSeq = async (type: ReminderType, smType: ScheduledMessageType) => {
+    // Pospuesto a pedido del cliente: ese día sale el mensaje que redactó el agente y
+    // la secuencia normal se cuenta DESDE ahí (aunque la secuencia esté apagada, el
+    // mensaje prometido sale igual).
+    if (postponed?.body) {
+      const meta: Record<string, unknown> = { postponed: true, dueAt: postponed.until.toISOString() };
+      if (productId) meta.productId = productId;
+      await scheduleReminder({
+        companyId,
+        customerId,
+        conversationId,
+        type: smType,
+        sendAt: postponed.until,
+        body: postponed.body,
+        metadata: meta as Prisma.InputJsonValue,
+        timezone: config.business.timezone,
+        quietHours,
+      });
+    }
     const seq = resolveReminderSequence(followup, type, productReminder, vars);
     if (!seq.enabled) return;
-    for (const [stepIndex, step] of seq.steps.entries()) {
-      const sendAt = secondsFromNow(step.delaySeconds);
+    // No repetir pasos: se continúa en el siguiente al último que el cliente ya recibió
+    // (derivado de las filas enviadas; no se guarda en el estado de la conversación).
+    const lastSent = smart.resume.enabled
+      ? await lastSentSequenceStep(companyId, customerId, smType, productId, followupMemoryCutoff(state, now))
+      : -1;
+    for (const { stepIndex, offsetSeconds } of resumeOffsets(seq.steps, lastSent)) {
+      const step = seq.steps[stepIndex];
+      const sendAt = new Date(baseMs + offsetSeconds * 1000);
       // Posición en la secuencia y hora planificada: el worker los usa para colapsar
       // pasos atrasados (envía solo el más reciente), vencerlos y ordenar con justicia
       // (sendAt se mueve con el pacing; dueAt conserva la hora original).
@@ -1605,7 +1638,7 @@ async function scheduleAutoReminders(
         mediaUrl: step.mediaUrl,
         metadata: meta as Prisma.InputJsonValue,
         timezone: config.business.timezone,
-        quietHours: (followup as { quietHours?: unknown } | null)?.quietHours,
+        quietHours,
       });
     }
   };

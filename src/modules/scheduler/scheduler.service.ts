@@ -43,6 +43,34 @@ export async function scheduleReminder(opts: {
 }
 
 /**
+ * Índice del último paso de una secuencia que el cliente YA recibió (-1 = ninguno), para
+ * continuar en el siguiente en vez de repetir. Se deriva de las filas ENVIADAS del mismo
+ * tipo y producto desde `since`. El producto se compara en JS: las filas sin producto no
+ * tienen la clave y el filtro JSON de Prisma no las distingue (misma lección que `manual`).
+ */
+export async function lastSentSequenceStep(
+  companyId: string,
+  customerId: string,
+  type: ScheduledMessageType,
+  productId: string | null,
+  since: Date,
+): Promise<number> {
+  const rows = await prisma.scheduledMessage.findMany({
+    where: { companyId, customerId, type, status: ScheduledMessageStatus.SENT, sentAt: { gt: since } },
+    select: { metadata: true },
+  });
+  let last = -1;
+  for (const r of rows) {
+    const meta = (r.metadata ?? {}) as { stepIndex?: unknown; productId?: unknown; manual?: unknown; postponed?: unknown };
+    if (meta.manual === true || meta.postponed === true) continue;
+    if (typeof meta.stepIndex !== "number" || !Number.isInteger(meta.stepIndex)) continue;
+    if (((meta.productId as string | undefined) ?? null) !== productId) continue;
+    if (meta.stepIndex > last) last = meta.stepIndex;
+  }
+  return last;
+}
+
+/**
  * Cancela recordatorios PENDING de un cliente (evita follow-ups obsoletos
  * cuando el cliente vuelve a responder). Si se pasan tipos, solo esos.
  *

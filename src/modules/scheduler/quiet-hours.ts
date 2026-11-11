@@ -38,7 +38,7 @@ function openingJitterMs(quiet: QuietHours): number {
 }
 
 /** Partes de reloj de pared (wall-clock) del instante en la zona horaria. */
-function zonedParts(date: Date, tz: string) {
+export function zonedParts(date: Date, tz: string) {
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
     year: "numeric",
@@ -63,9 +63,9 @@ function tzOffsetMinutes(date: Date, tz: string): number {
   return Math.round((asUTC - date.getTime()) / 60000);
 }
 
-/** Instante UTC correspondiente a una pared-local (y,m,d,hour:00) en la zona. */
-function zonedTimeToUtc(y: number, m: number, d: number, hour: number, tz: string): Date {
-  const guess = new Date(Date.UTC(y, m - 1, d, hour, 0, 0));
+/** Instante UTC correspondiente a una pared-local (y,m,d,hour:minute) en la zona. */
+export function zonedTimeToUtc(y: number, m: number, d: number, hour: number, tz: string, minute = 0): Date {
+  const guess = new Date(Date.UTC(y, m - 1, d, hour, minute, 0));
   const offset = tzOffsetMinutes(guess, tz);
   return new Date(guess.getTime() - offset * 60000);
 }

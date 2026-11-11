@@ -89,6 +89,12 @@ export interface ConversationState {
   /** Correo que el cliente escribió para recibir su acceso y que aún no se envió
    *  (p. ej. lo mandó junto al comprobante y el pago se aprobó en 2º plano). */
   pendingDeliveryEmail?: string | null;
+  /** Seguimiento inteligente: desde este instante la secuencia de recordatorios empieza de
+   *  cero (pago aprobado o reinicio); los pasos enviados antes ya no cuentan. */
+  followupResetAt?: string | null;
+  /** Seguimiento pospuesto a pedido del cliente (tool posponer_seguimiento): hasta `until`
+   *  no salen recordatorios; ese día se envía `body` y la secuencia sigue desde ahí. */
+  followupPostponed?: { until: string; body: string; setAt: string } | null;
   [key: string]: unknown;
 }
 
@@ -1129,7 +1135,9 @@ export async function resetConversation(
   await prisma.cart.deleteMany({ where: { companyId, customerId } });
   await prisma.conversation.update({
     where: { id: conversationId },
-    data: { state: {}, status: "OPEN", botPaused: false, lastInboundId: null },
+    // followupResetAt: los recordatorios ya enviados no cuentan para la conversación nueva
+    // (con "no repetir pasos" encendido la secuencia vuelve a empezar en el paso 1).
+    data: { state: { followupResetAt: new Date().toISOString() }, status: "OPEN", botPaused: false, lastInboundId: null },
   });
   // Acciones HTTP "una vez por cliente": reiniciar libera el bloqueo (el historial se conserva).
   await prisma.httpActionRun

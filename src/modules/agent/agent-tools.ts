@@ -80,6 +80,8 @@ import { createSubscriptionForSale, type RenewalReminderConfig } from "../subscr
 import { mailerEnabled } from "../../lib/mailer";
 import { sendDigitalDeliveryEmail, EmailDeliveryError } from "./email-delivery";
 import { applySpintax } from "./reminder-templates";
+import { normalizeSmartFollowup, resolvePostponeDate, formatPostponeDate, markFollowupReset, activePostpone } from "../scheduler/smart-followup";
+import { normalizeQuietHours, zonedParts } from "../scheduler/quiet-hours";
 
 /** Tope de archivos por envío (enviar_multimedia con fileIds y presentación). */
 const MAX_FILES_PER_SEND = 12;
@@ -155,11 +157,17 @@ export function driveSearchAvailable(config: BotConfig): boolean {
   return driveSearchEnabled() && productsWithDrive(config).length > 0;
 }
 
+/** El dueño activó «Posponer cuando el cliente lo pide» (Recordatorios → Seguimiento inteligente). */
+export function postponeAvailable(config: BotConfig): boolean {
+  return normalizeSmartFollowup(config.agent.followupConfig).postpone.enabled;
+}
+
 /** Nombres de las tools que se ocultan al modelo cuando no aplican al negocio. */
 export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
   const hidden = new Set<string>();
   if (!emailDeliveryAvailable(config)) hidden.add("entregar_por_correo");
   if (!crmToolAvailable(config)) hidden.add("actualizar_crm");
+  if (!postponeAvailable(config)) hidden.add("posponer_seguimiento");
   if (!driveSearchAvailable(config)) {
     hidden.add("buscar_en_drive");
     hidden.add("enviar_archivo_drive");
@@ -341,6 +349,8 @@ export interface TurnContext {
   outboxAfter?: OutboxMessage[];
   /** recordatorios a crear al cerrar el turno: {type, minutes, body} */
   reminders: Array<{ type: string; minutes: number; body: string }>;
+  /** true si en ESTE turno el modelo pospuso el seguimiento (posponer_seguimiento). */
+  postponedThisTurn?: boolean;
   /** avisos a enviar al admin al cerrar el turno (pedidos, handoff, etc.) */
   adminNotices: string[];
   /** true si en ESTE turno se derivó a humano (derivar_humano, 3 pagos fallidos, entrega manual).
@@ -1085,6 +1095,8 @@ export async function approveExternalPayment(opts: {
   state.pendingRecheckAt = null;
   state.paymentAttempts = 0;
   state.mpPreferenceId = null;
+  // Pagó: una compra futura empieza su seguimiento desde el paso 1 y sin pausa.
+  markFollowupReset(state);
   try {
     await cancelPendingReminders(companyId, customerId, [
       ScheduledMessageType.ABANDONED_CART,
@@ -1226,6 +1238,8 @@ export async function tryApprovePayment(opts: {
     if (cart.items.length) await checkoutCart(companyId, customerId, cart.totalText);
     state.pendingRecheckAt = null;
     state.paymentAttempts = 0;
+    // Una compra futura empieza su seguimiento desde el paso 1 y sin pausa.
+    markFollowupReset(state);
 
     // Pagó: cancelar los follow-ups de abandono/silencio pendientes (ya no aplican).
     try {
@@ -2035,6 +2049,27 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "posponer_seguimiento",
+      description:
+        "Pospone el seguimiento automático de ESTE cliente cuando pide que lo contacten más adelante (\"lo vemos el sábado\", \"escríbeme mañana a las 4\", \"luego te aviso\"). Hasta ese momento NO le salen recordatorios; ese día se le envía `mensaje` y los recordatorios siguen desde ahí. Calcula `fecha` y `hora` a partir de la \"Fecha y hora actual\" del prompt: si dijo día y hora envía ambas; si solo dijo el día envía solo `fecha`; si solo dijo la hora envía solo `hora`; si no dijo cuándo (\"después\", \"luego\") NO envíes ninguna y se usa la espera configurada por el negocio. Devuelve `programadoPara`: confírmale al cliente ese momento en tu respuesta. Si el cliente retoma la compra antes, llama con cancelar:true.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          fecha: { type: "string", description: "día en que quiere que le escriban, formato AAAA-MM-DD (zona horaria del negocio)" },
+          hora: { type: "string", description: "hora de 24 h, formato HH:mm (ej. 16:00)" },
+          mensaje: {
+            type: "string",
+            description: "texto que se le enviará ese día: breve, natural y retomando lo que conversaron (sin prometer precios ni condiciones que no estén configuradas). Obligatorio salvo con cancelar:true.",
+          },
+          cancelar: { type: "boolean", description: "true = quita la pausa (el cliente retomó la conversación o la compra ahora)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "derivar_humano",
       description:
         "Pausa el bot y avisa a un asesor humano. Úsalo si el cliente lo pide, si hay un problema que no puedes resolver, (si la política del negocio lo permite) cuando el cliente insiste en negociar el precio, con motivo CONSULTA cuando (si la política del negocio lo indica) no puedes responder con lo configurado, o con motivo NO_CONTACTAR cuando el cliente pide que NO le escriban más (el sistema cancela sus recordatorios y lo excluye de campañas).",
@@ -2739,6 +2774,9 @@ export async function executeTool(
       ctx.outbox.push({ kind: "text", text });
       ctx.state.status = "ESPERANDO_PAGO";
       ctx.state.lastPaymentPromptAt = new Date().toISOString();
+      // El cliente retomó la compra: la pausa de seguimiento que pidió antes ya no aplica
+      // (salvo que la haya pedido en este mismo turno: "pásame el Yape, pago el sábado").
+      if (!ctx.postponedThisTurn) ctx.state.followupPostponed = null;
 
       // Acciones CRM "cliente caliente" configuradas por producto: al enviar los
       // métodos de pago, mover al cliente de pestaña y/o etiquetar/quitar etiquetas
@@ -3630,6 +3668,40 @@ export async function executeTool(
         body: String(args.message ?? ""),
       });
       return JSON.stringify({ ok: true, scheduledInMinutes: minutes });
+    }
+
+    case "posponer_seguimiento": {
+      const followup = ctx.config.agent.followupConfig;
+      const smart = normalizeSmartFollowup(followup);
+      if (!smart.postpone.enabled) return JSON.stringify({ ok: false, error: "posponer el seguimiento no está activo en este negocio" });
+      if (args.cancelar === true) {
+        const had = Boolean(activePostpone(ctx.state));
+        ctx.state.followupPostponed = null;
+        return JSON.stringify({ ok: true, cancelado: had, nota: "Sin pausa: el seguimiento automático vuelve a su ritmo normal." });
+      }
+      const mensaje = String(args.mensaje ?? "").trim();
+      if (!mensaje) return JSON.stringify({ ok: false, error: "falta `mensaje`: el texto que se le enviará ese día" });
+      const tz = (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima";
+      const now = new Date();
+      const res = resolvePostponeDate(
+        { fecha: typeof args.fecha === "string" ? args.fecha : null, hora: typeof args.hora === "string" ? args.hora : null },
+        { now, tz, defaultHours: smart.postpone.defaultHours, defaultHour: smart.postpone.defaultHour },
+      );
+      if (!res.ok) return JSON.stringify({ ok: false, error: res.error });
+      ctx.state.followupPostponed = { until: res.until.toISOString(), body: mensaje.slice(0, 1000), setAt: now.toISOString() };
+      ctx.postponedThisTurn = true;
+      // Fuera del horario de envío del negocio el mensaje sale al abrir: se le avisa al
+      // modelo para que no prometa una hora que no se va a cumplir.
+      const quiet = normalizeQuietHours((followup as { quietHours?: unknown } | null)?.quietHours);
+      const hour = zonedParts(res.until, tz).hour;
+      const outside = hour < quiet.startHour || hour >= quiet.endHour;
+      return JSON.stringify({
+        ok: true,
+        programadoPara: formatPostponeDate(res.until, tz),
+        ...(outside
+          ? { nota: `Esa hora está fuera del horario de envío del negocio (${quiet.startHour}:00 a ${quiet.endHour}:00): el mensaje saldrá al abrir. Díselo así al cliente, sin prometer la hora exacta.` }
+          : { nota: "Confírmale al cliente ese momento en una línea. Hasta entonces no le salen recordatorios automáticos." }),
+      });
     }
 
     case "derivar_humano": {
