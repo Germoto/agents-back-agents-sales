@@ -74,7 +74,7 @@ function mpLinkStateLine(state: ConversationState, config: BotConfig, tz: string
     `LINK DE PAGO YA ENVIADO a este cliente (Mercado Pago)${amount ? `: ${amount}` : ""}, ${agoText(state.mpLinkSentAt)}` +
       (expiresAt && !expired ? ` (vence el ${formatPostponeDate(expiresAt, tz)})` : "") +
       ".",
-    "Está en un mensaje anterior del chat; tú no conoces la URL ni puedes escribirla.",
+    "Está en un mensaje anterior del chat (en tu historial figura como «[link de pago ya enviado al cliente]»); tú no conoces la URL ni puedes escribirla.",
   ];
   if (expired) parts.push("Ese link ya venció: si el cliente quiere pagar por ese medio hay que generar otro.");
   // Monto vigente distinto al del link (oferta personal o cambio de precio), solo sin carrito.
@@ -336,7 +336,7 @@ function renderPaymentMethods(payment: BotConfig["payment"]): string {
         : "- Mercado Pago (link de pago: tarjeta y otros medios; la confirmación es automática). Va dentro del mensaje de cobro; con enviar_metodos_pago soloLink:true se envía solo el link.",
     );
     lines.push(
-      "  (El link solo llega al cliente cuando llamas a enviar_metodos_pago: puedes llamarla las veces que haga falta y cada llamada envía un link nuevo con el monto vigente.)",
+      "  (El link solo llega al cliente cuando llamas a enviar_metodos_pago: puedes llamarla las veces que haga falta y cada llamada envía un link nuevo con el monto vigente. Los links ya enviados figuran en tu historial como «[link de pago ya enviado al cliente]»: no puedes copiarlos ni escribir un link de pago en tu texto.)",
     );
   }
   const note = payment.methods.length

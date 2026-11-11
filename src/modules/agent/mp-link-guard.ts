@@ -1,7 +1,8 @@
 /**
- * Guardia del link de pago de Mercado Pago: detecta cuando el texto final del
- * agente PROMETE el link («te paso el link 👇») sin que la herramienta lo haya
- * enviado en el turno. Función pura: el runtime decide qué hacer con el resultado.
+ * Guardia del link de pago de Mercado Pago. Dos detecciones sobre el texto final del
+ * agente: PROMETE el link («te paso el link 👇») sin que la herramienta lo haya
+ * enviado en el turno, o trae un link de pago ESCRITO A MANO (copiado de un mensaje
+ * anterior o inventado). Funciones puras: el runtime decide qué hacer con el resultado.
  */
 
 import type { ConversationState } from "./conversation.service";
@@ -67,4 +68,43 @@ export function promisesPaymentLink(text: string | null | undefined, state: Conv
     if (inPaymentContext(state)) return true;
   }
   return false;
+}
+
+/**
+ * Link de pago que genera el sistema: preferencia de Checkout Pro
+ * (…mercadopago.com.pe/checkout/v1/redirect?pref_id=…) o el link de muestra del
+ * simulador. Los links fijos del dueño (mpago.la/xxxx, link.mercadopago…) no entran.
+ */
+const MP_PAY_LINK_SRC =
+  String.raw`(?:https?:\/\/)?(?:[\w-]+\.)*mercadopago\.[a-z.]{2,10}\/[^\s<>"'*\])]*(?:pref[_-]?id=|checkout\/)[^\s<>"'*\])]*` +
+  String.raw`|(?:https?:\/\/)?mpago\.la\/ejemplo(?:\s*\(link de muestra[^)]*\))?`;
+const mpPayLinkRe = () => new RegExp(MP_PAY_LINK_SRC, "gi");
+
+/** Lo que ve el agente en su historial en lugar de la URL de un link de pago ya enviado. */
+export const MP_LINK_PLACEHOLDER = "[link de pago ya enviado al cliente]";
+const PLACEHOLDER_RE = /\[\s*link de pago[^\]\n]*\]/i;
+
+/** Un link que el dueño escribió en su configuración (prompt, productos) no se toca. */
+const isKnown = (url: string, knownText?: string | null) =>
+  Boolean(knownText && knownText.includes(url.replace(/[.,;:!?]+$/, "")));
+
+/**
+ * Oculta los links de pago de Mercado Pago de un mensaje del historial: el agente
+ * sabe que el link se envió, pero no ve la URL y no puede copiarla (pasó en prod:
+ * pegó a mano el link viejo en vez de llamar a la herramienta de cobro).
+ */
+export function maskMpLinks(text: string, knownText?: string | null): string {
+  if (!text) return text;
+  return text.replace(mpPayLinkRe(), (url) => (isKnown(url, knownText) ? url : MP_LINK_PLACEHOLDER));
+}
+
+/**
+ * ¿El texto trae un link de pago de Mercado Pago escrito por el modelo? Cuenta la URL
+ * de una preferencia y también el marcador del historial copiado tal cual.
+ */
+export function pastesMpLink(text: string | null | undefined, knownText?: string | null): boolean {
+  const raw = (text ?? "").trim();
+  if (!raw) return false;
+  if (PLACEHOLDER_RE.test(raw)) return true;
+  return (raw.match(mpPayLinkRe()) ?? []).some((url) => !isKnown(url, knownText));
 }

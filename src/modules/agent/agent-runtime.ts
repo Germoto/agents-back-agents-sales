@@ -10,7 +10,7 @@ import { buildKnowledgeHint, trailingUserText } from "./faq-match";
 import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
 import { mpChatOn } from "./payment-methods";
-import { promisesPaymentLink } from "./mp-link-guard";
+import { promisesPaymentLink, pastesMpLink, maskMpLinks } from "./mp-link-guard";
 import { findUpcomingBookingForCustomer } from "../bookings/bookings.service";
 import { formatSlotLabel } from "../bookings/availability.service";
 import { extractEmail } from "../../lib/email";
@@ -56,17 +56,21 @@ const INTERNAL_NOTE_RETRY =
 
 /**
  * Nota en rol usuario tras la guardia del link de pago (ver el bucle de runAgentTurn):
- * el texto que prometía el link no se envió y el modelo reescribe su cierre sabiendo
- * si el link salió o no.
+ * el texto que prometía el link, o que lo traía escrito a mano, no se envió y el
+ * modelo reescribe su cierre sabiendo si el link salió o no.
  */
-function mpLinkGuardNote(sent: boolean, toolResult: string): string {
-  const head =
-    "[Nota del sistema, no la escribió el cliente] Tu respuesta anterior anunciaba el link de pago pero no llamaste a la herramienta, así que ese texto NO se envió al cliente. ";
+function mpLinkGuardNote(sent: boolean, toolResult: string, kind: "promise" | "pasted" = "promise"): string {
+  const pasted = kind === "pasted";
+  const head = pasted
+    ? "[Nota del sistema, no la escribió el cliente] Tu respuesta anterior traía un link de pago escrito por ti (copiado de un mensaje anterior o inventado), así que ese texto NO se envió al cliente: un link de pago solo vale cuando lo envía la herramienta enviar_metodos_pago. "
+    : "[Nota del sistema, no la escribió el cliente] Tu respuesta anterior anunciaba el link de pago pero no llamaste a la herramienta, así que ese texto NO se envió al cliente. ";
   if (sent) {
     return (
       head +
-      "El sistema acaba de enviarle el mensaje con el monto y el link de pago de Mercado Pago. " +
-      `Escribe SOLO lo que falte decirle (sin repetir el monto ni el link y sin anunciar que se lo vas a pasar), o exactamente ${NO_REPLY_TOKEN} si no hace falta agregar nada.`
+      (pasted
+        ? "El cliente ya tiene en este turno el mensaje del sistema con el monto y un link de pago NUEVO de Mercado Pago. "
+        : "El sistema acaba de enviarle el mensaje con el monto y el link de pago de Mercado Pago. ") +
+      `Escribe SOLO lo que falte decirle (sin repetir el monto ni el link${pasted ? ", sin ninguna URL de pago" : ""} y sin anunciar que se lo vas a pasar), o exactamente ${NO_REPLY_TOKEN} si no hace falta agregar nada.`
     );
   }
   let reason = toolResult;
@@ -79,7 +83,9 @@ function mpLinkGuardNote(sent: boolean, toolResult: string): string {
   return (
     head +
     `El sistema intentó enviar el link y NO se pudo: ${reason.slice(0, 700)} ` +
-    "Escribe de nuevo tu mensaje al cliente SIN prometer ni anunciar el link."
+    (pasted
+      ? "Escribe de nuevo tu mensaje al cliente SIN ningún link de pago y sin prometerlo."
+      : "Escribe de nuevo tu mensaje al cliente SIN prometer ni anunciar el link.")
   );
 }
 
@@ -141,17 +147,19 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     }
   }
 
-  const messages: ChatMessage[] = [
-    {
-      role: "system",
-      content: buildSystemPrompt(ctx.config, ctx.state, {
-        flowVars: ctx.customerFlowVars ?? ((ctx.state.flow as { variables?: Record<string, string> } | undefined)?.variables ?? null),
-        flowNote: (ctx.state.flow as { aiTakeover?: { note?: string } } | undefined)?.aiTakeover?.note ?? null,
-        upcomingBooking,
-      }),
-    },
-    ...history,
-  ];
+  const systemPrompt = buildSystemPrompt(ctx.config, ctx.state, {
+    flowVars: ctx.customerFlowVars ?? ((ctx.state.flow as { variables?: Record<string, string> } | undefined)?.variables ?? null),
+    flowNote: (ctx.state.flow as { aiTakeover?: { note?: string } } | undefined)?.aiTakeover?.note ?? null,
+    upcomingBooking,
+  });
+  // Con Mercado Pago en el chat, el modelo no ve la URL de los links de pago ya
+  // enviados (queda un marcador): así no puede copiar un link viejo en vez de llamar a
+  // la herramienta de cobro. El cliente y el panel siguen viendo el mensaje completo.
+  const mpGuardOn = mpChatOn(ctx.config.payment);
+  const shownHistory = mpGuardOn
+    ? history.map((m) => (typeof m.content === "string" ? { ...m, content: maskMpLinks(m.content, systemPrompt) } : m))
+    : history;
+  const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...shownHistory];
 
   // FAQ determinística: si la consulta coincide claramente con una FAQ/objeción
   // configurada, se inyecta la respuesta al FINAL (recency) con instrucción de
@@ -309,12 +317,39 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       console.warn(`[agent] nota interna descartada tras reintento convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
       return "";
     }
+    // Guardia del link pegado a mano: el texto trae un link de pago de Mercado Pago que
+    // escribió el modelo (pasó en prod: copió el link viejo del chat en vez de llamar a
+    // la herramienta, así que no se generó uno nuevo ni se levantó la pausa de
+    // seguimiento). Ese texto no sale: si en el turno aún no se envió un link, se envía
+    // uno nuevo con enviar_metodos_pago y el modelo reescribe su cierre sin la URL.
+    // Comparte el intento único por turno con la guardia de la promesa.
+    if (final && mpGuardOn && pastesMpLink(final, systemPrompt)) {
+      if (!mpLinkGuardTried) {
+        mpLinkGuardTried = true;
+        let result = "";
+        if (!ctx.mpLinkSentThisTurn) {
+          result = await executeTool("enviar_metodos_pago", { soloLink: true }, ctx).catch((err) =>
+            JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "tool error" }),
+          );
+          if (ctx.mpLinkSentThisTurn) (ctx.toolsCalled ??= []).push("enviar_metodos_pago");
+        }
+        const sent = Boolean(ctx.mpLinkSentThisTurn);
+        console.warn(
+          `[agent] link de pago escrito a mano (guardia: ${sent ? "enviado por la herramienta" : "no se pudo enviar"}) convo=${ctx.conversationId}: ${final.slice(0, 160)}`,
+        );
+        messages.push({ role: "assistant", content: final });
+        messages.push({ role: "user", content: mpLinkGuardNote(sent, result, "pasted") });
+        continue;
+      }
+      console.warn(`[agent] link de pago escrito a mano descartado tras la guardia convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+      return ctx.outbox.length ? "" : FALLBACK_TEXT;
+    }
     // Guardia del link de pago: el texto promete el link de Mercado Pago («te paso el
     // link 👇») pero en este turno no salió ninguno, porque el modelo no llamó a la
     // herramienta (pasó en prod: el cliente se quedó esperando el link). Se envía de
     // verdad con los controles de siempre de enviar_metodos_pago y el modelo reescribe
     // su cierre sabiendo el resultado. Una sola vez por turno.
-    if (final && mpChatOn(ctx.config.payment) && promisesPaymentLink(final, ctx.state)) {
+    if (final && mpGuardOn && promisesPaymentLink(final, ctx.state)) {
       if (!mpLinkGuardTried && !ctx.mpLinkSentThisTurn) {
         mpLinkGuardTried = true;
         const result = await executeTool("enviar_metodos_pago", { soloLink: true }, ctx).catch((err) =>
@@ -361,6 +396,10 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   if (closingText && isInternalNote(closingText)) {
     console.warn(`[agent] nota interna descartada en el cierre convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
     return "";
+  }
+  if (closingText && mpGuardOn && pastesMpLink(closingText, systemPrompt)) {
+    console.warn(`[agent] link de pago escrito a mano descartado en el cierre convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
+    return ctx.outbox.length ? "" : FALLBACK_TEXT;
   }
   if (trailingAssistant && !closingText) return "";
   return closingText || (suppressFallback(ctx, history) ? "" : FALLBACK_TEXT);
