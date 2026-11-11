@@ -39,6 +39,63 @@ function parsePriceNum(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** "hace 5 min" / "hace 3 h" / "hace 2 días" para las líneas de estado. */
+function agoText(iso: string): string {
+  const min = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (min < 1) return "hace un momento";
+  if (min < 60) return `hace ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 48) return `hace ${h} h`;
+  return `hace ${Math.round(h / 24)} días`;
+}
+
+/**
+ * Línea de prompt con el link de pago de Mercado Pago que el cliente ya recibió
+ * (monto, antigüedad, vencimiento). Solo hechos: los resultados de herramientas no
+ * sobreviven entre turnos y sin esto el modelo no sabe que ya lo envió ni por cuánto.
+ * Si conviene reenviarlo o remitir al anterior lo deciden las instrucciones del negocio.
+ */
+function mpLinkStateLine(state: ConversationState, config: BotConfig, tz: string): string | null {
+  if (!mpChatOn(config.payment) || !state.mpLinkSentAt) return null;
+  const sentAt = new Date(state.mpLinkSentAt);
+  if (Number.isNaN(sentAt.getTime())) return null;
+  const symbol = symbolFor(config.business.currency);
+  const base = Number(state.mpLinkBaseAmount ?? 0);
+  const total = Number(state.mpAmount ?? 0);
+  const amount =
+    base > 0
+      ? `${symbol} ${base.toFixed(2)}` + (total > base + 0.005 ? ` (${symbol} ${total.toFixed(2)} con la comisión del link)` : "")
+      : total > 0
+        ? `${symbol} ${total.toFixed(2)}`
+        : "";
+  const expiresAt = state.mpLinkExpiresAt ? new Date(state.mpLinkExpiresAt) : null;
+  const expired = Boolean(expiresAt && expiresAt.getTime() <= Date.now());
+  const parts = [
+    `LINK DE PAGO YA ENVIADO a este cliente (Mercado Pago)${amount ? `: ${amount}` : ""}, ${agoText(state.mpLinkSentAt)}` +
+      (expiresAt && !expired ? ` (vence el ${formatPostponeDate(expiresAt, tz)})` : "") +
+      ".",
+    "Está en un mensaje anterior del chat; tú no conoces la URL ni puedes escribirla.",
+  ];
+  if (expired) parts.push("Ese link ya venció: si el cliente quiere pagar por ese medio hay que generar otro.");
+  // Monto vigente distinto al del link (oferta personal o cambio de precio), solo sin carrito.
+  if (!state.cartText && base > 0) {
+    const offer = state.activeOffer;
+    const offerApplies = Boolean(
+      offer?.priceText && (!offer.productId || !state.selectedProductId || offer.productId === state.selectedProductId),
+    );
+    const product = state.selectedProductId ? config.products.find((p) => p.id === state.selectedProductId) : undefined;
+    const currentText = offerApplies ? offer!.priceText : (product?.priceText ?? product?.price);
+    const current = parsePriceNum(currentText);
+    if (current > 0 && Math.abs(current - base) > 0.005) {
+      parts.push(`El monto vigente ahora es ${symbol} ${current.toFixed(2)}: el link anterior quedó con otro monto.`);
+    }
+  }
+  parts.push(
+    "Para enviarlo otra vez llama enviar_metodos_pago con soloLink:true: genera un link nuevo con el monto vigente. El link solo llega al cliente si llamas a la herramienta.",
+  );
+  return parts.join(" ");
+}
+
 // Renderiza las modalidades (grupo de modificadores) con su PRECIO ABSOLUTO
 // (precio base del producto + delta), para que el agente las ofrezca con claridad.
 function renderModalities(v: Record<string, unknown>, basePrice: string | undefined, symbol: string = "S/"): string {
@@ -277,6 +334,9 @@ function renderPaymentMethods(payment: BotConfig["payment"]): string {
       mpLinkOnRequest(payment)
         ? "- Mercado Pago (link de pago: tarjeta y otros medios; la confirmación es automática). NO va en el mensaje de cobro: se envía aparte con enviar_metodos_pago soloLink:true cuando el cliente lo pide."
         : "- Mercado Pago (link de pago: tarjeta y otros medios; la confirmación es automática). Va dentro del mensaje de cobro; con enviar_metodos_pago soloLink:true se envía solo el link.",
+    );
+    lines.push(
+      "  (El link solo llega al cliente cuando llamas a enviar_metodos_pago: puedes llamarla las veces que haga falta y cada llamada envía un link nuevo con el monto vigente.)",
     );
   }
   const note = payment.methods.length
@@ -603,6 +663,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     // Pausa de seguimiento vigente (la pidió el cliente): sin esto el modelo no sabe que
     // ya quedó en escribirle y vuelve a prometerlo o a insistir.
     ...(postponedLine ? [postponedLine, ""] : []),
+    // Link de pago de Mercado Pago que el cliente ya recibió (monto, antigüedad, vencimiento).
+    ...(mpLinkStateLine(state, config, tz) ? [mpLinkStateLine(state, config, tz)!, ""] : []),
     ...(flowVarsText
       ? [
           `DATOS QUE EL CLIENTE YA DIO EN EL CHATBOT DE FLUJOS (NO los vuelvas a preguntar; úsalos para personalizar y avanzar): ${flowVarsText}.`,

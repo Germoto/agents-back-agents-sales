@@ -54,7 +54,7 @@ export function matchLevelArg(v: unknown): MatchLevel {
 }
 import { drivePurchased, blockedFolderIds, allowedFolderIds } from "../drive/drive-guard";
 import { decryptCredential } from "../../lib/credentials-crypto";
-import { composePaymentMethodsMessage, mpChatOn } from "./payment-methods";
+import { composePaymentMethodsMessage, mpChatOn, clearMpLinkState } from "./payment-methods";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
 import { publicStoreUrlIfLive } from "../storefront/storefront-public-url";
@@ -188,7 +188,7 @@ const PAYMENT_TOOL_WITH_MP_LINK: ToolDefinition = {
   function: {
     name: "enviar_metodos_pago",
     description:
-      "Envía al cliente los métodos de pago y el monto a pagar (del carrito o del producto seleccionado). Úsalo SOLO cuando exprese intención clara de pagar/comprar/activar. Con soloLink:true envía ÚNICAMENTE el link de pago de Mercado Pago (tarjeta y otros medios), sin los métodos manuales.",
+      "Envía al cliente los métodos de pago y el monto a pagar (del carrito o del producto seleccionado). Úsalo SOLO cuando exprese intención clara de pagar/comprar/activar. Con soloLink:true envía ÚNICAMENTE el link de pago de Mercado Pago (tarjeta y otros medios), sin los métodos manuales. Puedes llamarla las veces que haga falta: cada llamada envía un link NUEVO con el monto vigente. El link solo llega al cliente si llamas a esta herramienta (tú no conoces la URL).",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -388,6 +388,8 @@ export interface TurnContext {
   /** modo simulación (Pruebas): los tools que escriben datos compartidos/reales
    * (validar_pago, registrar pedidos, reservas) se stubean para no afectar datos. */
   simulate?: boolean;
+  /** true si en ESTE turno salió al cliente un link de pago de Mercado Pago (enviar_metodos_pago). */
+  mpLinkSentThisTurn?: boolean;
   /** Nombres de las tools ejecutadas en ESTE turno (en orden). Lo llena el runtime;
    *  permite guardas deterministas sobre el texto final (p. ej. tras enviar_metodos_pago). */
   toolsCalled?: string[];
@@ -1120,6 +1122,7 @@ export async function approveExternalPayment(opts: {
   state.pendingRecheckAt = null;
   state.paymentAttempts = 0;
   state.mpPreferenceId = null;
+  clearMpLinkState(state);
   // Pagó: una compra futura empieza su seguimiento desde el paso 1 y sin pausa.
   markFollowupReset(state);
   try {
@@ -1263,6 +1266,7 @@ export async function tryApprovePayment(opts: {
     if (cart.items.length) await checkoutCart(companyId, customerId, cart.totalText);
     state.pendingRecheckAt = null;
     state.paymentAttempts = 0;
+    clearMpLinkState(state);
     // Una compra futura empieza su seguimiento desde el paso 1 y sin pausa.
     markFollowupReset(state);
 
@@ -2818,6 +2822,7 @@ export async function executeTool(
       }
       const mpLine = mpLinkIncluded ? "x" : "";
       ctx.outbox.push({ kind: "text", text });
+      if (mpLinkIncluded) ctx.mpLinkSentThisTurn = true;
       ctx.state.status = "ESPERANDO_PAGO";
       ctx.state.lastPaymentPromptAt = new Date().toISOString();
       // El cliente retomó la compra: la pausa de seguimiento que pidió antes ya no aplica
@@ -2920,6 +2925,7 @@ export async function executeTool(
         if (cartSim.items.length) await checkoutCart(ctx.companyId, ctx.customerId, cartSim.totalText);
         ctx.state.status = "PAGADO";
         ctx.state.activeOffer = null;
+        clearMpLinkState(ctx.state);
         return JSON.stringify({ ok: true, approved: true, note: "(simulación) Pago aprobado. Ahora entrega el producto con entregar_producto." });
       }
 

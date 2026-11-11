@@ -50,9 +50,17 @@ export function mpLinkOnRequest(payment: PaymentConfigLike | null | undefined): 
   return mpChatOn(payment) && payment?.mp?.chatMode === "ON_REQUEST" && (payment?.methods.length ?? 0) > 0;
 }
 
+/** Pago aprobado o venta cerrada: el link enviado ya no cuenta para una compra futura. */
+export function clearMpLinkState(state: ConversationState): void {
+  state.mpLinkSentAt = null;
+  state.mpLinkBaseAmount = null;
+  state.mpLinkExpiresAt = null;
+}
+
 /**
  * Arma el texto de cobro (monto + métodos manuales + link MP) y, si crea el
- * link, muta `state.mpPreferenceId/mpAmount`. En simulación no crea el link.
+ * link, muta `state.mpPreferenceId/mpAmount` y deja anotado que el cliente ya
+ * tiene un link (`mpLinkSentAt/mpLinkBaseAmount`). En simulación no crea el link.
  *
  * `mpLink`: "auto" (default) = métodos manuales y, según el modo del negocio, el
  * link dentro del mismo mensaje; "only" = mensaje corto SOLO con el link (el cliente
@@ -126,6 +134,14 @@ export async function composePaymentMethodsMessage(opts: {
       // Simulador: no se crea un link real; se muestra uno de ejemplo.
       link = "https://mpago.la/ejemplo (link de muestra: en el chat real se genera el link de pago)";
     }
+  }
+  // El mensaje con link sale siempre que hay link: se anota para el contexto del agente
+  // (los resultados de herramientas no sobreviven entre turnos).
+  if (link) {
+    opts.state.mpLinkSentAt = new Date().toISOString();
+    opts.state.mpLinkBaseAmount = opts.amountNum;
+    opts.state.mpAmount = linkAmount;
+    opts.state.mpLinkExpiresAt = null;
   }
   const withFee = mpCfg?.feeMode === "CUSTOMER" && linkAmount > opts.amountNum;
 

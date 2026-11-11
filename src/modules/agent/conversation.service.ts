@@ -82,6 +82,12 @@ export interface ConversationState {
   /** Mercado Pago: preference del último link de pago enviado y su monto (para el webhook). */
   mpPreferenceId?: string | null;
   mpAmount?: number | null;
+  /** Mercado Pago: cuándo recibió el cliente el último link de pago (el agente lo ve en su contexto). */
+  mpLinkSentAt?: string | null;
+  /** Monto SIN comisión con el que salió ese link (se compara con el monto vigente). */
+  mpLinkBaseAmount?: number | null;
+  /** Vencimiento de ese link (null = no vence). */
+  mpLinkExpiresAt?: string | null;
   /** Última entrega del acceso por correo (entregar_por_correo). */
   lastEmailDeliveryAt?: string | null;
   /** Correo al que se hizo la última entrega (evita re-detectar el mismo correo del historial como pedido nuevo). */

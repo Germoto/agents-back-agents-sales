@@ -9,6 +9,8 @@ import { buildSystemPrompt } from "./agent-prompt";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
 import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, type TurnContext } from "./agent-tools";
 import { summarizeCart } from "./cart.service";
+import { mpChatOn } from "./payment-methods";
+import { promisesPaymentLink } from "./mp-link-guard";
 import { findUpcomingBookingForCustomer } from "../bookings/bookings.service";
 import { formatSlotLabel } from "../bookings/availability.service";
 import { extractEmail } from "../../lib/email";
@@ -51,6 +53,35 @@ export function isInternalNote(text: string | null | undefined): boolean {
 
 const INTERNAL_NOTE_RETRY =
   `Tu respuesta anterior era un comentario interno y NO se envió al cliente. Escribe SOLO el mensaje que verá el cliente (natural, sin corchetes ni comentarios sobre la conversación), o exactamente ${NO_REPLY_TOKEN} si no corresponde decir nada.`;
+
+/**
+ * Nota en rol usuario tras la guardia del link de pago (ver el bucle de runAgentTurn):
+ * el texto que prometía el link no se envió y el modelo reescribe su cierre sabiendo
+ * si el link salió o no.
+ */
+function mpLinkGuardNote(sent: boolean, toolResult: string): string {
+  const head =
+    "[Nota del sistema, no la escribió el cliente] Tu respuesta anterior anunciaba el link de pago pero no llamaste a la herramienta, así que ese texto NO se envió al cliente. ";
+  if (sent) {
+    return (
+      head +
+      "El sistema acaba de enviarle el mensaje con el monto y el link de pago de Mercado Pago. " +
+      `Escribe SOLO lo que falte decirle (sin repetir el monto ni el link y sin anunciar que se lo vas a pasar), o exactamente ${NO_REPLY_TOKEN} si no hace falta agregar nada.`
+    );
+  }
+  let reason = toolResult;
+  try {
+    const parsed = JSON.parse(toolResult) as { error?: string };
+    if (parsed?.error) reason = parsed.error;
+  } catch {
+    // resultado no JSON: se pasa tal cual
+  }
+  return (
+    head +
+    `El sistema intentó enviar el link y NO se pudo: ${reason.slice(0, 700)} ` +
+    "Escribe de nuevo tu mensaje al cliente SIN prometer ni anunciar el link."
+  );
+}
 
 /** Texto final del modelo → lo que se envía ("" si contestó NO_REPLY_TOKEN). */
 function finalReply(text: string | null | undefined): string {
@@ -224,6 +255,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   }
 
   let internalNoteRetried = false;
+  let mpLinkGuardTried = false;
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await chatCompletion({
       apiKey,
@@ -277,8 +309,38 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       console.warn(`[agent] nota interna descartada tras reintento convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
       return "";
     }
+    // Guardia del link de pago: el texto promete el link de Mercado Pago («te paso el
+    // link 👇») pero en este turno no salió ninguno, porque el modelo no llamó a la
+    // herramienta (pasó en prod: el cliente se quedó esperando el link). Se envía de
+    // verdad con los controles de siempre de enviar_metodos_pago y el modelo reescribe
+    // su cierre sabiendo el resultado. Una sola vez por turno.
+    if (final && mpChatOn(ctx.config.payment) && promisesPaymentLink(final, ctx.state)) {
+      if (!mpLinkGuardTried && !ctx.mpLinkSentThisTurn) {
+        mpLinkGuardTried = true;
+        const result = await executeTool("enviar_metodos_pago", { soloLink: true }, ctx).catch((err) =>
+          JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "tool error" }),
+        );
+        const sent = Boolean(ctx.mpLinkSentThisTurn);
+        // Con el link ya enviado aplica la misma guarda de texto redundante que tras un cobro normal.
+        if (sent) (ctx.toolsCalled ??= []).push("enviar_metodos_pago");
+        console.warn(
+          `[agent] link de pago prometido sin herramienta (guardia: ${sent ? "enviado" : "no se pudo enviar"}) convo=${ctx.conversationId}: ${final.slice(0, 160)}`,
+        );
+        messages.push({ role: "assistant", content: final });
+        messages.push({ role: "user", content: mpLinkGuardNote(sent, result) });
+        continue;
+      }
+      // Tras la guardia, un cierre que vuelve a prometer el link no sale: el link ya está
+      // en el chat o no se pudo generar.
+      if (mpLinkGuardTried) {
+        console.warn(`[agent] promesa de link descartada tras la guardia convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+        return ctx.outbox.length ? "" : FALLBACK_TEXT;
+      }
+    }
     // Tras descartar una nota interna, el silencio es la respuesta correcta (sin el genérico).
     if (internalNoteRetried && !final) return "";
+    // Tras la guardia del link, sin nada más que decir, el link enviado es la respuesta.
+    if (mpLinkGuardTried && !final && ctx.mpLinkSentThisTurn) return "";
     if (trailingAssistant && !final) return "";
     return final || (suppressFallback(ctx, history) ? "" : FALLBACK_TEXT);
   }
