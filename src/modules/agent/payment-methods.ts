@@ -62,7 +62,7 @@ export const DEFAULT_MP_LINK_MESSAGE =
   "💳 Paga con tarjeta y otros medios por aquí:\n{link}\n\n" +
   "La confirmación es automática: en cuanto se apruebe el pago te llega tu pedido ✅";
 // Variante de fábrica cuando la comisión del link la paga el cliente.
-const DEFAULT_MP_LINK_MESSAGE_WITH_FEE = DEFAULT_MP_LINK_MESSAGE.replace(
+export const DEFAULT_MP_LINK_MESSAGE_WITH_FEE = DEFAULT_MP_LINK_MESSAGE.replace(
   "*{monto}*",
   "*{monto}* por el link (incluye la comisión de Mercado Pago)",
 );

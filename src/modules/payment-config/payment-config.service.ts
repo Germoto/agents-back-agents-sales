@@ -3,7 +3,7 @@ import { AppError } from "../../lib/app-error";
 import { encryptCredential, decryptCredential } from "../../lib/credentials-crypto";
 import { mpGetMe } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
-import { DEFAULT_MP_LINK_MESSAGE } from "../agent/payment-methods";
+import { DEFAULT_MP_LINK_MESSAGE, DEFAULT_MP_LINK_MESSAGE_WITH_FEE } from "../agent/payment-methods";
 
 /** Mercado Pago es un módulo de paquete: las empresas legacy pasan. */
 async function assertMpAllowedByPlan(companyId: string) {
@@ -50,6 +50,7 @@ function mapMpConfig(config: {
       chatLinkMessage: null,
       chatLinkExpiryDays: null,
       defaultChatLinkMessage: DEFAULT_MP_LINK_MESSAGE,
+      defaultChatLinkMessageWithFee: DEFAULT_MP_LINK_MESSAGE_WITH_FEE,
     };
   }
   const plain = config.mpAccessToken ? decryptCredential(config.mpAccessToken) : "";
@@ -68,6 +69,7 @@ function mapMpConfig(config: {
     chatLinkMessage: config.mpChatLinkMessage,
     chatLinkExpiryDays: config.mpChatLinkExpiryDays,
     defaultChatLinkMessage: DEFAULT_MP_LINK_MESSAGE,
+    defaultChatLinkMessageWithFee: DEFAULT_MP_LINK_MESSAGE_WITH_FEE,
   };
 }
 
