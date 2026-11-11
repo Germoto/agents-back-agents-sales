@@ -9,6 +9,7 @@ import { resumeRunningCampaigns } from "./modules/campaigns/campaign-driver";
 import { startStorefrontWorker } from "./modules/storefront/storefront.worker";
 import { ensureSalesAgentBootTouchups } from "./modules/admin-console/sales-agent.service";
 import { startDriveIndexWorker } from "./modules/drive/drive-index.worker";
+import { startCourierSyncWorker } from "./modules/shipping/courier-sync.worker";
 import { startWhatsappProvisionWorker } from "./modules/whatsapp-config/whatsapp-provision.worker";
 
 const httpServer = createServer(app);
@@ -28,6 +29,8 @@ httpServer.listen(env.PORT, () => {
   startStorefrontWorker();
   // Índice en memoria de las carpetas de Drive de la entrega (solo con GOOGLE_DRIVE_API_KEY).
   startDriveIndexWorker();
+  // Catálogo de agencias de courier (Shalom): copia local que se refresca sola.
+  startCourierSyncWorker();
   // Alta automática: completa el canal SMS Tools de las cuentas que nacieron con el proveedor caído.
   startWhatsappProvisionWorker();
   // Reanuda las campañas masivas que quedaron en ejecución antes del reinicio

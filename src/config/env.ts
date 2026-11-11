@@ -37,6 +37,10 @@ const envSchema = z.object({
   // Índice en memoria de Drive: tope de entradas por producto y horas entre reconstrucciones.
   DRIVE_INDEX_MAX_FILES: z.coerce.number().int().positive().default(30000),
   DRIVE_INDEX_REFRESH_HOURS: z.coerce.number().positive().default(12),
+  // Catálogo de agencias de courier (rubro comercial): lista pública que usa la web de
+  // Shalom, copiada a nuestra BD. Vacía = no se sincroniza. Horas entre actualizaciones.
+  SHALOM_AGENCIES_URL: z.string().optional().default("https://newwebservices.shalomcontrol.com/api/v1/web/agencias/listar"),
+  COURIER_SYNC_HOURS: z.coerce.number().positive().default(24),
   // Modelo de generación de imágenes del copiloto (override sin tocar código).
   IMAGE_GEN_MODEL: z.string().default("gpt-image-2"),
   // Prioridad de la MULTIMEDIA en SMS Tools: "1" = síncrona (el gateway emite el

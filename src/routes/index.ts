@@ -9,6 +9,7 @@ import copilotRoutes from "../modules/copilot/copilot.routes";
 import productFilesRoutes from "../modules/product-files/product-files.routes";
 import customersRoutes from "../modules/customers/customers.routes";
 import ordersRoutes from "../modules/orders/orders.routes";
+import shippingRoutes from "../modules/shipping/shipping.routes";
 import bookingsRoutes from "../modules/bookings/bookings.routes";
 import { calendarPublicRoutes } from "../modules/bookings/calendar.routes";
 import {
@@ -69,6 +70,8 @@ router.use("/product-files", billingGuard(), productFilesRoutes);
 router.use("/stickers", billingGuard(), stickersRoutes);
 router.use("/customers", billingGuard(), customersRoutes);
 router.use("/orders", billingGuard(), ordersRoutes);
+// Catálogo de agencias de courier (rubro comercial con «Envíos»)
+router.use("/shipping", billingGuard(), shippingRoutes);
 // Agenda de citas (rubro SERVICE): disponibilidad, citas y bloqueos
 router.use("/bookings", billingGuard(), bookingsRoutes);
 // Config del widget de reservas (panel). El widget público va en /public/booking.
