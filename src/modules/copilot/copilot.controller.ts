@@ -31,6 +31,7 @@ import { createProduct, updateProduct, deleteProduct, getProduct } from "../prod
 import { updateBusinessProfile, type DeliveryConfigInput } from "../business/business.service";
 import { upsertAgentConfig, updateAgentReminders } from "../agent-config/agent-config.service";
 import { upsertPaymentConfig, updateMercadoPagoConfig } from "../payment-config/payment-config.service";
+import { DEFAULT_MP_LINK_MESSAGE, MP_LINK_MESSAGE_MAX } from "../agent/payment-methods";
 import {
   createCrm,
   updateCrm,
@@ -835,7 +836,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_pagos",
       description:
-        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (se FUSIONAN por método+número: agrega nuevos y actualiza titulares; para QUITAR uno usa reemplazarMetodos=true con la lista final completa), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE), mpChatMode? ('OFF' | 'ALWAYS' | 'ON_REQUEST': LINK DE MERCADO PAGO EN EL CHAT de WhatsApp), mpStoreEnabled? (true/false: Mercado Pago en la tienda web), mpChatEnabled? (compatibilidad: true/false enciende o apaga el chat sin cambiar el modo)}. MODOS DEL CHAT: OFF = el agente cobra solo con los métodos manuales; ALWAYS = el link va dentro del mensaje de cobro junto a Yape/Plin (el de siempre); ON_REQUEST = el cobro lleva solo los métodos manuales y el agente manda el link en un mensaje aparte cuando el cliente pide otro medio (otro banco, transferencia, tarjeta), con el mismo monto del cobro (carrito u oferta activa de ese cliente); el pago por link se aprueba y entrega solo. Con ON_REQUEST: (a) CUÁNDO ofrecer el link lo decide el PROMPT del agente: tras activarlo revisa el prompt con ver_configuracion (si dice algo como «solo Yape o Plin» el agente seguirá negando otros medios) y propón al dueño una línea con configurar_agente, ej. «Si el cliente no puede pagar con Yape o Plin o pide tarjeta u otro banco, ofrécele el link de Mercado Pago»; (b) el bloque «Validar pago» de los flujos NO envía el link; (c) un negocio sin métodos manuales lo envía siempre. Si la comisión la paga el cliente, se suma al monto del link (ver_configuracion → pagos.mercadoPago.comision). Requiere Mercado Pago conectado. Un cambio SOLO de Mercado Pago (mpChatMode / mpStoreEnabled / mpChatEnabled) no toca ni exige métodos manuales. El Access Token de Mercado Pago NO se gestiona por chat: se conecta en Integraciones. Llámala SOLO tras confirmación.",
+        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (se FUSIONAN por método+número: agrega nuevos y actualiza titulares; para QUITAR uno usa reemplazarMetodos=true con la lista final completa), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE), mpChatMode? ('OFF' | 'ALWAYS' | 'ON_REQUEST': LINK DE MERCADO PAGO EN EL CHAT de WhatsApp), mpStoreEnabled? (true/false: Mercado Pago en la tienda web), mpChatEnabled? (compatibilidad: true/false enciende o apaga el chat sin cambiar el modo), mpLinkMessage? (texto propio del MENSAJE DEL LINK; null = el de fábrica), mpLinkExpiryDays? (1 a 30: días de vigencia del link del chat; null o 0 = no vence)}. MODOS DEL CHAT: OFF = el agente cobra solo con los métodos manuales; ALWAYS = el link va dentro del mensaje de cobro junto a Yape/Plin (el de siempre); ON_REQUEST = el cobro lleva solo los métodos manuales y el agente manda el link en un mensaje aparte cuando el cliente pide otro medio (otro banco, transferencia, tarjeta), con el mismo monto del cobro (carrito u oferta activa de ese cliente); el pago por link se aprueba y entrega solo. Con ON_REQUEST: (a) CUÁNDO ofrecer el link lo decide el PROMPT del agente: tras activarlo revisa el prompt con ver_configuracion (si dice algo como «solo Yape o Plin» el agente seguirá negando otros medios) y propón al dueño una línea con configurar_agente, ej. «Si el cliente no puede pagar con Yape o Plin o pide tarjeta u otro banco, ofrécele el link de Mercado Pago»; (b) el bloque «Validar pago» de los flujos NO envía el link; (c) un negocio sin métodos manuales lo envía siempre. Si la comisión la paga el cliente, se suma al monto del link (ver_configuracion → pagos.mercadoPago.comision). REENVÍO DEL LINK: no hay límite de una vez; el agente puede enviarlo las veces que haga falta, cada envío genera un link NUEVO con el monto vigente (carrito u oferta activa de ese cliente) y el agente ve en su contexto si ya envió uno, por cuánto y hace cuánto. MENSAJE DEL LINK (mpLinkMessage): es el mensaje aparte con el que el agente envía el link cuando el cliente lo pide; variables {monto} (monto del cobro, con la comisión si la paga el cliente), {link} (si el texto no lo trae, el link va al final) y {vence} (fecha de vencimiento; si el link no vence, la línea que lo usa se omite); admite variantes {a|b}; máximo 600 caracteres. El ESTILO de ese mensaje se cambia AQUÍ, no en el prompt del agente; no aplica al link que va dentro del mensaje de cobro del modo ALWAYS. Muestra el texto al dueño antes de guardarlo. VENCIMIENTO (mpLinkExpiryDays): apagado por defecto (el link no vence); con N días, pasado el plazo Mercado Pago muestra el link como no disponible y, si el cliente lo vuelve a pedir, el agente genera otro con el monto vigente; aplica solo al link del chat, no a la tienda web. Requiere Mercado Pago conectado. Un cambio SOLO de Mercado Pago (mpChatMode / mpStoreEnabled / mpChatEnabled / mpLinkMessage / mpLinkExpiryDays) no toca ni exige métodos manuales. El Access Token de Mercado Pago NO se gestiona por chat: se conecta en Integraciones. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -2265,14 +2266,31 @@ function describeMpChatMode(
     return {
       modo: "A_PEDIDO",
       queHace:
-        "El mensaje de cobro lleva solo los métodos manuales; el agente envía el link en un mensaje aparte cuando el cliente pide otro medio (otro banco, tarjeta). CUÁNDO ofrecerlo se escribe en el prompt del agente. El pago por link se aprueba y entrega solo. En el bloque «Validar pago» de los flujos el link no se envía." +
+        "El mensaje de cobro lleva solo los métodos manuales; el agente envía el link en un mensaje aparte cuando el cliente pide otro medio (otro banco, tarjeta). CUÁNDO ofrecerlo se escribe en el prompt del agente. Si el cliente vuelve a pedirlo, el agente genera uno nuevo con el monto vigente. El pago por link se aprueba y entrega solo. En el bloque «Validar pago» de los flujos el link no se envía." +
         sinManuales +
         sinConexion,
     };
   }
   return {
     modo: "SIEMPRE",
-    queHace: "El link de pago viaja dentro del mensaje de cobro, junto a los métodos manuales; el pago por link se aprueba y entrega solo." + sinConexion,
+    queHace:
+      "El link de pago viaja dentro del mensaje de cobro, junto a los métodos manuales; si el cliente vuelve a pedirlo, el agente genera uno nuevo con el monto vigente. El pago por link se aprueba y entrega solo." +
+      sinConexion,
+  };
+}
+
+/** Mensaje aparte del link de Mercado Pago y vigencia del link del chat, interpretados para el dueño. */
+function describeMpLinkOptions(payment: { mpChatLinkMessage: string | null; mpChatLinkExpiryDays: number | null } | null) {
+  const custom = payment?.mpChatLinkMessage?.trim() || null;
+  const days = payment?.mpChatLinkExpiryDays ?? null;
+  return {
+    mensajeLink: {
+      personalizado: Boolean(custom),
+      texto: custom ?? DEFAULT_MP_LINK_MESSAGE,
+      variables:
+        "{monto} = monto del cobro · {link} = el link (si falta, va al final) · {vence} = fecha de vencimiento (si el link no vence, la línea que lo usa se omite) · variantes {a|b}",
+    },
+    vencimientoLink: days ? `${days} ${days === 1 ? "día" : "días"}` : "no vence",
   };
 }
 
@@ -3094,6 +3112,7 @@ export async function runCopilotTool(
         pasos: Array.isArray(s?.steps) ? s.steps.length : 0,
       });
       const mpChatView = describeMpChatMode(payment);
+      const mpLinkView = describeMpLinkOptions(payment);
       const { followupConfig: _fu, crmToolConfig: _crmTool, ...agentRest } = agent ?? { followupConfig: null, crmToolConfig: null };
       const crmToolView = await describeCrmToolConfig(companyId, agent?.crmToolConfig);
       const aiQuota = await getPlatformAiQuota(companyId);
@@ -3191,13 +3210,16 @@ export async function runCopilotTool(
                   // Link de pago en el chat de WhatsApp: APAGADO | SIEMPRE | A_PEDIDO.
                   modoChat: mpChatView.modo,
                   queHaceEnChat: mpChatView.queHace,
+                  // Mensaje aparte con el que el agente envía el link y vigencia del link del chat.
+                  mensajeLink: mpLinkView.mensajeLink,
+                  vencimientoLink: mpLinkView.vencimientoLink,
                   comision: {
                     quienLaPaga: payment.mpFeeMode === "CUSTOMER" ? "cliente (se suma al monto del link)" : "negocio",
                     porcentaje: Number(payment.mpFeePercent),
                     fijo: Number(payment.mpFeeFixed),
                     masIgv: payment.mpFeeIgv,
                   },
-                  nota: "Se conecta en Integraciones (token solo desde el panel); el modo del chat y la tienda se cambian con configurar_pagos {mpChatMode, mpStoreEnabled}.",
+                  nota: "Se conecta en Integraciones (token solo desde el panel); el modo del chat y la tienda se cambian con configurar_pagos {mpChatMode, mpStoreEnabled}, y el mensaje y el vencimiento del link con {mpLinkMessage, mpLinkExpiryDays}.",
                 },
               }
             : null,
@@ -3298,7 +3320,35 @@ export async function runCopilotTool(
       if (mpChatMode && !["OFF", "ALWAYS", "ON_REQUEST"].includes(mpChatMode)) {
         return { result: JSON.stringify({ ok: false, error: "mpChatMode inválido: usa OFF, ALWAYS u ON_REQUEST" }), wrote: false };
       }
-      const mpTouched = Boolean(mpChatMode) || typeof data.mpChatEnabled === "boolean" || typeof data.mpStoreEnabled === "boolean";
+      // Mensaje propio del link (null o vacío = el de fábrica) y vigencia en días (null o 0 = no vence).
+      let mpLinkMessage: string | null | undefined;
+      if (data.mpLinkMessage === null) mpLinkMessage = null;
+      else if (typeof data.mpLinkMessage === "string") {
+        mpLinkMessage = data.mpLinkMessage.trim() || null;
+        if (mpLinkMessage && mpLinkMessage.length > MP_LINK_MESSAGE_MAX) {
+          return {
+            result: JSON.stringify({ ok: false, error: `mpLinkMessage admite hasta ${MP_LINK_MESSAGE_MAX} caracteres (tiene ${mpLinkMessage.length})` }),
+            wrote: false,
+          };
+        }
+      }
+      let mpLinkExpiryDays: number | null | undefined;
+      if (data.mpLinkExpiryDays !== undefined) {
+        const days = data.mpLinkExpiryDays === null ? 0 : Number(data.mpLinkExpiryDays);
+        if (!Number.isInteger(days) || days < 0 || days > 30) {
+          return {
+            result: JSON.stringify({ ok: false, error: "mpLinkExpiryDays inválido: usa de 1 a 30 días, o null para que el link no venza" }),
+            wrote: false,
+          };
+        }
+        mpLinkExpiryDays = days === 0 ? null : days;
+      }
+      const mpTouched =
+        Boolean(mpChatMode) ||
+        typeof data.mpChatEnabled === "boolean" ||
+        typeof data.mpStoreEnabled === "boolean" ||
+        mpLinkMessage !== undefined ||
+        mpLinkExpiryDays !== undefined;
       // Un cambio solo de Mercado Pago no toca los pagos manuales (un negocio que
       // cobra solo con MP no tiene métodos ni teléfono de avisos que validar).
       const manualTouched =
@@ -3372,11 +3422,18 @@ export async function runCopilotTool(
           ...(chatEnabled !== undefined ? { chatEnabled } : {}),
           ...(mpChatMode && mpChatMode !== "OFF" ? { chatMode: mpChatMode as "ALWAYS" | "ON_REQUEST" } : {}),
           ...(typeof data.mpStoreEnabled === "boolean" ? { storeEnabled: data.mpStoreEnabled } : {}),
+          ...(mpLinkMessage !== undefined ? { chatLinkMessage: mpLinkMessage } : {}),
+          ...(mpLinkExpiryDays !== undefined ? { chatLinkExpiryDays: mpLinkExpiryDays } : {}),
         });
         const after = await prisma.paymentConfig.findUnique({ where: { companyId }, include: { methods: true } });
         const view = describeMpChatMode(after);
         mpView = {
-          mercadoPago: { modoChat: view.modo, queHaceEnChat: view.queHace, tienda: after?.mpStoreEnabled ?? false },
+          mercadoPago: {
+            modoChat: view.modo,
+            queHaceEnChat: view.queHace,
+            tienda: after?.mpStoreEnabled ?? false,
+            ...describeMpLinkOptions(after),
+          },
           ...(view.modo === "A_PEDIDO"
             ? { siguientePaso: "Revisa el prompt del agente (ver_configuracion) y propón al dueño la línea que diga CUÁNDO ofrecer el link (configurar_agente): si el prompt dice que solo se acepta Yape o Plin, el agente seguirá negando otros medios." }
             : {}),
@@ -5628,7 +5685,7 @@ const SYSTEM_GUIDE = [
   "- Chat web (Canales → pestaña Chat web, /whatsapp?tab=chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
   "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled, portada); configurar_tienda es PARCIAL: fusiona con lo guardado, solo cambia lo que mandas (null borra) y las listas se reemplazan completas, así que nunca mandes productOverrides de productos que no cambian. En el panel, Tienda web tiene pestañas (ver más abajo); el carrusel de portada admite hasta 5 productos destacados con banner y 3 estilos (ambiente, tarjeta o póster) con titular resaltado, bullets y prueba social; los Yape/Plin en revisión se aprueban en Pedidos. La tienda pública tiene barra de anuncio (configurar_tienda announcement), cabecera oscura con buscador y carrito, carrusel (portada), franja de confianza con iconos, COMBOS POR VOLUMEN (volumePricing: tramos '3 o más −20 %' y 'todos los packs' a precio fijo; el descuento se calcula en el checkout y se ve en tarjetas, barra de carrito fija, cajón del carrito con barra de progreso y 'Completa tu pedido'), checkout dentro del cajón, y cada ficha es una LANDING DE VENTAS (productOverrides[id].landing: titular gancho, video, cifras, dolor/solución, 'Lo que recibes hoy' con includes/bonos, muestra, testimonios, checkout inline con garantía (salesSettings.guarantee), ORDER BUMP a precio especial, cupón, FAQ y barra fija inferior). Color del botón de compra, título del catálogo, posición de la barra fija de compra de la landing (salesSettings.landingBar: arriba/abajo/ambas) y PIE configurable (salesSettings.footer: tema automático/oscuro/claro, bloque de suscripción con sus textos y línea del negocio (nombre, frase, pagos, WhatsApp, nota) activables por separado) en salesSettings. Cada recurso de muestra puede llevar un botón de compra debajo (media[].cta). Los botones de compra tienen un efecto configurable (salesSettings.ctaEffect). El panel de Tienda web tiene pestañas Resumen · Apariencia (Identidad, Cobros y contacto, Catálogo) · Productos (visibles, orden, Personalizar) · Portada (Carrusel, Franja, Precios) · Landing (Barra de compra, Efecto, Garantía, Pie) · Combos · Cupones · Correos (Automáticos, Promociones, Historial) · Pedidos. Cada producto puede tener portada, varias categorías (etiquetas), descripción corta, orden y RECURSOS DE MUESTRA (PDF, archivos, video, imágenes que el comprador ve en la ficha) propios para la tienda (Apariencia y cobro → Productos visibles → Personalizar) sin tocar el producto que usa el agente de WhatsApp (configurar_tienda productOverrides). ARCHIVOS PROTEGIDOS: en el paso Archivos del producto, 'Solo por enlace firmado (privado)' saca el archivo de la URL pública; se entrega como enlace firmado de 7 días en el correo, en la página de gracias y en el chat (actualizar_producto files[].privateDownload=true). Las FAQ de la ficha salen del producto (se pueden ocultar algunas solo en la tienda con landing.faqHiddenIds) más preguntas propias de la tienda (landing.faqExtra); los recordatorios por correo admiten cupón por producto (couponByProduct). La portada de cada producto en la tienda se puede cambiar u ocultar (productOverrides imageUrl/hiddenImages) sin tocar el producto; los recursos de muestra se previsualizan en el panel. CORREOS AUTOMÁTICOS (Tienda web → Correos): checkout abandonado (hasta 3 correos cuando un pedido queda sin pagar; se cancelan al pagar), post-compra a los N días con el producto relacionado y cupón, y bienvenida a quien se suscribe en el pie de la tienda; cada correo lleva enlace de baja y nunca se envía a quien se dio de baja; se configuran con configurar_tienda emailReminders y se consultan en ver_tienda → correos. PROMOCIONES POR CORREO (Tienda web → Correos → Promociones): campañas a compradores, suscriptores, contactos de WhatsApp con correo, por etiqueta, contactos elegidos a mano, correos pegados o CSV con campos propios (campo1..3, cupón por persona); solo a quien tiene consentimiento y no se dio de baja; ritmo y tope diario automáticos; métricas de clics y compras atribuidas (listar_campanas_correo, previsualizar_audiencia_correo, crear_campana_correo, enviar_prueba_campana_correo). CUPONES: ver_cupones / crear_cupon / editar_cupon / desactivar_cupon (también en Tienda web → Cupones); el comprador los escribe en el checkout. CUENTA REGRESIVA: si un producto tiene oferta con offerEndsAt, la tienda muestra 'Termina en hh:mm:ss' automáticamente. La página de gracias ofrece el producto RELACIONADO (cross-sell del producto comprado, si está visible en la tienda) como upsell, y el panel (Resumen) muestra métricas con los mismos filtros del dashboard (hoy, ayer, 7/30 días, mes, 12 meses, rango) y por producto, con el EMBUDO visitas → vistas → carrito → pago → compras y el % de cada paso (ver_tienda → metricas, con dias o desde/hasta y productId). Los pedidos de prueba se pueden ELIMINAR con lo relacionado (Pedidos → Eliminar o eliminar_pedido_tienda, tras confirmación). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/AddToCart/InitiateCheckout/Purchase, con advanced matching del correo/teléfono al iniciar el checkout) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens). Si en Integraciones la comisión de Mercado Pago la asume el CLIENTE, la tienda muestra el total con recargo en el botón y una nota antes de ir a Mercado Pago (Yape/Plin nunca lleva recargo).",
   "- Probar el agente: Agente IA → pestaña Probar (/agente?tab=probar): simulador para chatear con el agente sin gastar WhatsApp real y prueba de envío real por WhatsApp. (La página Pruebas ya no existe; /pruebas redirige ahí.)",
-  "- Integraciones (/integraciones): pestañas Pagos automáticos (sub-pestañas Conexiones [tabla con interruptores Activa/Auto-aprobar y menú ⋯], ValidPay, Mercado Pago, Webhook personalizado) · Meta (sub-pestañas Conversions API, Píxel en la tienda) · Copiloto (MCP) · Historial (eventos recibidos por conexión). La cabecera muestra la URL del webhook de pagos y la checklist de conexiones. Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en la sub-pestaña Mercado Pago se elige el link en el chat de WhatsApp con tres opciones: Apagado, Siempre (dentro del mensaje de cobro) o Solo si lo piden (el agente lo envía aparte cuando el cliente pide otro banco o tarjeta), y aparte si se usa en la tienda web; por chat: configurar_pagos {mpChatMode, mpStoreEnabled}), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
+  "- Integraciones (/integraciones): pestañas Pagos automáticos (sub-pestañas Conexiones [tabla con interruptores Activa/Auto-aprobar y menú ⋯], ValidPay, Mercado Pago, Webhook personalizado) · Meta (sub-pestañas Conversions API, Píxel en la tienda) · Copiloto (MCP) · Historial (eventos recibidos por conexión). La cabecera muestra la URL del webhook de pagos y la checklist de conexiones. Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en la sub-pestaña Mercado Pago se elige el link en el chat de WhatsApp con tres opciones: Apagado, Siempre (dentro del mensaje de cobro) o Solo si lo piden (el agente lo envía aparte cuando el cliente pide otro banco o tarjeta), y aparte si se usa en la tienda web; con el chat encendido, ahí mismo se edita el «Mensaje del link de pago» (texto propio con {monto}, {link} y {vence}, con vista previa y botón para restaurar el de fábrica) y el «Vencimiento del link» (apagado = no vence, o de 1 a 30 días); por chat: configurar_pagos {mpChatMode, mpStoreEnabled, mpLinkMessage, mpLinkExpiryDays}), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
   "- Respuestas rápidas (/respuestas-rapidas, módulo Respuestas rápidas): biblioteca de plantillas con multimedia y acciones; también se ven y envían desde la pestaña Respuestas del chat.",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
   "",
@@ -5682,6 +5739,7 @@ export async function buildSystem(companyId: string, opts: { mode?: "panel" | "o
     "- DISEÑADOR: con generar_imagen creas banners de oferta, fotos de producto y creativos con IA (se guardan en el servidor y su URL sirve en cualquier configuración: banner de presentación, pasos de recordatorio, followups, respuestas rápidas, campañas, o como foto de producto vía adjuntar_foto_producto). Cuesta dinero al negocio (usa su key de OpenAI) → SOLO tras confirmación. Flujo OBLIGATORIO: generar → mostrar la URL al usuario → su aprobación → adjuntar → verificar (previsualizar_ficha). Textos del banner van LITERALES entre comillas en el prompt. Si el negocio no tiene key de OpenAI, deriva al panel (Agente IA); JAMÁS pidas ni recibas keys por chat.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). REGLA: después de activar «posponer a pedido» (postpone) o el link de Mercado Pago «solo si lo piden» (mpChatMode ON_REQUEST), propón al dueño la línea para el prompt del agente y guárdala con configurar_agente tras su OK: el sistema le da la herramienta al agente, pero CUÁNDO usarla es política del negocio y vive en su prompt. Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
+    "- LINK DE MERCADO PAGO EN EL CHAT: el agente puede enviarlo las veces que haga falta (cada envío es un link nuevo con el monto vigente) y sabe si ya envió uno, por cuánto y hace cuánto, así que no hace falta escribir en el prompt reglas como «el link que te dejé arriba». El ESTILO del mensaje del link se cambia con configurar_pagos {mpLinkMessage}, no en el prompt del agente; el vencimiento con {mpLinkExpiryDays} (apagado por defecto). Si el dueño cuenta que el agente prometió el link y no llegó: el sistema ya lo envía solo cuando el agente lo promete (y si Mercado Pago falla, el agente ofrece los métodos manuales o deriva).",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",
     "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana, eliminar_cliente, reiniciar_conversacion, iniciar_conversacion y cancelar_recordatorios: SOLO si lo pidió explícitamente y confirmó. Nunca elimines ni escribas a números nuevos por iniciativa propia.",
