@@ -101,6 +101,7 @@ import { getMetaCapiConfig, updateMetaCapiConfig } from "../meta-capi/meta-capi.
 import {
   listPendingReminders,
   listReminderHistory,
+  countReminderHistory,
   cancelRemindersByIds,
   cancelRemindersByFilter,
   updateScheduledReminder,
@@ -111,6 +112,8 @@ import { listStoreEmails } from "../storefront/storefront-email.service";
 import { createCampaign as createEmailCampaign, listCampaigns as listEmailCampaigns, previewAudience as previewEmailAudience, sendCampaignTest as sendEmailCampaignTest, startCampaign as startEmailCampaign } from "../storefront/storefront-campaigns.service";
 import { updateStorefrontConfigSchema } from "../storefront/storefront.schemas";
 import { normalizeQuietHours, normalizePacing } from "../scheduler/quiet-hours";
+import { describeSmartFollowup, normalizeSmartFollowup } from "../scheduler/smart-followup";
+import { getAiReviewOverview } from "../scheduler/reminder-ai-review";
 import { ScheduledMessageStatus } from "@prisma/client";
 import { buildBotConfig } from "../bot/bot.service";
 import { buildFichaPreview, matchLevelArg } from "../agent/agent-tools";
@@ -818,7 +821,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_recordatorios",
       description:
-        "Actualiza los RECORDATORIOS automáticos. `data` es PARCIAL: {abandonedCart? {enabled, steps: [{delaySeconds, message, mediaUrl? (imagen/video/audio/archivo que sale con ese paso: URL de listar_recursos o de los archivos del producto; null la quita), mediaType? ('image'|'video'|'audio'|'document'), offerPrice? (OFERTA ESCALONADA: al enviarse ese paso el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje)}]}, leftOnRead? {enabled, steps: [...]}, quietHours? {startHour 0-23, endHour 1-24, spreadMinutes 0-180 (DISPERSIÓN AL ABRIR: lo acumulado fuera de horario se reparte al azar en los primeros N minutos en vez de salir todo a la hora exacta; default 90)}, pacing? {minSec, maxSec, maxPerHour} (RITMO ANTI-BLOQUEO: separación al azar entre recordatorios de la empresa, default 25-70 s, y tope por hora, default 60)}. delaySeconds en segundos (ej. 3600 = 1 hora). En los mensajes se puede usar SPINTAX {Hola|Buenas|Qué tal} para que cada cliente reciba un texto distinto (anti-bloqueo). Tras un BLOQUEO de WhatsApp, recomienda calentar el número: pacing 60-120 s y maxPerHour 20-30 la primera semana. CÓMO FUNCIONA LA COLA: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delaySeconds desde ese momento, no acumulativo); el envío respeta horario, ritmo y tope por hora; si varios pasos de un cliente están vencidos sale SOLO el más reciente (con el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y los demás se cancelan; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre los atrasados. CAPACIDAD ≈ maxPerHour × horas de envío por día; cada paso extra multiplica la demanda (leads/día × pasos) — antes de AGREGAR pasos o BAJAR el ritmo, compara con listar_recordatorios_programados (total/atrasados) y avisa al dueño si la cola no se va a cubrir. Llámala SOLO tras confirmación.",
+        "Actualiza los RECORDATORIOS automáticos. `data` es PARCIAL: {abandonedCart? {enabled, steps: [{delaySeconds, message, mediaUrl? (imagen/video/audio/archivo que sale con ese paso: URL de listar_recursos o de los archivos del producto; null la quita), mediaType? ('image'|'video'|'audio'|'document'), offerPrice? (OFERTA ESCALONADA: al enviarse ese paso el agente ofrece/cobra/valida ese precio SOLO a ese cliente; usa {oferta} en el mensaje)}]}, leftOnRead? {enabled, steps: [...]}, quietHours? {startHour 0-23, endHour 1-24, spreadMinutes 0-180 (DISPERSIÓN AL ABRIR: lo acumulado fuera de horario se reparte al azar en los primeros N minutos en vez de salir todo a la hora exacta; default 90)}, pacing? {minSec, maxSec, maxPerHour} (RITMO ANTI-BLOQUEO: separación al azar entre recordatorios de la empresa, default 25-70 s, y tope por hora, default 60), resume? {enabled}, postpone? {enabled, defaultHours 1-720, defaultHour 0-23}, aiReview? {enabled, dailyLimit 10-2000, criteria?}}. SEGUIMIENTO INTELIGENTE (las tres nacen APAGADAS y se fusionan campo por campo: puedes enviar solo {aiReview:{dailyLimit:50}}): (1) resume.enabled=true = NO REPETIR PASOS: si el cliente responde y vuelve a callar, la secuencia sigue en el paso siguiente al último que recibió, no desde el 1 (ej. pasos a 1 h, 24 h y 48 h con 1 y 2 enviados: el 3 sale 24 h después de su última respuesta; las ofertas escalonadas conservan el orden); una compra aprobada o reiniciar la conversación vuelve al paso 1. (2) postpone.enabled=true = POSPONER A PEDIDO DEL CLIENTE: da al agente de ventas la herramienta posponer_seguimiento; si el cliente dice «lo vemos el sábado» programa UN mensaje para el sábado a las defaultHour (default 10) y si solo dice «después» lo programa en defaultHours (default 24); hasta esa fecha no salen recordatorios y la secuencia cuenta desde ahí. CUÁNDO posponer lo decide el PROMPT del agente: tras activarlo propón al dueño una línea para su prompt (configurar_agente), ej. «Si el cliente pide que le escriban otro día o dice que luego avisa, usa posponer_seguimiento y confírmale cuándo le escribirás». (3) aiReview.enabled=true = REVISIÓN CON IA: antes de enviar un recordatorio de carrito/visto a un cliente que escribió después del recordatorio anterior, la IA lee los últimos mensajes y decide enviar u omitir ESE paso (queda cancelado con motivo «Omitido por revisión IA: …» y una nota en el chat que solo ve el dueño). GASTA consultas de IA del negocio: avísalo antes de encenderla; dailyLimit es el tope de revisiones por día (default 100; al llegar al tope los recordatorios salen sin revisar); el primer recordatorio a cada cliente nunca se revisa; criteria es un texto opcional del dueño con cuándo NO enviar (null vuelve al criterio por defecto: no interesado, ya compró, pidió que no le escriban, pidió tiempo y aún no pasó). ver_configuracion → recordatorios.seguimientoInteligente muestra el estado interpretado y el contador de hoy. delaySeconds en segundos (ej. 3600 = 1 hora). En los mensajes se puede usar SPINTAX {Hola|Buenas|Qué tal} para que cada cliente reciba un texto distinto (anti-bloqueo). Tras un BLOQUEO de WhatsApp, recomienda calentar el número: pacing 60-120 s y maxPerHour 20-30 la primera semana. CÓMO FUNCIONA LA COLA: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delaySeconds desde ese momento, no acumulativo); el envío respeta horario, ritmo y tope por hora; si varios pasos de un cliente están vencidos sale SOLO el más reciente (con el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y los demás se cancelan; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre los atrasados. CAPACIDAD ≈ maxPerHour × horas de envío por día; cada paso extra multiplica la demanda (leads/día × pasos) — antes de AGREGAR pasos o BAJAR el ritmo, compara con listar_recordatorios_programados (total/atrasados) y avisa al dueño si la cola no se va a cubrir. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -832,7 +835,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_pagos",
       description:
-        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (se FUSIONAN por método+número: agrega nuevos y actualiza titulares; para QUITAR uno usa reemplazarMetodos=true con la lista final completa), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE), mpChatEnabled? / mpStoreEnabled? (MERCADO PAGO POR CANAL: true/false para usar el link de pago en el cobro por chat de WhatsApp y/o en la tienda web; requiere que MP ya esté conectado)}. El Access Token de Mercado Pago NO se gestiona por chat: se conecta en Integraciones. Llámala SOLO tras confirmación.",
+        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (se FUSIONAN por método+número: agrega nuevos y actualiza titulares; para QUITAR uno usa reemplazarMetodos=true con la lista final completa), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE), mpChatMode? ('OFF' | 'ALWAYS' | 'ON_REQUEST': LINK DE MERCADO PAGO EN EL CHAT de WhatsApp), mpStoreEnabled? (true/false: Mercado Pago en la tienda web), mpChatEnabled? (compatibilidad: true/false enciende o apaga el chat sin cambiar el modo)}. MODOS DEL CHAT: OFF = el agente cobra solo con los métodos manuales; ALWAYS = el link va dentro del mensaje de cobro junto a Yape/Plin (el de siempre); ON_REQUEST = el cobro lleva solo los métodos manuales y el agente manda el link en un mensaje aparte cuando el cliente pide otro medio (otro banco, transferencia, tarjeta), con el mismo monto del cobro (carrito u oferta activa de ese cliente); el pago por link se aprueba y entrega solo. Con ON_REQUEST: (a) CUÁNDO ofrecer el link lo decide el PROMPT del agente: tras activarlo revisa el prompt con ver_configuracion (si dice algo como «solo Yape o Plin» el agente seguirá negando otros medios) y propón al dueño una línea con configurar_agente, ej. «Si el cliente no puede pagar con Yape o Plin o pide tarjeta u otro banco, ofrécele el link de Mercado Pago»; (b) el bloque «Validar pago» de los flujos NO envía el link; (c) un negocio sin métodos manuales lo envía siempre. Si la comisión la paga el cliente, se suma al monto del link (ver_configuracion → pagos.mercadoPago.comision). Requiere Mercado Pago conectado. Un cambio SOLO de Mercado Pago (mpChatMode / mpStoreEnabled / mpChatEnabled) no toca ni exige métodos manuales. El Access Token de Mercado Pago NO se gestiona por chat: se conecta en Integraciones. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1523,12 +1526,13 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "listar_recordatorios_programados",
       description:
-        "Recordatorios (seguimientos, citas, renovaciones) con fecha y cliente. Por defecto los PENDIENTES: devuelve el TOTAL real, cuántos van ATRASADOS (más de 1 h) y por tipo, y cada ítem con su id, paso de la secuencia y atrasoMin (minutos desde su hora planificada) — los ids sirven para cancelar_recordatorios; filtra con phone, tipo, productId o atrasadosMasDeHoras. Con estado=SENT devuelve los ENVIADOS en un rango (desde/hasta ISO) más un RESUMEN para analizar ráfagas: envíos por hora, separación mínima/promedio entre envíos consecutivos y por tipo — úsalo para verificar que los recordatorios de la apertura (p. ej. 7am) salieron dispersos y espaciados. estado=FAILED o CANCELLED muestra el motivo; en CANCELLED, «colapsado…» o «venció…» es la COLA descartando pasos viejos a propósito (no es un fallo): cuando varios pasos de un cliente están vencidos sale solo el más reciente.",
+        "Recordatorios (seguimientos, citas, renovaciones) con fecha y cliente. Por defecto los PENDIENTES: devuelve el TOTAL real, cuántos van ATRASADOS (más de 1 h) y por tipo, y cada ítem con su id, paso de la secuencia y atrasoMin (minutos desde su hora planificada) — los ids sirven para cancelar_recordatorios; filtra con phone, tipo, productId o atrasadosMasDeHoras. PAGINADO: cada llamada devuelve una página (limit, máx 100) con total, pagina, paginas, hayMas y siguientePagina; para ver TODOS repite la llamada con pagina=siguientePagina (mismos filtros) hasta que hayMas sea false — nunca digas que «solo hay 100»: mira total. Un ítem con pospuesto:true es un mensaje que el CLIENTE pidió para esa fecha («escríbeme el sábado», función Posponer de Seguimiento inteligente): no es un atraso ni un paso de la secuencia. Con estado=SENT devuelve los ENVIADOS en un rango (desde/hasta ISO) más un RESUMEN para analizar ráfagas: envíos por hora, separación mínima/promedio entre envíos consecutivos y por tipo — úsalo para verificar que los recordatorios de la apertura (p. ej. 7am) salieron dispersos y espaciados. estado=FAILED o CANCELLED muestra el motivo; en CANCELLED, «colapsado…» o «venció…» es la COLA descartando pasos viejos a propósito (no es un fallo): cuando varios pasos de un cliente están vencidos sale solo el más reciente; «Omitido por revisión IA: …» es la revisión con IA de Seguimiento inteligente, que leyó el chat y decidió no enviar ESE paso (el motivo va en el texto).",
       parameters: {
         type: "object",
         additionalProperties: false,
         properties: {
-          limit: { type: "number", description: "máx 100 (default 50)" },
+          limit: { type: "number", description: "filas por página, máx 100 (default 50)" },
+          pagina: { type: "number", description: "página a leer, desde 1 (default 1). Usa siguientePagina de la respuesta anterior para seguir leyendo." },
           estado: { type: "string", enum: ["PENDING", "SENT", "FAILED", "CANCELLED"], description: "default PENDING" },
           desde: { type: "string", description: "ISO (solo con estado≠PENDING); default: últimas 24 h" },
           hasta: { type: "string", description: "ISO (solo con estado≠PENDING)" },
@@ -2242,6 +2246,33 @@ function buildPayload(data: LooseData, existing: AdminProduct | null, replace = 
       merged.push(...incV.filter((nv) => !curNames.has(norm(nv.name))));
       return merged.map((v, i) => ({ ...v, sortOrder: i }));
     })(),
+  };
+}
+
+/**
+ * Link de Mercado Pago en el chat de WhatsApp, interpretado para el dueño:
+ * APAGADO | SIEMPRE | A_PEDIDO + una frase con lo que hace el agente.
+ */
+function describeMpChatMode(
+  payment: { mpEnabled: boolean; mpAccessToken: string | null; mpChatEnabled: boolean; mpChatMode: string; methods?: unknown[] } | null,
+): { modo: "APAGADO" | "SIEMPRE" | "A_PEDIDO"; queHace: string } {
+  if (!payment || !payment.mpChatEnabled) {
+    return { modo: "APAGADO", queHace: "El agente no envía el link de Mercado Pago por WhatsApp: cobra solo con los métodos manuales." };
+  }
+  const sinConexion = !payment.mpAccessToken || !payment.mpEnabled ? " OJO: Mercado Pago no está conectado o activo, así que hoy no sale ningún link." : "";
+  if (payment.mpChatMode === "ON_REQUEST") {
+    const sinManuales = payment.methods && !payment.methods.length ? " Como no hay métodos manuales, el link va siempre en el cobro." : "";
+    return {
+      modo: "A_PEDIDO",
+      queHace:
+        "El mensaje de cobro lleva solo los métodos manuales; el agente envía el link en un mensaje aparte cuando el cliente pide otro medio (otro banco, tarjeta). CUÁNDO ofrecerlo se escribe en el prompt del agente. El pago por link se aprueba y entrega solo. En el bloque «Validar pago» de los flujos el link no se envía." +
+        sinManuales +
+        sinConexion,
+    };
+  }
+  return {
+    modo: "SIEMPRE",
+    queHace: "El link de pago viaja dentro del mensaje de cobro, junto a los métodos manuales; el pago por link se aprueba y entrega solo." + sinConexion,
   };
 }
 
@@ -3055,10 +3086,14 @@ export async function runCopilotTool(
         maxSec: env.REMINDER_PACING_MAX_SEC,
         maxPerHour: env.REMINDER_MAX_PER_HOUR,
       });
+      const smart = normalizeSmartFollowup(fu);
+      const smartText = describeSmartFollowup(smart);
+      const aiReviewToday = await getAiReviewOverview(companyId).catch(() => ({ revisadosHoy: 0, omitidosHoy: 0 }));
       const seqInfo = (s?: { enabled?: boolean; steps?: unknown[] }) => ({
         enabled: Boolean(s?.enabled),
         pasos: Array.isArray(s?.steps) ? s.steps.length : 0,
       });
+      const mpChatView = describeMpChatMode(payment);
       const { followupConfig: _fu, crmToolConfig: _crmTool, ...agentRest } = agent ?? { followupConfig: null, crmToolConfig: null };
       const crmToolView = await describeCrmToolConfig(companyId, agent?.crmToolConfig);
       const aiQuota = await getPlatformAiQuota(companyId);
@@ -3103,6 +3138,24 @@ export async function runCopilotTool(
               nota: "Con campaña enviando, la pausa se duplica. Configurable con configurar_recordatorios {quietHours.spreadMinutes, pacing}.",
             },
             plantillaMeta: fu?.metaTemplate ?? null,
+            // Seguimiento inteligente: estado + frase interpretada de cada opción.
+            seguimientoInteligente: {
+              noRepetirPasos: { enabled: smart.resume.enabled, queHace: smartText.resume },
+              posponerAPedido: {
+                enabled: smart.postpone.enabled,
+                siNoDiceCuandoHoras: smart.postpone.defaultHours,
+                siDiceDiaSinHora: `${String(smart.postpone.defaultHour).padStart(2, "0")}:00`,
+                queHace: smartText.postpone,
+              },
+              revisionConIA: {
+                enabled: smart.aiReview.enabled,
+                topeDiario: smart.aiReview.dailyLimit,
+                criterioPropio: smart.aiReview.criteria,
+                hoy: { revisados: aiReviewToday.revisadosHoy, omitidos: aiReviewToday.omitidosHoy },
+                queHace: smartText.aiReview,
+              },
+              nota: "Se cambia con configurar_recordatorios {resume, postpone, aiReview} o en Recordatorios → Seguimiento inteligente.",
+            },
           },
           driveBusqueda: await (async () => {
             const digitals = await prisma.product.findMany({
@@ -3135,7 +3188,16 @@ export async function runCopilotTool(
                   conectado: Boolean(payment.mpAccessToken),
                   activo: payment.mpEnabled,
                   canales: { chat: payment.mpChatEnabled, tienda: payment.mpStoreEnabled },
-                  nota: "Se conecta en Integraciones (token solo desde el panel); los canales se cambian con configurar_pagos {mpChatEnabled, mpStoreEnabled}.",
+                  // Link de pago en el chat de WhatsApp: APAGADO | SIEMPRE | A_PEDIDO.
+                  modoChat: mpChatView.modo,
+                  queHaceEnChat: mpChatView.queHace,
+                  comision: {
+                    quienLaPaga: payment.mpFeeMode === "CUSTOMER" ? "cliente (se suma al monto del link)" : "negocio",
+                    porcentaje: Number(payment.mpFeePercent),
+                    fijo: Number(payment.mpFeeFixed),
+                    masIgv: payment.mpFeeIgv,
+                  },
+                  nota: "Se conecta en Integraciones (token solo desde el panel); el modo del chat y la tienda se cambian con configurar_pagos {mpChatMode, mpStoreEnabled}.",
                 },
               }
             : null,
@@ -3232,6 +3294,20 @@ export async function runCopilotTool(
       if (mode && !["BEFORE_DELIVERY", "CASH_ON_DELIVERY", "MANUAL", "CUSTOMER_CHOICE"].includes(mode)) {
         return { result: JSON.stringify({ ok: false, error: "paymentMode inválido" }), wrote: false };
       }
+      const mpChatMode = asStr(data.mpChatMode)?.toUpperCase();
+      if (mpChatMode && !["OFF", "ALWAYS", "ON_REQUEST"].includes(mpChatMode)) {
+        return { result: JSON.stringify({ ok: false, error: "mpChatMode inválido: usa OFF, ALWAYS u ON_REQUEST" }), wrote: false };
+      }
+      const mpTouched = Boolean(mpChatMode) || typeof data.mpChatEnabled === "boolean" || typeof data.mpStoreEnabled === "boolean";
+      // Un cambio solo de Mercado Pago no toca los pagos manuales (un negocio que
+      // cobra solo con MP no tiene métodos ni teléfono de avisos que validar).
+      const manualTouched =
+        data.enabled !== undefined ||
+        data.notificationPhone !== undefined ||
+        data.methods !== undefined ||
+        data.paymentMode !== undefined ||
+        args.reemplazarMetodos === true;
+      const skipManual = mpTouched && !manualTouched;
       const methods = Array.isArray(data.methods)
         ? (data.methods as Array<{ method?: unknown; number?: unknown; holder?: unknown }>)
             .map((m, i) => ({
@@ -3257,42 +3333,59 @@ export async function runCopilotTool(
         merged.push(...methods.filter((m) => !curKeys.has(keyOf(m))));
         return merged.map((m, i) => ({ ...m, sortOrder: i }));
       })();
-      if (!finalMethods.length) {
-        return {
-          result: JSON.stringify({ ok: false, error: "se necesita al menos un método de pago (method/number/holder) para guardar" }),
-          wrote: false,
-        };
+      if (!skipManual) {
+        if (!finalMethods.length) {
+          return {
+            result: JSON.stringify({ ok: false, error: "se necesita al menos un método de pago (method/number/holder) para guardar" }),
+            wrote: false,
+          };
+        }
+        if (!notificationPhone) {
+          return {
+            result: JSON.stringify({ ok: false, error: "falta notificationPhone (WhatsApp donde avisar los pagos) — pídeselo al usuario" }),
+            wrote: false,
+          };
+        }
+        await upsertPaymentConfig(companyId, {
+          enabled: typeof data.enabled === "boolean" ? data.enabled : (current?.enabled ?? true),
+          notificationPhone,
+          methods: finalMethods,
+          paymentMode: (mode as "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL" | "CUSTOMER_CHOICE" | undefined) ??
+            (current?.paymentMode ?? "BEFORE_DELIVERY"),
+        });
       }
-      if (!notificationPhone) {
-        return {
-          result: JSON.stringify({ ok: false, error: "falta notificationPhone (WhatsApp donde avisar los pagos) — pídeselo al usuario" }),
-          wrote: false,
-        };
-      }
-      await upsertPaymentConfig(companyId, {
-        enabled: typeof data.enabled === "boolean" ? data.enabled : (current?.enabled ?? true),
-        notificationPhone,
-        methods: finalMethods,
-        paymentMode: (mode as "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL" | "CUSTOMER_CHOICE" | undefined) ??
-          (current?.paymentMode ?? "BEFORE_DELIVERY"),
-      });
       // Mercado Pago por canal (no toca el token ni la comisión).
       let mpNota = "";
-      if (typeof data.mpChatEnabled === "boolean" || typeof data.mpStoreEnabled === "boolean") {
+      let mpView: Record<string, unknown> = {};
+      if (mpTouched) {
         if (!current?.mpAccessToken) {
           mpNota = " Mercado Pago NO está conectado: los canales se guardarán pero no aplican hasta conectar el token en Integraciones.";
         }
+        // mpChatMode manda sobre mpChatEnabled: OFF apaga el canal; los otros dos lo encienden con ese modo.
+        const chatEnabled = mpChatMode ? mpChatMode !== "OFF" : typeof data.mpChatEnabled === "boolean" ? data.mpChatEnabled : undefined;
         await updateMercadoPagoConfig(companyId, {
           enabled: current?.mpEnabled ?? false,
           feeMode: (current?.mpFeeMode as "TENANT" | "CUSTOMER") ?? "TENANT",
           feePercent: Number(current?.mpFeePercent ?? 3.99),
           feeFixed: Number(current?.mpFeeFixed ?? 1),
           feeIgv: current?.mpFeeIgv ?? true,
-          ...(typeof data.mpChatEnabled === "boolean" ? { chatEnabled: data.mpChatEnabled } : {}),
+          ...(chatEnabled !== undefined ? { chatEnabled } : {}),
+          ...(mpChatMode && mpChatMode !== "OFF" ? { chatMode: mpChatMode as "ALWAYS" | "ON_REQUEST" } : {}),
           ...(typeof data.mpStoreEnabled === "boolean" ? { storeEnabled: data.mpStoreEnabled } : {}),
         });
+        const after = await prisma.paymentConfig.findUnique({ where: { companyId }, include: { methods: true } });
+        const view = describeMpChatMode(after);
+        mpView = {
+          mercadoPago: { modoChat: view.modo, queHaceEnChat: view.queHace, tienda: after?.mpStoreEnabled ?? false },
+          ...(view.modo === "A_PEDIDO"
+            ? { siguientePaso: "Revisa el prompt del agente (ver_configuracion) y propón al dueño la línea que diga CUÁNDO ofrecer el link (configurar_agente): si el prompt dice que solo se acepta Yape o Plin, el agente seguirá negando otros medios." }
+            : {}),
+        };
       }
-      return { result: JSON.stringify({ ok: true, nota: "Pagos actualizados (lo no enviado se conservó)." + mpNota }), wrote: true };
+      return {
+        result: JSON.stringify({ ok: true, nota: (skipManual ? "Mercado Pago actualizado (los métodos manuales no se tocaron)." : "Pagos actualizados (lo no enviado se conservó).") + mpNota, ...mpView }),
+        wrote: true,
+      };
     }
 
     case "ver_crm": {
@@ -3806,13 +3899,36 @@ export async function runCopilotTool(
             }
           : {}),
         ...(data.pacing !== undefined ? { pacing: data.pacing } : {}),
+        // Seguimiento inteligente: fusión campo por campo (permite cambiar solo el tope o solo el interruptor).
+        ...(["resume", "postpone", "aiReview"] as const).reduce<Record<string, unknown>>((acc, key) => {
+          if (data[key] === undefined) return acc;
+          const cur = ((current?.followupConfig as Record<string, unknown> | null)?.[key] ?? {}) as Record<string, unknown>;
+          acc[key] = data[key] && typeof data[key] === "object" ? { ...cur, ...(data[key] as Record<string, unknown>) } : data[key];
+          return acc;
+        }, {}),
       };
       const parsed = followupConfigSchema.safeParse(merged);
       if (!parsed.success) {
         return { result: JSON.stringify({ ok: false, error: `datos inválidos: ${zodErrorsText(parsed.error)}` }), wrote: false };
       }
       await updateAgentReminders(companyId, (parsed.data ?? null) as Record<string, unknown> | null);
-      return { result: JSON.stringify({ ok: true, nota: "Recordatorios actualizados (lo no enviado se conservó)." }), wrote: true };
+      const smartTouched = data.resume !== undefined || data.postpone !== undefined || data.aiReview !== undefined;
+      const smartNow = normalizeSmartFollowup(parsed.data);
+      return {
+        result: JSON.stringify({
+          ok: true,
+          nota: "Recordatorios actualizados (lo no enviado se conservó).",
+          ...(smartTouched
+            ? {
+                seguimientoInteligente: describeSmartFollowup(smartNow),
+                ...(data.postpone !== undefined && smartNow.postpone.enabled
+                  ? { siguientePaso: "Propón al dueño la línea para el prompt del agente que diga CUÁNDO posponer (configurar_agente): sin ella el agente tiene la herramienta pero no la regla del negocio." }
+                  : {}),
+              }
+            : {}),
+        }),
+        wrote: true,
+      };
     }
 
     // ---------------------- ANÁLISIS (solo lectura) ----------------------
@@ -5116,13 +5232,29 @@ export async function runCopilotTool(
     }
     case "listar_recordatorios_programados": {
       const limit = Math.min(Math.max(Number(args.limit) || 50, 1), 100);
+      const pagina = Math.max(1, Math.floor(Number(args.pagina) || 1));
+      const offset = (pagina - 1) * limit;
+      // Bloque de paginación común a pendientes e historial.
+      const paging = (total: number, shown: number) => {
+        const paginas = Math.max(1, Math.ceil(total / limit));
+        const hayMas = offset + shown < total;
+        return { total, pagina, paginas, mostrados: shown, hayMas, ...(hayMas ? { siguientePagina: pagina + 1 } : {}) };
+      };
       const estado = String(args.estado ?? "PENDING").toUpperCase();
       if (estado !== "PENDING") {
         const status =
           estado === "SENT" ? ScheduledMessageStatus.SENT : estado === "FAILED" ? ScheduledMessageStatus.FAILED : ScheduledMessageStatus.CANCELLED;
         const from = args.desde ? new Date(String(args.desde)) : new Date(Date.now() - 24 * 60 * 60_000);
         const to = args.hasta ? new Date(String(args.hasta)) : undefined;
-        const history = await listReminderHistory(companyId, { status, from, to, limit: 500 });
+        // El resumen se calcula sobre la ventana completa (hasta 500); la página puede ir más allá.
+        const [history, totalHist] = await Promise.all([
+          listReminderHistory(companyId, { status, from, to, limit: 500 }),
+          countReminderHistory(companyId, { status, from, to }),
+        ]);
+        const pageRows =
+          offset + limit <= history.length || history.length < 500
+            ? history.slice(offset, offset + limit)
+            : await listReminderHistory(companyId, { status, from, to, limit, skip: offset });
         const company = await prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } });
         const tz = company?.timezone || "America/Lima";
         const hourOf = (d: Date) => new Intl.DateTimeFormat("es-PE", { timeZone: tz, hour: "2-digit", hour12: false }).format(d);
@@ -5148,7 +5280,7 @@ export async function runCopilotTool(
               ? "Separación mínima < 20 s o decenas en la misma hora = ráfaga (riesgo de bloqueo). Ajusta con configurar_recordatorios {quietHours.spreadMinutes, pacing}."
               : "failureReason explica cada caso (cliente pagó/cerró, atención humana, fuera de ventana Meta, etc.).",
         };
-        const rows = history.slice(0, limit).map((r) => ({
+        const rows = pageRows.map((r) => ({
           tipo: r.type,
           estado: r.status,
           fecha: timeOf(r),
@@ -5156,24 +5288,35 @@ export async function runCopilotTool(
           ...(r.failureReason ? { motivo: r.failureReason } : {}),
           texto: String(r.body ?? "").slice(0, 120),
         }));
-        return { result: JSON.stringify({ resumen, mostrados: rows.length, items: rows }), wrote: false };
+        return {
+          result: JSON.stringify({
+            resumen: { ...resumen, ...(totalHist > history.length ? { nota2: `El resumen cubre los ${history.length} más recientes de ${totalHist}; acota con desde/hasta para analizar una franja.` } : {}) },
+            ...paging(totalHist, rows.length),
+            items: rows,
+          }),
+          wrote: false,
+        };
       }
       const tipo = String(args.tipo ?? "").toUpperCase();
       const customerId = args.phone ? (await findCustomerRef(companyId, args.phone)).id : undefined;
+      const lateH = Number(args.atrasadosMasDeHoras);
       const page = await listPendingReminders(companyId, {
         type: (LISTABLE_TYPES as string[]).includes(tipo) ? (tipo as ScheduledMessageType) : undefined,
         productId: args.productId ? String(args.productId) : undefined,
         customerId,
         lateOnly: args.soloAtrasados === true,
+        // El atraso se filtra en la consulta para que total y páginas sean reales.
+        lateMoreThanHours: Number.isFinite(lateH) && lateH > 0 ? lateH : undefined,
+        offset,
+        limit,
       });
-      const lateH = Number(args.atrasadosMasDeHoras);
       const nowMs = Date.now();
-      const filtered = Number.isFinite(lateH) && lateH > 0 ? page.items.filter((r) => nowMs - r.dueAt.getTime() > lateH * 3600_000) : page.items;
-      const rows = filtered.slice(0, limit).map((r) => ({
+      const rows = page.items.map((r) => ({
         id: r.id,
         tipo: r.type,
         enviaEl: r.sendAt,
         ...(r.stepIndex != null ? { paso: r.stepCount ? `${r.stepIndex + 1}/${r.stepCount}` : r.stepIndex + 1 } : {}),
+        ...(r.postponed ? { pospuesto: true } : {}),
         atrasoMin: Math.max(0, Math.round((nowMs - r.dueAt.getTime()) / 60_000)),
         cliente: { nombre: r.customer?.name ?? null, phone: r.customer?.phone ?? null },
         texto: String(r.body ?? "").slice(0, 150),
@@ -5181,15 +5324,14 @@ export async function runCopilotTool(
       }));
       return {
         result: JSON.stringify({
-          total: page.total,
+          ...paging(page.total, rows.length),
           atrasados: page.atrasados,
           porTipo: page.porTipo,
-          ...(filtered !== page.items ? { coincidenAtraso: filtered.length } : {}),
-          mostrados: rows.length,
           nota:
             page.atrasados > 0
               ? "atrasados = pendientes con más de 1 h de retraso. Si crece día a día, la capacidad (tope por hora × horas de envío) no cubre la demanda: reduce pasos de las secuencias o sube el ritmo con configurar_recordatorios {pacing}. El worker envía solo el paso más reciente cuando varios de un cliente están vencidos y vence los muy atrasados."
               : "Sin atrasos: la cola se está cubriendo a tiempo.",
+          ...(page.total > offset + rows.length ? { paginacion: `Hay más: repite la llamada con pagina=${pagina + 1} y los mismos filtros.` } : {}),
           items: rows,
         }),
         wrote: false,
@@ -5463,7 +5605,7 @@ const SYSTEM_GUIDE = [
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. CHATS FAVORITOS (distinto de fijar): «Marcar favorito» en el menú ⋯ pone un corazón en la lista y el filtro «Solo favoritos» los aísla (favorito en listar_conversaciones, filtro favoritos:true). MENSAJES DESTACADOS: la estrella de cada burbuja (hover en escritorio, mantener pulsado en móvil) lo marca y la pestaña «Destacados» del panel lateral los lista y salta al mensaje (destacado:true en leer_conversacion). CITAS: tocar la cita de un mensaje salta al mensaje citado. AUDIOS: se transcriben solos si hay key de OpenAI para audios; si no se transcribió (o el chat está en atención humana y quieres leerlo), el asesor usa clic derecho → Transcribir sobre el audio (en el celular, mantener pulsado) o tú transcribir_audio; no dispara al agente. STICKERS: los que manda el cliente se ven sin burbuja y se guardan en la galería del negocio con «Guardar sticker»; el asesor envía stickers desde el botón del composer (galería + «Subir imagen», que se convierte sola a WebP 512×512); por aquí NO se envían stickers. El agente IA SÍ 've' los stickers que manda el cliente: visión los describe en una frase (personaje, emoción, texto) y responde en contexto; no pasan por la lectura de comprobantes. NOTAS vs RESPUESTAS DEL FLUJO: la pestaña Notas son notas privadas del equipo (el agente NO las ve); las «Respuestas del flujo» (lo que el cliente contestó en bloques de pregunta de un flujo, chips 📝 en las tarjetas del CRM y lista en Contacto) SÍ entran al contexto del agente y se borran con la × (en el CRM o en Contacto) o con gestionar_cliente_crm quitarRespuestasFlujo. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}. ACCIONES HTTP (Integraciones → Acciones HTTP, como el nodo HTTP Request de n8n): el dueño guarda CONEXIONES (URL base + credencial cifrada: Bearer, API key en cabecera o query, Basic; el secreto solo se escribe en el panel y nunca se muestra) y ACCIONES (peticiones con método, URL, query, cabeceras y cuerpo JSON con variables {{nombre}}, {{telefono}}, {{correo}}, {{producto}}, {{precio}}, {{pedido}}, variables del flujo y {{param.x}}). La respuesta queda aplanada en variables {{api.status}}, {{api.body}}, {{api.<campo>.<subcampo>}} (responseVar cambia el prefijo). Se usan en TRES lugares: (1) FLUJOS, bloque «Petición HTTP» (http-request, salidas success/error); (2) ENTREGA DEL PRODUCTO, digitalDelivery.assignmentMode 'HTTP_ACTION' + httpActionId: al confirmar el pago se llama a la API y el mensaje de entrega usa {api.campo}; si la API falla el cliente recibe 'un asesor te lo envía', el dueño un aviso con el error y la venta queda en entrega manual; no se genera dos veces para la misma venta; (3) AGENTE IA: una acción con agentEnabled se vuelve la herramienta accion_<slug> (agentDescription = cuándo usarla; agentParams = datos que pide al cliente; oncePerCustomer = una vez por cliente, p. ej. una licencia demo); CUÁNDO ofrecerla lo decide el prompt del dueño, no el sistema. SUBIR ARCHIVOS DESDE CLAUDE.AI: las imágenes o archivos que el dueño pega en el chat de Claude NO llegan a FlowApp; usa crear_enlace_subida {productId} y dale el enlace (30 min) para que los suba ahí; luego configúralos. Herramientas: listar_acciones_http, probar_accion_http (llama a la API real), crear_accion_http / editar_accion_http (edición PARCIAL: solo lo que mandas cambia; sin credenciales en headers), liberar_accion_http (vuelve a permitir una acción 'una vez por cliente' a un cliente; reiniciar_conversacion también la libera). Si el agente recibe bloqueado:true es que esa acción ya se usó con el cliente y sigue la regla del prompt del dueño. El panel tiene «Importar cURL» y «Probar». Historial de ejecuciones en Integraciones → Acciones HTTP → Ejecuciones (secretos enmascarados). ARCHIVOS: se puede subir y enviar cualquier archivo pdf, xml, xls/xlsx, doc/docx, zip, rar, 7z, txt, csv o pptx (hasta 100 MB; imagen/video/audio hasta 50 MB) desde Recursos, respuestas rápidas, campañas, recordatorios, flujos (bloque Enviar documento), presentación y entrega del producto, tienda y el chat; el cliente lo recibe como documento descargable con su nombre. En Meta solo txt/xls/xlsx/doc/docx/ppt/pptx/pdf viajan como documento; zip/rar/7z/csv/xml se envían como enlace. El agente IA ve los archivos que manda el cliente como '[el cliente envió un archivo: nombre]' (no los abre) y puede enviar los del producto con enviar_multimedia. PESTAÑA RECURSOS del chat (junto a Contacto/Respuestas/Notas): lista la BIBLIOTECA de multimedia del negocio — archivos de productos + multimedia de recordatorios (generales y por producto), banner y mensajes adicionales de presentación y mensajes post-venta — con su origen, filtro por producto y buscador; el asesor la envía al cliente con un clic, con o sin su descripción (al enviarla, el panel resuelve las variantes {a|b} y {nombre}); la misma biblioteca se consulta por aquí con listar_recursos. AVISOS AL DUEÑO: cuando el agente deriva a humano (consulta sin respuesta, negociación, reclamo, pago, flujo, campaña) y cuando un cliente escribe en un chat en atención humana, el dueño recibe un WhatsApp con el link directo al chat (flowapp.pe/conversaciones?id=…). TOMAR EL CONTROL DE UN CHAT DESDE AQUÍ (lo mismo que hace el asesor en el panel): leer_conversacion (trae el id de cada mensaje) → enviar_mensaje_cliente (texto y/o imagen/video/audio/archivo por URL, citando con citarMensajeId; por defecto pasa el chat a atención humana) o enviar_respuesta_rapida (/comando con sus acciones) o reaccionar_mensaje (emoji) → programar_recordatorio_cliente para un seguimiento a una hora → al terminar, atencion_humana {activar:false} REACTIVA el bot (si no, el agente IA no vuelve a responderle). Reactivar el bot (desde el panel, con BOT <número> por WhatsApp o con atencion_humana) limpia la derivación: el agente retoma con lo que respondió el asesor y NO vuelve a derivar por el mismo motivo (solo si el cliente pide una persona o hay un problema nuevo). atencion_humana {activar:true} pausa el bot sin escribir. iniciar_conversacion abre un chat con un número nuevo (solo tras confirmación; en Meta no se puede sin plantilla). reiniciar_conversacion borra el historial (irreversible, solo tras confirmación). Límites automáticos de los envíos del copiloto: nunca a clientes noContactar; en Meta solo dentro de la ventana de 24 h desde el último mensaje del cliente (fuera de ella usa un recordatorio o campaña con plantilla); ritmo anti-bloqueo igual al de los recordatorios (tope por hora y separación entre clientes distintos; si devuelve reintentarEnSeg, espera). La firma del negocio se agrega sola a cada mensaje. Escribe como una persona del negocio: corto, una idea y una pregunta; precios, pagos y enlaces SOLO de ver_producto/ver_configuracion/ver_tienda, nunca inventados.",
   "- CONVERSACIONES (/conversaciones): la lista del panel busca y filtra en TODO el historial del negocio (nombre, teléfono, etapa, etiqueta, anuncio) con scroll infinito, y los mensajes de cada chat se cargan por tramos (los más recientes primero, «Cargar anteriores» arriba). En móvil: lista → chat (atrás vuelve a la lista) → herramientas en hoja inferior (Contacto, Respuestas, Notas, Destacados, Recursos); el menú ⋯ del chat tiene Mensajes destacados, Fijar, Marcar favorito, Etiquetas, Recordatorio, No contactar, Fondo, Reiniciar y Eliminar; escribir en un chat con el bot activo toma el control automáticamente.\n" +
   "- BÚSQUEDA EN GOOGLE DRIVE (entrega): si la entrega de un producto digital (digitalDelivery.instructions / followupMessages) trae links de carpetas públicas de Drive, el servidor arma un ÍNDICE EN MEMORIA por producto (nombres, rutas, tamaños; nada en la base; se rehace al reiniciar, cada 12 h y cuando cambian los links; tope 30 000 entradas: packs enormes quedan 'parcial' y lo que falta se busca en vivo). El agente busca en TODOS los niveles con búsqueda aproximada (tool buscar_en_drive: mayúsculas, tildes, orden y errores pequeños no importan), lista carpetas paginadas (carpetaId + offset), saca UNA muestra directa (obtener_muestra: un archivo suelto, nunca carpeta; clasifica la coincidencia exacta/parcial/débil con `puntaje` 0-1 y NO da por encontrado lo débil —solo parecido de letras, ej. 'metallica' ≈ 'medallita'—: responde encontrado:false con `sugerencias` de carpetas/categorías cercanas; `minCoincidencia` ajusta el umbral, default parcial) y adjunta archivos pequeños (enviar_archivo_drive). Qué comparte antes/después del pago lo escribe el dueño en el PROMPT del agente (Agente → prompt/reglas o configurar_agente), sin reglas fijas; PERO el SISTEMA, por su cuenta, retira cualquier link de CARPETA de la entrega que el bot intente mandar a un cliente que no compró (deja nota 🔒 en el chat); las carpetas de muestra que el dueño puso en la ficha, FAQs, objeciones o recordatorios del producto siempre pasan, y los links de archivos sueltos no se tocan. Con resultados de Drive en el turno, el agente NO deriva por CONSULTA. Requiere carpetas 'cualquiera con el enlace' y la API key de Google de la plataforma (ver_configuracion → driveBusqueda muestra el estado del índice por producto; no la configura el dueño). El dueño prueba aquí con buscar_en_drive / obtener_muestra (reindexar=true fuerza el índice). Comillas: el sistema decodifica entidades HTML (&quot;) en mensajes entrantes y salientes.",
-  "- COLA DE RECORDATORIOS: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delays desde ese momento). El worker respeta el tope por hora y el horario; si varios pasos de un cliente están vencidos envía solo el más reciente (activando el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y cancela los demás; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre pasos atrasados. listar_recordatorios_programados muestra el total real y los atrasados: si los atrasados crecen, la capacidad (tope/hora × horas) no cubre la demanda. cancelar_recordatorios cancela uno, una selección por ids o un lote por filtro (cliente, tipo, producto, atraso): en lote primero soloContar y confirmación del dueño. editar_recordatorio cambia el texto, la multimedia o la hora de UN recordatorio pendiente (en el panel: Recordatorios → Programados → ✎ Editar); para cambiar muchos, cambia la secuencia.\n" +
+  "- COLA DE RECORDATORIOS: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delays desde ese momento). El worker respeta el tope por hora y el horario; si varios pasos de un cliente están vencidos envía solo el más reciente (activando el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y cancela los demás; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre pasos atrasados. listar_recordatorios_programados muestra el total real y los atrasados: si los atrasados crecen, la capacidad (tope/hora × horas) no cubre la demanda. cancelar_recordatorios cancela uno, una selección por ids o un lote por filtro (cliente, tipo, producto, atraso): en lote primero soloContar y confirmación del dueño. editar_recordatorio cambia el texto, la multimedia o la hora de UN recordatorio pendiente (en el panel: Recordatorios → Programados → ✎ Editar); para cambiar muchos, cambia la secuencia. El listado va por páginas (pagina, hayMas, siguientePagina): el total real es `total`, nunca el número de filas mostradas. SEGUIMIENTO INTELIGENTE (configurar_recordatorios {resume, postpone, aiReview}; las tres nacen apagadas): «no repetir pasos» hace que la secuencia continúe en el paso siguiente cuando el cliente responde y vuelve a callar; «posponer a pedido» da al agente la herramienta posponer_seguimiento (un ítem con pospuesto:true es ese mensaje; mientras está vigente no salen otros recordatorios a ese cliente); «revisión con IA» lee el chat antes de enviar y puede omitir un paso (cancelado con motivo «Omitido por revisión IA: …»), gasta consultas de IA y tiene tope diario. Si el dueño se queja de recordatorios que ignoran la conversación o repiten mensajes, explícale estas tres opciones con ver_configuracion → recordatorios.seguimientoInteligente y actívalas solo con su confirmación.\n" +
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). El Inbox del panel muestra los últimos 100 contactos sin colocar con «Cargar más» y búsqueda por nombre/teléfono; los clientes siguen existiendo aunque no estén en pantalla. CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas; con quitarRespuestasFlujo borra las respuestas del chatbot 📝 que se ven en la tarjeta y en Contacto — el agente las volverá a preguntar; solo tras confirmación) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar). CALENDARIO: tras cada cita confirmada por el agente o un flujo, el cliente recibe por WhatsApp enlaces para agregarla a Google Calendar / iPhone (crear_cita devuelve esos enlaces en 'calendario' para que el dueño los pegue si la creó a mano) y, si tiene correo en su ficha, una invitación por email. El dueño ve TODAS sus citas y bloqueos en su propio calendario suscribiendo la URL ICS de Empresa → Agenda → «Calendario en tu teléfono» (iPhone: Ajustes → Calendario → Cuentas → Añadir cuenta → Otro → Añadir calendario suscrito; Google Calendar: Otros calendarios → + → Desde URL; Outlook: Agregar calendario → Suscribirse desde web). Es de UN solo sentido (FlowApp → calendario) y se refresca cada ~1 h según el dispositivo; no hay sincronización con Google OAuth. VIDEOLLAMADA (citas online): el dueño pega un enlace FIJO de Meet/Zoom en el servicio (actualizar_producto verticalData.meetingUrl) o uno por defecto para todo el negocio (configurar_empresa meetingUrl); con eso el cliente recibe '🎥 Enlace de la videollamada' junto con los enlaces de calendario al confirmar/reprogramar, en los recordatorios, en el evento del calendario (como ubicación) y en el correo. No se envía si la cita quedó como presencial (modality) o si no hay enlace. Para crear la sala fija de Meet: meet.google.com → «Nueva reunión» → «Crear una reunión para más tarde» → copiar el enlace (los clientes piden unirse y el dueño los admite; Google borra la sala si pasa 1 año sin usarse). crear_cita devuelve 'calendario.meetingUrl'. Aún no hay enlace único por cita (eso requeriría conectar Google con OAuth). REPROGRAMAR: el agente ve en su prompt la cita vigente del cliente y la MUEVE con reprogramar_cita; agendar_servicio no crea una segunda cita si ya hay una vigente (solo con adicional:true). Si el dueño ve citas duplicadas de antes de este cambio, cancele la vieja con actualizar_cita.",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. DEFAULTS SEGUROS si no se indica otra cosa: 45–90 s entre contactos, pausa 180–300 s cada 10, tope 60/día (cuenta todas las campañas del negocio), horario 09:00–21:00. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 60–120 s); en números nuevos recomienda tope diario 30–50 y subirlo de a poco; sin spintax todos reciben el mismo texto (pide ≥3 variantes en saludo, verbo y cierre; nunca en precios ni links). PROTECCIONES AUTOMÁTICAS: solo UNA campaña en curso por negocio; si 5 envíos seguidos fallan se pausa sola (pauseReason failures) y avisa al dueño por WhatsApp. Flujo seguro OBLIGATORIO: previsualizar_audiencia_campana (total real tras exclusiones) → crear borrador → mostrar total + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible) → ver_campana para el seguimiento (cómo va, por qué espera, fallidos) → pausar_campana / reanudar_campana (reversibles) o cancelar_campana (irreversible, confirmación con el nombre). MULTIMEDIA EN CAMPAÑAS: para adjuntar algo ya subido (archivo de producto, video de un recordatorio, banner de presentación) usa listar_recursos y pasa su url como mediaUrl en los mensajes — en el panel es el botón 'Insertar recurso' del paso Mensajes.",
   "- FLUJOS — secuencia OBLIGATORIA: (1) ver_bloques_flujo y ver_crm ANTES de diseñar (nunca inventes ids: usa nombres o los ids reales); (2) propón al dueño el flujo en lenguaje llano — qué pregunta y qué opciones numeradas verá el cliente (muéstrale el texto tal cual le llegará), qué etiqueta/columna pone cada rama, cuándo avisa al dueño, si agenda cita — y espera su confirmación; (3) crear_flujo con soloValidar=true para comprobar, luego sin él; (4) muéstrale el link /flujos/<id> y las warnings; (5) activar_flujo SOLO tras confirmación explícita, avisando que en modo FLOW el bot calla si ningún flujo se dispara (en HYBRID responde el agente) y que el modo se cambia con configurar_empresa botMode; (6) para modificar uno existente, ver_flujo primero y devuelve el grafo COMPLETO conservando ids y posiciones. GOTCHAS: en HYBRID termina el flujo de calificación con to-agent (clientText opcional + note con lo que el agente debe hacer) en vez de handoff, salvo que el dueño quiera atender él; las respuestas del flujo (saveVariable) quedan en la ficha del cliente (Conversaciones → Contacto, tarjeta del CRM, ver_cliente/leer_conversacion) y el agente las recibe como contexto; si el dueño capta leads por Meta Ads, propón trigger onAdLead (no keywords) y acciones CRM en el anuncio (configurar_anuncio); etiquetas según rango (presupuesto, tipo de cliente) requieren un bloque answers (opciones numeradas; el cliente responde con el número o el nombre) con una rama por opción, no question libre; en answers el message es SOLO la pregunta: la lista «1. … 2. …» la agrega el sistema y NUNCA se crean opciones separadas para «1»,«2»… (duplicarían ramas); para menús de 7+ opciones usa list; BOTONES: answers/list son texto numerado, pero el bloque poll envía una ENCUESTA NATIVA de WhatsApp (botonera real, 2-12 opciones, un tap; solo por SMS Tools, en Meta/chat web se degrada sola a menú numerado) — propón poll cuando el dueño pida botones; el agente IA NO envía encuestas (solo los flujos); las variables guardadas (saveVariable) solo llegan al dueño si el notifyText del handoff las incluye con {{variable}}; book-appointment necesita un servicio con durationMin; un flujo de captación típico: answers (qué necesita, una opción por servicio) → crm-add-tags → crm-move → answers (tipo/presupuesto) → crm-add-tags → question (descripción) → to-agent (HYBRID) o handoff con aviso que incluya {{nombre}} {{telefono}} y las variables (ver_bloques_flujo trae un EJEMPLO completo).",
@@ -5480,13 +5622,13 @@ const SYSTEM_GUIDE = [
   "- Agente IA (/agente): pestañas Modelo (proveedor, modelo, temperatura, API keys) · Comportamiento (sub-pestañas Prompt, Estilo de venta, Reglas, Catálogo) · Bot y avisos (sub-pestañas Modo del bot [modo de operación AI/FLOW/HYBRID y a quién responde: abierto o solo números permitidos], Firma y ritmo, Avisos al dueño [WhatsApp de avisos], Atención humana [números sin respuesta del bot, pase tras la venta, chats en manos de un humano]) · CRM automático · Probar (simulador y prueba de envío real). Un solo botón «Guardar cambios» para todo. Detalle: prompt del agente, estilo, comportamiento comercial, PROVEEDOR DE IA (OpenAI, Anthropic Claude o Google Gemini), modelo y API keys (necesarias para el agente y para este copiloto). Cambiar de proveedor pide ingresar la API key de ese proveedor. Modelos Claude disponibles: claude-haiku-5-5 (rápido y económico, recomendado), claude-sonnet-5-5 (alta calidad) y claude-opus-5-5 (máxima calidad, más caro); en los Claude 5.x la temperatura no aplica (el panel la deshabilita). Las notas de voz de WhatsApp se transcriben con OpenAI (Whisper) y las imágenes del copiloto se generan con OpenAI: si el proveedor es Claude/Gemini hay un campo aparte y opcional para una key de OpenAI para audios e imágenes — sin ella los audios no se transcriben (el agente pide al cliente que lo escriba y el dueño recibe un aviso por WhatsApp como máximo una vez al día) ni se generan imágenes; si la transcripción falla por algo puntual se reintenta una vez; el resto (agente, comprobantes, copiloto) corre con el proveedor elegido. HERRAMIENTA DE CRM DEL AGENTE (Agente IA → pestaña «CRM automático»; por chat configurar_agente crmTool): APAGADA por defecto; cuando se activa, el agente puede mover al cliente SOLO a las columnas permitidas y poner/quitar SOLO las etiquetas permitidas de UN tablero, y SOLO cuando se cumple la regla 'cuando' escrita para cada una (obligatoria); además 'solo avanzar' (no retrocede columnas), tope de acciones por turno (default 1), rastro en Notas del cliente y aviso por WhatsApp al dueño en cada cambio. Buenas prácticas al proponerla: columnas de hitos conversacionales (p. ej. «Propuesta enviada» cuando pide la cotización por escrito, «Reunión agendada» cuando la cita quedó confirmada, «Perdido / En pausa» cuando dice explícitamente que no le interesa) y etiquetas de temperatura (p. ej. «🔥 Caliente» cuando pide precio/fecha/propuesta); NO permitir columnas de entrada (las maneja el flujo/anuncio) ni de pago/ganado (las maneja la validación de comprobantes). Propón las reglas por escrito y actívala SOLO tras confirmación.",
   "- MODOS DEL BOT (Agente IA → Bot y avisos → Modo del bot; configurar_empresa botMode): AI = el agente IA conversa libre con el catálogo (recomendado para vender); FLOW = solo flujos guiados por bloques (predecible; si ningún flujo se dispara el bot calla; handoff pausa para humano); HYBRID = el flujo recibe y califica (botones, etiquetas, columnas, origen por anuncio) y luego el agente IA continúa con esas respuestas como contexto (bloque to-agent) — si ningún flujo se dispara, responde el agente. Recomienda HYBRID para servicios/leads que primero se califican y luego se conversan; AI y HYBRID requieren key de IA (solo desde el panel).",
   "- Flujos de chatbot (/flujos): flujos guiados por bloques (módulo Flujos) que corren cuando el bot está en modo FLOW o HYBRID. Puedes CREARLOS y EDITARLOS por chat: ver_bloques_flujo (bloques, reglas y datos reales) → diseña → crear_flujo / editar_flujo (nacen INACTIVOS, link /flujos/<id>) → activar_flujo. El editor visual del panel sigue disponible para retocarlos. REPORTES programados (correo/WhatsApp, diario/semanal/mensual): configurar_reportes (ver, cambiar, enviar prueba). SUSCRIPCIONES (STREAMER): gestionar_suscripcion (crear/renovar/cancelar) y el INVENTARIO de cuentas con ver_inventario_streaming / actualizar_inventario_streaming (agregar, editar, eliminar credenciales). PÍXEL de la tienda: configurar_pixel_tienda enciende/apaga el píxel si CAPI ya está configurado en Integraciones (tokens solo desde el panel).",
-  "- Recordatorios (/recordatorios): pestañas Secuencias (sub-pestañas Abandono de carrito · Dejado en visto) · Horario y ritmo · Programados; un solo «Guardar cambios». Mensajes programados (carrito abandonado, dejado en visto, recordatorios de cita, renovaciones). ANTI-BLOQUEO (pestaña Horario y ritmo): lo que cae fuera de horario NO sale todo a la hora de apertura — se dispersa al azar en los primeros minutos (spreadMinutes, default 90) y los recordatorios de la empresa salen espaciados (pacing 25-70 s al azar, tope 60/hora; si hay una campaña enviando, el ritmo se duplica). Los mensajes admiten SPINTAX {Hola|Buenas|Qué tal} para variar el texto entre clientes. Si el usuario sufrió un bloqueo de WhatsApp: recomienda ritmo 60-120 s, tope 20-30/h y dispersión 120 min la primera semana, textos con spintax y {nombre}, y no programar campañas en la misma franja que los recordatorios.",
+  "- Recordatorios (/recordatorios): pestañas Secuencias (sub-pestañas Abandono de carrito · Dejado en visto) · Seguimiento inteligente (no repetir pasos, posponer cuando el cliente lo pide, revisar con IA antes de enviar; un cuadro «Con esta configuración:» explica en palabras lo que va a pasar y muestra el contador de revisiones de hoy) · Horario y ritmo · Programados (los pospuestos llevan la etiqueta «Pospuesto a pedido del cliente»); un solo «Guardar cambios». Mensajes programados (carrito abandonado, dejado en visto, recordatorios de cita, renovaciones). ANTI-BLOQUEO (pestaña Horario y ritmo): lo que cae fuera de horario NO sale todo a la hora de apertura — se dispersa al azar en los primeros minutos (spreadMinutes, default 90) y los recordatorios de la empresa salen espaciados (pacing 25-70 s al azar, tope 60/hora; si hay una campaña enviando, el ritmo se duplica). Los mensajes admiten SPINTAX {Hola|Buenas|Qué tal} para variar el texto entre clientes. Si el usuario sufrió un bloqueo de WhatsApp: recomienda ritmo 60-120 s, tope 20-30/h y dispersión 120 min la primera semana, textos con spintax y {nombre}, y no programar campañas en la misma franja que los recordatorios.",
   "- Pagos (/pagos): pestañas Métodos manuales (Yape/Plin/cuentas que el bot ofrece) · Modo de cobro · Pagos automáticos (resumen de Mercado Pago y ValidPay con enlaces a Integraciones). El WhatsApp de avisos (notificationPhone) se edita en Agente IA → Bot y avisos → Avisos al dueño.",
   "- Canales (/whatsapp, antes «WhatsApp API»): pestañas WhatsApp (sub-pestañas SMS Tools (QR) · API de Meta · Mensajes; el proveedor se activa desde su sub-pestaña; la prueba de envío real está al final de la sub-pestaña del proveedor activo) · Chat web (módulo Chat web) · Reservas online (rubros de servicios). /chat-web y /reservas-online redirigen aquí.",
   "- Chat web (Canales → pestaña Chat web, /whatsapp?tab=chat-web): widget de chat con IA para la web del negocio — genera un snippet <script> con token para pegar en su página, con dominios permitidos, color y bienvenida (módulo Chat web).",
   "- Tienda web (/tienda-web): página pública de venta del negocio en <slug>.flowapp.pe (módulo Tienda web) que muestra automáticamente los productos DIGITALES del catálogo que tengan entrega por correo activa; el comprador paga con Mercado Pago (tarjeta) o con Yape/Plin (ve los números de Pagos, sube la captura del comprobante y el sistema la lee con visión y la cruza con los comprobantes pendientes igual que el chat; si no la valida sola queda EN_REVISION, el sistema reintenta ~10 min y avisa al dueño por WhatsApp, y el dueño la aprueba o rechaza en Tienda web → Pedidos o con aprobar_pedido_tienda / rechazar_pedido_tienda) y recibe el acceso por correo (y por WhatsApp si deja su número); cada compra crea un comprobante APROBADO con canal 'tienda web' y avisa al dueño. Requisitos: identificador (slug) válido en Empresa, al menos un cobro (Mercado Pago conectado en Integraciones y habilitado para el canal tienda, o métodos Yape/Plin en Pagos con la opción 'Aceptar Yape/Plin' de la tienda activa) y productos con entrega por correo. Se consulta con ver_tienda y se configura con configurar_tienda (título, frase, color, WhatsApp del botón, productos, manualPaymentsEnabled, portada); configurar_tienda es PARCIAL: fusiona con lo guardado, solo cambia lo que mandas (null borra) y las listas se reemplazan completas, así que nunca mandes productOverrides de productos que no cambian. En el panel, Tienda web tiene pestañas (ver más abajo); el carrusel de portada admite hasta 5 productos destacados con banner y 3 estilos (ambiente, tarjeta o póster) con titular resaltado, bullets y prueba social; los Yape/Plin en revisión se aprueban en Pedidos. La tienda pública tiene barra de anuncio (configurar_tienda announcement), cabecera oscura con buscador y carrito, carrusel (portada), franja de confianza con iconos, COMBOS POR VOLUMEN (volumePricing: tramos '3 o más −20 %' y 'todos los packs' a precio fijo; el descuento se calcula en el checkout y se ve en tarjetas, barra de carrito fija, cajón del carrito con barra de progreso y 'Completa tu pedido'), checkout dentro del cajón, y cada ficha es una LANDING DE VENTAS (productOverrides[id].landing: titular gancho, video, cifras, dolor/solución, 'Lo que recibes hoy' con includes/bonos, muestra, testimonios, checkout inline con garantía (salesSettings.guarantee), ORDER BUMP a precio especial, cupón, FAQ y barra fija inferior). Color del botón de compra, título del catálogo, posición de la barra fija de compra de la landing (salesSettings.landingBar: arriba/abajo/ambas) y PIE configurable (salesSettings.footer: tema automático/oscuro/claro, bloque de suscripción con sus textos y línea del negocio (nombre, frase, pagos, WhatsApp, nota) activables por separado) en salesSettings. Cada recurso de muestra puede llevar un botón de compra debajo (media[].cta). Los botones de compra tienen un efecto configurable (salesSettings.ctaEffect). El panel de Tienda web tiene pestañas Resumen · Apariencia (Identidad, Cobros y contacto, Catálogo) · Productos (visibles, orden, Personalizar) · Portada (Carrusel, Franja, Precios) · Landing (Barra de compra, Efecto, Garantía, Pie) · Combos · Cupones · Correos (Automáticos, Promociones, Historial) · Pedidos. Cada producto puede tener portada, varias categorías (etiquetas), descripción corta, orden y RECURSOS DE MUESTRA (PDF, archivos, video, imágenes que el comprador ve en la ficha) propios para la tienda (Apariencia y cobro → Productos visibles → Personalizar) sin tocar el producto que usa el agente de WhatsApp (configurar_tienda productOverrides). ARCHIVOS PROTEGIDOS: en el paso Archivos del producto, 'Solo por enlace firmado (privado)' saca el archivo de la URL pública; se entrega como enlace firmado de 7 días en el correo, en la página de gracias y en el chat (actualizar_producto files[].privateDownload=true). Las FAQ de la ficha salen del producto (se pueden ocultar algunas solo en la tienda con landing.faqHiddenIds) más preguntas propias de la tienda (landing.faqExtra); los recordatorios por correo admiten cupón por producto (couponByProduct). La portada de cada producto en la tienda se puede cambiar u ocultar (productOverrides imageUrl/hiddenImages) sin tocar el producto; los recursos de muestra se previsualizan en el panel. CORREOS AUTOMÁTICOS (Tienda web → Correos): checkout abandonado (hasta 3 correos cuando un pedido queda sin pagar; se cancelan al pagar), post-compra a los N días con el producto relacionado y cupón, y bienvenida a quien se suscribe en el pie de la tienda; cada correo lleva enlace de baja y nunca se envía a quien se dio de baja; se configuran con configurar_tienda emailReminders y se consultan en ver_tienda → correos. PROMOCIONES POR CORREO (Tienda web → Correos → Promociones): campañas a compradores, suscriptores, contactos de WhatsApp con correo, por etiqueta, contactos elegidos a mano, correos pegados o CSV con campos propios (campo1..3, cupón por persona); solo a quien tiene consentimiento y no se dio de baja; ritmo y tope diario automáticos; métricas de clics y compras atribuidas (listar_campanas_correo, previsualizar_audiencia_correo, crear_campana_correo, enviar_prueba_campana_correo). CUPONES: ver_cupones / crear_cupon / editar_cupon / desactivar_cupon (también en Tienda web → Cupones); el comprador los escribe en el checkout. CUENTA REGRESIVA: si un producto tiene oferta con offerEndsAt, la tienda muestra 'Termina en hh:mm:ss' automáticamente. La página de gracias ofrece el producto RELACIONADO (cross-sell del producto comprado, si está visible en la tienda) como upsell, y el panel (Resumen) muestra métricas con los mismos filtros del dashboard (hoy, ayer, 7/30 días, mes, 12 meses, rango) y por producto, con el EMBUDO visitas → vistas → carrito → pago → compras y el % de cada paso (ver_tienda → metricas, con dias o desde/hasta y productId). Los pedidos de prueba se pueden ELIMINAR con lo relacionado (Pedidos → Eliminar o eliminar_pedido_tienda, tras confirmación). Extras: botón 'Comprar por WhatsApp' en cada producto (usa el WhatsApp del botón), carrito multi-producto, previews con imagen al compartir el link, y píxel de Meta: en Integraciones → Meta Conversions API, el check 'Insertar el píxel en la tienda web' usa el Dataset ID como píxel (PageView/ViewContent/AddToCart/InitiateCheckout/Purchase, con advanced matching del correo/teléfono al iniciar el checkout) y reporta cada compra web por CAPI sin duplicar; en el dashboard las ventas de la tienda aparecen como fuente 'Tienda web' (solo desde el panel; el copiloto no gestiona tokens). Si en Integraciones la comisión de Mercado Pago la asume el CLIENTE, la tienda muestra el total con recargo en el botón y una nota antes de ir a Mercado Pago (Yape/Plin nunca lleva recargo).",
   "- Probar el agente: Agente IA → pestaña Probar (/agente?tab=probar): simulador para chatear con el agente sin gastar WhatsApp real y prueba de envío real por WhatsApp. (La página Pruebas ya no existe; /pruebas redirige ahí.)",
-  "- Integraciones (/integraciones): pestañas Pagos automáticos (sub-pestañas Conexiones [tabla con interruptores Activa/Auto-aprobar y menú ⋯], ValidPay, Mercado Pago, Webhook personalizado) · Meta (sub-pestañas Conversions API, Píxel en la tienda) · Copiloto (MCP) · Historial (eventos recibidos por conexión). La cabecera muestra la URL del webhook de pagos y la checklist de conexiones. Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en la sub-pestaña Mercado Pago se elige POR CANAL si se usa en el cobro por chat y/o en la tienda web — p. ej. solo tienda), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
+  "- Integraciones (/integraciones): pestañas Pagos automáticos (sub-pestañas Conexiones [tabla con interruptores Activa/Auto-aprobar y menú ⋯], ValidPay, Mercado Pago, Webhook personalizado) · Meta (sub-pestañas Conversions API, Píxel en la tienda) · Copiloto (MCP) · Historial (eventos recibidos por conexión). La cabecera muestra la URL del webhook de pagos y la checklist de conexiones. Mercado Pago (links de pago automáticos: se pega el Access Token APP_USR-… de mercadopago.com.pe/developers; módulo Mercado Pago; en la sub-pestaña Mercado Pago se elige el link en el chat de WhatsApp con tres opciones: Apagado, Siempre (dentro del mensaje de cobro) o Solo si lo piden (el agente lo envía aparte cuando el cliente pide otro banco o tarjeta), y aparte si se usa en la tienda web; por chat: configurar_pagos {mpChatMode, mpStoreEnabled}), ValidPay para Yape/Plin automático (secret + webhook; módulo Webhooks) el CONECTOR MCP: una URL para configurar FlowApp Y analizar los datos del negocio conversando desde Claude (claude.ai/Claude Desktop) o Cursor — se activa, se copia la URL y se regenera el token ahí mismo; y META CONVERSIONS API: reporta cada venta cerrada al anuncio Meta de origen (ctwa_clid) para que Meta optimice las campañas hacia COMPRADORES (el token es un SECRETO: se configura solo en el panel, con Dataset ID del Administrador de eventos).",
   "- Respuestas rápidas (/respuestas-rapidas, módulo Respuestas rápidas): biblioteca de plantillas con multimedia y acciones; también se ven y envían desde la pestaña Respuestas del chat.",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
   "",
@@ -5539,7 +5681,7 @@ export async function buildSystem(companyId: string, opts: { mode?: "panel" | "o
     "- DIAGNÓSTICO: si el dueño reporta que el bot responde a todos 'Disculpa, estoy teniendo un inconveniente', casi siempre es el PROVEEDOR DE IA fallando: sin créditos/saldo (recargar en la cuenta del proveedor, ej. OpenAI → Billing) o API key inválida — se revisa/corrige en el panel (Agente IA). El sistema avisa al dueño por WhatsApp al primer fallo accionable y de nuevo al recuperarse; el agente revive solo al corregir la causa, sin reiniciar nada.",
     "- DISEÑADOR: con generar_imagen creas banners de oferta, fotos de producto y creativos con IA (se guardan en el servidor y su URL sirve en cualquier configuración: banner de presentación, pasos de recordatorio, followups, respuestas rápidas, campañas, o como foto de producto vía adjuntar_foto_producto). Cuesta dinero al negocio (usa su key de OpenAI) → SOLO tras confirmación. Flujo OBLIGATORIO: generar → mostrar la URL al usuario → su aprobación → adjuntar → verificar (previsualizar_ficha). Textos del banner van LITERALES entre comillas en el prompt. Si el negocio no tiene key de OpenAI, deriva al panel (Agente IA); JAMÁS pidas ni recibas keys por chat.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
-    "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
+    "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). REGLA: después de activar «posponer a pedido» (postpone) o el link de Mercado Pago «solo si lo piden» (mpChatMode ON_REQUEST), propón al dueño la línea para el prompt del agente y guárdala con configurar_agente tras su OK: el sistema le da la herramienta al agente, pero CUÁNDO usarla es política del negocio y vive en su prompt. Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",
     "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana, eliminar_cliente, reiniciar_conversacion, iniciar_conversacion y cancelar_recordatorios: SOLO si lo pidió explícitamente y confirmó. Nunca elimines ni escribas a números nuevos por iniciativa propia.",

@@ -198,6 +198,8 @@ export type PendingReminderFilter = {
   customerId?: string;
   /** Solo los que llevan más de 1 h de atraso (misma condición que el contador `atrasados`). */
   lateOnly?: boolean;
+  /** Solo los que llevan más de N horas de atraso (se filtra en la consulta: permite paginar). */
+  lateMoreThanHours?: number;
 };
 
 /**
@@ -205,8 +207,8 @@ export type PendingReminderFilter = {
  * viejas sin dueAt, sendAt hace más de 1 h. El tope por hora corre sendAt hacia adelante,
  * por eso no basta con sendAt. dueAt es ISO ⇒ la comparación de texto equivale a la de fecha.
  */
-export function overdueRemindersWhere(now = new Date()): Prisma.ScheduledMessageWhereInput {
-  const hourAgo = new Date(now.getTime() - 60 * 60_000);
+export function overdueRemindersWhere(now = new Date(), hours = 1): Prisma.ScheduledMessageWhereInput {
+  const hourAgo = new Date(now.getTime() - hours * 60 * 60_000);
   return {
     OR: [
       { metadata: { path: ["dueAt"], lt: hourAgo.toISOString() } },
@@ -220,12 +222,14 @@ export function pendingRemindersWhere(companyId: string, opts: PendingReminderFi
   const q = (opts.q ?? "").trim();
   const productId = (opts.productId ?? "").trim();
   const types = opts.type ? [opts.type] : opts.types?.length ? opts.types : LISTABLE_TYPES;
+  const lateH = Number(opts.lateMoreThanHours);
+  const late = Number.isFinite(lateH) && lateH > 0 ? overdueRemindersWhere(new Date(), lateH) : opts.lateOnly ? overdueRemindersWhere() : {};
   return {
     companyId,
     status: ScheduledMessageStatus.PENDING,
     type: { in: types.filter((t) => LISTABLE_TYPES.includes(t)) },
     ...(opts.customerId ? { customerId: opts.customerId } : {}),
-    ...(opts.lateOnly ? overdueRemindersWhere() : {}),
+    ...late,
     // El productId se guarda en metadata al agendar el recordatorio (scheduleAutoReminders).
     ...(productId ? { metadata: { path: ["productId"], equals: productId } } : {}),
     ...(q
@@ -263,7 +267,7 @@ export async function cancelRemindersByFilter(
   count: number;
   muestra: Array<{ id: string; type: ScheduledMessageType; dueAt: Date; customer: { name: string | null; phone: string } }>;
 }> {
-  const where = pendingRemindersWhere(companyId, { ...filter, types: filter.type ? undefined : FOLLOWUP_TYPES });
+  const where = pendingRemindersWhere(companyId, { ...filter, lateMoreThanHours: undefined, types: filter.type ? undefined : FOLLOWUP_TYPES });
   const rows = await prisma.scheduledMessage.findMany({
     where,
     orderBy: { sendAt: "asc" },
@@ -299,6 +303,8 @@ export type PendingReminderRow = {
   stepCount: number | null;
   /** Tipo del adjunto (metadata.mediaType: image|video|audio|pdf|document), si hay mediaUrl. */
   mediaType: string | null;
+  /** Pospuesto a pedido del cliente (tool posponer_seguimiento del agente). */
+  postponed: boolean;
   customer: { name: string | null; phone: string };
 };
 
@@ -355,6 +361,7 @@ export async function listPendingReminders(
       stepIndex: num(m.stepIndex),
       stepCount: num(m.stepCount),
       mediaType: r.mediaUrl && typeof m.mediaType === "string" ? m.mediaType : null,
+      postponed: m.postponed === true,
     };
   });
   return { items, total, offset, limit, porTipo, atrasados };
@@ -436,6 +443,7 @@ export async function updateScheduledReminder(
     stepIndex: num(m.stepIndex),
     stepCount: num(m.stepCount),
     mediaType: updated.mediaUrl && typeof m.mediaType === "string" ? m.mediaType : null,
+    postponed: m.postponed === true,
   };
 }
 
@@ -456,7 +464,7 @@ export function guessMediaType(url: string): string {
  */
 export async function listReminderHistory(
   companyId: string,
-  opts: { status?: ScheduledMessageStatus; from?: Date; to?: Date; limit?: number },
+  opts: { status?: ScheduledMessageStatus; from?: Date; to?: Date; limit?: number; skip?: number },
 ): Promise<
   Array<{
     id: string;
@@ -480,6 +488,7 @@ export async function listReminderHistory(
       ...(range ? { [timeField]: range } : {}),
     },
     orderBy: { [timeField]: "desc" },
+    skip: Math.max(0, Math.floor(opts.skip ?? 0)),
     take: Math.min(Math.max(opts.limit ?? 200, 1), 500),
     select: {
       id: true,
@@ -491,6 +500,19 @@ export async function listReminderHistory(
       body: true,
       customer: { select: { name: true, phone: true } },
     },
+  });
+}
+
+/** Total del historial para el mismo filtro de listReminderHistory (paginación del Copiloto). */
+export async function countReminderHistory(
+  companyId: string,
+  opts: { status?: ScheduledMessageStatus; from?: Date; to?: Date },
+): Promise<number> {
+  const status = opts.status ?? ScheduledMessageStatus.SENT;
+  const timeField = status === ScheduledMessageStatus.SENT ? "sentAt" : "sendAt";
+  const range = opts.from || opts.to ? { gte: opts.from, lte: opts.to } : undefined;
+  return prisma.scheduledMessage.count({
+    where: { companyId, status, type: { in: LISTABLE_TYPES }, ...(range ? { [timeField]: range } : {}) },
   });
 }
 

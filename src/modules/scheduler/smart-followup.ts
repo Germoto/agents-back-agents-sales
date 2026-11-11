@@ -57,6 +57,31 @@ export function normalizeSmartFollowup(raw: unknown): SmartFollowup {
   };
 }
 
+/** "24 horas", "3 días": la espera por defecto de posponer, en palabras. */
+export function waitInWords(hours: number): string {
+  if (hours >= 48 && hours % 24 === 0) return `${hours / 24} días`;
+  return hours === 1 ? "1 hora" : `${hours} horas`;
+}
+
+/**
+ * Frases que interpretan la configuración para el dueño (Copiloto → ver_configuracion).
+ * El panel arma las suyas con el mismo sentido (cuadro «Con esta configuración:»).
+ */
+export function describeSmartFollowup(s: SmartFollowup): { resume: string; postpone: string; aiReview: string } {
+  const hh = `${String(s.postpone.defaultHour).padStart(2, "0")}:00`;
+  return {
+    resume: s.resume.enabled
+      ? "Si un cliente responde y vuelve a callar, la secuencia sigue en el paso siguiente: no repite los pasos que ya recibió (memoria de 30 días; una compra aprobada o reiniciar la conversación la reinicia)."
+      : "Apagado: cada vez que el cliente responde y calla, la secuencia vuelve a empezar desde el paso 1.",
+    postpone: s.postpone.enabled
+      ? `Si el cliente pide que le escriban otro día, el agente programa UN mensaje para ese momento (si dice el día sin hora, a las ${hh}; si solo dice «después», en ${waitInWords(s.postpone.defaultHours)}). Hasta esa fecha no salen recordatorios y la secuencia normal empieza a contar desde ahí.`
+      : "Apagado: el agente no puede pausar los recordatorios aunque el cliente pida que le escriban después.",
+    aiReview: s.aiReview.enabled
+      ? `Antes de cada recordatorio a un cliente que respondió después del recordatorio anterior, la IA lee el chat y decide si enviarlo. Máximo ${s.aiReview.dailyLimit} revisiones al día; cada una es una consulta corta a la IA del negocio. El primer recordatorio a cada cliente nunca se revisa. Si la IA falla o se alcanza el tope, el recordatorio se envía.`
+      : "Apagada: no genera gasto. Los recordatorios salen sin leer el chat.",
+  };
+}
+
 /**
  * Pasos que faltan enviar y a cuántos segundos (desde el momento base) sale cada uno.
  * `lastSentIndex` = índice del último paso que el cliente YA recibió (-1 = ninguno).
