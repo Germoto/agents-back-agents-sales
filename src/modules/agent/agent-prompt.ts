@@ -13,6 +13,7 @@ import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
 import { emailDeliveryAvailable, crmToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable } from "./agent-tools";
 import { activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
+import { mpChatOn, mpLinkOnRequest } from "./payment-methods";
 import { deliveryDriveRefs, driveSearchEnabled } from "../../lib/google-drive";
 import { symbolFor } from "../../lib/currency";
 
@@ -262,13 +263,26 @@ function renderCatalog(
 }
 
 function renderPaymentMethods(payment: BotConfig["payment"]): string {
-  if (!payment.enabled || !payment.methods.length) return "(pagos no configurados)";
+  const mpOn = mpChatOn(payment);
+  if (!payment.enabled || (!payment.methods.length && !mpOn)) return "(pagos no configurados)";
   // Solo los métodos disponibles, SIN número ni titular: los datos concretos los
   // envía la herramienta enviar_metodos_pago. Si el modelo los tuviera aquí, podría
   // soltarlos en texto libre y saltarse el paso que marca la conversación como
   // esperando pago (lastPaymentPromptAt) — pasó en prod.
-  const names = payment.methods.map((m) => `- ${m.method}`).join("\n");
-  return `${names}\n(Los números de cuenta y titulares NO los conoces: los envía la herramienta enviar_metodos_pago.)`;
+  const lines = payment.methods.map((m) => `- ${m.method}`);
+  // Mercado Pago en el chat: solo se describe la capacidad; cuándo ofrecerlo lo
+  // deciden las instrucciones del negocio.
+  if (mpOn) {
+    lines.push(
+      mpLinkOnRequest(payment)
+        ? "- Mercado Pago (link de pago: tarjeta y otros medios; la confirmación es automática). NO va en el mensaje de cobro: se envía aparte con enviar_metodos_pago soloLink:true cuando el cliente lo pide."
+        : "- Mercado Pago (link de pago: tarjeta y otros medios; la confirmación es automática). Va dentro del mensaje de cobro; con enviar_metodos_pago soloLink:true se envía solo el link.",
+    );
+  }
+  const note = payment.methods.length
+    ? "(Los números de cuenta y titulares NO los conoces: los envía la herramienta enviar_metodos_pago.)"
+    : "(El link de pago lo envía la herramienta enviar_metodos_pago; tú no lo conoces.)";
+  return `${lines.join("\n")}\n${note}`;
 }
 
 // Guía de comportamiento según el rubro del negocio (Company.vertical).

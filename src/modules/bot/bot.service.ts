@@ -244,6 +244,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
         feeIgv: paymentConfig.mpFeeIgv,
         // Canal chat: el link solo se agrega al cobro si está habilitado para el chat.
         chatEnabled: paymentConfig.mpChatEnabled,
+        // ALWAYS = el link va en el mensaje de cobro; ON_REQUEST = solo si el cliente lo pide.
+        chatMode: paymentConfig.mpChatMode === "ON_REQUEST" ? "ON_REQUEST" : "ALWAYS",
       },
     },
     agent: {

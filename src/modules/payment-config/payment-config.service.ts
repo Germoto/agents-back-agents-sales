@@ -31,9 +31,10 @@ function mapMpConfig(config: {
   mpFeeIgv: boolean;
   mpChatEnabled: boolean;
   mpStoreEnabled: boolean;
+  mpChatMode: string;
 } | null) {
   if (!config) {
-    return { enabled: false, connected: false, feeMode: "TENANT", feePercent: 3.99, feeFixed: 1, feeIgv: true, chatEnabled: true, storeEnabled: true };
+    return { enabled: false, connected: false, feeMode: "TENANT", feePercent: 3.99, feeFixed: 1, feeIgv: true, chatEnabled: true, storeEnabled: true, chatMode: "ALWAYS" };
   }
   const plain = config.mpAccessToken ? decryptCredential(config.mpAccessToken) : "";
   return {
@@ -46,6 +47,7 @@ function mapMpConfig(config: {
     feeIgv: config.mpFeeIgv,
     chatEnabled: config.mpChatEnabled,
     storeEnabled: config.mpStoreEnabled,
+    chatMode: config.mpChatMode === "ON_REQUEST" ? "ON_REQUEST" : "ALWAYS",
   };
 }
 
@@ -116,6 +118,7 @@ export async function updateMercadoPagoConfig(
     feeIgv: boolean;
     chatEnabled?: boolean;
     storeEnabled?: boolean;
+    chatMode?: "ALWAYS" | "ON_REQUEST";
   },
 ) {
   // Conectar o activar MP exige el módulo del paquete; desconectar siempre se permite.
@@ -131,6 +134,7 @@ export async function updateMercadoPagoConfig(
     mpFeeIgv: data.feeIgv,
     ...(data.chatEnabled !== undefined ? { mpChatEnabled: data.chatEnabled } : {}),
     ...(data.storeEnabled !== undefined ? { mpStoreEnabled: data.storeEnabled } : {}),
+    ...(data.chatMode !== undefined ? { mpChatMode: data.chatMode } : {}),
   };
 
   if (data.accessToken === null) {

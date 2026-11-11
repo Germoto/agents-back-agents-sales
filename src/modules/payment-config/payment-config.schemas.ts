@@ -31,4 +31,6 @@ export const updateMercadoPagoSchema = z.object({
   // Canales (omitidos = no cambian): link en el cobro por chat / checkout de la tienda web.
   chatEnabled: z.boolean().optional(),
   storeEnabled: z.boolean().optional(),
+  // Link en el chat (omitido = no cambia): siempre en el cobro o solo cuando el cliente lo pide.
+  chatMode: z.enum(["ALWAYS", "ON_REQUEST"]).optional(),
 });

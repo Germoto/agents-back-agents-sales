@@ -54,7 +54,7 @@ export function matchLevelArg(v: unknown): MatchLevel {
 }
 import { drivePurchased, blockedFolderIds, allowedFolderIds } from "../drive/drive-guard";
 import { decryptCredential } from "../../lib/credentials-crypto";
-import { composePaymentMethodsMessage } from "./payment-methods";
+import { composePaymentMethodsMessage, mpChatOn } from "./payment-methods";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
 import { publicStoreUrlIfLive } from "../storefront/storefront-public-url";
@@ -173,10 +173,35 @@ export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
     hidden.add("enviar_archivo_drive");
     hidden.add("obtener_muestra");
   }
-  const base = hidden.size ? TOOL_DEFINITIONS.filter((t) => !hidden.has(t.function.name)) : TOOL_DEFINITIONS;
+  let base = hidden.size ? TOOL_DEFINITIONS.filter((t) => !hidden.has(t.function.name)) : TOOL_DEFINITIONS;
+  // Con Mercado Pago encendido en el chat, enviar_metodos_pago gana el parámetro soloLink.
+  if (mpChatOn(config.payment)) {
+    base = base.map((t) => (t.function.name === "enviar_metodos_pago" ? PAYMENT_TOOL_WITH_MP_LINK : t));
+  }
   const dynamic = agentHttpActionsOf(config).map(httpActionToolDef);
   return dynamic.length ? [...base, ...dynamic] : base;
 }
+
+/** Variante de enviar_metodos_pago para negocios con Mercado Pago en el chat. */
+const PAYMENT_TOOL_WITH_MP_LINK: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "enviar_metodos_pago",
+    description:
+      "Envía al cliente los métodos de pago y el monto a pagar (del carrito o del producto seleccionado). Úsalo SOLO cuando exprese intención clara de pagar/comprar/activar. Con soloLink:true envía ÚNICAMENTE el link de pago de Mercado Pago (tarjeta y otros medios), sin los métodos manuales.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        soloLink: {
+          type: "boolean",
+          description:
+            "true = enviar solo el link de pago de Mercado Pago (mensaje corto con el monto y el link; la confirmación es automática). Para cuando el cliente quiere pagar con tarjeta u otro medio distinto a los métodos manuales, según las instrucciones del negocio.",
+        },
+      },
+    },
+  },
+};
 
 /** Acciones HTTP que el dueño marcó "disponible para el agente" (bot.service las carga). */
 export type AgentHttpAction = {
@@ -2757,8 +2782,10 @@ export async function executeTool(
         mpTitle = `Pedido (${cart.items.length} productos)`;
       }
 
+      // soloLink: el cliente pidió pagar por el link de Mercado Pago (solo si está activo en el chat).
+      const soloLink = args.soloLink === true && mpChatOn(ctx.config.payment);
       // Texto de cobro compartido (métodos manuales + link MP) — ver payment-methods.ts.
-      const { text, mpLinkIncluded } = await composePaymentMethodsMessage({
+      const { text, mpLinkIncluded, mpLinkAvailable } = await composePaymentMethodsMessage({
         companyId: ctx.companyId,
         conversationId: ctx.conversationId,
         payment: ctx.config.payment,
@@ -2769,7 +2796,26 @@ export async function executeTool(
         title: mpTitle,
         productIds: newIds.length ? newIds : chargeIds,
         simulate: ctx.simulate,
+        mpLink: soloLink ? "only" : "auto",
       });
+      // Sin link no hay nada que enviar: que el agente no lo prometa.
+      if (soloLink && !text) {
+        return JSON.stringify({
+          ok: false,
+          error:
+            "No se pudo generar el link de pago de Mercado Pago en este momento. NO le digas al cliente que se lo enviaste ni lo prometas. " +
+            (ctx.config.payment.methods.length
+              ? "Ofrécele los métodos manuales (enviar_metodos_pago sin soloLink) o, si no le sirven, deriva a un asesor (derivar_humano)."
+              : "Deriva a un asesor (derivar_humano) para que coordine el pago."),
+        });
+      }
+      if (!soloLink && !ctx.simulate && !ctx.config.payment.methods.length && !mpLinkIncluded) {
+        return JSON.stringify({
+          ok: false,
+          error:
+            "No se pudo generar el link de pago (es el único medio de pago del negocio). NO le digas al cliente que se lo enviaste; deriva a un asesor (derivar_humano) para que coordine el pago.",
+        });
+      }
       const mpLine = mpLinkIncluded ? "x" : "";
       ctx.outbox.push({ kind: "text", text });
       ctx.state.status = "ESPERANDO_PAGO";
@@ -2804,15 +2850,30 @@ export async function executeTool(
         }
       }
 
+      if (soloLink) {
+        return JSON.stringify({
+          ok: true,
+          amount: amountText,
+          sent: true,
+          mercadoPagoLink: true,
+          nota:
+            "Ya envié al cliente el monto y el link de pago de Mercado Pago. Deja tu texto final VACÍO: NO repitas el monto ni el link. La confirmación y la entrega por ese medio son AUTOMÁTICAS: no le pidas comprobante. Solo escribe algo si el cliente hizo una pregunta concreta que ese mensaje no responde (en UNA línea).",
+        });
+      }
+      const linkOnRequest = mpLinkAvailable && !mpLinkIncluded;
       return JSON.stringify({
         ok: true,
         amount: amountText,
         sent: true,
         mercadoPagoLink: Boolean(mpLine),
+        ...(linkOnRequest ? { linkMercadoPagoDisponible: true } : {}),
         nota:
           "Ya envié el monto y los métodos de pago al cliente (con la instrucción de mandar el comprobante). Deja tu texto final VACÍO: NO repitas el monto, los métodos ni 'envíame el comprobante'. Solo escribe algo si el cliente hizo una pregunta concreta que el mensaje de cobro no responde (y contéstala en UNA línea)." +
           (mpLine
             ? " Si el cliente paga por el link de Mercado Pago, la confirmación y la entrega son AUTOMÁTICAS: no le pidas comprobante por ese medio."
+            : "") +
+          (linkOnRequest
+            ? " El link de pago de Mercado Pago (tarjeta y otros medios) NO se envió en este mensaje: está disponible con enviar_metodos_pago soloLink:true si el cliente lo pide."
             : ""),
       });
     }

@@ -515,6 +515,9 @@ model PaymentConfig {
   // siendo mpEnabled + token.
   mpChatEnabled     Boolean         @default(true)
   mpStoreEnabled    Boolean         @default(true)
+  // Link en el chat: ALWAYS = dentro del mensaje de cobro (histórico);
+  // ON_REQUEST = solo cuando el cliente lo pide (el agente lo envía aparte).
+  mpChatMode        String          @default("ALWAYS")
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
   company           Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
