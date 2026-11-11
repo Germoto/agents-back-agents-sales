@@ -10,6 +10,8 @@ import { symbolFor } from "../../lib/currency";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { renderCartForOrder, variantLabelFor, type CartSummary } from "./cart.service";
+import { toDec } from "../orders/order-money";
+import type { DeliveryType, OrderAmounts } from "../shipping/shipping-config";
 
 type PaymentMode = "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL";
 
@@ -46,6 +48,72 @@ function initialStatusFor(mode: PaymentMode | undefined): {
   return { status: "PEDIDO_REGISTRADO", paymentStatus: "PENDIENTE_PAGO", paymentMethod: null };
 }
 
+/**
+ * Envío y montos del pedido cuando el negocio tiene «Envíos» encendido. Los montos los
+ * calcula quien llama (computeOrderAmounts) con la configuración del negocio.
+ */
+export interface OrderShippingInput {
+  amounts: OrderAmounts;
+  deliveryType: DeliveryType;
+  courier?: string | null;
+  agencyId?: string | null;
+  agencyName?: string | null;
+  agencyAddress?: string | null;
+  recipientDocument?: string | null;
+  recipientPhone?: string | null;
+}
+
+/** Estado inicial según la regla de cobro del tipo de entrega. */
+function initialStatusForShipping(shipping: OrderShippingInput, mode: PaymentMode | undefined): ReturnType<typeof initialStatusFor> {
+  const { chargeMode, advance } = shipping.amounts;
+  if (chargeMode === "TOTAL") {
+    return { status: "PENDIENTE_PAGO", paymentStatus: "PENDIENTE_PAGO", paymentMethod: "Pago adelantado" };
+  }
+  if (chargeMode === "ADELANTO") {
+    return {
+      status: advance > 0 ? "PENDIENTE_PAGO" : "EN_COORDINACION",
+      paymentStatus: "PENDIENTE_PAGO",
+      paymentMethod: "Adelanto y saldo",
+    };
+  }
+  // Sin cobro previo: coordinación manual conserva su estado de siempre.
+  if (mode === "MANUAL") return initialStatusFor(mode);
+  return { status: "EN_COORDINACION", paymentStatus: "PENDIENTE_PAGO", paymentMethod: "Contra entrega" };
+}
+
+/** Columnas de envío y montos del pedido. Vacío sin «Envíos»: el pedido queda como siempre. */
+function shippingColumns(shipping: OrderShippingInput | undefined, symbol: string) {
+  if (!shipping) return {};
+  const a = shipping.amounts;
+  const text = (v: string | null | undefined) => v?.trim() || null;
+  return {
+    deliveryType: shipping.deliveryType,
+    courier: text(shipping.courier)?.toUpperCase() ?? null,
+    agencyId: shipping.agencyId ?? null,
+    agencyName: text(shipping.agencyName),
+    agencyAddress: text(shipping.agencyAddress),
+    recipientDocument: text(shipping.recipientDocument),
+    recipientPhone: text(shipping.recipientPhone),
+    subtotalAmount: toDec(a.subtotal),
+    shippingAmount: toDec(a.shipping),
+    totalAmount: toDec(a.total),
+    advanceAmount: toDec(a.advance),
+    paidAmount: toDec(0),
+    total: `${symbol} ${a.total.toFixed(2)}`,
+  };
+}
+
+/** `Order.address` es obligatorio: en agencia o recojo se arma con lo que se sabe. */
+function addressFor(address: string, shipping: OrderShippingInput | undefined): string {
+  const typed = address.trim();
+  if (typed || !shipping) return typed;
+  if (shipping.deliveryType === "RECOJO") return "Recojo en tienda";
+  if (shipping.deliveryType === "AGENCIA") {
+    return [shipping.agencyName?.trim(), shipping.agencyAddress?.trim()].filter(Boolean).join(" · ") || "Agencia por confirmar";
+  }
+  return typed;
+}
+
 function emitOrderNew(
   companyId: string,
   order: { id: string; orderCode: string; status: string; customerName: string; product?: { name: string } | null },
@@ -71,6 +139,8 @@ export interface CreateOrderInput {
   /** Variante elegida (talla/color) para el snapshot del ítem. */
   variantLabel?: string;
   paymentMode?: PaymentMode;
+  /** Solo con «Envíos» encendido: datos de envío y montos (total, adelanto). */
+  shipping?: OrderShippingInput;
 }
 
 export async function createAgentOrder(input: CreateOrderInput) {
@@ -86,8 +156,9 @@ export async function createAgentOrder(input: CreateOrderInput) {
   const qty = Math.max(1, input.quantity || 1);
   const unit = product.price ?? "0";
   const company = await prisma.company.findUnique({ where: { id: input.companyId }, select: { currency: true } });
-  const lineTotal = `${symbolFor(company?.currency)} ${(parseNum(unit) * qty).toFixed(2)}`;
-  const init = initialStatusFor(input.paymentMode);
+  const symbol = symbolFor(company?.currency);
+  const lineTotal = `${symbol} ${(parseNum(unit) * qty).toFixed(2)}`;
+  const init = input.shipping ? initialStatusForShipping(input.shipping, input.paymentMode) : initialStatusFor(input.paymentMode);
 
   const order = await prisma.order.create({
     data: {
@@ -97,13 +168,14 @@ export async function createAgentOrder(input: CreateOrderInput) {
       orderCode: buildOrderCode(Date.now()),
       quantity: qty,
       customerName: input.customerName.trim(),
-      address: input.address.trim(),
+      address: addressFor(input.address, input.shipping),
       reference: (input.reference ?? "").trim(),
       notes: input.notes?.trim() || null,
       status: init.status,
       paymentStatus: init.paymentStatus,
       paymentMethod: init.paymentMethod,
       total: lineTotal,
+      ...shippingColumns(input.shipping, symbol),
       items: {
         create: [
           {
@@ -139,13 +211,15 @@ export async function createOrderFromCart(input: {
   reference?: string;
   extraNotes?: string;
   paymentMode?: PaymentMode;
+  /** Solo con «Envíos» encendido: datos de envío y montos (total, adelanto). */
+  shipping?: OrderShippingInput;
 }) {
   if (!input.cart.items.length) throw new AppError("El carrito está vacío", 422);
 
   const firstProductId = input.cart.items[0].productId;
   const totalQty = input.cart.items.reduce((acc, it) => acc + it.quantity, 0);
   const notes = [input.extraNotes?.trim(), renderCartForOrder(input.cart)].filter(Boolean).join("\n");
-  const init = initialStatusFor(input.paymentMode);
+  const init = input.shipping ? initialStatusForShipping(input.shipping, input.paymentMode) : initialStatusFor(input.paymentMode);
 
   const order = await prisma.order.create({
     data: {
@@ -155,13 +229,14 @@ export async function createOrderFromCart(input: {
       orderCode: buildOrderCode(Date.now()),
       quantity: totalQty,
       customerName: input.customerName.trim(),
-      address: input.address.trim(),
+      address: addressFor(input.address, input.shipping),
       reference: (input.reference ?? "").trim(),
       notes,
       status: init.status,
       paymentStatus: init.paymentStatus,
       paymentMethod: init.paymentMethod,
       total: input.cart.totalText,
+      ...shippingColumns(input.shipping, input.cart.symbol),
       items: {
         create: input.cart.items.map((it) => ({
           productId: it.productId,
