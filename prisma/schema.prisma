@@ -41,6 +41,8 @@ enum OrderStatus {
   PENDIENTE_PAGO
   PAGADO
   ENTREGADO
+  // Envíos: el paquete ya está en la agencia (o listo en tienda) esperando al cliente.
+  LISTO_PARA_RECOGER
 }
 
 enum DigitalSaleStatus {
@@ -149,6 +151,9 @@ model Company {
   // Config de entrega a nivel negocio (restaurante/físico): { cost, time, areas[],
   // pickupAvailable, requiresAddress }. El agente la usa para todos los productos.
   deliveryConfig       Json?
+  // Envíos del rubro comercial (tipos de entrega, costos, adelanto/saldo, avisos por
+  // estado). null = apagado: el negocio sigue como siempre. Ver shipping/shipping-config.ts.
+  shippingConfig       Json?
   // Horario de atención para la AGENDA de citas: [{ day: 0-6, from: "09:00", to: "18:00" }]
   businessHours        Json?
   // Enlace fijo de videollamada (Meet/Zoom) por defecto para citas online;
@@ -1333,31 +1338,101 @@ model CompanyCalendarFeed {
 }
 
 model Order {
-  id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId     String               @db.Uuid
-  customerId    String               @db.Uuid
-  productId     String               @db.Uuid
-  orderCode     String               @unique
-  quantity      Int
-  customerName  String
-  address       String
-  reference     String
-  notes         String?
-  status        OrderStatus
+  id                String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId         String               @db.Uuid
+  customerId        String               @db.Uuid
+  productId         String               @db.Uuid
+  orderCode         String               @unique
+  quantity          Int
+  customerName      String
+  address           String
+  reference         String
+  notes             String?
+  status            OrderStatus
   // Rubro Comercial: total del pedido, estado de pago y placeholder de comprobante (Fase 2 Myfact).
-  total         String?
-  paymentStatus String? // 'PENDIENTE_PAGO' | 'PAGADO' (string, no enum)
-  paymentMethod String?
-  comprobanteId String?              @db.Uuid
-  createdAt     DateTime             @default(now())
-  updatedAt     DateTime             @updatedAt
-  company       Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  customer      Customer             @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  product       Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
-  items         OrderItem[]
-  statusHistory OrderStatusHistory[]
+  total             String?
+  paymentStatus     String? // 'PENDIENTE_PAGO' | 'PAGO_PARCIAL' | 'PAGADO' (string, no enum)
+  paymentMethod     String?
+  comprobanteId     String?              @db.Uuid
+  // Envíos (solo negocios con shippingConfig encendido). Todo opcional: un pedido sin
+  // totalAmount es un pedido "de siempre" y ninguna lógica nueva lo toca.
+  deliveryType      String? // 'DOMICILIO' | 'AGENCIA' | 'RECOJO'
+  courier           String? // 'SHALOM' u otra courier en texto libre
+  agencyId          String?              @db.Uuid // CourierAgency.id (sin FK: la foto vive en agencyName/agencyAddress)
+  agencyName        String?
+  agencyAddress     String?
+  recipientDocument String? // DNI de quien recoge
+  recipientPhone    String?
+  subtotalAmount    Decimal?             @db.Decimal(12, 2)
+  shippingAmount    Decimal?             @db.Decimal(12, 2)
+  totalAmount       Decimal?             @db.Decimal(12, 2)
+  advanceAmount     Decimal?             @db.Decimal(12, 2) // adelanto mínimo pedido al registrar
+  paidAmount        Decimal?             @db.Decimal(12, 2) // suma de OrderPayment
+  trackingCode      String? // guía / número de orden de la courier
+  pickupKey         String? // clave de recojo
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  company           Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer          Customer             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product           Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  items             OrderItem[]
+  statusHistory     OrderStatusHistory[]
+  payments          OrderPayment[]
 
   @@index([companyId, createdAt])
+}
+
+/**
+ * Pago aplicado a un pedido (adelanto, saldo o total). Order.paidAmount es la suma de
+ * estas filas. receiptId único: un comprobante nunca se acredita dos veces.
+ */
+model OrderPayment {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String   @db.Uuid
+  orderId   String   @db.Uuid
+  amount    Decimal  @db.Decimal(12, 2)
+  kind      String // 'ADELANTO' | 'SALDO' | 'TOTAL' | 'OTRO'
+  method    String? // yape, plin, transferencia, efectivo, mercadopago…
+  source    String // 'AGENTE' | 'PANEL' | 'COPILOTO' | 'MERCADOPAGO'
+  receiptId String?  @unique @db.Uuid // PaymentReceipt.id cuando vino de un comprobante
+  note      String?
+  createdBy String? // nombre o id de quien lo registró a mano
+  createdAt DateTime @default(now())
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([companyId, createdAt])
+}
+
+/**
+ * Catálogo de agencias de couriers (hoy: Shalom). Común a toda la plataforma, sin
+ * companyId. Lo llena shipping/courier-sync.worker.ts desde la lista pública de la
+ * courier; nunca se borra una fila (isActive=false si deja de venir).
+ */
+model CourierAgency {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  courier            String // 'SHALOM'
+  externalId         String // id de la agencia en la courier
+  name               String // nombre corto ("Chiclayo - Av. Bolognesi")
+  department         String?
+  province           String?
+  district           String?
+  place              String?
+  address            String?
+  schedule           String? // horario de atención, texto libre
+  phone              String?
+  latitude           Float?
+  longitude          Float?
+  ubigeo             String?
+  acceptsDestination Boolean  @default(true) // recibe envíos
+  isActive           Boolean  @default(true)
+  searchText         String // texto normalizado para buscar
+  syncedAt           DateTime @default(now())
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([courier, externalId])
+  @@index([courier, isActive])
 }
 
 /**
