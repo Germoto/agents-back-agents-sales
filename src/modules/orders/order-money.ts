@@ -28,7 +28,7 @@ export const COLLECTIBLE_STATUSES: OrderStatus[] = [
 const PRE_DISPATCH_STATUSES: OrderStatus[] = ["PENDIENTE_PAGO", "PEDIDO_REGISTRADO", "EN_COORDINACION"];
 
 export type PaymentKind = "ADELANTO" | "SALDO" | "TOTAL" | "OTRO";
-export type PaymentSource = "AGENTE" | "PANEL" | "COPILOTO" | "MERCADOPAGO";
+export type PaymentSource = "AGENTE" | "PANEL" | "COPILOTO" | "MERCADOPAGO" | "WEB";
 
 type MoneyFields = {
   totalAmount: Prisma.Decimal | number | null;

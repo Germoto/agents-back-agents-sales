@@ -23,6 +23,21 @@ function buildOrderCode(seed: number): string {
   return `PED-${t}${r}`;
 }
 
+/**
+ * `orderCode` es único y sale del reloj: dos pedidos en el mismo milisegundo (un pedido
+ * del chat y otro de la tienda web) chocarían. Se reintenta con otra semilla.
+ */
+async function withOrderCode<T>(create: (orderCode: string) => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await create(buildOrderCode(Date.now() + attempt * 7919));
+    } catch (err) {
+      const duplicated = (err as { code?: string }).code === "P2002";
+      if (!duplicated || attempt >= 3) throw err;
+    }
+  }
+}
+
 function parseNum(v: string | null | undefined): number {
   const n = Number(String(v ?? "").replace(/[^0-9.]/g, ""));
   return Number.isFinite(n) ? n : 0;
@@ -160,12 +175,12 @@ export async function createAgentOrder(input: CreateOrderInput) {
   const lineTotal = `${symbol} ${(parseNum(unit) * qty).toFixed(2)}`;
   const init = input.shipping ? initialStatusForShipping(input.shipping, input.paymentMode) : initialStatusFor(input.paymentMode);
 
-  const order = await prisma.order.create({
+  const order = await withOrderCode((orderCode) => prisma.order.create({
     data: {
       companyId: input.companyId,
       customerId: input.customerId,
       productId: input.productId,
-      orderCode: buildOrderCode(Date.now()),
+      orderCode,
       quantity: qty,
       customerName: input.customerName.trim(),
       address: addressFor(input.address, input.shipping),
@@ -191,7 +206,7 @@ export async function createAgentOrder(input: CreateOrderInput) {
       statusHistory: { create: [{ toStatus: init.status, changedBy: "agente", note: "Pedido registrado" }] },
     },
     include: { product: { select: { name: true } } },
-  });
+  }));
 
   emitOrderNew(input.companyId, order);
   return order;
@@ -213,6 +228,12 @@ export async function createOrderFromCart(input: {
   paymentMode?: PaymentMode;
   /** Solo con «Envíos» encendido: datos de envío y montos (total, adelanto). */
   shipping?: OrderShippingInput;
+  /** Quién registra el pedido en el historial. Por defecto "agente". */
+  changedBy?: string;
+  /** Origen del pedido: "WEB" = tienda web. Vacío = chat (lo de siempre). */
+  source?: string;
+  /** Nota del primer registro del historial. */
+  historyNote?: string;
 }) {
   if (!input.cart.items.length) throw new AppError("El carrito está vacío", 422);
 
@@ -221,12 +242,13 @@ export async function createOrderFromCart(input: {
   const notes = [input.extraNotes?.trim(), renderCartForOrder(input.cart)].filter(Boolean).join("\n");
   const init = input.shipping ? initialStatusForShipping(input.shipping, input.paymentMode) : initialStatusFor(input.paymentMode);
 
-  const order = await prisma.order.create({
+  const order = await withOrderCode((orderCode) => prisma.order.create({
     data: {
       companyId: input.companyId,
       customerId: input.customerId,
       productId: firstProductId,
-      orderCode: buildOrderCode(Date.now()),
+      orderCode,
+      source: input.source ?? null,
       quantity: totalQty,
       customerName: input.customerName.trim(),
       address: addressFor(input.address, input.shipping),
@@ -247,10 +269,12 @@ export async function createOrderFromCart(input: {
           lineTotal: `${input.cart.symbol} ${(it.unitPrice * it.quantity).toFixed(2)}`,
         })),
       },
-      statusHistory: { create: [{ toStatus: init.status, changedBy: "agente", note: "Pedido registrado" }] },
+      statusHistory: {
+        create: [{ toStatus: init.status, changedBy: input.changedBy ?? "agente", note: input.historyNote ?? "Pedido registrado" }],
+      },
     },
     include: { product: { select: { name: true } } },
-  });
+  }));
 
   emitOrderNew(input.companyId, order);
   return order;
