@@ -259,6 +259,27 @@ export function deliveryBlockedReason(cfg: ShippingConfig, tipo: DeliveryType, c
 }
 
 // ---------------------------------------------------------------------------
+// WhatsApp del comprador
+// ---------------------------------------------------------------------------
+
+/** Prefijo telefónico por defecto de la tienda según su moneda. null = el comprador elige su país. */
+export function defaultDialPrefix(currency: string | null | undefined): string | null {
+  return String(currency ?? "PEN").toUpperCase() === "PEN" ? "51" : null;
+}
+
+/**
+ * WhatsApp del comprador en dígitos y con código de país, para que coincida con el número
+ * con el que después escribe al negocio. Un número local (hasta 9 dígitos) toma el prefijo
+ * de la tienda. null = no es un número utilizable.
+ */
+export function buyerPhoneDigits(raw: unknown, prefix: string | null): string | null {
+  let d = String(raw ?? "").replace(/\D/g, "").replace(/^0+/, "");
+  if (!d) return null;
+  if (d.length <= 9 && prefix) d = `${prefix}${d}`;
+  return d.length >= 10 && d.length <= 15 ? d : null;
+}
+
+// ---------------------------------------------------------------------------
 // Montos del pedido web
 // ---------------------------------------------------------------------------
 

@@ -62,6 +62,8 @@ import {
   type VolumePricing,
 } from "./storefront-sales";
 import {
+  buyerPhoneDigits,
+  defaultDialPrefix,
   deliveryBlockedReason,
   DELIVERY_LABELS,
   isSimplePhysicalProduct,
@@ -79,6 +81,8 @@ import {
 import { loadShippingConfig } from "../shipping/shipping.service";
 import { enabledDeliveryTypes, parseDeliveryType, shippingOn, type ShippingConfig } from "../shipping/shipping-config";
 import { searchAgencies } from "../shipping/agency-search";
+import { resolveOrderShipping, type OrderShippingErrorCode } from "../shipping/order-shipping-resolver";
+import { createOrderForStoreOrder, type StoreShippingSnapshot } from "./storefront-order.service";
 import { companyTracksStock } from "../orders/orders.service";
 
 // ---------------------------------------------------------------------------
@@ -455,7 +459,7 @@ export async function getPublicStore(slug: string) {
   const guaranteeText = (text: string) => (isPhysical && text === DEFAULT_GUARANTEE.text ? PHYSICAL_GUARANTEE_TEXT : text);
   return {
     kind,
-    envio: isPhysical ? { tipos: entregas, maxPorProducto: physical.maxQtyPerItem } : null,
+    envio: isPhysical ? { tipos: entregas, maxPorProducto: physical.maxQtyPerItem, prefijoTelefono: defaultDialPrefix(company.currency) } : null,
     pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual, mpRecargo: pay.mpRecargo },
     portada: { slides, autoplay: cfg.carouselAutoplay, intervalSec: cfg.carouselIntervalSec },
     anuncio: anuncio.enabled && anuncio.text ? { text: anuncio.text, endsAt: anuncioEndsAt && new Date(anuncioEndsAt).getTime() > Date.now() ? anuncioEndsAt : null } : null,
@@ -667,7 +671,35 @@ function syntheticPhone(email: string): string {
 
 export type StoreCheckoutMethod = "MERCADOPAGO" | "MANUAL";
 
-export type StoreOrderItem = { productId: string; name: string; unitPrice: number; qty: number };
+/** Ítem guardado en el pedido. Tienda física: suma lo elegido en la ficha (texto y pares grupo/opción). */
+export type StoreOrderItem = { productId: string; name: string; unitPrice: number; qty: number; variant?: string | null; options?: VariantChoice[] };
+
+/** Entrega tal como llega del checkout de la tienda física (sin validar). */
+export type StoreDeliveryInput = {
+  tipo?: string | null;
+  direccion?: string | null;
+  referencia?: string | null;
+  agenciaId?: string | null;
+  agenciaTexto?: string | null;
+  courier?: string | null;
+  documento?: string | null;
+  telefonoRecibe?: string | null;
+};
+
+export type StoreCheckoutInput = {
+  productId?: string;
+  productIds?: string[];
+  items?: StoreCartItemInput[] | null;
+  name: string;
+  email?: string | null;
+  phone?: string | null;
+  method?: StoreCheckoutMethod;
+  coupon?: string | null;
+  emailMarketing?: boolean;
+  bumpProductId?: string | null;
+  entrega?: StoreDeliveryInput | null;
+  cobro?: string | null;
+};
 
 /** Ids de producto de un pedido (carrito o pedido antiguo de un solo producto). */
 export function orderProductIds(order: { productId: string; productIds: string[] }): string[] {
@@ -989,15 +1021,300 @@ export async function quoteStoreCart(slug: string, input: StoreQuoteInput) {
   };
 }
 
-export async function createStoreCheckout(
-  slug: string,
-  input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod; coupon?: string | null; emailMarketing?: boolean; bumpProductId?: string | null },
-  client?: StoreWebClient | null,
+/**
+ * Cliente del pedido web: lo crea (pasando por el tope de leads del plan) o actualiza sus
+ * datos de contacto. El correo solo se escribe cuando el comprador lo dio.
+ */
+async function upsertStoreCustomer(
+  companyId: string,
+  legacy: boolean,
+  input: { phone: string; name: string; email: string | null; emailMarketing?: boolean },
 ) {
-  const { company, cfg, ent, kind } = await resolveStore(slug);
-  // Guarda temporal: la tienda física todavía no tiene checkout propio (pide entrega y
-  // crea un pedido real). Nunca debe pasar por el flujo de entrega digital.
-  if (kind === "PHYSICAL") throw new AppError("El checkout de esta tienda aún no está disponible", 409);
+  const { phone, name, email } = input;
+  const existing = await prisma.customer.findUnique({
+    where: { companyId_phone: { companyId, phone } },
+    select: { id: true, name: true, email: true },
+  });
+  if (!legacy && !existing) {
+    const allowed = await gateNewLead(companyId, phone);
+    if (!allowed) throw new AppError("La tienda no puede recibir compras por el momento", 503);
+  }
+  const customer = await prisma.customer.upsert({
+    where: { companyId_phone: { companyId, phone } },
+    update: {
+      lastInteractionAt: new Date(),
+      ...(email ? { email } : {}),
+      ...(existing?.name ? {} : { name }),
+    },
+    create: {
+      companyId,
+      phone,
+      name,
+      ...(email ? { email } : {}),
+      status: "activo",
+      lastInteractionAt: new Date(),
+      metadata: { origin: "storefront", emailMarketing: input.emailMarketing !== false },
+    },
+    select: { id: true, metadata: true },
+  });
+  // Consentimiento para promociones por correo (la casilla del checkout). No toca la baja total.
+  if (existing && input.emailMarketing !== undefined) {
+    const md = (customer.metadata ?? {}) as Record<string, unknown>;
+    if (md.emailMarketing !== input.emailMarketing && !md.emailOptOut) {
+      await prisma.customer.update({ where: { id: customer.id }, data: { metadata: { ...md, emailMarketing: input.emailMarketing } } }).catch(() => undefined);
+    }
+  }
+  return customer;
+}
+
+/** Pedidos contra entrega sin cerrar que un mismo número puede tener abiertos desde la web. */
+const MAX_OPEN_COD_ORDERS = 2;
+
+/** Lo que el validador de entrega le dice al comprador (el agente tiene sus propios textos). */
+const DELIVERY_ERROR_TEXT: Record<OrderShippingErrorCode, string> = {
+  MISSING_TYPE: "Elige cómo quieres recibir tu pedido",
+  TYPE_DISABLED: "Ese tipo de entrega no está disponible en esta tienda",
+  MISSING_ADDRESS: "Escribe la dirección de entrega",
+  MISSING_AGENCY: "Elige la agencia donde recogerás tu pedido",
+  AGENCY_INVALID: "Esa agencia ya no está disponible. Elige otra.",
+  MISSING_DOCUMENT: "Escribe el DNI de quien recibe el pedido",
+  MISSING_PAYMENT_CHOICE: "Elige cómo quieres pagar",
+};
+
+/**
+ * Checkout de la tienda física. Valida carrito, entrega y cobro contra la configuración
+ * de Envíos y guarda en el StoreOrder la foto de lo elegido y de los montos.
+ * - Con algo que pagar ahora (total o adelanto): queda PENDIENTE por ese monto y sigue el
+ *   cobro de siempre (Mercado Pago o Yape/Plin); el pedido real nace al confirmarse el pago.
+ * - Sin nada que pagar ahora (contra entrega): queda CONFIRMADO y el pedido real nace aquí.
+ */
+async function createPhysicalCheckout(store: Awaited<ReturnType<typeof resolveStore>>, input: StoreCheckoutInput, client?: StoreWebClient | null) {
+  const { company, cfg, ent } = store;
+  const companyId = company.id;
+  const symbol = symbolFor(company.currency);
+  const money = (n: number) => `${symbol} ${n.toFixed(2)}`;
+
+  const name = input.name.trim();
+  // El WhatsApp es el contacto del pedido: obligatorio, real y con código de país.
+  const phoneDigits = buyerPhoneDigits(input.phone, defaultDialPrefix(company.currency));
+  if (!phoneDigits) throw new AppError("Escribe tu número de WhatsApp con el código de país", 400);
+  const phone = normalizePhone(phoneDigits);
+  const rawEmail = (input.email ?? "").trim();
+  const email = rawEmail ? normalizeEmail(rawEmail) : null;
+  if (rawEmail && !email) throw new AppError("El correo no es válido", 400);
+
+  const wanted = cartItemsOf({ items: input.items, productIds: [...(input.productId ? [input.productId] : []), ...(input.productIds ?? [])] });
+  const [pricing, charge] = await Promise.all([
+    pricePhysicalCart(company, cfg, { items: wanted, coupon: input.coupon ?? null }),
+    physicalChargeContext(company, cfg, ent),
+  ]);
+  const { shipCfg, ctx, pay } = charge;
+  const tipos = publicDeliveryOptions(shipCfg, ctx);
+  if (!tipos.length || !shipCfg) throw new AppError("Esta tienda aún no tiene formas de entrega disponibles", 409);
+
+  // Entrega y cobro: los mismos montos que mostró la cotización (webOrderAmounts).
+  const e = input.entrega ?? {};
+  const tipo = parseDeliveryType(e.tipo) ?? (tipos.length === 1 ? tipos[0].tipo : null);
+  if (!tipo) throw new AppError(DELIVERY_ERROR_TEXT.MISSING_TYPE, 400);
+  if (!tipos.some((t) => t.tipo === tipo)) throw new AppError(DELIVERY_ERROR_TEXT.TYPE_DISABLED, 409);
+  const web = webOrderAmounts(shipCfg, tipo, input.cobro, ctx, pricing.productsTotal, { requireChoice: true });
+  if (!web.ok) {
+    if (web.code === "MISSING_PAYMENT_CHOICE") throw new AppError(DELIVERY_ERROR_TEXT.MISSING_PAYMENT_CHOICE, 400);
+    throw new AppError(DELIVERY_ERROR_TEXT.TYPE_DISABLED, 409);
+  }
+  const ship = await resolveOrderShipping(
+    shipCfg,
+    {
+      deliveryType: tipo,
+      address: e.direccion,
+      agencyId: e.agenciaId,
+      agencyText: e.agenciaTexto,
+      courier: e.courier,
+      document: e.documento,
+      recipientPhone: e.telefonoRecibe,
+      cobro: web.option.cobro,
+    },
+    { subtotal: pricing.productsTotal, configuredPaymentMode: ctx.paymentMode },
+  );
+  if (!ship.ok) throw new AppError(DELIVERY_ERROR_TEXT[ship.code], ship.code === "TYPE_DISABLED" ? 409 : 400);
+
+  const amounts = web.amounts;
+  const payNow = web.payNow;
+  const cod = payNow <= 0;
+  const pc = pay.pc;
+  const method: StoreCheckoutMethod = input.method ?? (pay.mercadoPago ? "MERCADOPAGO" : "MANUAL");
+  if (!cod) {
+    if (method === "MERCADOPAGO" && (!pay.mercadoPago || !pc?.mpAccessToken)) {
+      throw new AppError("Esta tienda aún no tiene pagos con Mercado Pago habilitados", 409);
+    }
+    if (method === "MANUAL" && !pay.manual.length) {
+      throw new AppError("Esta tienda no acepta pago con Yape/Plin por el momento", 409);
+    }
+  }
+  // Yape/Plin: monto exacto. Mercado Pago: se le suma la comisión según la configuración.
+  const linkAmount =
+    cod || method === "MANUAL" || !pc
+      ? payNow
+      : mpLinkAmount(payNow, { feeMode: pc.mpFeeMode, feePercent: Number(pc.mpFeePercent), feeFixed: Number(pc.mpFeeFixed), feeIgv: pc.mpFeeIgv });
+
+  const customer = await upsertStoreCustomer(companyId, ent.legacy, { phone, name, email, emailMarketing: input.emailMarketing });
+
+  if (cod) {
+    // Freno a pedidos falsos: un mismo número no acumula pedidos contra entrega sin cerrar.
+    const open = await prisma.storeOrder.count({
+      where: { companyId, customerId: customer.id, status: "CONFIRMADO", order: { is: { status: { notIn: ["ENTREGADO", "CANCELADO"] } } } },
+    });
+    if (open >= MAX_OPEN_COD_ORDERS) {
+      throw new AppError("Ya tienes pedidos pendientes de entrega. Escríbenos por WhatsApp para coordinar uno nuevo.", 409);
+    }
+  }
+
+  const items: StoreOrderItem[] = pricing.lines.map((l) => ({
+    productId: l.productId,
+    name: l.name,
+    unitPrice: l.unitPrice,
+    qty: l.qty,
+    ...(l.variantLabel ? { variant: l.variantLabel, options: l.variant } : {}),
+  }));
+  const productIds = Array.from(new Set(items.map((it) => it.productId)));
+  const productName = items.length > 1 ? `${items[0].name} +${items.length - 1} más` : items[0].name;
+  const coupon = pricing.coupon;
+  const shipping: StoreShippingSnapshot = {
+    deliveryType: tipo,
+    address: (e.direccion ?? "").trim(),
+    reference: (e.referencia ?? "").trim(),
+    courier: ship.shipping.courier ?? null,
+    agencyId: ship.shipping.agencyId ?? null,
+    agencyName: ship.shipping.agencyName ?? null,
+    agencyAddress: ship.shipping.agencyAddress ?? null,
+    document: ship.shipping.recipientDocument ?? null,
+    recipientPhone: ship.shipping.recipientPhone ?? null,
+    cobro: web.option.cobro,
+    paymentMode: web.paymentMode ?? null,
+    amounts,
+  };
+
+  const accessToken = crypto.randomBytes(18).toString("base64url");
+  const order = await prisma.storeOrder.create({
+    data: {
+      companyId,
+      customerId: customer.id,
+      productId: items[0].productId,
+      productName,
+      items,
+      productIds,
+      email,
+      name,
+      phone,
+      amount: new Prisma.Decimal(linkAmount.toFixed(2)),
+      orderTotal: new Prisma.Decimal(amounts.total.toFixed(2)),
+      shipping: shipping as unknown as Prisma.InputJsonValue,
+      currency: company.currency,
+      status: cod ? "CONFIRMADO" : "PENDIENTE",
+      paymentMethod: cod ? "CONTRA_ENTREGA" : method,
+      accessToken,
+      metadata: {
+        kind: "PHYSICAL",
+        listPrice: pricing.subtotal,
+        feeMode: cod ? null : pc?.mpFeeMode ?? null,
+        ...(coupon ? { coupon: { couponId: coupon.couponId, code: coupon.code, discount: coupon.discount } } : {}),
+        // Desglose para la página del pedido, el panel y los correos.
+        pricing: {
+          subtotal: pricing.subtotal,
+          combo: pricing.combo.discount > 0 ? { discount: pricing.combo.discount, label: pricing.combo.label, bundle: false } : null,
+          bump: null,
+          coupon: coupon ? { code: coupon.code, discount: coupon.discount } : null,
+          productsTotal: pricing.productsTotal,
+          shipping: amounts.shipping,
+          total: amounts.total,
+          payNow,
+          balance: web.balance,
+        },
+        ...(client ? { web: client } : {}),
+      },
+    },
+  });
+
+  const base = storeUrl(company.slug);
+  const thanks = `${base}/gracias?o=${order.id}&t=${accessToken}`;
+  const common = {
+    kind: "PHYSICAL" as const,
+    orderId: order.id,
+    token: accessToken,
+    items,
+    descuento: coupon ? { code: coupon.code, amount: coupon.discount } : null,
+    total: amounts.total,
+    totalText: money(amounts.total),
+    saldo: web.balance,
+    saldoText: money(web.balance),
+  };
+
+  if (cod) {
+    let real;
+    try {
+      real = await createOrderForStoreOrder(order.id);
+    } catch (err) {
+      await prisma.storeOrder
+        .update({ where: { id: order.id }, data: { status: "FALLIDO", failureReason: `Pedido: ${err instanceof Error ? err.message : "error"}` } })
+        .catch(() => undefined);
+      console.error(`[storefront] pedido contra entrega falló company=${companyId}:`, err instanceof Error ? err.message : err);
+      throw new AppError("No se pudo registrar tu pedido. Intenta de nuevo en un momento.", 502);
+    }
+    void recordPurchaseEvent(order);
+    void consumeCoupon(order);
+    console.log(`[storefront] pedido ${order.id} CONFIRMADO (contra entrega) pedido=${real.orderCode}`);
+    return {
+      ...common,
+      method: "CONTRA_ENTREGA" as const,
+      confirmado: true,
+      pedido: real.orderCode,
+      initPoint: null,
+      amount: 0,
+      amountText: money(0),
+      feeIncluded: false,
+      metodos: [] as { method: string; number: string; holder: string }[],
+    };
+  }
+
+  // Recordatorios por correo si el pago queda a medias (solo si dejó correo; se cancelan al pagar).
+  void scheduleAbandonedCheckout(order);
+  const pending = { ...common, method, confirmado: false, pedido: null, amount: linkAmount, amountText: money(linkAmount) };
+
+  if (method === "MANUAL") {
+    return { ...pending, initPoint: null, feeIncluded: false, metodos: pay.manual };
+  }
+
+  let pref;
+  try {
+    // Un solo ítem por lo que se paga ahora (total o adelanto, con la comisión si aplica):
+    // con adelanto no hay forma de repartir el monto entre los productos sin restos.
+    pref = await mpCreatePreference(decryptCredential(pc!.mpAccessToken!), {
+      title: `${payNow < amounts.total ? "Adelanto de tu pedido" : "Pedido"} en ${company.name}`,
+      amount: linkAmount,
+      currency: company.currency.toUpperCase(),
+      externalReference: JSON.stringify({ storeOrderId: order.id }),
+      notificationUrl: `${env.PUBLIC_BASE_URL}/api/webhooks/mercadopago/${companyId}`,
+      backUrls: { success: thanks, failure: `${thanks}&r=failure`, pending: `${thanks}&r=pending` },
+      autoReturn: base.startsWith("https://"),
+    });
+  } catch (err) {
+    await prisma.storeOrder.update({
+      where: { id: order.id },
+      data: { status: "FALLIDO", failureReason: `Mercado Pago: ${err instanceof Error ? err.message : "error"}` },
+    });
+    console.error(`[storefront] MP preference falló company=${companyId}:`, err instanceof Error ? err.message : err);
+    throw new AppError("No se pudo iniciar el pago. Intenta de nuevo en un momento.", 502);
+  }
+  await prisma.storeOrder.update({ where: { id: order.id }, data: { mpPreferenceId: pref.id } });
+  return { ...pending, initPoint: pref.init_point, feeIncluded: linkAmount > payNow, metodos: [] as { method: string; number: string; holder: string }[] };
+}
+
+export async function createStoreCheckout(slug: string, input: StoreCheckoutInput, client?: StoreWebClient | null) {
+  const store = await resolveStore(slug);
+  // La tienda física tiene su propio checkout (entrega, cobro y pedido real): nunca pasa
+  // por el flujo de entrega digital.
+  if (store.kind === "PHYSICAL") return createPhysicalCheckout(store, input, client);
+  const { company, cfg, ent } = store;
   const companyId = company.id;
   const method: StoreCheckoutMethod = input.method === "MANUAL" ? "MANUAL" : "MERCADOPAGO";
 
@@ -1039,39 +1356,7 @@ export async function createStoreCheckout(
 
   // Cliente: WhatsApp real si lo dio; si no, teléfono sintético estable por email.
   const phone = digits ? normalizePhone(digits) : syntheticPhone(email);
-  const existing = await prisma.customer.findUnique({
-    where: { companyId_phone: { companyId, phone } },
-    select: { id: true, name: true, email: true },
-  });
-  if (!ent.legacy && !existing) {
-    const allowed = await gateNewLead(companyId, phone);
-    if (!allowed) throw new AppError("La tienda no puede recibir compras por el momento", 503);
-  }
-  const customer = await prisma.customer.upsert({
-    where: { companyId_phone: { companyId, phone } },
-    update: {
-      lastInteractionAt: new Date(),
-      email,
-      ...(existing?.name ? {} : { name }),
-    },
-    create: {
-      companyId,
-      phone,
-      name,
-      email,
-      status: "activo",
-      lastInteractionAt: new Date(),
-      metadata: { origin: "storefront", emailMarketing: input.emailMarketing !== false },
-    },
-    select: { id: true, metadata: true },
-  });
-  // Consentimiento para promociones por correo (la casilla del checkout). No toca la baja total.
-  if (existing && input.emailMarketing !== undefined) {
-    const md = (customer.metadata ?? {}) as Record<string, unknown>;
-    if (md.emailMarketing !== input.emailMarketing && !md.emailOptOut) {
-      await prisma.customer.update({ where: { id: customer.id }, data: { metadata: { ...md, emailMarketing: input.emailMarketing } } }).catch(() => undefined);
-    }
-  }
+  const customer = await upsertStoreCustomer(companyId, ent.legacy, { phone, name, email, emailMarketing: input.emailMarketing });
 
   const accessToken = crypto.randomBytes(18).toString("base64url");
   const order = await prisma.storeOrder.create({

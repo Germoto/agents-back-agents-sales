@@ -4,14 +4,39 @@ export const storeSlugParamsSchema = z.object({
   slug: z.string().trim().min(1).max(60),
 });
 
+// Línea del carrito de la tienda física: producto, cantidad y lo elegido en la ficha (talla, color…).
+export const storeCartItemSchema = z.object({
+  productId: z.string().uuid(),
+  qty: z.coerce.number().int().min(1).max(99),
+  variante: z.record(z.string().max(40), z.string().max(60)).optional().nullable(),
+});
+const hasProducts = (d: { productId?: string; productIds?: string[]; items?: unknown[] }) => Boolean(d.productId || d.productIds?.length || d.items?.length);
+
+// Entrega del pedido (tienda física). Qué campos son obligatorios lo decide la configuración de Envíos.
+const storeDeliverySchema = z.object({
+  tipo: z.string().trim().max(20).optional().nullable(),
+  direccion: z.string().trim().max(300).optional().nullable(),
+  referencia: z.string().trim().max(300).optional().nullable(),
+  agenciaId: z.string().trim().max(80).optional().nullable(),
+  agenciaTexto: z.string().trim().max(200).optional().nullable(),
+  courier: z.string().trim().max(40).optional().nullable(),
+  documento: z.string().trim().max(20).optional().nullable(),
+  telefonoRecibe: z.string().trim().max(30).optional().nullable(),
+});
+
 export const storeCheckoutSchema = z.object({
-  // Un producto (compra directa) o varios (carrito). Al menos uno de los dos.
+  // Un producto (compra directa), varios (carrito digital) o líneas con cantidad (tienda física).
   productId: z.string().uuid().optional(),
   productIds: z.array(z.string().uuid()).min(1).max(10).optional(),
+  items: z.array(storeCartItemSchema).min(1).max(30).optional(),
   name: z.string().trim().min(2).max(120),
-  email: z.string().trim().min(5).max(160),
-  // WhatsApp opcional: si viene, la entrega también sale por WhatsApp.
+  // Tienda digital: obligatorio (ahí llega el acceso). Tienda física: opcional.
+  email: z.string().trim().max(160).optional().nullable(),
+  // Tienda digital: opcional (si viene, la entrega también sale por WhatsApp). Tienda física: obligatorio.
   phone: z.string().trim().max(30).optional().nullable(),
+  // Tienda física: cómo recibe el pedido y, si el negocio deja elegir, cómo paga.
+  entrega: storeDeliverySchema.optional().nullable(),
+  cobro: z.enum(["adelantado", "contra_entrega"]).optional().nullable(),
   // MERCADOPAGO (default) o MANUAL (Yape/Plin con comprobante).
   method: z.enum(["MERCADOPAGO", "MANUAL"]).optional(),
   // Atribución Meta (píxel): cookies _fbp/_fbc y URL de la página (opcionales).
@@ -26,7 +51,7 @@ export const storeCheckoutSchema = z.object({
   emailMarketing: z.boolean().optional(),
   // Order bump de la landing del producto principal (precio especial validado en el backend).
   bumpProductId: z.string().uuid().optional().nullable(),
-}).refine((b) => Boolean(b.productId || b.productIds?.length), { message: "Elige al menos un producto", path: ["productId"] });
+}).refine(hasProducts, { message: "Elige al menos un producto", path: ["productId"] });
 
 // POST /order/:id/receipt (multipart: file + payerName)
 export const storeReceiptBodySchema = z.object({
@@ -165,14 +190,6 @@ export const storeMetricsQuerySchema = z.object({
 });
 
 // POST /:slug/coupon (previsualizar descuento)
-// Línea del carrito de la tienda física: producto, cantidad y lo elegido en la ficha (talla, color…).
-export const storeCartItemSchema = z.object({
-  productId: z.string().uuid(),
-  qty: z.coerce.number().int().min(1).max(99),
-  variante: z.record(z.string().max(40), z.string().max(60)).optional().nullable(),
-});
-const hasProducts = (d: { productIds?: string[]; items?: unknown[] }) => Boolean(d.productIds?.length || d.items?.length);
-
 export const storeCouponPreviewSchema = z
   .object({
     code: z.string().trim().min(1).max(30),
