@@ -443,7 +443,11 @@ export interface PromptExtras {
     agencyAddress?: string | null;
     trackingCode?: string | null;
     pickupKey?: string | null;
+    /** "WEB" = el cliente lo hizo en la tienda web. */
+    source?: string | null;
   } | null;
+  /** Tienda web de productos físicos, solo si el negocio encendió «El agente comparte la tienda». */
+  storeLinks?: { url: string; products: { name: string; url: string }[]; more: number } | null;
 }
 
 const ORDER_STATUS_TEXT: Record<string, string> = {
@@ -462,7 +466,7 @@ function currentOrderLine(extra: PromptExtras | undefined, cfg: ShippingConfig |
   if (!o || !cfg) return null;
   const money = (n: number) => `${sym} ${n.toFixed(2)}`;
   const parts = [
-    `${o.code} · estado: ${ORDER_STATUS_TEXT[o.status] ?? o.status}`,
+    `${o.code}${o.source === "WEB" ? " (lo hizo en la tienda web)" : ""} · estado: ${ORDER_STATUS_TEXT[o.status] ?? o.status}`,
     `total ${money(o.total)}, pagado ${money(o.paid)}, saldo ${money(o.balance)}`,
   ];
   if (o.deliveryType === "AGENCIA") {
@@ -480,6 +484,16 @@ function currentOrderLine(extra: PromptExtras | undefined, cfg: ShippingConfig |
     parts.push(released ? `clave de recojo: ${o.pickupKey}` : "clave de recojo: aún no se entrega al cliente");
   }
   return `PEDIDO VIGENTE DEL CLIENTE: ${parts.join(" · ")}. Si pregunta por su pedido, responde con estos datos sin consultar nada; no inventes guía, clave ni fechas que no estén aquí. Si hay saldo y quiere pagarlo, enviar_metodos_pago cobra lo que toca. No tienes herramienta para modificar un pedido ya registrado: no registres otro por lo mismo; si quiere cambiarlo o cancelarlo, deriva a un asesor.`;
+}
+
+/** Capacidad, no regla: cuándo compartir la tienda lo decide el prompt del negocio. */
+function storeLinksLine(extra?: PromptExtras): string | null {
+  const s = extra?.storeLinks;
+  if (!s?.url) return null;
+  const products = s.products.length
+    ? ` Enlace directo por producto: ${s.products.map((p) => `«${p.name}» → ${p.url}`).join(" ; ")}${s.more ? ` (y ${s.more} más en la tienda)` : ""}.`
+    : "";
+  return `TIENDA WEB DEL NEGOCIO: ${s.url} . Ahí el cliente ve los productos con fotos y puede hacer y pagar su pedido por su cuenta. Puedes compartir el enlace de la tienda o el de un producto.${products} Copia los enlaces tal cual; no inventes otros.`;
 }
 
 function upcomingBookingLine(extra?: PromptExtras): string | null {
@@ -719,6 +733,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     ...(upcomingBookingLine(extra) ? [upcomingBookingLine(extra)!, ""] : []),
     // Envíos: pedido vigente del cliente (estado, pagos, agencia, guía).
     ...(currentOrderLine(extra, shipCfg, shipSym) ? [currentOrderLine(extra, shipCfg, shipSym)!, ""] : []),
+    // Tienda web de productos físicos (solo si el negocio dejó que el agente la comparta).
+    ...(storeLinksLine(extra) ? [storeLinksLine(extra)!, ""] : []),
     // Rubros de carrito: estado REAL del carrito al inicio de este turno.
     ...(state.cartText
       ? [

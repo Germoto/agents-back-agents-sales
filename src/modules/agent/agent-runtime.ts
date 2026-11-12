@@ -9,6 +9,7 @@ import { buildSystemPrompt } from "./agent-prompt";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
 import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, shippingOf, postponeAvailable, type TurnContext } from "./agent-tools";
 import { currentOrderFor } from "../orders/order-money";
+import { agentStoreLinks } from "../storefront/storefront-public-url";
 import type { PromptExtras } from "./agent-prompt";
 import { summarizeCart } from "./cart.service";
 import { mpChatOn } from "./payment-methods";
@@ -274,6 +275,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
             agencyAddress: o.agencyAddress,
             trackingCode: o.trackingCode,
             pickupKey: o.pickupKey,
+            source: o.source,
           };
         }
       } catch {
@@ -282,11 +284,19 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     }
   }
 
+  // Tienda web de productos físicos: sus enlaces viajan al prompt solo si el negocio
+  // encendió «El agente comparte la tienda» (apagado por defecto).
+  let storeLinks: PromptExtras["storeLinks"] = null;
+  if (vertical === "PHYSICAL_GOODS") {
+    storeLinks = await agentStoreLinks(ctx.companyId).catch(() => null);
+  }
+
   const systemPrompt = buildSystemPrompt(ctx.config, ctx.state, {
     flowVars: ctx.customerFlowVars ?? ((ctx.state.flow as { variables?: Record<string, string> } | undefined)?.variables ?? null),
     flowNote: (ctx.state.flow as { aiTakeover?: { note?: string } } | undefined)?.aiTakeover?.note ?? null,
     upcomingBooking,
     currentOrder,
+    storeLinks,
   });
   // Con Mercado Pago en el chat, el modelo no ve la URL de los links de pago ya
   // enviados (queda un marcador): así no puede copiar un link viejo en vez de llamar a

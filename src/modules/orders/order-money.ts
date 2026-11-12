@@ -89,6 +89,7 @@ const DUE_SELECT = {
   advanceAmount: true,
   paidAmount: true,
   paymentStatus: true,
+  source: true,
   createdAt: true,
 } satisfies Prisma.OrderSelect;
 
