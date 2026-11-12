@@ -132,6 +132,13 @@ export async function composePaymentMethodsMessage(opts: {
   mpLink?: "auto" | "only";
   /** Zona horaria del negocio, para mostrar la fecha de vencimiento ({vence}). */
   timezone?: string;
+  /**
+   * Cobro de un pedido con «Envíos»: reemplaza el «Son *monto*» por el concepto
+   * (adelanto, saldo o total), el código del pedido y los montos.
+   */
+  head?: string;
+  /** Pedido al que se acredita el pago del link (viaja en la referencia de Mercado Pago). */
+  orderId?: string;
 }): Promise<{
   text: string;
   mpLinkIncluded: boolean;
@@ -173,6 +180,8 @@ export async function composePaymentMethodsMessage(opts: {
           externalReference: JSON.stringify({
             conversationId: opts.conversationId,
             productIds: opts.productIds,
+            // Solo en pedidos con «Envíos»: a qué pedido va y cuánto se acredita (sin comisión).
+            ...(opts.orderId ? { orderId: opts.orderId, baseAmount: opts.amountNum } : {}),
           }),
           notificationUrl: `${env.PUBLIC_BASE_URL}/api/webhooks/mercadopago/${opts.companyId}`,
         };
@@ -217,7 +226,15 @@ export async function composePaymentMethodsMessage(opts: {
   if (mode === "only") {
     if (!link) return { text: "", mpLinkIncluded: false, mpLinkAvailable: Boolean(mpAllowed), mpLinkFailed };
     const custom = (mpCfg?.chatLinkMessage ?? "").trim();
-    const template = custom || (withFee ? DEFAULT_MP_LINK_MESSAGE_WITH_FEE : DEFAULT_MP_LINK_MESSAGE);
+    const template =
+      custom ||
+      (opts.head
+        ? `${opts.head}\n\n` +
+          (withFee ? "💳 Por el link son *{monto}* (incluye la comisión de Mercado Pago):\n{link}" : "💳 Paga con tarjeta y otros medios por aquí:\n{link}") +
+          "\n\nLa confirmación es automática: en cuanto se apruebe el pago te aviso ✅"
+        : withFee
+          ? DEFAULT_MP_LINK_MESSAGE_WITH_FEE
+          : DEFAULT_MP_LINK_MESSAGE);
     const text = renderMpLinkMessage(template, {
       monto: withFee ? `${symbol} ${linkAmount.toFixed(2)}` : opts.amountText,
       link,
@@ -242,7 +259,9 @@ export async function composePaymentMethodsMessage(opts: {
   const manualBlock = methods
     ? `${methods}\n\n` +
       `Cuando pagues, envíame la *captura* o el *nombre del titular* de tu Yape/Plin (desde donde pagaste) y te confirmo al instante ✅`
-    : `Paga con el link de abajo y, en cuanto se confirme, te llega tu pedido ✅`;
-  const text = `Son *${opts.amountText}* 😊\n\n` + manualBlock + mpLine;
+    : opts.head
+      ? `Paga con el link de abajo y, en cuanto se confirme, te aviso ✅`
+      : `Paga con el link de abajo y, en cuanto se confirme, te llega tu pedido ✅`;
+  const text = `${opts.head ?? `Son *${opts.amountText}* 😊`}\n\n` + manualBlock + mpLine;
   return { text, mpLinkIncluded: Boolean(mpLine), mpLinkAvailable: Boolean(mpAllowed), mpLinkFailed };
 }

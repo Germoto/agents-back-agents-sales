@@ -7,7 +7,9 @@
 import { chatCompletion, type ChatMessage } from "../../lib/openai";
 import { buildSystemPrompt } from "./agent-prompt";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
-import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, type TurnContext } from "./agent-tools";
+import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, shippingOf, type TurnContext } from "./agent-tools";
+import { currentOrderFor } from "../orders/order-money";
+import type { PromptExtras } from "./agent-prompt";
 import { summarizeCart } from "./cart.service";
 import { mpChatOn } from "./payment-methods";
 import { promisesPaymentLink, pastesMpLink, maskMpLinks } from "./mp-link-guard";
@@ -147,10 +149,54 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     }
   }
 
+  // «Envíos»: el pedido vigente del cliente en el prompt de CADA turno, para que el
+  // agente responda por su estado y cobre el saldo sin registrar otro pedido.
+  let currentOrder: PromptExtras["currentOrder"] = null;
+  if (shippingOf(ctx.config)) {
+    const sim = ctx.state.simOrder;
+    if (ctx.simulate) {
+      if (sim) {
+        currentOrder = {
+          code: sim.orderCode,
+          status: sim.status,
+          total: sim.total,
+          paid: sim.paid,
+          balance: Math.max(0, sim.total - sim.paid),
+          deliveryType: sim.deliveryType,
+          courier: sim.courier,
+          agencyName: sim.agencyName,
+          agencyAddress: sim.agencyAddress,
+        };
+      }
+    } else {
+      try {
+        const o = await currentOrderFor(ctx.companyId, ctx.customerId);
+        if (o) {
+          currentOrder = {
+            code: o.orderCode,
+            status: o.status,
+            total: o.money.total,
+            paid: o.money.paid,
+            balance: o.money.balance,
+            deliveryType: o.deliveryType,
+            courier: o.courier,
+            agencyName: o.agencyName,
+            agencyAddress: o.agencyAddress,
+            trackingCode: o.trackingCode,
+            pickupKey: o.pickupKey,
+          };
+        }
+      } catch {
+        currentOrder = null;
+      }
+    }
+  }
+
   const systemPrompt = buildSystemPrompt(ctx.config, ctx.state, {
     flowVars: ctx.customerFlowVars ?? ((ctx.state.flow as { variables?: Record<string, string> } | undefined)?.variables ?? null),
     flowNote: (ctx.state.flow as { aiTakeover?: { note?: string } } | undefined)?.aiTakeover?.note ?? null,
     upcomingBooking,
+    currentOrder,
   });
   // Con Mercado Pago en el chat, el modelo no ve la URL de los links de pago ya
   // enviados (queda un marcador): así no puede copiar un link viejo en vez de llamar a

@@ -101,6 +101,18 @@ export interface ConversationState {
   /** Seguimiento pospuesto a pedido del cliente (tool posponer_seguimiento): hasta `until`
    *  no salen recordatorios; ese día se envía `body` y la secuencia sigue desde ahí. */
   followupPostponed?: { until: string; body: string; setAt: string } | null;
+  /** SIMULACIÓN con «Envíos»: pedido de muestra para probar adelanto y saldo sin crear pedidos reales. */
+  simOrder?: {
+    orderCode: string;
+    status: string;
+    total: number;
+    advance: number;
+    paid: number;
+    deliveryType?: string | null;
+    courier?: string | null;
+    agencyName?: string | null;
+    agencyAddress?: string | null;
+  } | null;
   [key: string]: unknown;
 }
 

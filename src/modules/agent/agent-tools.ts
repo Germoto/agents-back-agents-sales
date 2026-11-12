@@ -63,7 +63,7 @@ import {
   claimPayment,
   updatePaymentStatus,
 } from "../public-payments/public-payments.service";
-import { createAgentOrder, createOrderFromCart } from "./order.service";
+import { createAgentOrder, createOrderFromCart, type OrderShippingInput } from "./order.service";
 import { markOrderPaid, findPendingOrderForCustomer } from "../orders/orders.service";
 import {
   createBooking,
@@ -82,9 +82,22 @@ import { sendDigitalDeliveryEmail, EmailDeliveryError } from "./email-delivery";
 import { applySpintax } from "./reminder-templates";
 import { normalizeSmartFollowup, resolvePostponeDate, formatPostponeDate, markFollowupReset, activePostpone } from "../scheduler/smart-followup";
 import { normalizeQuietHours, zonedParts } from "../scheduler/quiet-hours";
+import {
+  shippingOn,
+  enabledDeliveryTypes,
+  parseDeliveryType,
+  computeOrderAmounts,
+  type ShippingConfig,
+  type DeliveryType,
+} from "../shipping/shipping-config";
+import { searchAgencies, findAgencyById, courierLabel } from "../shipping/agency-search";
+import { orderDueFor, applyOrderPayment, acceptsAmount, moneyOf, type OrderDue } from "../orders/order-money";
 
 /** Tope de archivos por envío (enviar_multimedia con fileIds y presentación). */
 const MAX_FILES_PER_SEND = 12;
+
+/** Tope de búsquedas de agencias por turno (buscar_agencias). */
+const MAX_AGENCY_SEARCHES_PER_TURN = 4;
 
 /** Comparación laxa de nombres (acentos/orden) para detectar confusión de titular. */
 function looseNameNorm(s: string): string {
@@ -162,9 +175,82 @@ export function postponeAvailable(config: BotConfig): boolean {
   return normalizeSmartFollowup(config.agent.followupConfig).postpone.enabled;
 }
 
+/**
+ * «Envíos» encendido con al menos un tipo de entrega (Empresa → Envíos, solo rubro
+ * comercial). null = el negocio registra y cobra pedidos como siempre.
+ */
+export function shippingOf(config: BotConfig): ShippingConfig | null {
+  const cfg = config.business.shipping;
+  return shippingOn(cfg) && enabledDeliveryTypes(cfg).length > 0 ? cfg : null;
+}
+
+/** Buscador de agencias disponible: envío por agencia encendido con una courier que tiene catálogo. */
+export function agencySearchAvailable(config: BotConfig): boolean {
+  const cfg = shippingOf(config);
+  return !!cfg && cfg.types.agencia.enabled && cfg.types.agencia.couriers.length > 0;
+}
+
+/**
+ * Con «Envíos» encendido, registrar_pedido y registrar_pedido_carrito ganan los datos
+ * del envío y cambian la secuencia: primero el pedido (el sistema calcula envío, total
+ * y adelanto) y después el cobro. Mismo recurso que PAYMENT_TOOL_WITH_MP_LINK.
+ */
+function orderToolWithShipping(tool: ToolDefinition, cfg: ShippingConfig): ToolDefinition {
+  const params = tool.function.parameters as { required?: string[]; properties?: Record<string, unknown> };
+  const agencia = cfg.types.agencia;
+  const needsDocument = cfg.askDocument && (agencia.enabled || cfg.types.recojo.enabled);
+  const properties: Record<string, unknown> = {
+    ...params.properties,
+    address: { type: "string", description: "Dirección completa de entrega. Solo en entrega a domicilio; en agencia o recojo se omite." },
+    tipoEntrega: {
+      type: "string",
+      enum: enabledDeliveryTypes(cfg).map((t) => t.toLowerCase()),
+      description: "Cómo recibe el pedido el cliente (lo que eligió).",
+    },
+    cobro: {
+      type: "string",
+      enum: ["adelantado", "contra_entrega"],
+      description: "Solo si la herramienta lo pide (el negocio deja elegir al cliente cómo pagar): lo que el cliente eligió.",
+    },
+    telefonoRecibe: { type: "string", description: "Teléfono de quien recibe o recoge, solo si es distinto al de este chat." },
+  };
+  if (agencia.enabled) {
+    const couriers = [...agencia.couriers.map((c) => courierLabel(c)), ...agencia.otrosCouriers];
+    if (agencia.couriers.length) {
+      properties.agenciaId = { type: "string", description: "Envío por agencia: id de la agencia elegida, tal cual lo devolvió buscar_agencias." };
+    }
+    properties.agenciaTexto = {
+      type: "string",
+      description:
+        "Envío por agencia sin id de catálogo: nombre o zona de la agencia tal como la dijo el cliente, o 'por coordinar' si se define después.",
+    };
+    properties.courier = { type: "string", description: `Courier del envío por agencia. Opciones del negocio: ${couriers.join(", ") || "la que indique el negocio"}.` };
+  }
+  if (needsDocument) {
+    properties.documento = { type: "string", description: "DNI o documento de quien recoge (agencia o recojo en tienda)." };
+  }
+  const required = [...(params.required ?? []).filter((k) => k !== "address"), "tipoEntrega"];
+  const cart = tool.function.name === "registrar_pedido_carrito";
+  return {
+    ...tool,
+    function: {
+      ...tool.function,
+      description:
+        (cart
+          ? "Registra UN pedido con todo el carrito y sus datos de envío. "
+          : "Registra el pedido de un producto FÍSICO con sus datos de envío (un solo producto; si el cliente armó un carrito usa registrar_pedido_carrito). ") +
+        "Úsalo cuando el cliente confirme la compra y tengas el nombre de quien recibe, el tipo de entrega y los datos de ese tipo" +
+        (needsDocument ? " (en agencia o recojo también el documento de quien recoge)" : "") +
+        ". Registra PRIMERO: el sistema calcula envío, total y adelanto y los devuelve. El cobro va DESPUÉS con enviar_metodos_pago, que toma el monto del pedido.",
+      parameters: { ...params, required, properties },
+    },
+  };
+}
+
 /** Nombres de las tools que se ocultan al modelo cuando no aplican al negocio. */
 export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
   const hidden = new Set<string>();
+  if (!agencySearchAvailable(config)) hidden.add("buscar_agencias");
   if (!emailDeliveryAvailable(config)) hidden.add("entregar_por_correo");
   if (!crmToolAvailable(config)) hidden.add("actualizar_crm");
   if (!postponeAvailable(config)) hidden.add("posponer_seguimiento");
@@ -177,6 +263,13 @@ export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
   // Con Mercado Pago encendido en el chat, enviar_metodos_pago gana el parámetro soloLink.
   if (mpChatOn(config.payment)) {
     base = base.map((t) => (t.function.name === "enviar_metodos_pago" ? PAYMENT_TOOL_WITH_MP_LINK : t));
+  }
+  // Con «Envíos» encendido, los dos registros de pedido piden los datos del envío.
+  const shipCfg = shippingOf(config);
+  if (shipCfg) {
+    base = base.map((t) =>
+      t.function.name === "registrar_pedido" || t.function.name === "registrar_pedido_carrito" ? orderToolWithShipping(t, shipCfg) : t,
+    );
   }
   const dynamic = agentHttpActionsOf(config).map(httpActionToolDef);
   return dynamic.length ? [...base, ...dynamic] : base;
@@ -402,6 +495,8 @@ export interface TurnContext {
   /** Resultados que devolvió Drive (buscar_en_drive / obtener_muestra) en ESTE turno: con
    *  resultados, derivar_humano por CONSULTA se rechaza (el agente sí puede responder). */
   driveHitsThisTurn?: number;
+  /** Búsquedas de agencias hechas en ESTE turno (buscar_agencias tiene tope). */
+  agencySearchesThisTurn?: number;
 }
 
 /**
@@ -603,6 +698,253 @@ function resolveOrderPaymentMode(
 
 function findProductById(ctx: TurnContext, productId: string): BotProduct | undefined {
   return ctx.config.products.find((p) => p.id === productId || p.slug === productId);
+}
+
+type OrderPayMode = "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL";
+
+/**
+ * Datos de envío y montos de un pedido con «Envíos» encendido. Valida lo que mandó
+ * el modelo contra la configuración (tipo de entrega activo, agencia del catálogo,
+ * DNI si el negocio lo pide) y calcula envío, total y adelanto. No decide nada
+ * comercial: aplica la regla de cobro que el dueño eligió para ese tipo de entrega.
+ */
+async function resolveShippingForOrder(
+  ctx: TurnContext,
+  cfg: ShippingConfig,
+  args: Record<string, unknown>,
+  subtotal: number,
+): Promise<{ shipping?: OrderShippingInput; paymentMode?: OrderPayMode; error?: string }> {
+  const enabled = enabledDeliveryTypes(cfg);
+  const options = enabled.map((t) => t.toLowerCase()).join(", ");
+  const tipo = parseDeliveryType(args.tipoEntrega) ?? (enabled.length === 1 ? enabled[0] : null);
+  if (!tipo) return { error: `Falta tipoEntrega. Pregunta al cliente cómo quiere recibir su pedido (opciones: ${options}) y vuelve a registrar.` };
+  if (!enabled.includes(tipo)) return { error: `El negocio no ofrece entrega por ${tipo.toLowerCase()}. Opciones: ${options}.` };
+
+  const address = String(args.address ?? "").trim();
+  if (tipo === "DOMICILIO" && !address) return { error: "Falta la dirección de entrega (address)." };
+
+  let courier: string | null = null;
+  let agencyId: string | null = null;
+  let agencyName: string | null = null;
+  let agencyAddress: string | null = null;
+  if (tipo === "AGENCIA") {
+    const ag = cfg.types.agencia;
+    const agenciaId = String(args.agenciaId ?? "").trim();
+    const agenciaTexto = String(args.agenciaTexto ?? "").trim();
+    if (agenciaId) {
+      const found = await findAgencyById(agenciaId).catch(() => null);
+      if (!found || !(ag.couriers as string[]).includes(found.courier)) {
+        return { error: "agenciaId no válido: usa el id que devolvió buscar_agencias (no lo inventes) o pasa agenciaTexto con la agencia que indicó el cliente." };
+      }
+      agencyId = found.id;
+      agencyName = found.displayName;
+      agencyAddress = found.address || null;
+      courier = found.courier;
+    } else if (agenciaTexto) {
+      const all = [...(ag.couriers as string[]), ...ag.otrosCouriers];
+      agencyName = agenciaTexto;
+      courier = String(args.courier ?? "").trim() || (all.length === 1 ? all[0] : null);
+    } else {
+      return {
+        error: agencySearchAvailable(ctx.config)
+          ? "Falta la agencia de destino: búscala con buscar_agencias, confirma con el cliente cuál prefiere y pasa su agenciaId."
+          : "Falta la agencia de destino: pregunta al cliente a qué agencia lo enviamos y pásala en agenciaTexto (y la courier en courier).",
+      };
+    }
+  }
+
+  const documento = String(args.documento ?? "").replace(/\s+/g, "").trim();
+  if (cfg.askDocument && tipo !== "DOMICILIO" && !documento) {
+    return { error: "Falta el documento (DNI) de quien va a recoger el pedido: pídeselo al cliente y pásalo en documento." };
+  }
+
+  // «Según el modo de cobro del negocio»: vale la regla de siempre (incluida la elección del cliente).
+  const rule = cfg.charge[tipo.toLowerCase() as "domicilio" | "agencia" | "recojo"];
+  const pm = resolveOrderPaymentMode(ctx, args.cobro);
+  if (rule.mode === "SEGUN_MODO" && pm.error) return { error: pm.error };
+
+  return {
+    paymentMode: pm.mode,
+    shipping: {
+      amounts: computeOrderAmounts(cfg, { subtotal, deliveryType: tipo, paymentMode: pm.mode }),
+      deliveryType: tipo,
+      courier,
+      agencyId,
+      agencyName,
+      agencyAddress,
+      recipientDocument: documento || null,
+      recipientPhone: String(args.telefonoRecibe ?? "").replace(/[^\d+]/g, "") || null,
+    },
+  };
+}
+
+/** Entrega del pedido en una frase (aviso al dueño y respuesta de la tool). */
+function deliveryLabel(shipping: OrderShippingInput, address: string): string {
+  if (shipping.deliveryType === "RECOJO") return "recojo en tienda";
+  if (shipping.deliveryType === "AGENCIA") {
+    const courier = shipping.courier ? `${courierLabel(shipping.courier)} ` : "";
+    return `agencia ${courier}${shipping.agencyName ?? ""}${shipping.agencyAddress ? ` (${shipping.agencyAddress})` : ""}`.trim();
+  }
+  return `a domicilio, ${address}`;
+}
+
+/**
+ * registrar_pedido / registrar_pedido_carrito con «Envíos» encendido: primero el
+ * pedido (con envío, total y adelanto calculados aquí) y después el cobro. En el
+ * simulador no se crea un pedido real: queda uno de muestra en el estado.
+ */
+async function registerOrderWithShipping(
+  ctx: TurnContext,
+  cfg: ShippingConfig,
+  args: Record<string, unknown>,
+  source: "single" | "cart",
+): Promise<string> {
+  const fail = (error: string, extra: Record<string, unknown> = {}) => JSON.stringify({ ok: false, error, ...extra });
+  const cart = await summarizeCart(ctx.companyId, ctx.customerId);
+  let product: BotProduct | undefined;
+  let qty = 1;
+  let subtotal = 0;
+  if (source === "single") {
+    product = findProductById(ctx, String(args.productId ?? ""));
+    if (!product) return fail("producto no encontrado");
+    if (product.productType !== "physical") return fail("registrar_pedido es solo para productos físicos");
+    if (cart.items.length) {
+      return fail("Hay productos en el carrito: registra con registrar_pedido_carrito para que entre todo lo que pidió el cliente.");
+    }
+    const offer = activeOfferFor(ctx.state, product.id);
+    const priceText = product.priceText ?? product.price;
+    if (!offer && (planOptions(product.verticalData, priceText).length || !isPlainAmount(priceText))) {
+      return fail(
+        `El precio de «${product.name}» depende de la opción elegida: agrégalo al carrito con agregar_carrito (con la opción que eligió el cliente) y registra con registrar_pedido_carrito.`,
+      );
+    }
+    qty = Math.max(1, Math.floor(Number(args.quantity ?? 1)) || 1);
+    subtotal = (offer?.num ?? parsePrice(priceText)) * qty;
+  } else {
+    if (!cart.items.length) return fail("el carrito está vacío");
+    subtotal = cart.total;
+  }
+
+  const customerName = String(args.customerName ?? "").trim();
+  if (!customerName) return fail("falta el nombre de quien recibe el pedido");
+  const resolved = await resolveShippingForOrder(ctx, cfg, args, subtotal);
+  if (!resolved.shipping) return fail(resolved.error ?? "no se pudo calcular el envío");
+  const shipping = resolved.shipping;
+  const a = shipping.amounts;
+  const address = String(args.address ?? "").trim();
+  const sym = symbolFor(ctx.config.business.currency);
+  const money = (n: number) => `${sym} ${n.toFixed(2)}`;
+  const resumen =
+    source === "single"
+      ? `${qty}x ${product!.name}`
+      : cart.items
+          .map((it) => `${it.quantity}x ${it.name}${it.modifiers.length ? ` (${it.modifiers.map((m) => m.option).join(", ")})` : ""}`)
+          .join(", ");
+
+  let orderCode = "SIM-0001";
+  if (ctx.simulate) {
+    if (source === "cart") await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
+    ctx.state.simOrder = {
+      orderCode,
+      status: a.advance > 0 ? "PENDIENTE_PAGO" : "EN_COORDINACION",
+      total: a.total,
+      advance: a.advance,
+      paid: 0,
+      deliveryType: shipping.deliveryType,
+      courier: shipping.courier,
+      agencyName: shipping.agencyName,
+      agencyAddress: shipping.agencyAddress,
+    };
+  } else {
+    try {
+      const base = {
+        companyId: ctx.companyId,
+        customerId: ctx.customerId,
+        customerName,
+        address,
+        reference: String(args.reference ?? "").trim(),
+        paymentMode: resolved.paymentMode,
+        shipping,
+      };
+      const order =
+        source === "single"
+          ? await createAgentOrder({
+              ...base,
+              productId: product!.id,
+              quantity: qty,
+              notes: String(args.notes ?? "").trim() || undefined,
+              variantLabel: String(args.variant ?? "").trim() || undefined,
+            })
+          : await createOrderFromCart({ ...base, cart, extraNotes: String(args.notes ?? "").trim() });
+      if (source === "cart") await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
+      orderCode = order.orderCode;
+      ctx.state.pendingOrderId = order.id;
+      ctx.adminNotices.push(
+        `🛒 Nuevo pedido ${order.orderCode} (${ctx.customerPhone}): ${resumen} para ${customerName}. ` +
+          `Entrega: ${deliveryLabel(shipping, address)}. Total ${money(a.total)}` +
+          (a.advance > 0 && a.advance < a.total ? ` · adelanto ${money(a.advance)}` : "") +
+          ".",
+      );
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : "no se pudo registrar el pedido");
+    }
+  }
+  ctx.state.status = "PEDIDO_REGISTRADO";
+  if (product) ctx.state.selectedProductId = product.id;
+
+  const saldo = Math.max(0, Math.round((a.total - a.advance) * 100) / 100);
+  let note: string;
+  if (a.advance > 0 && saldo <= 0) {
+    note = `Pedido registrado. Este pedido se paga por adelantado: cobra AHORA el total (${money(a.total)}) con enviar_metodos_pago (el monto lo pone el sistema) y valida con validar_pago.`;
+  } else if (a.advance > 0) {
+    note = `Pedido registrado. Cobra AHORA el adelanto (${money(a.advance)}) con enviar_metodos_pago (el monto lo pone el sistema) y valida con validar_pago. El saldo (${money(saldo)}) se cobra después, también con enviar_metodos_pago.`;
+  } else if (resolved.paymentMode === "MANUAL" && a.chargeMode === "CONTRA_ENTREGA") {
+    note = "Pedido registrado. El negocio coordina el pago directamente con el cliente: no envíes métodos de pago.";
+  } else {
+    note = "Pedido registrado. Este pedido no pide pago por adelantado. No envíes métodos de pago salvo que el cliente quiera pagar antes.";
+  }
+  if (a.shippingPaidAtDestination) note += " El flete NO está en el total: el cliente lo paga a la courier al recoger.";
+  note += " Confirma al cliente el código, la entrega y los montos tal como vienen aquí (no los recalcules).";
+  return JSON.stringify({
+    ok: true,
+    orderCode,
+    entrega: deliveryLabel(shipping, address),
+    subtotal: money(a.subtotal),
+    envio: a.shippingPaidAtDestination ? "lo paga el cliente al recoger" : money(a.shipping),
+    total: money(a.total),
+    adelanto: money(a.advance),
+    saldo: money(saldo),
+    note: ctx.simulate ? `(simulación) ${note}` : note,
+  });
+}
+
+/**
+ * Pedido con saldo pendiente del cliente (solo con «Envíos» encendido): de ahí sale
+ * cuánto toca cobrar y contra qué se valida el pago. null = todo sigue como siempre.
+ */
+async function orderDueOf(ctx: TurnContext): Promise<OrderDue | null> {
+  if (!shippingOf(ctx.config)) return null;
+  if (ctx.simulate) {
+    const sim = ctx.state.simOrder;
+    if (!sim) return null;
+    const m = moneyOf({ totalAmount: sim.total, advanceAmount: sim.advance, paidAmount: sim.paid });
+    if (!m || m.balance <= 0.005) return null;
+    return { ...m, orderId: "sim", orderCode: sim.orderCode, status: sim.status as OrderDue["status"] };
+  }
+  return orderDueFor(ctx.companyId, ctx.customerId).catch(() => null);
+}
+
+/** Cabecera del mensaje de cobro de un pedido: concepto, código y montos. */
+function orderChargeHead(due: OrderDue, sym: string): string {
+  const money = (n: number) => `${sym} ${n.toFixed(2)}`;
+  const rest = Math.round((due.balance - due.now) * 100) / 100;
+  if (rest > 0.005) {
+    return `Adelanto del pedido *${due.orderCode}*: *${money(due.now)}* 😊\nTotal ${money(due.total)} · después queda un saldo de ${money(rest)}`;
+  }
+  if (due.paid > 0.005) {
+    return `Saldo del pedido *${due.orderCode}*: *${money(due.now)}* 😊\nTotal ${money(due.total)} · ya pagaste ${money(due.paid)}`;
+  }
+  return `Total del pedido *${due.orderCode}*: *${money(due.now)}* 😊`;
 }
 
 /** Producto en la forma que esperan drive-search / drive-index (id + companyId + entrega). */
@@ -1018,6 +1360,8 @@ export interface ApprovePaymentResult {
   autoSales?: AutoSaleInfo[];
   /** Si quedó pendiente por timing (el caller decide si agenda el recheck). */
   shouldRecheck?: boolean;
+  /** Pago acreditado a un pedido con «Envíos» (adelanto, saldo o total). */
+  order?: { orderCode: string; kind: string; amount: number; total: number; paid: number; balance: number; fullyPaid: boolean };
 }
 
 function parseAmountNumber(text: string | null | undefined): number | undefined {
@@ -1202,10 +1546,14 @@ export async function tryApprovePayment(opts: {
   codes: string[];
   expected?: number;
   deliver: boolean;
+  /** Pedido con saldo pendiente («Envíos»): el pago se valida y se acredita a ese pedido. */
+  orderDue?: OrderDue | null;
 }): Promise<ApprovePaymentResult> {
   const { companyId, customerId, config, state } = opts;
   const payerName = (opts.payerName ?? "").trim();
   const codes = (opts.codes ?? []).map((c) => String(c).replace(/\D/g, "")).filter((c) => c.length >= 3);
+
+  if (opts.orderDue) return approveOrderPayment(opts, opts.orderDue, payerName, codes);
 
   // Idempotencia: ya pagado/entregado → no re-aprobar ni re-entregar.
   const status = state.status ?? "";
@@ -1364,6 +1712,153 @@ export async function tryApprovePayment(opts: {
   }
 
   // (d) Timing: el comprobante puede no haber entrado aún → reintento en 2º plano.
+  return {
+    approved: false,
+    kind: "timing",
+    customerMessage: "Estoy validando tu pago automáticamente 🙏 dame un momentito y te confirmo.",
+    shouldRecheck: true,
+  };
+}
+
+/** Mensaje al cliente tras acreditar un pago a su pedido. */
+export function orderPaymentMessage(o: NonNullable<ApprovePaymentResult["order"]>, sym: string): string {
+  const money = (n: number) => `${sym} ${n.toFixed(2)}`;
+  return o.fullyPaid
+    ? `¡Pago confirmado! ✅ Tu pedido *${o.orderCode}* quedó pagado por completo (${money(o.total)}).`
+    : `¡Pago confirmado! ✅ Recibí ${money(o.amount)} de tu pedido *${o.orderCode}*. Saldo pendiente: ${money(o.balance)}.`;
+}
+
+/**
+ * Validación de un pago contra un pedido con «Envíos»: mismo cruce con los
+ * comprobantes de ValidPay que tryApprovePayment, pero el monto sale del pedido
+ * (adelanto mínimo o saldo; si el comprobante leído trae un monto intermedio, vale
+ * ese) y al aprobar se acredita al pedido. No entrega nada ni cierra el carrito.
+ */
+async function approveOrderPayment(
+  opts: Parameters<typeof tryApprovePayment>[0],
+  due: OrderDue,
+  payerName: string,
+  codes: string[],
+): Promise<ApprovePaymentResult> {
+  const { companyId, customerId, config, state } = opts;
+  const sym = symbolFor(config.business.currency);
+  const money = (n: number) => `${sym} ${n.toFixed(2)}`;
+  const readAmount = parseAmountNumber(state.lastReceipt?.amountText);
+  const amounts = readAmount && acceptsAmount(due, readAmount) ? [readAmount] : Array.from(new Set([due.now, due.balance]));
+
+  let top: any = null;
+  let reasons: string[] = [];
+  let amount = amounts[0];
+  for (const candidate of amounts) {
+    const found = await matchPayments(companyId, {
+      payerName: payerName || undefined,
+      amountPaid: candidate,
+      operationCodes: codes,
+      limit: 5,
+    } as any);
+    const first = found[0] as any;
+    const r: string[] = (first?.matchReasons ?? []) as string[];
+    if (first && (r.includes("operation_code_exact") || r.includes("payer_name_exact") || r.includes("payer_name_similar"))) {
+      top = first;
+      reasons = r;
+      amount = candidate;
+      break;
+    }
+  }
+
+  if (top) {
+    try {
+      const items = await prisma.orderItem.findMany({ where: { orderId: due.orderId }, select: { productId: true } });
+      const productIds = Array.from(new Set(items.map((it) => it.productId).filter((id): id is string => !!id)));
+      await claimPayment(companyId, top.id, { claimedBy: "agent", claimTtlSeconds: 120 } as any);
+      await updatePaymentStatus(companyId, top.id, {
+        status: "APROBADO",
+        validationMode: "AUTO",
+        matchScore: top.matchScore,
+        matchStrategy: reasons.join("+") || "agent_auto",
+        matchedPayerNameInput: payerName || (codes[0] ?? ""),
+        customerPhone: opts.customerPhone,
+        productIds,
+      } as any);
+      const applied = await applyOrderPayment({
+        companyId,
+        orderId: due.orderId,
+        amount,
+        source: "AGENTE",
+        receiptId: top.id,
+      });
+      if (!applied) throw new Error("el pedido no admite pagos");
+      state.pendingRecheckAt = null;
+      state.paymentAttempts = 0;
+      clearMpLinkState(state);
+      markFollowupReset(state);
+      // El comprobante ya se aplicó: que no se vuelva a validar con el mismo.
+      state.lastReceipt = null;
+      state.activeOffer = null;
+      // Pago parcial: la conversación sigue abierta para validar el saldo después.
+      state.status = applied.fullyPaid ? "PAGADO" : "PEDIDO_REGISTRADO";
+      if (applied.fullyPaid) state.pendingOrderId = null;
+      try {
+        await cancelPendingReminders(companyId, customerId, [
+          ScheduledMessageType.ABANDONED_CART,
+          ScheduledMessageType.LEFT_ON_READ,
+          ScheduledMessageType.OFFER_COUNTDOWN,
+          ScheduledMessageType.POST_SALE,
+        ]);
+      } catch {
+        /* best-effort */
+      }
+      const order = {
+        orderCode: applied.orderCode,
+        kind: applied.kind,
+        amount: applied.amount,
+        total: applied.money.total,
+        paid: applied.money.paid,
+        balance: applied.money.balance,
+        fullyPaid: applied.fullyPaid,
+      };
+      return { approved: true, order, customerMessage: orderPaymentMessage(order, sym) };
+    } catch (err) {
+      console.warn("[agent] no se pudo acreditar el pago al pedido:", err instanceof Error ? err.message : err);
+      return {
+        approved: false,
+        kind: "timing",
+        customerMessage: "Estoy validando tu pago automáticamente 🙏 dame un momentito y te confirmo.",
+        shouldRecheck: true,
+      };
+    }
+  }
+
+  // No aprobado: mismos motivos que en una venta normal, con los montos del pedido.
+  state.status = "ESPERANDO_VALIDACION";
+  const holders = ((config.payment?.methods ?? []) as Array<{ holder?: string }>).map((m) => m.holder ?? "").filter(Boolean);
+  if (payerName && !codes.length && holders.some((h) => sameHolder(payerName, h))) {
+    return {
+      approved: false,
+      kind: "confusion",
+      customerMessage:
+        "Ese es el titular de NUESTRA cuenta 🙂 (a quién le pagaste), no el tuyo. Para validar tu pago necesito el nombre del titular de TU Yape/Plin (desde donde pagaste) o que me reenvíes la captura del comprobante.",
+    };
+  }
+  if (!payerName && !codes.length) {
+    return {
+      approved: false,
+      kind: "needs_info",
+      customerMessage:
+        "¡Gracias! Para validar tu pago, dime por favor el *nombre del titular* de tu Yape o Plin (la cuenta DESDE donde hiciste el pago) 🙏",
+    };
+  }
+  if (readAmount && !acceptsAmount(due, readAmount)) {
+    const expectedText =
+      due.now < due.balance - 0.005
+        ? `el adelanto mínimo es ${money(due.now)} y el saldo total es ${money(due.balance)}`
+        : `el saldo pendiente es ${money(due.balance)}`;
+    return {
+      approved: false,
+      kind: "amount_mismatch",
+      customerMessage: `Veo un comprobante por ${money(readAmount)}, pero para tu pedido *${due.orderCode}* ${expectedText}. ¿Me reenvías el comprobante correcto? 🙏`,
+    };
+  }
   return {
     approved: false,
     kind: "timing",
@@ -1721,6 +2216,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             description: "ids (o nombres exactos) de los archivos concretos a enviar, de la lista de multimedia del producto (hasta 12 por llamada). Úsalo para enviar SOLO el/los archivo(s) que el cliente pide o que se relacionan con su consulta; si lo pasas, se envían esos sin importar si ya se enviaron antes. Si ninguno coincide, la respuesta trae archivosDisponibles para corregir.",
           },
           kind: { type: "string", enum: ["image", "pdf", "document", "video", "audio", "all"], description: "filtra por tipo cuando NO indicas fileIds; 'document' = PDF y demás archivos (zip, Excel, Word…); 'all' envía todos" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "buscar_agencias",
+      description:
+        "Busca en el catálogo real de agencias de la courier del negocio por departamento, provincia, distrito, nombre o dirección, sin importar mayúsculas, tildes ni errores pequeños de tipeo. Devuelve hasta 5 agencias con id, nombre, dirección, horario y `coincidencia` (exacta | parcial | debil). Paginado: `offset` + `siguienteOffset` para ver más. Úsala cuando el cliente quiera envío por agencia o pregunte qué agencias hay en su zona: no inventes agencias ni direcciones. El `id` de la agencia que elija va en `agenciaId` al registrar el pedido.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["consulta"],
+        properties: {
+          consulta: { type: "string", description: "zona o nombre que dijo el cliente ('chiclayo', 'ferreñafe', 'av parra arequipa')" },
+          offset: { type: "integer", minimum: 0, description: "desde qué resultado seguir (usa el siguienteOffset de la respuesta anterior)" },
         },
       },
     },
@@ -2436,6 +2948,47 @@ export async function executeTool(
       return JSON.stringify({ ok: true, sent: sentCount, nota: "Ya envié los archivos (con su texto) al cliente. NO repitas ni describas su contenido en tu texto final; cierra breve o deja el texto vacío." });
     }
 
+    case "buscar_agencias": {
+      const shipCfg = shippingOf(ctx.config);
+      if (!shipCfg || !agencySearchAvailable(ctx.config)) {
+        return JSON.stringify({ ok: false, error: "este negocio no tiene envío por agencia con buscador" });
+      }
+      const query = String(args.consulta ?? "").trim().slice(0, 120);
+      if (!query) {
+        return JSON.stringify({ ok: false, error: "indica consulta: la zona (departamento, provincia o distrito) o el nombre de la agencia" });
+      }
+      if ((ctx.agencySearchesThisTurn ?? 0) >= MAX_AGENCY_SEARCHES_PER_TURN) {
+        return JSON.stringify({
+          ok: false,
+          error: "ya buscaste agencias varias veces en este turno: responde con lo encontrado o pide al cliente un dato más preciso (distrito o provincia)",
+        });
+      }
+      ctx.agencySearchesThisTurn = (ctx.agencySearchesThisTurn ?? 0) + 1;
+      try {
+        const r = await searchAgencies({
+          query,
+          couriers: shipCfg.types.agencia.couriers,
+          offset: Math.max(0, Number(args.offset) || 0),
+          limit: 5,
+        });
+        return JSON.stringify({
+          ok: true,
+          total: r.total,
+          siguienteOffset: r.siguienteOffset,
+          resultados: r.results,
+          nota: r.results.length
+            ? `${r.total} agencia(s) coinciden${r.hayMas ? `; para ver más llama de nuevo con offset=${r.siguienteOffset}` : ""}. Copia nombre y dirección tal cual. Las de coincidencia 'debil' solo se parecen: confírmalas con el cliente. Al registrar el pedido pasa el id elegido en agenciaId.`
+            : "Sin agencias para esa búsqueda. Pide al cliente el distrito o la provincia; no inventes agencias.",
+        });
+      } catch (err) {
+        console.error("[agent] buscar_agencias falló:", (err as Error).message);
+        return JSON.stringify({
+          ok: false,
+          error: "no se pudo consultar el catálogo de agencias ahora; si el cliente ya sabe a qué agencia quiere el envío, regístrala con agenciaTexto",
+        });
+      }
+    }
+
     case "buscar_en_drive": {
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
@@ -2725,7 +3278,29 @@ export async function executeTool(
       const cartVertical =
         (ctx.config.business as { vertical?: string }).vertical === "RESTAURANT" ||
         (ctx.config.business as { vertical?: string }).vertical === "PHYSICAL_GOODS";
-      if (cartVertical && !cart.items.length) {
+      // «Envíos»: primero el pedido y después el cobro; se cobra lo que toca del pedido.
+      const shipCfgPay = shippingOf(ctx.config);
+      let orderDue: OrderDue | null = null;
+      if (shipCfgPay) {
+        if (cart.items.some((it) => findProductById(ctx, it.productId)?.productType === "physical")) {
+          return JSON.stringify({
+            ok: false,
+            error:
+              "Primero registra el pedido con registrar_pedido_carrito (tipo de entrega y datos de envío): el sistema calcula el envío, el total y cuánto se cobra ahora. Después vuelve a llamar enviar_metodos_pago.",
+          });
+        }
+        if (!cart.items.length) {
+          orderDue = await orderDueOf(ctx);
+          if (!orderDue) {
+            return JSON.stringify({
+              ok: false,
+              error:
+                "No hay un pedido con saldo pendiente que cobrar. Si el cliente quiere comprar, arma el carrito y registra el pedido (registrar_pedido_carrito o registrar_pedido); después se cobra.",
+            });
+          }
+        }
+      }
+      if (cartVertical && !cart.items.length && !orderDue) {
         return JSON.stringify({
           ok: false,
           error:
@@ -2735,7 +3310,9 @@ export async function executeTool(
       // Guard anti-reventa: no re-cobrar un producto DIGITAL que el cliente YA compró.
       // (Un físico sí podría re-pedirse; un infoproducto ya entregado no.)
       const purchased = Array.isArray(ctx.state.purchasedProductIds) ? ctx.state.purchasedProductIds : [];
-      const chargeIds = cart.productIds.length
+      const chargeIds = orderDue
+        ? []
+        : cart.productIds.length
         ? cart.productIds
         : ctx.state.selectedProductId
         ? [ctx.state.selectedProductId]
@@ -2750,7 +3327,7 @@ export async function executeTool(
       // Carrito vacío: cobrar el producto seleccionado SOLO si su precio es un monto claro.
       // Con PLANES el plan elegido tiene que estar en el carrito (si no se cobraría el "desde")
       // y un precio de texto ("Desde S/ 19.99 al mes") nunca se manda como monto a pagar.
-      if (!cart.items.length && ctx.state.selectedProductId) {
+      if (!orderDue && !cart.items.length && ctx.state.selectedProductId) {
         const sel = findProductById(ctx, ctx.state.selectedProductId);
         const offerSel = activeOfferFor(ctx.state, ctx.state.selectedProductId);
         if (sel && !offerSel) {
@@ -2773,7 +3350,11 @@ export async function executeTool(
       let amountText = cart.totalText;
       let amountNum = cart.total;
       let mpTitle = "Compra";
-      if (!cart.items.length && ctx.state.selectedProductId) {
+      if (orderDue) {
+        amountNum = orderDue.now;
+        amountText = `${symbolFor(ctx.config.business.currency)} ${orderDue.now.toFixed(2)}`;
+        mpTitle = `Pedido ${orderDue.orderCode}`;
+      } else if (!cart.items.length && ctx.state.selectedProductId) {
         const p = findProductById(ctx, ctx.state.selectedProductId);
         // Oferta escalonada (personal, activada por recordatorio) manda sobre el catálogo.
         const offer = activeOfferFor(ctx.state, ctx.state.selectedProductId);
@@ -2802,6 +3383,12 @@ export async function executeTool(
         simulate: ctx.simulate,
         mpLink: soloLink ? "only" : "auto",
         timezone: (ctx.config.business as { timezone?: string }).timezone,
+        ...(orderDue
+          ? {
+              head: orderChargeHead(orderDue, symbolFor(ctx.config.business.currency)),
+              orderId: orderDue.orderId === "sim" ? undefined : orderDue.orderId,
+            }
+          : {}),
       });
       // Sin link no hay nada que enviar: que el agente no lo prometa.
       if (soloLink && !text) {
@@ -2913,6 +3500,45 @@ export async function executeTool(
         ctx.state.lastPaymentPromptAt = new Date().toISOString();
       }
 
+      // «Envíos»: el pago se valida contra el pedido registrado (adelanto o saldo).
+      const dueVp = await orderDueOf(ctx);
+      const symVp = symbolFor(ctx.config.business.currency);
+      if (shippingOf(ctx.config) && !dueVp && ctx.state.status !== "PAGADO" && ctx.state.status !== "ENTREGADO") {
+        const cartShip = await summarizeCart(ctx.companyId, ctx.customerId);
+        const physicalCtx = cartShip.items.length
+          ? cartShip.items.some((it) => findProductById(ctx, it.productId)?.productType === "physical")
+          : !!ctx.state.selectedProductId && findProductById(ctx, ctx.state.selectedProductId)?.productType === "physical";
+        if (physicalCtx) {
+          return JSON.stringify({
+            ok: false,
+            error:
+              "Todavía no hay un pedido registrado al que aplicar este pago. Registra primero el pedido (registrar_pedido_carrito o registrar_pedido, con el tipo de entrega y los datos de envío) y vuelve a llamar validar_pago: el comprobante ya quedó guardado, no se lo pidas de nuevo al cliente.",
+          });
+        }
+      }
+      if (ctx.simulate && dueVp && ctx.state.simOrder) {
+        const sim = ctx.state.simOrder;
+        const readSim = parseAmountNumber(ctx.state.lastReceipt?.amountText);
+        const paidNow = readSim && acceptsAmount(dueVp, readSim) ? readSim : dueVp.now;
+        sim.paid = Math.round((sim.paid + paidNow) * 100) / 100;
+        const balanceSim = Math.max(0, Math.round((sim.total - sim.paid) * 100) / 100);
+        const full = balanceSim <= 0.005;
+        sim.status = full ? "PAGADO" : "PEDIDO_REGISTRADO";
+        ctx.state.status = full ? "PAGADO" : "PEDIDO_REGISTRADO";
+        ctx.state.lastReceipt = null;
+        clearMpLinkState(ctx.state);
+        return JSON.stringify({
+          ok: true,
+          approved: true,
+          pedido: sim.orderCode,
+          pagado: `${symVp} ${sim.paid.toFixed(2)}`,
+          saldo: `${symVp} ${balanceSim.toFixed(2)}`,
+          note: full
+            ? "(simulación) Pago aprobado: el pedido quedó pagado por completo. Confírmaselo al cliente; no hay nada que entregar por chat."
+            : "(simulación) Pago aprobado y acreditado al pedido. Confirma al cliente lo recibido y el saldo pendiente tal como vienen aquí.",
+        });
+      }
+
       // SIMULACIÓN: no tocar PaymentReceipt reales; aprobar de frente.
       if (ctx.simulate) {
         const cartSim = await summarizeCart(ctx.companyId, ctx.customerId);
@@ -2988,6 +3614,7 @@ export async function executeTool(
         const n = offer?.num ?? Number(String(p?.price ?? "").replace(/[^0-9.]/g, ""));
         if (Number.isFinite(n) && n > 0) expectedVp = n;
       }
+      if (dueVp) expectedVp = dueVp.now;
 
       const result = await tryApprovePayment({
         companyId: ctx.companyId,
@@ -3000,8 +3627,28 @@ export async function executeTool(
         codes,
         expected: expectedVp,
         deliver: false, // el modelo entrega con entregar_producto
+        orderDue: dueVp,
       });
 
+      if (result.approved && result.order) {
+        const o = result.order;
+        const m = (n: number) => `${symVp} ${n.toFixed(2)}`;
+        ctx.adminNotices.push(
+          `💰 Pago de ${m(o.amount)} validado para el pedido ${o.orderCode} (${ctx.customerPhone}). ` +
+            (o.fullyPaid ? "Pedido pagado por completo." : `Pagado ${m(o.paid)} de ${m(o.total)} · saldo ${m(o.balance)}.`),
+        );
+        return JSON.stringify({
+          ok: true,
+          approved: true,
+          pedido: o.orderCode,
+          recibido: m(o.amount),
+          pagado: m(o.paid),
+          saldo: m(o.balance),
+          note: o.fullyPaid
+            ? "Pago aprobado: el pedido quedó pagado por completo. Confírmaselo al cliente; no hay nada que entregar por chat (NO llames entregar_producto)."
+            : "Pago aprobado y acreditado al pedido. Confirma al cliente lo recibido y el saldo pendiente tal como vienen aquí (NO llames entregar_producto).",
+        });
+      }
       if (result.approved) {
         if (result.kind === "already") {
           if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
@@ -3286,6 +3933,8 @@ export async function executeTool(
     }
 
     case "registrar_pedido": {
+      const shipCfgOrder = shippingOf(ctx.config);
+      if (shipCfgOrder) return registerOrderWithShipping(ctx, shipCfgOrder, args, "single");
       const product = findProductById(ctx, String(args.productId ?? ""));
       if (!product) return JSON.stringify({ ok: false, error: "producto no encontrado" });
       if (product.productType !== "physical") {
@@ -3337,6 +3986,8 @@ export async function executeTool(
     }
 
     case "registrar_pedido_carrito": {
+      const shipCfgCart = shippingOf(ctx.config);
+      if (shipCfgCart) return registerOrderWithShipping(ctx, shipCfgCart, args, "cart");
       const cart = await summarizeCart(ctx.companyId, ctx.customerId);
       if (!cart.items.length) return JSON.stringify({ ok: false, error: "el carrito está vacío" });
       const customerName = String(args.customerName ?? "").trim();

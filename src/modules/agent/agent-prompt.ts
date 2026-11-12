@@ -11,7 +11,8 @@ import { planOptions } from "../products/product-plans";
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
-import { emailDeliveryAvailable, crmToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable } from "./agent-tools";
+import { emailDeliveryAvailable, crmToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
+import { describeShippingConfig, type ShippingConfig } from "../shipping/shipping-config";
 import { activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
 import { mpChatOn, mpLinkOnRequest } from "./payment-methods";
 import { deliveryDriveRefs, driveSearchEnabled } from "../../lib/google-drive";
@@ -348,7 +349,7 @@ function renderPaymentMethods(payment: BotConfig["payment"]): string {
 // Guía de comportamiento según el rubro del negocio (Company.vertical).
 function verticalGuidance(
   vertical: string | undefined,
-  opts?: { catalogMode?: string; keywordMode?: string; trackStock?: boolean; meetingUrl?: boolean },
+  opts?: { catalogMode?: string; keywordMode?: string; trackStock?: boolean; meetingUrl?: boolean; shipping?: boolean },
 ): string {
   switch (vertical) {
     case "RESTAURANT":
@@ -399,13 +400,20 @@ function verticalGuidance(
       const stock = trackStock
         ? "STOCK: respeta el stock disponible de cada producto; si el cliente pide más de lo que hay, avísale cuántas unidades quedan. No prometas lo que no hay."
         : "";
+      // Con «Envíos» encendido el pedido se registra primero y el cobro va después.
+      const datosEntrega = opts?.shipping
+        ? "toma su nombre y los datos del tipo de entrega que elija (ver ENVÍOS DEL NEGOCIO)"
+        : "toma su nombre y dirección de entrega (o recojo en local si aplica), valida la zona de envío";
+      const cobro = opts?.shipping
+        ? "COBRO: primero se registra el pedido y después se cobra lo que la herramienta devuelva como monto a pagar ahora (ver COBRO CON ENVÍOS)."
+        : "COBRO: respeta el modo de cobro configurado. Adelantado: envía los métodos de pago (enviar_metodos_pago) y valida el pago (validar_pago) ANTES de confirmar. Contra entrega: registra el pedido y coordina la entrega (se paga al recibir). Manual: registra el pedido y un asesor coordina el cobro. Si el negocio deja ELEGIR al cliente, pregúntale primero '¿prefieres pagar por adelantado o contra entrega?' y actúa según su respuesta.";
       return (
         "Rubro COMERCIAL: vendes productos físicos (ferretería, ropa, licorería, electrodomésticos, juguetes, etc.). Conoces cada producto (precio, descripción, atributos, variantes) y respondes preguntas concretas. Si piden fotos o más imágenes de un producto, envíalas con enviar_multimedia. " +
         catalogo + " " + keyword + " " +
         "VARIANTES: si un producto tiene variantes (talla, color, etc.), pregúntalas y pásalas al agregar_carrito como `modifiers` {group:'Talla', option:'M'}; así queda registrado qué eligió el cliente. " +
         (stock ? stock + " " : "") +
-        "CARRITO Y PEDIDO: arma el pedido en el carrito (agregar_carrito, ver_carrito) sumando varios productos; si el cliente cambia o quita algo: quitar_carrito elimina (con quantity baja unidades), fijar_cantidad deja la cantidad EXACTA (para corregir errores), vaciar_carrito empieza de cero; agregar_carrito es SOLO para pedidos nuevos. Cuando el cliente confirme, toma su nombre y dirección de entrega (o recojo en local si aplica), valida la zona de envío, y usa registrar_pedido_carrito para registrar TODO el carrito como UN pedido. Para un solo producto puedes usar registrar_pedido. " +
-        "COBRO: respeta el modo de cobro configurado. Adelantado: envía los métodos de pago (enviar_metodos_pago) y valida el pago (validar_pago) ANTES de confirmar. Contra entrega: registra el pedido y coordina la entrega (se paga al recibir). Manual: registra el pedido y un asesor coordina el cobro. Si el negocio deja ELEGIR al cliente, pregúntale primero '¿prefieres pagar por adelantado o contra entrega?' y actúa según su respuesta."
+        "CARRITO Y PEDIDO: arma el pedido en el carrito (agregar_carrito, ver_carrito) sumando varios productos; si el cliente cambia o quita algo: quitar_carrito elimina (con quantity baja unidades), fijar_cantidad deja la cantidad EXACTA (para corregir errores), vaciar_carrito empieza de cero; agregar_carrito es SOLO para pedidos nuevos. Cuando el cliente confirme, " + datosEntrega + ", y usa registrar_pedido_carrito para registrar TODO el carrito como UN pedido. Para un solo producto puedes usar registrar_pedido. " +
+        cobro
       );
     }
     case "INFOPRODUCT":
@@ -422,6 +430,56 @@ export interface PromptExtras {
   flowNote?: string | null;
   /** Cita vigente del cliente (SERVICE/REAL_ESTATE): para que mueva, no duplique. */
   upcomingBooking?: { code: string | null; service: string; when: string; status: string } | null;
+  /** Pedido vigente del cliente (solo con «Envíos»): para responder por su estado y no duplicarlo. */
+  currentOrder?: {
+    code: string;
+    status: string;
+    total: number;
+    paid: number;
+    balance: number;
+    deliveryType?: string | null;
+    courier?: string | null;
+    agencyName?: string | null;
+    agencyAddress?: string | null;
+    trackingCode?: string | null;
+    pickupKey?: string | null;
+  } | null;
+}
+
+const ORDER_STATUS_TEXT: Record<string, string> = {
+  PENDIENTE_PAGO: "pendiente de pago",
+  PEDIDO_REGISTRADO: "registrado",
+  EN_COORDINACION: "en coordinación",
+  PAGADO: "pagado, por despachar",
+  DESPACHADO: "despachado",
+  LISTO_PARA_RECOGER: "listo para recoger",
+  ENTREGADO: "entregado",
+  CANCELADO: "cancelado",
+};
+
+function currentOrderLine(extra: PromptExtras | undefined, cfg: ShippingConfig | null, sym: string): string | null {
+  const o = extra?.currentOrder;
+  if (!o || !cfg) return null;
+  const money = (n: number) => `${sym} ${n.toFixed(2)}`;
+  const parts = [
+    `${o.code} · estado: ${ORDER_STATUS_TEXT[o.status] ?? o.status}`,
+    `total ${money(o.total)}, pagado ${money(o.paid)}, saldo ${money(o.balance)}`,
+  ];
+  if (o.deliveryType === "AGENCIA") {
+    const agencia = [o.courier, o.agencyName, o.agencyAddress].filter(Boolean).join(" · ");
+    parts.push(`envío por agencia${agencia ? `: ${agencia}` : " (agencia por confirmar)"}`);
+  } else if (o.deliveryType === "RECOJO") parts.push("recojo en tienda");
+  else if (o.deliveryType === "DOMICILIO") parts.push("entrega a domicilio");
+  if (o.trackingCode) parts.push(`guía: ${o.trackingCode}`);
+  if (o.pickupKey) {
+    // La clave solo se muestra al agente cuando la regla del negocio ya permite entregarla.
+    const released =
+      cfg.pickupKeyRelease === "AL_PAGAR_SALDO"
+        ? o.balance <= 0.005
+        : ["DESPACHADO", "LISTO_PARA_RECOGER"].includes(o.status);
+    parts.push(released ? `clave de recojo: ${o.pickupKey}` : "clave de recojo: aún no se entrega al cliente");
+  }
+  return `PEDIDO VIGENTE DEL CLIENTE: ${parts.join(" · ")}. Si pregunta por su pedido, responde con estos datos sin consultar nada; no inventes guía, clave ni fechas que no estén aquí. Si hay saldo y quiere pagarlo, enviar_metodos_pago cobra lo que toca. No tienes herramienta para modificar un pedido ya registrado: no registres otro por lo mismo; si quiere cambiarlo o cancelarlo, deriva a un asesor.`;
 }
 
 function upcomingBookingLine(extra?: PromptExtras): string | null {
@@ -464,6 +522,10 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
   const negotiationHandoff = !!(config.agent as { negotiationHandoff?: boolean }).negotiationHandoff;
   // Toggle del dueño: si no sabe responder, derivar (motivo CONSULTA) en vez de inventar.
   const unknownHandoff = !!(config.agent as { unknownHandoff?: boolean }).unknownHandoff;
+
+  // «Envíos» (rubro comercial): null = el prompt queda como siempre.
+  const shipCfg = shippingOf(config);
+  const shipSym = symbolFor(config.business.currency);
 
   // Entrega a nivel negocio (restaurante): se aplica a todos los productos.
   const biz = config.business as { deliveryConfig?: Record<string, unknown> | null };
@@ -513,6 +575,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
       keywordMode: (config.agent as { keywordMode?: string }).keywordMode,
       trackStock: (config.agent as { trackStock?: boolean }).trackStock,
       meetingUrl: !!(config.business as { meetingUrl?: string | null }).meetingUrl,
+      shipping: !!shipCfg,
     })}`,
     ...(deliveryLine ? [deliveryLine] : []),
     "",
@@ -590,8 +653,20 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
       : []),
     "- 'yaCompro' (en el estado) son los productos que el cliente YA compró y recibió (memoria durable, no depende del historial reciente). Si el cliente pregunta por un producto de 'yaCompro', es SOPORTE post-venta: responde sus dudas, NO le envíes métodos de pago, NO le ofrezcas activarlo/comprarlo y NO lo agregues al carrito (ya es suyo, sería re-venderle lo mismo). Si dice que no le llegó el acceso o hay un problema con su compra, usa derivar_humano para que un asesor lo resuelva.",
     "- Tras una entrega (status ENTREGADO), si el cliente se interesa en OTRO producto, trátalo como una VENTA NUEVA: preséntalo con enviar_ficha y sigue el flujo normal (resuelve dudas → agregar_carrito si aplica → enviar_metodos_pago → validar_pago → entregar_producto). El 'selectedProductId' y el status ENTREGADO se refieren a la compra ANTERIOR; NO dejes que bloqueen una compra nueva.",
+    ...(shipCfg
+      ? [
+          `- ENVÍOS DEL NEGOCIO (hechos de su configuración): ${describeShippingConfig(shipCfg, shipSym).slice(0, -1).join(" ")}`,
+          `- Productos FÍSICOS: informa, ayuda a cerrar y pide los datos del pedido: nombre de quien recibe, cantidad, variante si aplica y el tipo de entrega, entre los que el negocio ofrece. Domicilio: dirección completa y referencia. Agencia: ${
+            agencySearchAvailable(config)
+              ? "busca con buscar_agencias por ciudad, distrito o nombre, ofrece las opciones REALES que devuelve y registra con el agenciaId de la que elija (si usa una courier sin buscador, pasa courier y agenciaTexto con lo que diga el cliente)"
+              : "pide la courier y la agencia donde quiere recoger y pásalas como courier y agenciaTexto"
+          }; nunca inventes agencias, direcciones ni horarios. Recojo en tienda: no pide dirección. Luego registra con registrar_pedido o registrar_pedido_carrito pasando tipoEntrega: la herramienta calcula y devuelve envío, total, adelanto y saldo; usa ESOS montos, no los calcules tú. Nunca envíes enlaces digitales para un físico.`,
+          `- COBRO CON ENVÍOS: PRIMERO se registra el pedido y DESPUÉS se cobra. Si al registrar hay un monto a pagar ahora (adelanto o total), enviar_metodos_pago cobra lo que toca del pedido; si no hay nada que cobrar ahora, no envíes métodos de pago. Cuando el cliente mande su comprobante, validar_pago lo acredita al pedido. Con pago parcial el pedido sigue abierto: el saldo se cobra y valida igual, con enviar_metodos_pago + validar_pago. Para un pedido físico no uses entregar_producto. Donde la regla de cobro de un tipo de entrega es «según el modo de cobro del negocio», vale el modo *${paymentMode}*: con customer_choice pregunta al cliente si paga adelantado o contra entrega y pasa cobro:'adelantado' o cobro:'contra_entrega' al registrar.`,
+        ]
+      : [
     "- Productos FÍSICOS: informa, ayuda a cerrar y pide los datos de entrega (nombre de quien recibe, dirección completa, referencia, cantidad y variante si el producto tiene variantes). Valida la dirección contra las zonas de envío configuradas; si está fuera de zona, dilo y ofrece alternativas (recojo si está disponible). Luego registra el pedido con registrar_pedido. Nunca envíes enlaces digitales para un físico.",
     `- Modo de pago del negocio: *${paymentMode}*. before_delivery = cobra y valida el pago (enviar_metodos_pago + validar_pago) ANTES de registrar el pedido. cash_on_delivery = toma los datos y registra el pedido (paga contra entrega), sin cobrar antes. manual = registra el pedido y coordina el pago con un asesor. customer_choice = el CLIENTE elige: antes de enviar métodos de pago PREGÚNTALE si prefiere pago adelantado o contra entrega; si elige adelantado sigue el flujo de before_delivery, si elige contra entrega registra el pedido sin cobrar; al registrar pasa cobro:'adelantado' o cobro:'contra_entrega' según lo que eligió (la herramienta lo exige).`,
+        ]),
     "- Si el cliente se enfría, deja en visto o tiene un carrito sin pagar, puedes programar un recordatorio con agendar_recordatorio.",
     // Posponer el seguimiento: SOLO si el dueño lo activó. Se describe la capacidad;
     // cuándo usarla (y con qué tono) lo deciden las instrucciones del negocio.
@@ -642,6 +717,8 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     ...(offeredSlotsLine(state, config) ? [offeredSlotsLine(state, config)!, ""] : []),
     // Agenda: cita vigente del cliente (sin esto el modelo "agenda" otra en vez de moverla).
     ...(upcomingBookingLine(extra) ? [upcomingBookingLine(extra)!, ""] : []),
+    // Envíos: pedido vigente del cliente (estado, pagos, agencia, guía).
+    ...(currentOrderLine(extra, shipCfg, shipSym) ? [currentOrderLine(extra, shipCfg, shipSym)!, ""] : []),
     // Rubros de carrito: estado REAL del carrito al inicio de este turno.
     ...(state.cartText
       ? [

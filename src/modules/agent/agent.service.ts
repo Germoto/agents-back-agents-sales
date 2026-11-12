@@ -55,7 +55,8 @@ import {
   getCustomerFlowVars,
   type FlowTurnResult,
 } from "../flows/flow-engine";
-import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, type TurnContext } from "./agent-tools";
+import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, shippingOf, type TurnContext } from "./agent-tools";
+import { orderDueFor } from "../orders/order-money";
 import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-guard";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
@@ -1093,6 +1094,11 @@ export async function recheckPayment(msg: {
       .map((c) => (c ?? "").trim())
       .filter(Boolean) as string[];
 
+    // «Envíos»: el reintento valida contra el pedido con saldo pendiente. Si el turno
+    // del cliente ya resolvió esta validación (p. ej. aprobó el adelanto), no insistir.
+    const orderDue = shippingOf(config) ? await orderDueFor(msg.companyId, msg.customerId).catch(() => null) : null;
+    if (orderDue && !state.pendingRecheckAt) return;
+
     const result = await tryApprovePayment({
       companyId: msg.companyId,
       customerId: msg.customerId,
@@ -1104,7 +1110,38 @@ export async function recheckPayment(msg: {
       codes,
       expected: md.expectedAmount ?? undefined,
       deliver: true,
+      orderDue,
     });
+
+    if (result.approved && result.order) {
+      // Pago acreditado a un pedido: confirmar al cliente y avisar al dueño.
+      if (result.customerMessage && to) {
+        try {
+          await sendText(sender, to, result.customerMessage);
+        } catch {
+          /* best-effort */
+        }
+      }
+      await saveState(conversationId, state as ConversationState);
+      const adminPhone = waSender
+        ? (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "")
+        : "";
+      if (adminPhone) {
+        const o = result.order;
+        try {
+          await sendText(
+            waSender!,
+            adminPhone,
+            `💰 Pago de ${o.amount.toFixed(2)} validado para el pedido ${o.orderCode} (${md.customerPhone ?? to}). ` +
+              (o.fullyPaid ? "Pedido pagado por completo." : `Saldo pendiente: ${o.balance.toFixed(2)}.`),
+          );
+        } catch {
+          /* best-effort */
+        }
+      }
+      console.log(`[agent] recheckPayment: pago acreditado al pedido ${result.order.orderCode} (conv=${conversationId})`);
+      return;
+    }
 
     if (result.approved && result.deliveryOutbox?.length) {
       if (result.customerMessage && to) {

@@ -8,6 +8,7 @@ import { isPlatformSalesCompanyId, getLivePlansPromptSection } from "../admin-co
 import { listCrmStructure } from "../crm/crm.service";
 import { getEntitlements } from "../billing/entitlements";
 import { LEGACY_UNKNOWN_HANDOFF_RULE, type CrmToolConfig } from "../agent-config/agent-config.schemas";
+import { normalizeShippingConfig } from "../shipping/shipping-config";
 
 /** Herramienta de CRM del agente resuelta con NOMBRES (lo que lee el prompt y la tool). */
 export interface AgentCrmTool {
@@ -201,6 +202,11 @@ export async function buildBotConfig(companyId: string, account?: string) {
       adminPhone: whatsappConfig.company.adminPhone,
       vertical: whatsappConfig.company.vertical,
       deliveryConfig: (whatsappConfig.company.deliveryConfig ?? null) as Record<string, unknown> | null,
+      // «Envíos» (Empresa → Envíos): solo rubro comercial. null = apagado o sin configurar.
+      shipping:
+        whatsappConfig.company.vertical === "PHYSICAL_GOODS"
+          ? normalizeShippingConfig(whatsappConfig.company.shippingConfig)
+          : null,
       timezone: whatsappConfig.company.timezone,
       // Enlace fijo de videollamada por defecto (citas online); lo envía el sistema al confirmar.
       meetingUrl: whatsappConfig.company.meetingUrl ?? null,
