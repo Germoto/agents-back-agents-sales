@@ -53,6 +53,8 @@ export function matchLevelArg(v: unknown): MatchLevel {
   return (MATCH_LEVELS as string[]).includes(s) ? (s as MatchLevel) : "parcial";
 }
 import { drivePurchased, blockedFolderIds, allowedFolderIds } from "../drive/drive-guard";
+import { needsMediaProbe, probeDriveMedia } from "../../lib/drive-media-probe";
+import { fallbackLinkText } from "./delivery";
 import { decryptCredential } from "../../lib/credentials-crypto";
 import { composePaymentMethodsMessage, mpChatOn, clearMpLinkState } from "./payment-methods";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
@@ -1968,6 +1970,42 @@ function driveAttachCheck(entry: DriveEntry): { mediaKind: "image" | "video" | "
   return { mediaKind };
 }
 
+/** Adjuntos de Drive que este cliente ya recibió (para no repetir el mismo adjunto). */
+const DRIVE_ATTACHED_MAX = 40;
+
+/**
+ * Decisión final de adjuntar: además del chequeo por nombre/peso, no repite un
+ * adjunto ya enviado a este cliente (va el link) y revisa el formato REAL de
+ * los mp4/3gp/m4a (un MOV con HEVC renombrado a .mp4 no abre en muchos celulares).
+ */
+async function driveAttachDecision(
+  ctx: TurnContext,
+  entry: DriveEntry,
+): Promise<{ mediaKind: "image" | "video" | "audio" | "document" } | { motivo: string } | { repetido: true }> {
+  const check = driveAttachCheck(entry);
+  if ("motivo" in check) return check;
+  const sent = Array.isArray(ctx.state.driveAttachedIds) ? ctx.state.driveAttachedIds : [];
+  if (sent.includes(entry.id)) return { repetido: true };
+  if (needsMediaProbe(entry.name)) {
+    const probe = await probeDriveMedia(entry.id);
+    if (probe.ok === false) return { motivo: `${probe.motivo}: manda el link` };
+  }
+  return check;
+}
+
+function markDriveAttached(ctx: TurnContext, fileId: string): void {
+  const sent = Array.isArray(ctx.state.driveAttachedIds) ? ctx.state.driveAttachedIds : [];
+  ctx.state.driveAttachedIds = [...sent.filter((id) => id !== fileId), fileId].slice(-DRIVE_ATTACHED_MAX);
+}
+
+/** Adjunto repetido: el sistema manda el link del archivo en vez de volver a adjuntarlo. */
+function pushDriveLinkInstead(ctx: TurnContext, entry: DriveEntry): void {
+  ctx.outbox.push({ kind: "text", text: fallbackLinkText(driveViewLink(entry)) });
+}
+
+const DRIVE_REPEAT_NOTE =
+  "Este archivo YA se le adjuntó antes a este cliente: no se repite el adjunto. El sistema le acaba de mandar el link del archivo en un mensaje aparte: NO lo pegues de nuevo; cierra breve.";
+
 const DRIVE_SENT_NOTE =
   "El archivo se está enviando como adjunto: NO afirmes que ya le llegó ni pegues el link en tu texto final; cierra breve. Si no se le abre, el sistema le manda el link solo.";
 
@@ -3107,10 +3145,15 @@ export async function executeTool(
         const carpeta = pick.folder ? driveEntryView(pick.folder, guard) : undefined;
         let enviado = false;
         let motivoNoAdjunto: string | undefined;
+        let linkEnviado = false;
         if (args.adjuntar === true) {
-          const check = driveAttachCheck(pick.file);
-          if ("motivo" in check) motivoNoAdjunto = check.motivo;
+          const check = await driveAttachDecision(ctx, pick.file);
+          if ("repetido" in check) {
+            pushDriveLinkInstead(ctx, pick.file);
+            linkEnviado = true;
+          } else if ("motivo" in check) motivoNoAdjunto = check.motivo;
           else {
+            markDriveAttached(ctx, pick.file.id);
             ctx.outbox.push({
               kind: "media",
               mediaUrl: driveDownloadUrl(pick.file.id),
@@ -3130,10 +3173,13 @@ export async function executeTool(
           archivo,
           ...(carpeta ? { carpeta, nota_carpeta: pick.via === "carpeta" ? "el tema coincidió con esta carpeta; el archivo es uno de dentro" : undefined } : {}),
           enviado,
+          ...(linkEnviado ? { linkEnviado } : {}),
           ...(motivoNoAdjunto ? { motivoNoAdjunto } : {}),
           nota: enviado
             ? DRIVE_SENT_NOTE
-            : motivoNoAdjunto
+            : linkEnviado
+              ? DRIVE_REPEAT_NOTE
+              : motivoNoAdjunto
               ? "No se adjuntó (ver motivoNoAdjunto): comparte el link del archivo tal cual."
               : "Comparte el link del archivo tal cual si corresponde (o adjúntalo con enviar_archivo_drive / adjuntar=true).",
         });
@@ -3167,8 +3213,13 @@ export async function executeTool(
           const allowed = purchased || !blockedFolderIds(product).has(entry.id);
           return JSON.stringify({ ok: false, error: "es una carpeta: no se adjunta", link: allowed ? driveViewLink(entry) : null, nota: allowed ? "compártela por link si corresponde" : "carpeta de la entrega: disponible tras la compra (lo decide el sistema)" });
         }
-        const check = driveAttachCheck(entry);
+        const check = await driveAttachDecision(ctx, entry);
+        if ("repetido" in check) {
+          pushDriveLinkInstead(ctx, entry);
+          return JSON.stringify({ ok: true, enviado: false, linkEnviado: true, archivo: describeEntry(entry, true), nota: DRIVE_REPEAT_NOTE });
+        }
         if ("motivo" in check) return JSON.stringify({ ok: false, error: check.motivo, archivo: describeEntry(entry, true), nota: "mándalo por link" });
+        markDriveAttached(ctx, entry.id);
         ctx.outbox.push({
           kind: "media",
           mediaUrl: driveDownloadUrl(entry.id),

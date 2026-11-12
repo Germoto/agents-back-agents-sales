@@ -82,6 +82,8 @@ export interface ConversationState {
   /** Mercado Pago: preference del último link de pago enviado y su monto (para el webhook). */
   mpPreferenceId?: string | null;
   mpAmount?: number | null;
+  /** Archivos de Drive ya adjuntados a este cliente (un adjunto repetido sale como link). */
+  driveAttachedIds?: string[];
   /** Mercado Pago: cuándo recibió el cliente el último link de pago (el agente lo ve en su contexto). */
   mpLinkSentAt?: string | null;
   /** Monto SIN comisión con el que salió ese link (se compara con el monto vigente). */
