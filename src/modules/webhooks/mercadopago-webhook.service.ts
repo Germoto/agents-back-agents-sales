@@ -22,6 +22,9 @@ interface MpReference {
   productIds?: string[];
   /** Pedido de la tienda web (rama independiente del flujo del chat). */
   storeOrderId?: string;
+  /** Pedido con «Envíos» que cobra este link y el monto que se le acredita (sin comisión). */
+  orderId?: string;
+  baseAmount?: number;
 }
 
 export async function processMercadoPagoWebhook(
@@ -127,6 +130,9 @@ export async function processMercadoPagoWebhook(
       amountText,
       payerName,
       provider: "Mercado Pago",
+      receiptId,
+      orderId: ref.orderId ?? null,
+      orderAmount: Number(ref.baseAmount) > 0 ? Number(ref.baseAmount) : Number(payment.transaction_amount ?? 0),
     });
   }
 

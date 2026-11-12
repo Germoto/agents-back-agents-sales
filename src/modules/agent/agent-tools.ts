@@ -1729,6 +1729,65 @@ export function orderPaymentMessage(o: NonNullable<ApprovePaymentResult["order"]
 }
 
 /**
+ * Acredita un pago YA confirmado a un pedido con montos y deja la conversación lista:
+ * pago parcial = sigue abierta para validar el saldo; pago completo = PAGADO.
+ * null si el pedido no admite pagos; `already` si ese comprobante ya estaba aplicado.
+ */
+export async function creditOrderPayment(opts: {
+  companyId: string;
+  customerId: string;
+  orderId: string;
+  amount: number;
+  source: "AGENTE" | "MERCADOPAGO";
+  method?: string | null;
+  receiptId?: string | null;
+  state: ConversationState;
+  sym: string;
+}): Promise<{ already: boolean; order: NonNullable<ApprovePaymentResult["order"]>; customerMessage: string } | null> {
+  const { state } = opts;
+  const applied = await applyOrderPayment({
+    companyId: opts.companyId,
+    orderId: opts.orderId,
+    amount: opts.amount,
+    source: opts.source,
+    method: opts.method ?? null,
+    receiptId: opts.receiptId ?? null,
+  });
+  if (!applied) return null;
+  const order = {
+    orderCode: applied.orderCode,
+    kind: applied.kind,
+    amount: applied.amount,
+    total: applied.money.total,
+    paid: applied.money.paid,
+    balance: applied.money.balance,
+    fullyPaid: applied.fullyPaid,
+  };
+  if (applied.already) return { already: true, order, customerMessage: "" };
+  state.pendingRecheckAt = null;
+  state.paymentAttempts = 0;
+  clearMpLinkState(state);
+  markFollowupReset(state);
+  // El comprobante ya se aplicó: que no se vuelva a validar con el mismo.
+  state.lastReceipt = null;
+  state.activeOffer = null;
+  // Pago parcial: la conversación sigue abierta para validar el saldo después.
+  state.status = applied.fullyPaid ? "PAGADO" : "PEDIDO_REGISTRADO";
+  if (applied.fullyPaid) state.pendingOrderId = null;
+  try {
+    await cancelPendingReminders(opts.companyId, opts.customerId, [
+      ScheduledMessageType.ABANDONED_CART,
+      ScheduledMessageType.LEFT_ON_READ,
+      ScheduledMessageType.OFFER_COUNTDOWN,
+      ScheduledMessageType.POST_SALE,
+    ]);
+  } catch {
+    /* best-effort */
+  }
+  return { already: false, order, customerMessage: orderPaymentMessage(order, opts.sym) };
+}
+
+/**
  * Validación de un pago contra un pedido con «Envíos»: mismo cruce con los
  * comprobantes de ValidPay que tryApprovePayment, pero el monto sale del pedido
  * (adelanto mínimo o saldo; si el comprobante leído trae un monto intermedio, vale
@@ -1780,44 +1839,18 @@ async function approveOrderPayment(
         customerPhone: opts.customerPhone,
         productIds,
       } as any);
-      const applied = await applyOrderPayment({
+      const credited = await creditOrderPayment({
         companyId,
+        customerId,
         orderId: due.orderId,
         amount,
         source: "AGENTE",
         receiptId: top.id,
+        state,
+        sym,
       });
-      if (!applied) throw new Error("el pedido no admite pagos");
-      state.pendingRecheckAt = null;
-      state.paymentAttempts = 0;
-      clearMpLinkState(state);
-      markFollowupReset(state);
-      // El comprobante ya se aplicó: que no se vuelva a validar con el mismo.
-      state.lastReceipt = null;
-      state.activeOffer = null;
-      // Pago parcial: la conversación sigue abierta para validar el saldo después.
-      state.status = applied.fullyPaid ? "PAGADO" : "PEDIDO_REGISTRADO";
-      if (applied.fullyPaid) state.pendingOrderId = null;
-      try {
-        await cancelPendingReminders(companyId, customerId, [
-          ScheduledMessageType.ABANDONED_CART,
-          ScheduledMessageType.LEFT_ON_READ,
-          ScheduledMessageType.OFFER_COUNTDOWN,
-          ScheduledMessageType.POST_SALE,
-        ]);
-      } catch {
-        /* best-effort */
-      }
-      const order = {
-        orderCode: applied.orderCode,
-        kind: applied.kind,
-        amount: applied.amount,
-        total: applied.money.total,
-        paid: applied.money.paid,
-        balance: applied.money.balance,
-        fullyPaid: applied.fullyPaid,
-      };
-      return { approved: true, order, customerMessage: orderPaymentMessage(order, sym) };
+      if (!credited) throw new Error("el pedido no admite pagos");
+      return { approved: true, order: credited.order, customerMessage: orderPaymentMessage(credited.order, sym) };
     } catch (err) {
       console.warn("[agent] no se pudo acreditar el pago al pedido:", err instanceof Error ? err.message : err);
       return {

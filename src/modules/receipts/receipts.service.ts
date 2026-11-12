@@ -10,6 +10,7 @@ import { markFollowupReset } from "../scheduler/smart-followup";
 import { clearMpLinkState } from "../agent/payment-methods";
 import { resumeFlowOnPaymentOutcome } from "../flows/flow-engine";
 import { reportCtwaConversion } from "../meta-capi/meta-capi.service";
+import { singleOpenOrderFor, applyOrderPayment } from "../orders/order-money";
 
 export interface ReceiptFilters {
   status?: string | null;
@@ -262,6 +263,12 @@ export async function approveReceipt(
   // Meta Conversions API: reportar la venta al anuncio de origen (best-effort).
   void reportCtwaConversion(companyId, receipt.id).catch(() => undefined);
 
+  // Pedido con «Envíos»: si el cliente tiene UN solo pedido con saldo, el comprobante
+  // aprobado se le acredita (adelanto o saldo). No-op para los pedidos de siempre.
+  await creditReceiptToOpenOrder(companyId, updated).catch((err) => {
+    console.warn("[receipts] no se pudo acreditar el comprobante al pedido:", err instanceof Error ? err.message : err);
+  });
+
   // Emitir evento Socket.IO para que el frontend actualice en tiempo real
   socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {
     id: updated.id,
@@ -279,6 +286,30 @@ export async function approveReceipt(
   }).catch(() => undefined);
 
   return updated;
+}
+
+/**
+ * Aplica un comprobante aprobado a mano al único pedido con saldo de su cliente.
+ * Solo si el monto del comprobante cabe en el saldo; si no, lo decide el dueño en Pedidos.
+ */
+async function creditReceiptToOpenOrder(
+  companyId: string,
+  receipt: { id: string; customerId: string | null; amountPaid: string | null; orderId?: string | null },
+) {
+  if (!receipt.customerId || receipt.orderId) return null;
+  const due = await singleOpenOrderFor(companyId, receipt.customerId);
+  if (!due) return null;
+  const amount = Number(String(receipt.amountPaid ?? "").replace(/[^0-9.]/g, ""));
+  if (!Number.isFinite(amount) || amount <= 0 || amount > due.balance + 0.005) return null;
+  return applyOrderPayment({
+    companyId,
+    orderId: due.orderId,
+    amount,
+    source: "PANEL",
+    receiptId: receipt.id,
+    note: "Comprobante aprobado en el panel",
+    createdBy: "panel",
+  });
 }
 
 /**

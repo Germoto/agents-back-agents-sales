@@ -45,6 +45,7 @@ import { alertAiProviderFailure, notifyAiProviderRecovered } from "./ai-alerts";
 import { notifyHumanChatMessage } from "./human-chat-alert";
 import { chatLinkLine } from "../../lib/panel-url";
 import { markOrderPaid, findPendingOrderForCustomer } from "../orders/orders.service";
+import { symbolFor } from "../../lib/currency";
 import {
   runFlowTurn,
   buildRealFlowIO,
@@ -55,7 +56,7 @@ import {
   getCustomerFlowVars,
   type FlowTurnResult,
 } from "../flows/flow-engine";
-import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, shippingOf, type TurnContext } from "./agent-tools";
+import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, shippingOf, creditOrderPayment, type TurnContext } from "./agent-tools";
 import { orderDueFor } from "../orders/order-money";
 import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-guard";
 import { summarizeCart } from "./cart.service";
@@ -1273,6 +1274,9 @@ export async function handleExternalPaymentApproved(opts: {
   amountText: string;
   payerName?: string | null;
   provider?: string;
+  /** Pedido con «Envíos» que cobraba el link: el pago se le acredita (adelanto o saldo). */
+  orderId?: string | null;
+  orderAmount?: number;
 }): Promise<void> {
   const provider = opts.provider ?? "Mercado Pago";
   try {
@@ -1299,6 +1303,55 @@ export async function handleExternalPaymentApproved(opts: {
     // El sender WEB ignora `to`; el placeholder evita que un visitante anónimo
     // (phone sintético sin dígitos) se salte los guards `if (to)`.
     const to = isWeb ? "web" : convo.customer.phone.replace(/\D/g, "");
+
+    // Pedido con «Envíos»: el pago se acredita al pedido (adelanto o saldo). No hay
+    // entrega digital ni cierre de carrito; con saldo pendiente el chat sigue abierto.
+    if (opts.orderId) {
+      const sym = symbolFor(config.business.currency);
+      const credited = await creditOrderPayment({
+        companyId: opts.companyId,
+        customerId: convo.customerId,
+        orderId: opts.orderId,
+        amount: opts.orderAmount ?? 0,
+        source: "MERCADOPAGO",
+        method: provider,
+        receiptId: opts.receiptId ?? null,
+        state: state as ConversationState,
+        sym,
+      });
+      if (!credited) {
+        console.warn(`[agent] pago externo (${provider}): el pedido ${opts.orderId} no admite pagos (conv=${opts.conversationId})`);
+        return;
+      }
+      if (credited.already) return;
+      await saveState(opts.conversationId, state as ConversationState);
+      if (to) {
+        try {
+          await sendText(sender, to, credited.customerMessage);
+        } catch {
+          /* best-effort */
+        }
+      }
+      const o = credited.order;
+      const adminPhoneOrder = waSender
+        ? (config.payment.notification?.whatsappPhone || config.business.adminPhone || "").replace(/\D/g, "")
+        : "";
+      if (adminPhoneOrder) {
+        try {
+          await sendText(
+            waSender!,
+            adminPhoneOrder,
+            `💳 Pago por ${provider} confirmado para el pedido *${o.orderCode}*: ${sym} ${o.amount.toFixed(2)} de ${isWeb ? "un cliente del chat web" : convo.customer.phone}` +
+              (opts.payerName ? ` (${opts.payerName})` : "") +
+              (o.fullyPaid ? ". Pedido pagado por completo ✅" : `. Saldo pendiente: ${sym} ${o.balance.toFixed(2)}.`),
+          );
+        } catch {
+          /* best-effort */
+        }
+      }
+      console.log(`[agent] pago externo (${provider}) acreditado al pedido ${o.orderCode} (conv=${opts.conversationId})`);
+      return;
+    }
 
     // La entrega digital SIEMPRE va tras el pago aprobado (igual que el flujo de
     // comprobantes: tryApprovePayment/recheckPayment no consultan paymentMode —

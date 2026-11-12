@@ -131,6 +131,26 @@ export async function orderDueFor(companyId: string, customerId: string): Promis
   return { ...money, orderId: order.id, orderCode: order.orderCode, status: order.status };
 }
 
+/**
+ * Pedido al que se puede aplicar un comprobante aprobado a mano: el ÚNICO pedido del
+ * cliente con saldo y en estado cobrable. Con varios (o ninguno) devuelve null y el
+ * dueño lo registra desde Pedidos, para no acreditar al pedido equivocado.
+ */
+export async function singleOpenOrderFor(companyId: string, customerId: string): Promise<OrderDue | null> {
+  const orders = await prisma.order.findMany({
+    where: { companyId, customerId, totalAmount: { not: null }, status: { in: COLLECTIBLE_STATUSES } },
+    orderBy: { createdAt: "desc" },
+    take: 5,
+    select: DUE_SELECT,
+  });
+  const open = orders
+    .map((o) => ({ o, money: moneyOf(o) }))
+    .filter((x): x is { o: (typeof orders)[number]; money: OrderMoney } => !!x.money && x.money.balance > EPS);
+  if (open.length !== 1) return null;
+  const { o, money } = open[0];
+  return { ...money, orderId: o.id, orderCode: o.orderCode, status: o.status };
+}
+
 export interface ApplyPaymentInput {
   companyId: string;
   orderId: string;
