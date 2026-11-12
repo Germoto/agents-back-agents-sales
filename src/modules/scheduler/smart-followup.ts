@@ -14,13 +14,24 @@ import { zonedParts, zonedTimeToUtc } from "./quiet-hours";
 
 export type SmartFollowup = {
   resume: { enabled: boolean };
-  postpone: { enabled: boolean; defaultHours: number; defaultHour: number };
+  postpone: {
+    enabled: boolean;
+    defaultHours: number;
+    defaultHour: number;
+    /** Mensaje que deja el sistema cuando el agente promete una fecha y no la programa. */
+    fallbackMessage: string;
+  };
   aiReview: { enabled: boolean; dailyLimit: number; criteria: string | null };
 };
 
+/** Mensaje por defecto de la red de seguridad de posponer (admite variantes {a|b}). */
+export const DEFAULT_POSTPONE_FALLBACK_MESSAGE =
+  "{hola|buenas}.. como quedamos te escribo hoy.. {seguimos con tu pedido?|te paso los datos para el pago?}";
+export const POSTPONE_FALLBACK_MAX = 600;
+
 export const DEFAULT_SMART_FOLLOWUP: SmartFollowup = {
   resume: { enabled: false },
-  postpone: { enabled: false, defaultHours: 24, defaultHour: 10 },
+  postpone: { enabled: false, defaultHours: 24, defaultHour: 10, fallbackMessage: DEFAULT_POSTPONE_FALLBACK_MESSAGE },
   aiReview: { enabled: false, dailyLimit: 100, criteria: null },
 };
 
@@ -37,10 +48,11 @@ function intIn(v: unknown, min: number, max: number, fallback: number): number {
 export function normalizeSmartFollowup(raw: unknown): SmartFollowup {
   const f = (raw ?? {}) as {
     resume?: { enabled?: unknown } | null;
-    postpone?: { enabled?: unknown; defaultHours?: unknown; defaultHour?: unknown } | null;
+    postpone?: { enabled?: unknown; defaultHours?: unknown; defaultHour?: unknown; fallbackMessage?: unknown } | null;
     aiReview?: { enabled?: unknown; dailyLimit?: unknown; criteria?: unknown } | null;
   };
   const d = DEFAULT_SMART_FOLLOWUP;
+  const fallback = typeof f.postpone?.fallbackMessage === "string" ? f.postpone.fallbackMessage.trim().slice(0, POSTPONE_FALLBACK_MAX) : "";
   const criteria = typeof f.aiReview?.criteria === "string" ? f.aiReview.criteria.trim().slice(0, 600) : "";
   return {
     resume: { enabled: f.resume?.enabled === true },
@@ -48,6 +60,7 @@ export function normalizeSmartFollowup(raw: unknown): SmartFollowup {
       enabled: f.postpone?.enabled === true,
       defaultHours: intIn(f.postpone?.defaultHours, 1, 720, d.postpone.defaultHours),
       defaultHour: intIn(f.postpone?.defaultHour, 0, 23, d.postpone.defaultHour),
+      fallbackMessage: fallback || d.postpone.fallbackMessage,
     },
     aiReview: {
       enabled: f.aiReview?.enabled === true,
@@ -74,7 +87,7 @@ export function describeSmartFollowup(s: SmartFollowup): { resume: string; postp
       ? "Si un cliente responde y vuelve a callar, la secuencia sigue en el paso siguiente: no repite los pasos que ya recibió (memoria de 30 días; una compra aprobada o reiniciar la conversación la reinicia)."
       : "Apagado: cada vez que el cliente responde y calla, la secuencia vuelve a empezar desde el paso 1.",
     postpone: s.postpone.enabled
-      ? `Si el cliente pide que le escriban otro día, el agente programa UN mensaje para ese momento (si dice el día sin hora, a las ${hh}; si solo dice «después», en ${waitInWords(s.postpone.defaultHours)}). Hasta esa fecha no salen recordatorios y la secuencia normal empieza a contar desde ahí.`
+      ? `Si el cliente pide que le escriban otro día, el agente programa UN mensaje para ese momento (si dice el día sin hora, a las ${hh}; si solo dice «después», en ${waitInWords(s.postpone.defaultHours)}). Hasta esa fecha no salen recordatorios y la secuencia normal empieza a contar desde ahí. Si el agente promete una fecha y no la programa, el sistema se lo exige; si aun así no lo hace, el sistema programa ese día este mensaje: «${s.postpone.fallbackMessage}». Si no logra leer la fecha, deja una nota interna en el chat.`
       : "Apagado: el agente no puede pausar los recordatorios aunque el cliente pida que le escriban después.",
     aiReview: s.aiReview.enabled
       ? `Antes de cada recordatorio a un cliente que respondió después del recordatorio anterior, la IA lee el chat y decide si enviarlo. Máximo ${s.aiReview.dailyLimit} revisiones al día; cada una es una consulta corta a la IA del negocio. El primer recordatorio a cada cliente nunca se revisa. Si la IA falla o se alcanza el tope, el recordatorio se envía.`

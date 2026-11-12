@@ -497,6 +497,13 @@ export interface TurnContext {
   driveHitsThisTurn?: number;
   /** Búsquedas de agencias hechas en ESTE turno (buscar_agencias tiene tope). */
   agencySearchesThisTurn?: number;
+  /** Registro del turno: cada herramienta ejecutada y si devolvió error (`sistema` = la
+   *  ejecutó una guardia, no el modelo). Se guarda en el estado para el Copiloto. */
+  turnLog?: Array<{ tool: string; ok: boolean; error?: string; sistema?: boolean }>;
+  /** Guardias del sistema que actuaron en ESTE turno, en palabras. */
+  guardEvents?: string[];
+  /** Notas internas para el dueño que quedan en el chat al cerrar el turno (el cliente no las ve). */
+  systemNotes?: string[];
 }
 
 /**

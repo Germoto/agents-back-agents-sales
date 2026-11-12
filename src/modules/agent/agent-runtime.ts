@@ -7,12 +7,15 @@
 import { chatCompletion, type ChatMessage } from "../../lib/openai";
 import { buildSystemPrompt } from "./agent-prompt";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
-import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, shippingOf, type TurnContext } from "./agent-tools";
+import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, shippingOf, postponeAvailable, type TurnContext } from "./agent-tools";
 import { currentOrderFor } from "../orders/order-money";
 import type { PromptExtras } from "./agent-prompt";
 import { summarizeCart } from "./cart.service";
 import { mpChatOn } from "./payment-methods";
 import { promisesPaymentLink, pastesMpLink, maskMpLinks } from "./mp-link-guard";
+import { promisesFollowupDate, parsePromisedDate } from "./postpone-guard";
+import { normalizeSmartFollowup, activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
+import { zonedParts } from "../scheduler/quiet-hours";
 import { findUpcomingBookingForCustomer } from "../bookings/bookings.service";
 import { formatSlotLabel } from "../bookings/availability.service";
 import { extractEmail } from "../../lib/email";
@@ -24,6 +27,93 @@ const OPT_OUT_RE =
   /\b((ya )?no (me |nos |m)?(escrib|molest|insist|mand|envi)|dej(a|e|en|ar) de (escribir|molestar|insistir|mandar|enviar)|no (me )?(vuelv|vuelva|vuelvan|volver) a escribir|b[oó]rr(a|e|en)(me|nos)|elim[ií]n(a|e|en)(me|nos)|no (me )?interesa[,.! ]+(no|ya no|deja|dejen)|no quiero (que (me )?escrib|recibir|m[aá]s mensajes)|s[aá](c|q)(a|ame|anos|uenme|enme|uennos) de (la|su|tu) lista|^\s*stop\s*$)/i;
 const FALLBACK_TEXT =
   "Disculpa, tuve un problema para procesar tu mensaje. ¿Me lo repites o me dices qué producto te interesa?";
+
+const TURN_LOG_MAX_TURNS = 10;
+const TURN_LOG_MAX_TOOLS = 12;
+
+/** Anota en el registro del turno una herramienta ejecutada y si devolvió error. */
+function logTool(ctx: TurnContext, name: string, result: string, sistema = false): void {
+  let ok = true;
+  let error: string | undefined;
+  try {
+    const r = JSON.parse(result) as { ok?: unknown; error?: unknown } | null;
+    if (r && typeof r === "object" && (r.ok === false || (r.error && r.ok !== true))) {
+      ok = false;
+      error = typeof r.error === "string" ? r.error.slice(0, 160) : undefined;
+    }
+  } catch {
+    // Resultado que no es JSON: se cuenta como ejecutada sin error.
+  }
+  (ctx.turnLog ??= []).push({ tool: name, ok, ...(error ? { error } : {}), ...(sistema ? { sistema: true } : {}) });
+}
+
+/**
+ * Pasa el registro del turno al estado de la conversación (últimos turnos, con tope).
+ * Se llama al cerrar el turno, antes de guardar el estado. Un turno sin herramientas
+ * ni guardias no se anota.
+ */
+export function recordTurnLog(ctx: TurnContext, now = new Date()): void {
+  const tools = (ctx.turnLog ?? []).slice(0, TURN_LOG_MAX_TOOLS);
+  const guards = ctx.guardEvents ?? [];
+  if (!tools.length && !guards.length) return;
+  const prev = Array.isArray(ctx.state.turnLog) ? ctx.state.turnLog : [];
+  ctx.state.turnLog = [...prev, { at: now.toISOString(), tools, ...(guards.length ? { guards } : {}) }].slice(-TURN_LOG_MAX_TURNS);
+}
+
+const POSTPONE_GUARD_NOTE =
+  "[Nota del sistema, no la escribió el cliente] Tu mensaje anterior NO se envió: promete escribirle al cliente en una fecha, pero no llamaste a posponer_seguimiento, así que ese día no saldría ningún mensaje y los recordatorios automáticos le llegarían antes. Llama AHORA a posponer_seguimiento con `fecha` (AAAA-MM-DD), `hora` (HH:mm) y `mensaje` (el texto que recibirá ese día) y después confírmale el momento en una línea. Si en realidad no corresponde escribirle ese día, responde sin prometer una fecha.";
+
+/** Herramientas que ya dejan programado un contacto: con ellas la promesa de fecha está cubierta. */
+const SCHEDULING_TOOLS = new Set(["agendar_recordatorio", "agendar_servicio", "reprogramar_cita"]);
+
+const tzOf = (ctx: TurnContext) => (ctx.config.business as { timezone?: string }).timezone ?? "America/Lima";
+
+/** ¿La guardia de la fecha prometida tiene algo que revisar en este turno? */
+function postponeGuardApplies(ctx: TurnContext): boolean {
+  if (ctx.postponedThisTurn || ctx.handoffThisTurn) return false;
+  return !(ctx.toolsCalled ?? []).some((t) => SCHEDULING_TOOLS.has(t));
+}
+
+/** El texto solo repite una pausa que ya está programada para ese mismo día. */
+function restatesActivePostpone(ctx: TurnContext, text: string, customerText: string): boolean {
+  const active = activePostpone(ctx.state);
+  if (!active) return false;
+  const tz = tzOf(ctx);
+  const parsed = parsePromisedDate(text, { now: new Date(), tz, customerText });
+  if (!parsed?.fecha) return true;
+  const p = zonedParts(active.until, tz);
+  return parsed.fecha === `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
+}
+
+/**
+ * Red de seguridad de la fecha prometida: el modelo prometió escribir en una fecha y no
+ * llamó a posponer_seguimiento ni después de la nota. El sistema lee el día y la hora
+ * del texto y programa el mensaje de respaldo del negocio con la misma herramienta. Si
+ * no logra leer la fecha, no programa nada y deja una nota interna en el chat.
+ */
+async function systemPostpone(ctx: TurnContext, promise: string, customerText: string): Promise<void> {
+  const smart = normalizeSmartFollowup(ctx.config.agent.followupConfig);
+  const parsed = parsePromisedDate(promise, { now: new Date(), tz: tzOf(ctx), customerText });
+  if (parsed) {
+    const result = await executeTool("posponer_seguimiento", { ...parsed, mensaje: smart.postpone.fallbackMessage }, ctx).catch((err) =>
+      JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "tool error" }),
+    );
+    logTool(ctx, "posponer_seguimiento", result, true);
+    const active = ctx.postponedThisTurn ? activePostpone(ctx.state) : null;
+    if (active) {
+      (ctx.toolsCalled ??= []).push("posponer_seguimiento");
+      const when = formatPostponeDate(active.until, tzOf(ctx));
+      (ctx.guardEvents ??= []).push(`fecha prometida sin posponer: el sistema programó el mensaje de respaldo para el ${when}`);
+      console.warn(`[agent] fecha prometida sin herramienta (guardia: programado por el sistema para ${when}) convo=${ctx.conversationId}: ${promise.slice(0, 160)}`);
+      return;
+    }
+  }
+  (ctx.guardEvents ??= []).push("fecha prometida sin posponer: el sistema no pudo leer la fecha y no programó nada");
+  (ctx.systemNotes ??= []).push(
+    `🗓️ El agente le prometió al cliente escribirle en una fecha («${promise.slice(0, 140)}») y no la programó. El sistema no pudo leer esa fecha, así que no quedó ningún mensaje programado: revisa este chat.`,
+  );
+  console.warn(`[agent] fecha prometida sin herramienta (guardia: fecha ilegible, sin programar) convo=${ctx.conversationId}: ${promise.slice(0, 160)}`);
+}
 
 /** Respuesta literal del modelo cuando no queda nada por contestar (ver TRAILING_ASSISTANT_NOTE). */
 export const NO_REPLY_TOKEN = "SIN_RESPUESTA";
@@ -310,6 +400,9 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
 
   let internalNoteRetried = false;
   let mpLinkGuardTried = false;
+  const postponeGuardOn = postponeAvailable(ctx.config);
+  let postponeGuardTried = false;
+  let postponePromise = "";
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await chatCompletion({
       apiKey,
@@ -341,6 +434,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
         const result = await executeTool(call.function.name, parsed, ctx).catch((err) =>
           JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "tool error" }),
         );
+        logTool(ctx, call.function.name, result);
         messages.push({ role: "tool", tool_call_id: call.id, content: result });
       }
       continue;
@@ -377,6 +471,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
           result = await executeTool("enviar_metodos_pago", { soloLink: true }, ctx).catch((err) =>
             JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "tool error" }),
           );
+          logTool(ctx, "enviar_metodos_pago", result, true);
           if (ctx.mpLinkSentThisTurn) (ctx.toolsCalled ??= []).push("enviar_metodos_pago");
         }
         const sent = Boolean(ctx.mpLinkSentThisTurn);
@@ -401,6 +496,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
         const result = await executeTool("enviar_metodos_pago", { soloLink: true }, ctx).catch((err) =>
           JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "tool error" }),
         );
+        logTool(ctx, "enviar_metodos_pago", result, true);
         const sent = Boolean(ctx.mpLinkSentThisTurn);
         // Con el link ya enviado aplica la misma guarda de texto redundante que tras un cobro normal.
         if (sent) (ctx.toolsCalled ??= []).push("enviar_metodos_pago");
@@ -416,6 +512,27 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       if (mpLinkGuardTried) {
         console.warn(`[agent] promesa de link descartada tras la guardia convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
         return ctx.outbox.length ? "" : FALLBACK_TEXT;
+      }
+    }
+    // Guardia de la fecha prometida: el texto promete escribirle al cliente en un día u
+    // hora («te escribo el lunes a las 9») pero en el turno no se llamó a
+    // posponer_seguimiento (pasó en prod: no quedó nada programado y esa noche salió el
+    // recordatorio del carrito). Primero se le exige al modelo que la programe; si
+    // vuelve a prometer sin programar, el sistema la programa con el mensaje de respaldo.
+    if (postponeGuardOn && postponeGuardApplies(ctx)) {
+      if (final && !postponeGuardTried && promisesFollowupDate(final) && !restatesActivePostpone(ctx, final, inboundText)) {
+        postponeGuardTried = true;
+        postponePromise = final;
+        (ctx.guardEvents ??= []).push("fecha prometida sin posponer: se le exigió al modelo programarla");
+        console.warn(`[agent] fecha prometida sin herramienta (guardia: nota al modelo) convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+        messages.push({ role: "assistant", content: final });
+        messages.push({ role: "user", content: POSTPONE_GUARD_NOTE });
+        continue;
+      }
+      if (postponeGuardTried && (!final || promisesFollowupDate(final))) {
+        const promise = final || postponePromise;
+        await systemPostpone(ctx, promise, inboundText);
+        return promise;
       }
     }
     // Tras descartar una nota interna, el silencio es la respuesta correcta (sin el genérico).
@@ -446,6 +563,15 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   if (closingText && mpGuardOn && pastesMpLink(closingText, systemPrompt)) {
     console.warn(`[agent] link de pago escrito a mano descartado en el cierre convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
     return ctx.outbox.length ? "" : FALLBACK_TEXT;
+  }
+  if (
+    closingText &&
+    postponeGuardOn &&
+    postponeGuardApplies(ctx) &&
+    promisesFollowupDate(closingText) &&
+    !restatesActivePostpone(ctx, closingText, inboundText)
+  ) {
+    await systemPostpone(ctx, closingText, inboundText);
   }
   if (trailingAssistant && !closingText) return "";
   return closingText || (suppressFallback(ctx, history) ? "" : FALLBACK_TEXT);

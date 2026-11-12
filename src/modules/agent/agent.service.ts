@@ -39,7 +39,7 @@ import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type Wh
 import { readReceiptImage } from "./receipt-vision";
 import { describeSticker } from "./sticker-vision";
 import { fulfillPendingDeliveryEmail } from "./email-delivery";
-import { runAgentTurn, isInternalNote } from "./agent-runtime";
+import { runAgentTurn, isInternalNote, recordTurnLog } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
 import { alertAiProviderFailure, notifyAiProviderRecovered } from "./ai-alerts";
 import { notifyHumanChatMessage } from "./human-chat-alert";
@@ -939,6 +939,19 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     await flushOutbox(sender, customerPhone, ctx.outboxAfter, ctx, gapMs);
   }
 
+  // Notas internas de las guardias del sistema: quedan en el chat para el dueño, el cliente no las ve.
+  for (const note of ctx.systemNotes ?? []) {
+    await recordMessage({
+      companyId,
+      customerId,
+      conversationId,
+      role: "SYSTEM",
+      message: note,
+      rawPayload: { source: "agent-guard" },
+    }).catch(() => undefined);
+  }
+
+  recordTurnLog(ctx);
   await saveState(conversationId, ctx.state);
 
   // Reconciliación: los follow-ups de abandono y dejado-en-visto son EXCLUYENTES y

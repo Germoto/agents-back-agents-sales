@@ -69,6 +69,9 @@ const postponeSchema = z
     defaultHours: z.coerce.number().int().min(1).max(720).default(24),
     // Hora del día cuando el cliente dice el día pero no la hora ("el sábado").
     defaultHour: z.coerce.number().int().min(0).max(23).default(10),
+    // Mensaje que programa el sistema si el agente promete una fecha y no la agenda
+    // (vacío = el texto por defecto). Admite variantes {a|b}.
+    fallbackMessage: z.string().trim().max(600).optional(),
   })
   .optional();
 // aiReview: antes de enviar un recordatorio a un cliente que respondió, la IA lee el chat y decide.

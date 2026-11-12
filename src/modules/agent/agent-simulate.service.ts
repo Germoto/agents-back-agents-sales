@@ -8,7 +8,7 @@
 
 import { prisma } from "../../lib/prisma";
 import { buildBotConfig } from "../bot/bot.service";
-import { runAgentTurn } from "./agent-runtime";
+import { runAgentTurn, recordTurnLog } from "./agent-runtime";
 import { buildHistory, saveState, resetConversation, type ConversationState } from "./conversation.service";
 import { runFlowTurn, trailingUserText, getCustomerFlowVars, type FlowIO, type FlowTraceEntry, type FlowTurnResult } from "../flows/flow-engine";
 import { shouldDropFinalTextAfterPayment, type TurnContext, type OutboxMessage } from "./agent-tools";
@@ -310,13 +310,15 @@ export async function simulateTurn(
     replies.push({ role: "assistant", text, source: "agent" });
   }
 
+  recordTurnLog(ctx);
   await saveState(sim.conversationId, ctx.state);
   const reminders = await previewReminders(companyId, sim.customerId, ctx.state, config);
   // Notas de sistema (p. ej. "pasaría a atención humana"): el simulador no ejecuta
   // los efectos reales pero deja constancia de lo que ocurriría en producción.
+  const baseNotices = [...ctx.adminNotices, ...(ctx.systemNotes ?? [])];
   const notices = driveLinksRemoved
-    ? [...ctx.adminNotices, `🔒 Se retiró ${driveLinksRemoved === 1 ? "un link de carpeta" : `${driveLinksRemoved} links de carpetas`} de la entrega de Drive: el cliente aún no compró.`]
-    : ctx.adminNotices;
+    ? [...baseNotices, `🔒 Se retiró ${driveLinksRemoved === 1 ? "un link de carpeta" : `${driveLinksRemoved} links de carpetas`} de la entrega de Drive: el cliente aún no compró.`]
+    : baseNotices;
   return { replies, reminders, notices, ...(hybridTrace ? { trace: hybridTrace } : {}) };
 }
 

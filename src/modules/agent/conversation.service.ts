@@ -101,6 +101,13 @@ export interface ConversationState {
   /** Seguimiento pospuesto a pedido del cliente (tool posponer_seguimiento): hasta `until`
    *  no salen recordatorios; ese día se envía `body` y la secuencia sigue desde ahí. */
   followupPostponed?: { until: string; body: string; setAt: string } | null;
+  /** Registro de los últimos turnos del agente: herramientas que llamó, si alguna devolvió
+   *  error y qué guardias del sistema actuaron (lo muestra leer_conversacion del Copiloto). */
+  turnLog?: Array<{
+    at: string;
+    tools: Array<{ tool: string; ok: boolean; error?: string; sistema?: boolean }>;
+    guards?: string[];
+  }>;
   /** SIMULACIÓN con «Envíos»: pedido de muestra para probar adelanto y saldo sin crear pedidos reales. */
   simOrder?: {
     orderCode: string;
