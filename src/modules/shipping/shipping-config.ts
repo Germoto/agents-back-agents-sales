@@ -56,6 +56,7 @@ export const NOTIFY_VARIABLES = [
   "guia",
   "clave",
   "courier",
+  "seguimiento",
 ] as const;
 
 /** Plantillas de fábrica (el dueño las edita en Empresa → Envíos → Avisos al cliente). */

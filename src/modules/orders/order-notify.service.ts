@@ -30,6 +30,7 @@ import {
   type NotifyEvent,
   type ShippingConfig,
 } from "../shipping/shipping-config";
+import { storeOrderUrl } from "../storefront/storefront-url";
 import { moneyOf } from "./order-money";
 
 export const ORDER_NOTICE_SOURCE = "order-notice";
@@ -65,8 +66,8 @@ const VAR_RE = /\{([a-zA-Z]+)\}/g;
  * cuyas variables quedaron TODAS vacías se quita entera (p. ej. «Guía: {guia}» sin guía),
  * así una plantilla sirve para todos los tipos de entrega.
  */
-export function renderOrderNotice(template: string, vars: NoticeVars): string {
-  const known = new Map<string, string>(NOTIFY_VARIABLES.map((v) => [v.toLowerCase(), vars[v] ?? ""]));
+export function renderNoticeTemplate(template: string, vars: Record<string, string>): string {
+  const known = new Map<string, string>(Object.entries(vars).map(([k, v]) => [k.toLowerCase(), v ?? ""]));
   const lines = applySpintax(template)
     .split("\n")
     .map((line) => {
@@ -85,6 +86,10 @@ export function renderOrderNotice(template: string, vars: NoticeVars): string {
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+export function renderOrderNotice(template: string, vars: NoticeVars): string {
+  return renderNoticeTemplate(template, vars);
+}
+
 interface NoticeOrder {
   orderCode: string;
   status: OrderStatus;
@@ -101,13 +106,24 @@ interface NoticeOrder {
 }
 
 /** La clave de recojo solo viaja cuando la configuración ya permite entregarla. */
-function releasedPickupKey(order: NoticeOrder, cfg: ShippingConfig, balance: number | null): string {
+export function releasedPickupKey(
+  order: { pickupKey: string | null; status: OrderStatus | string },
+  cfg: ShippingConfig,
+  balance: number | null,
+): string {
   if (!order.pickupKey) return "";
   if (cfg.pickupKeyRelease === "AL_PAGAR_SALDO") return balance !== null && balance <= 0.005 ? order.pickupKey : "";
   return ["DESPACHADO", "LISTO_PARA_RECOGER", "ENTREGADO"].includes(order.status) ? order.pickupKey : "";
 }
 
-export function noticeVarsFor(order: NoticeOrder, cfg: ShippingConfig, symbol: string, customerName?: string | null): NoticeVars {
+export function noticeVarsFor(
+  order: NoticeOrder,
+  cfg: ShippingConfig,
+  symbol: string,
+  customerName?: string | null,
+  /** Enlace a la página del pedido (solo los pedidos de la tienda web la tienen). */
+  trackingUrl?: string | null,
+): NoticeVars {
   const money = moneyOf(order as Parameters<typeof moneyOf>[0]);
   const fmt = (n: number) => `${symbol} ${n.toFixed(2)}`;
   const name = (customerName || order.customerName || "").trim().split(/\s+/)[0] ?? "";
@@ -122,6 +138,7 @@ export function noticeVarsFor(order: NoticeOrder, cfg: ShippingConfig, symbol: s
     guia: order.trackingCode ?? "",
     clave: releasedPickupKey(order, cfg, money ? money.balance : null),
     courier: order.courier ?? "",
+    seguimiento: trackingUrl ?? "",
   };
 }
 
@@ -140,8 +157,8 @@ async function chatOf(companyId: string, customerId: string) {
 export async function notifyOrderEvent(companyId: string, orderId: string, event: NotifyEvent): Promise<OrderNoticeResult> {
   const skipped = (reason: string): OrderNoticeResult => ({ sent: false, event, reason });
   try {
-    const [company, order] = await Promise.all([
-      prisma.company.findUnique({ where: { id: companyId }, select: { currency: true, shippingConfig: true } }),
+    const [company, order, webOrder] = await Promise.all([
+      prisma.company.findUnique({ where: { id: companyId }, select: { currency: true, shippingConfig: true, slug: true } }),
       prisma.order.findFirst({
         where: { id: orderId, companyId },
         select: {
@@ -160,6 +177,8 @@ export async function notifyOrderEvent(companyId: string, orderId: string, event
           pickupKey: true,
         },
       }),
+      // Pedido que nació en la tienda web: su página de seguimiento viaja en {seguimiento}.
+      prisma.storeOrder.findFirst({ where: { orderId, companyId }, select: { id: true, accessToken: true } }),
     ]);
     if (!order) return skipped("pedido no encontrado");
     const cfg = normalizeShippingConfig(company?.shippingConfig);
@@ -171,7 +190,11 @@ export async function notifyOrderEvent(companyId: string, orderId: string, event
     const convo = await chatOf(companyId, order.customerId);
     if (!convo) return skipped("el cliente no tiene conversación");
 
-    const text = renderOrderNotice(rule.message, noticeVarsFor(order, cfg, symbolFor(company?.currency), convo.customer.name));
+    const trackingUrl = webOrder && company?.slug ? storeOrderUrl(company.slug, webOrder.id, webOrder.accessToken) : null;
+    const text = renderOrderNotice(
+      rule.message,
+      noticeVarsFor(order, cfg, symbolFor(company?.currency), convo.customer.name, trackingUrl),
+    );
     if (!text) return skipped("la plantilla del aviso quedó vacía");
 
     const note = (reason: string) =>

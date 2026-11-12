@@ -6,3 +6,8 @@ export function storeUrl(slug: string): string {
   const base = (env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
   return `${base}/tienda/${slug}`;
 }
+
+/** Página pública de un pedido de la tienda (pago y seguimiento). */
+export function storeOrderUrl(slug: string, storeOrderId: string, accessToken: string): string {
+  return `${storeUrl(slug)}/gracias?o=${storeOrderId}&t=${accessToken}`;
+}
