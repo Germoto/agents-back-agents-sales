@@ -42,6 +42,7 @@ import { cancelOrderEmails, emailRemindersOf, sanitizeEmailReminders, scheduleAb
 import {
   announcementOf,
   computeCombo,
+  computePhysicalCombo,
   deepMergeJson,
   DEFAULT_GUARANTEE,
   DEFAULT_SAMPLE,
@@ -56,6 +57,7 @@ import {
   videoEmbedUrl,
   volumePricingOf,
   type LandingOverride,
+  type PhysicalComboResult,
   type PricedItem,
   type VolumePricing,
 } from "./storefront-sales";
@@ -424,6 +426,32 @@ export async function getPublicStore(slug: string) {
       : DEFAULT_TRUST_ITEMS;
   // El combo «todos los productos» es solo de la tienda digital.
   const allBundleOn = combos.allBundle.enabled && !isPhysical;
+  // Combos armados (solo tienda física): se publican los que tienen todos sus productos visibles
+  // y de verdad bajan la suma de los precios vigentes; el carrito aplica la misma regla.
+  const money = (n: number) => `${symbol} ${n.toFixed(2)}`;
+  const combosArmados =
+    isPhysical && combos.enabled
+      ? combos.bundles
+          .filter((bd) => bd.enabled && bd.productIds.every((id) => byId.has(id)))
+          .map((bd) => {
+            const parts = bd.productIds.map((id) => byId.get(id)!);
+            const regular = Number(parts.reduce((acc, x) => acc + parsePrice(x.b.price), 0).toFixed(2));
+            return { bd, parts, regular, saving: Number((regular - bd.price).toFixed(2)) };
+          })
+          .filter((x) => x.saving > 0)
+          .map(({ bd, parts, regular, saving }) => ({
+            id: bd.id,
+            name: bd.name,
+            price: bd.price,
+            priceText: money(bd.price),
+            regularPrice: regular,
+            regularPriceText: money(regular),
+            ahorro: saving,
+            ahorroText: money(saving),
+            agotado: tracksStock && parts.some((x) => typeof x.p.stock === "number" && x.p.stock <= 0),
+            productos: parts.map((x) => ({ id: x.p.id, slug: x.b.slug, name: x.p.name, imageUrl: x.images[0]?.url ?? null })),
+          }))
+      : [];
   const guaranteeText = (text: string) => (isPhysical && text === DEFAULT_GUARANTEE.text ? PHYSICAL_GUARANTEE_TEXT : text);
   return {
     kind,
@@ -431,8 +459,9 @@ export async function getPublicStore(slug: string) {
     pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual, mpRecargo: pay.mpRecargo },
     portada: { slides, autoplay: cfg.carouselAutoplay, intervalSec: cfg.carouselIntervalSec },
     anuncio: anuncio.enabled && anuncio.text ? { text: anuncio.text, endsAt: anuncioEndsAt && new Date(anuncioEndsAt).getTime() > Date.now() ? anuncioEndsAt : null } : null,
-    combos: combos.enabled && (combos.tiers.length || allBundleOn)
+    combos: combos.enabled && (combos.tiers.length || allBundleOn || combosArmados.length)
       ? {
+          ...(isPhysical ? { bundles: combosArmados } : {}),
           tiers: combos.tiers,
           allBundle: allBundleOn ? { price: combos.allBundle.price as number, priceText: bundlePriceText, label: combos.allBundle.label, total: mapped.length } : null,
           seccion: allBundleOn
@@ -721,9 +750,9 @@ export type PhysicalCartPricing = {
   lines: PhysicalCartLine[];
   /** Suma de lista de los productos. */
   subtotal: number;
-  combo: CartPricing["combo"];
+  combo: PhysicalComboResult;
   coupon: CartPricing["coupon"];
-  /** Productos con descuento por cantidad y cupón aplicados (sin envío). */
+  /** Productos con combos, descuento por cantidad y cupón aplicados (sin envío). */
   productsTotal: number;
 };
 
@@ -778,12 +807,14 @@ async function pricePhysicalCart(
     }
   }
   const subtotal = Number(lines.reduce((acc, l) => acc + l.unitPrice * l.qty, 0).toFixed(2));
-  // Descuento por cantidad de unidades. «Todos los productos» es solo de la tienda digital.
-  const vp = volumePricingOf(cfg.volumePricing);
-  const combo = computeCombo(
+  // Combos armados y descuento por cantidad. «Todos los productos» es solo de la tienda digital.
+  const catalog = new Map(
+    eligible.map((p) => [p.id, { name: p.name, unitPrice: parsePrice(mapBotProduct(p, { currencySymbol: symbol, timezone: company.timezone }).price) }]),
+  );
+  const combo = computePhysicalCombo(
     lines.map((l) => ({ productId: l.productId, name: l.name, unitPrice: l.unitPrice, qty: l.qty })),
-    { ...vp, allBundle: { ...vp.allBundle, enabled: false } },
-    eligible.map((p) => p.id),
+    volumePricingOf(cfg.volumePricing),
+    catalog,
   );
   const afterCombo = Number((subtotal - combo.discount).toFixed(2));
   // El cupón descuenta sobre los productos, nunca sobre el envío.
@@ -793,7 +824,7 @@ async function pricePhysicalCart(
   return {
     lines,
     subtotal,
-    combo: { discount: combo.discount, label: combo.label, kind: combo.kind, bundle: false, next: combo.next, nextBundle: null },
+    combo,
     coupon,
     productsTotal,
   };
@@ -874,9 +905,32 @@ async function quotePhysicalCart(company: StoreCompany, cfg: Parameters<typeof p
     })),
     subtotal: pricing.subtotal,
     subtotalText: money(pricing.subtotal),
-    combo: pricing.combo.discount > 0 ? { discount: pricing.combo.discount, discountText: money(pricing.combo.discount), label: pricing.combo.label, kind: pricing.combo.kind, bundle: false } : null,
+    combo:
+      pricing.combo.discount > 0
+        ? {
+            discount: pricing.combo.discount,
+            discountText: money(pricing.combo.discount),
+            label: pricing.combo.label,
+            kind: pricing.combo.kind,
+            bundle: false,
+            // Combos armados que entraron (juegos completos) y lo que ahorra cada uno.
+            combos: pricing.combo.bundles.map((h) => ({ id: h.id, name: h.name, sets: h.sets, ahorro: h.saving, ahorroText: money(h.saving) })),
+          }
+        : null,
     siguienteTramo: pricing.combo.next,
     siguienteBundle: null,
+    // «Agrega X y llévate el combo»: el combo armado más cercano a completarse.
+    siguienteCombo: pricing.combo.nextBundle
+      ? {
+          id: pricing.combo.nextBundle.id,
+          name: pricing.combo.nextBundle.name,
+          price: pricing.combo.nextBundle.price,
+          priceText: money(pricing.combo.nextBundle.price),
+          ahorro: pricing.combo.nextBundle.saving,
+          ahorroText: money(pricing.combo.nextBundle.saving),
+          faltan: pricing.combo.nextBundle.missing,
+        }
+      : null,
     bump: null,
     cupon: pricing.coupon ? { code: pricing.coupon.code, discount: pricing.coupon.discount, discountText: money(pricing.coupon.discount) } : null,
     productos: pricing.productsTotal,

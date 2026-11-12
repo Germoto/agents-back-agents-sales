@@ -15,13 +15,19 @@ import { AppError } from "../../lib/app-error";
 export type Announcement = { enabled: boolean; text: string; countdown: string };
 
 export type VolumeTier = { minQty: number; discountPct: number };
+/** Combo armado: productos concretos (una unidad de cada uno) a un precio fijo por juego. Solo tienda física. */
+export type StoreBundle = { id: string; name: string; productIds: string[]; price: number; enabled: boolean };
 export type VolumePricing = {
   enabled: boolean;
   /** Tramos por cantidad (ordenados por minQty); el mayor que aplique gana. */
   tiers: VolumeTier[];
   /** "Todos los packs" a precio fijo (solo si el carrito trae TODOS los productos visibles). */
   allBundle: { enabled: boolean; price: number | null; label: string };
+  /** Combos armados (tienda física): se aplican por juego completo; el resto sigue los tramos. */
+  bundles: StoreBundle[];
 };
+export const MAX_STORE_BUNDLES = 10;
+export const MAX_BUNDLE_PRODUCTS = 6;
 
 export type ComboSection = { kicker: string; headline: string; sub: string; ctaLabel: string };
 export type Guarantee = { enabled: boolean; days: number; title: string; text: string };
@@ -122,6 +128,7 @@ const num = (v: unknown): number | null => {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v.replace(",", ".")) : NaN;
   return Number.isFinite(n) ? n : null;
 };
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function announcementOf(v: unknown): Announcement {
   const o = obj(v);
@@ -137,8 +144,32 @@ export function volumePricingOf(v: unknown): VolumePricing {
     .sort((a, b) => a.minQty - b.minQty)
     .slice(0, 3);
   const price = num(bundle.price);
+  const usedIds = new Set<string>();
+  const bundles: StoreBundle[] = (Array.isArray(o.bundles) ? o.bundles : [])
+    .map((raw) => {
+      const b = obj(raw);
+      const ids = (Array.isArray(b.productIds) ? b.productIds : []).map((x) => str(x, 40)).filter((x) => UUID_RE.test(x));
+      const bPrice = num(b.price);
+      return {
+        id: str(b.id, 40),
+        name: str(b.name, 60),
+        productIds: Array.from(new Set(ids)).slice(0, MAX_BUNDLE_PRODUCTS),
+        price: bPrice !== null && bPrice > 0 ? Number(bPrice.toFixed(2)) : 0,
+        enabled: b.enabled !== false,
+      };
+    })
+    .filter((b) => b.name && b.productIds.length >= 2 && b.price > 0)
+    .slice(0, MAX_STORE_BUNDLES)
+    .map((b, i) => {
+      // El id identifica al combo en el panel y la tienda: si falta o se repite, se asigna uno.
+      let id = b.id && !usedIds.has(b.id) ? b.id : `combo-${i + 1}`;
+      while (usedIds.has(id)) id = `${id}x`;
+      usedIds.add(id);
+      return { ...b, id };
+    });
   return {
     enabled: o.enabled === true,
+    bundles,
     tiers,
     allBundle: { enabled: bundle.enabled === true && price !== null && price > 0, price: price !== null && price > 0 ? Number(price.toFixed(2)) : null, label: str(bundle.label, 40) || "Todos los packs" },
   };
@@ -383,6 +414,93 @@ export function computeCombo(cartItems: PricedItem[], vp: VolumePricing, visible
     bundle: false,
     next: nextTier ? { missing: nextTier.minQty - qty, discountPct: nextTier.discountPct } : null,
     nextBundle: bundleOn && missingForBundle > 0 ? { missing: missingForBundle, price: vp.allBundle.price as number } : null,
+  };
+}
+
+export type BundleHit = { id: string; name: string; sets: number; price: number; saving: number };
+
+export type PhysicalComboResult = {
+  /** Descuento total sobre los productos: combos armados + tramo por cantidad. */
+  discount: number;
+  label: string | null;
+  kind: "tier" | "bundle" | null;
+  /** Combos armados aplicados: juegos completos y lo que ahorra cada uno en total. */
+  bundles: BundleHit[];
+  tier: VolumeTier | null;
+  /** Parte del descuento que viene del tramo (unidades que no entraron en un combo). */
+  tierDiscount: number;
+  next: { missing: number; discountPct: number } | null;
+  /** Combo armado más cercano: qué productos faltan para completarlo. */
+  nextBundle: { id: string; name: string; price: number; saving: number; missing: { productId: string; name: string }[] } | null;
+};
+
+const round2 = (n: number): number => Number(n.toFixed(2));
+
+/**
+ * Descuentos de la tienda física. Primero los combos armados: cada juego completo (una
+ * unidad de cada producto del combo) se cobra a su precio fijo; si dos combos comparten
+ * un producto, gana el que más ahorra. Las unidades que no entraron en un combo siguen
+ * los tramos por cantidad (cuentan aparte). Un combo que no baja la suma de los precios
+ * vigentes, o con un producto que ya no está en la tienda, no aplica.
+ * `catalog` = productos visibles de la tienda con su precio vigente.
+ */
+export function computePhysicalCombo(
+  cartItems: PricedItem[],
+  vp: VolumePricing,
+  catalog: Map<string, { name: string; unitPrice: number }>,
+): PhysicalComboResult {
+  const none: PhysicalComboResult = { discount: 0, label: null, kind: null, bundles: [], tier: null, tierDiscount: 0, next: null, nextBundle: null };
+  if (!vp.enabled) return none;
+  const left = new Map<string, number>();
+  const priceOf = new Map<string, number>();
+  for (const it of cartItems) {
+    left.set(it.productId, (left.get(it.productId) ?? 0) + it.qty);
+    priceOf.set(it.productId, it.unitPrice);
+  }
+  const subtotal = round2(cartItems.reduce((a, it) => a + it.unitPrice * it.qty, 0));
+  const usable = vp.bundles
+    .filter((b) => b.enabled && b.productIds.every((id) => catalog.has(id)))
+    .map((b) => ({ b, saving: round2(b.productIds.reduce((a, id) => a + (catalog.get(id)?.unitPrice ?? 0), 0) - b.price) }))
+    .filter((x) => x.saving > 0)
+    .sort((a, b2) => b2.saving - a.saving);
+  const hits: BundleHit[] = [];
+  for (const { b, saving } of usable) {
+    const sets = Math.min(...b.productIds.map((id) => left.get(id) ?? 0));
+    if (sets < 1) continue;
+    for (const id of b.productIds) left.set(id, (left.get(id) ?? 0) - sets);
+    hits.push({ id: b.id, name: b.name, sets, price: b.price, saving: round2(saving * sets) });
+  }
+  const bundleDiscount = round2(hits.reduce((a, h) => a + h.saving, 0));
+  let looseQty = 0;
+  let looseSubtotal = 0;
+  for (const [id, q] of left) {
+    looseQty += q;
+    looseSubtotal += q * (priceOf.get(id) ?? 0);
+  }
+  let tier: VolumeTier | null = null;
+  for (const t of vp.tiers) if (looseQty >= t.minQty) tier = t;
+  const nextTier = vp.tiers.find((t) => t.minQty > looseQty) ?? null;
+  const tierDiscount = tier ? Math.max(0, round2((looseSubtotal * tier.discountPct) / 100)) : 0;
+  // Combo más cercano: el comprador ya lleva (suelto) alguno de sus productos y le faltan otros.
+  const near = usable
+    .map(({ b, saving }) => ({ b, saving, missing: b.productIds.filter((id) => (left.get(id) ?? 0) < 1) }))
+    .filter((x) => x.missing.length > 0 && x.missing.length < x.b.productIds.length)
+    .sort((a, b2) => a.missing.length - b2.missing.length || b2.saving - a.saving)[0];
+  const labels = [
+    ...hits.map((h) => (h.sets > 1 ? `${h.name} ×${h.sets}` : h.name)),
+    ...(tier && tierDiscount > 0 ? [`${tier.minQty} o más · −${tier.discountPct}%`] : []),
+  ];
+  return {
+    discount: Math.min(round2(bundleDiscount + tierDiscount), subtotal),
+    label: labels.length ? labels.join(" + ") : null,
+    kind: hits.length ? "bundle" : tier ? "tier" : null,
+    bundles: hits,
+    tier,
+    tierDiscount,
+    next: nextTier ? { missing: nextTier.minQty - looseQty, discountPct: nextTier.discountPct } : null,
+    nextBundle: near
+      ? { id: near.b.id, name: near.b.name, price: near.b.price, saving: near.saving, missing: near.missing.map((id) => ({ productId: id, name: catalog.get(id)?.name ?? "" })) }
+      : null,
   };
 }
 
