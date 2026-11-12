@@ -60,7 +60,11 @@ import { getBillingMe } from "../billing/billing.service";
 import { getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 import { getDashboardStats } from "../dashboard/dashboard.service";
 import { approveReceipt, associateReceiptProduct, ignoreReceipt, listReceipts, rejectReceipt } from "../receipts/receipts.service";
-import { listOrders, updateOrderStatus } from "../orders/orders.service";
+import { getOrderDetail, listOrders, registerOrderPayment, updateOrderShipping, updateOrderStatus } from "../orders/orders.service";
+import type { PaymentKind } from "../orders/order-money";
+import { searchAgencies } from "../shipping/agency-search";
+import { agencyCatalogStatus } from "../shipping/courier-sync.service";
+import { getShippingConfig, patchShippingConfig } from "../shipping/shipping.service";
 import { createNote, deleteCustomer, getCustomer, listNotes, updateCustomer, removeCustomerFlowVars } from "../customers/customers.service";
 import { listCrmStructure } from "../crm/crm.service";
 import { crmToolConfigSchema } from "../agent-config/agent-config.schemas";
@@ -355,7 +359,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_empresa",
       description:
-        "Actualiza la EMPRESA. `data` es PARCIAL (solo lo que cambia): {name?, timezone?, vertical? (SOLO si aún no hay productos), botMode? ('AI' agente IA | 'FLOW' chatbot de flujos | 'HYBRID' el flujo recibe y califica y luego responde el agente IA; HYBRID y AI requieren key de IA), currency? ('PEN' soles S/ | 'USD' dólares $ — la MONEDA del negocio: TODO el embudo la usa: fichas, carrito, cobro, validación, reportes), deliveryConfig? {cost?, time?, areas?: string[], pickupAvailable?, requiresAddress?}, businessHours? [{day (0=domingo..6=sábado), from 'HH:MM', to 'HH:MM'}], meetingUrl? (enlace FIJO de videollamada Meet/Zoom por defecto para citas online; null lo quita), firmaEnabled?, firmaText?}. Llámala SOLO tras la confirmación del usuario.",
+        "Actualiza la EMPRESA. `data` es PARCIAL (solo lo que cambia): {name?, timezone?, vertical? (SOLO si aún no hay productos), botMode? ('AI' agente IA | 'FLOW' chatbot de flujos | 'HYBRID' el flujo recibe y califica y luego responde el agente IA; HYBRID y AI requieren key de IA), currency? ('PEN' soles S/ | 'USD' dólares $ — la MONEDA del negocio: TODO el embudo la usa: fichas, carrito, cobro, validación, reportes), deliveryConfig? {cost?, time?, areas?: string[], pickupAvailable?, requiresAddress?}, businessHours? [{day (0=domingo..6=sábado), from 'HH:MM', to 'HH:MM'}], meetingUrl? (enlace FIJO de videollamada Meet/Zoom por defecto para citas online; null lo quita), firmaEnabled?, firmaText?}. OJO rubro comercial: el envío por AGENCIA (Shalom), el costo de envío que se SUMA al total, el adelanto y saldo y los avisos por estado del pedido NO van aquí: van en configurar_envios (deliveryConfig es solo texto informativo para el agente). Llámala SOLO tras la confirmación del usuario.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -903,11 +907,15 @@ export const TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "listar_pedidos",
-      description: "Pedidos (rubros restaurante/comercial) con código, estado, total, cliente e ítems. Filtro opcional por estado (PEDIDO_REGISTRADO, PENDIENTE_PAGO, PAGADO, DESPACHADO, ENTREGADO...).",
+      description: "Pedidos (rubros restaurante/comercial) con código, estado, total, cliente e ítems. Filtro opcional por estado (PEDIDO_REGISTRADO, EN_COORDINACION, PENDIENTE_PAGO, PAGADO, DESPACHADO, LISTO_PARA_RECOGER, ENTREGADO, CANCELADO). En negocios con «Envíos» encendido (configurar_envios) cada pedido trae además `envio` {tipo DOMICILIO|AGENCIA|RECOJO, courier, agencia, direccionAgencia, documento, telefonoRecibe, guia, clave, costo} y `montos` {total, adelanto, pagado, saldo} en números; `pago` puede ser PENDIENTE_PAGO | PAGO_PARCIAL (adelanto recibido, falta saldo) | PAGADO. Con `codigo` devuelve UN pedido con su detalle: lista de `pagos` (monto, tipo ADELANTO/SALDO/TOTAL, método, origen AGENTE/PANEL/COPILOTO/MERCADOPAGO, fecha) e historial de estados. Solo lectura.",
       parameters: {
         type: "object",
         additionalProperties: false,
-        properties: { estado: { type: "string" }, limit: { type: "number", description: "máx 100 (default 30)" } },
+        properties: {
+          estado: { type: "string" },
+          codigo: { type: "string", description: "código (PED-…) o id de UN pedido: devuelve su detalle con pagos e historial" },
+          limit: { type: "number", description: "máx 100 (default 30)" },
+        },
       },
     },
   },
@@ -1121,8 +1129,72 @@ export const TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "actualizar_pedido",
-      description: "Cambia el ESTADO de un pedido (rubros restaurante/comercial; listar_pedidos → codigo): PEDIDO_REGISTRADO | EN_COORDINACION | DESPACHADO | CANCELADO | PENDIENTE_PAGO | PAGADO | ENTREGADO. Avisa al cliente igual que el panel. Llámala tras confirmación.",
-      parameters: { type: "object", additionalProperties: false, required: ["codigo", "estado"], properties: { codigo: { type: "string", description: "código o id del pedido" }, estado: { type: "string" }, nota: { type: "string" } } },
+      description: "Actualiza un pedido (rubros restaurante/comercial; listar_pedidos → codigo). 1) ESTADO: PEDIDO_REGISTRADO | EN_COORDINACION | DESPACHADO | LISTO_PARA_RECOGER (llegó a la agencia o está listo en tienda) | CANCELADO | PENDIENTE_PAGO | PAGADO | ENTREGADO. 2) DATOS DE ENVÍO (sin cambiar estado o junto con él): guia (código de seguimiento), clave (clave de recojo de la agencia), agenciaId (id de buscar_agencias; guarda nombre y dirección) o agenciaTexto + courier (agencia escrita a mano), tipoEntrega (DOMICILIO | AGENCIA | RECOJO), documento (DNI de quien recoge), telefonoRecibe, costoEnvio (recalcula el total y el saldo; solo pedidos con montos). AVISO AL CLIENTE: cambiar el estado NO avisa por defecto; solo con avisar=true Y si ese aviso está encendido en Envíos → Avisos al cliente (configurar_envios notifications: DESPACHADO, LISTO_PARA_RECOGER, ENTREGADO, CANCELADO, PAGO_COMPLETO al pasar a PAGADO). El resultado dice en `aviso` si se envió o por qué no (aviso apagado, cliente en no contactar, ventana de 24 h de Meta). Si pones guía/clave y estado en la misma llamada, el aviso ya sale con esos datos. Para registrar un ADELANTO o SALDO no cambies el estado a PAGADO: usa registrar_pago_pedido. Llámala tras confirmación.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["codigo"],
+        properties: {
+          codigo: { type: "string", description: "código o id del pedido" },
+          estado: { type: "string" },
+          nota: { type: "string" },
+          avisar: { type: "boolean", description: "true = enviar al cliente el aviso de ese estado (si está encendido en Envíos)" },
+          guia: { type: "string", description: "código de seguimiento; '' lo borra" },
+          clave: { type: "string", description: "clave de recojo; '' la borra" },
+          tipoEntrega: { type: "string", description: "DOMICILIO | AGENCIA | RECOJO" },
+          agenciaId: { type: "string", description: "id devuelto por buscar_agencias" },
+          agenciaTexto: { type: "string", description: "agencia escrita a mano (courier sin catálogo)" },
+          courier: { type: "string" },
+          documento: { type: "string", description: "DNI de quien recoge" },
+          telefonoRecibe: { type: "string" },
+          costoEnvio: { type: "number", description: "nuevo costo de envío; recalcula total y saldo" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "registrar_pago_pedido",
+      description: "Registra A MANO un pago de un pedido con montos (negocios con «Envíos» encendido): el ADELANTO, el SALDO o el total. Úsala cuando el dueño confirma que recibió el dinero y la validación automática no lo acreditó (sin ValidPay, efectivo, depósito visto por él). Efectos: suma el pago, deja el pedido en PAGO_PARCIAL o PAGADO (y mueve el estado si aún no se despachó), REACTIVA el bot si el chat estaba pausado por ese pago, y envía al cliente el aviso «Adelanto recibido» o «Pago completo» si está encendido en Envíos → Avisos (el resultado lo dice en `aviso`). {codigo, monto (número, en la moneda del negocio), metodo? (yape, plin, transferencia, efectivo…), tipo? (ADELANTO | SALDO | TOTAL | OTRO; si falta se deduce), nota?}. No acepta pedidos sin montos (ahí se usa actualizar_pedido estado=PAGADO), cancelados ni ya pagados. Antes de llamarla revisa listar_pedidos codigo=… (pagado y saldo) y pide confirmación del monto: un pago registrado no se borra desde aquí.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["codigo", "monto"],
+        properties: {
+          codigo: { type: "string", description: "código o id del pedido" },
+          monto: { type: "number" },
+          metodo: { type: "string" },
+          tipo: { type: "string", description: "ADELANTO | SALDO | TOTAL | OTRO" },
+          nota: { type: "string" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "buscar_agencias",
+      description: "Busca AGENCIAS de courier (hoy el catálogo de Shalom, ~560 agencias de todo el Perú) por zona o nombre: departamento, provincia, distrito, nombre de la agencia o dirección. Búsqueda aproximada (tildes, mayúsculas y errores pequeños no importan). Devuelve hasta 8 por página con id, nombre, dirección, horario, teléfono y `coincidencia` (exacta | parcial | debil: 'debil' solo se parece, confírmala). Paginado con offset/siguienteOffset. El catálogo es común a la plataforma: se copia de la lista pública de Shalom y se refresca solo cada 24 h (ver_configuracion → envios.catalogoAgencias dice cuántas hay y cuándo se actualizó); no es una API oficial y no cotiza fletes ni rastrea envíos. El AGENTE usa esta misma búsqueda con los clientes cuando el negocio tiene envío por agencia encendido (configurar_envios). El id sirve para actualizar_pedido agenciaId. Solo lectura.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["consulta"],
+        properties: { consulta: { type: "string", description: "zona o nombre, ej. 'chiclayo', 'av parra arequipa'" }, offset: { type: "number" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "configurar_envios",
+      description: "ENVÍOS del rubro COMERCIAL (Empresa → pestaña Envíos; nace APAGADO y apagado todo sigue como siempre). `data` es PARCIAL y se FUSIONA con lo guardado (los objetos se combinan; las listas se reemplazan): {enabled?, types?: {domicilio?: {enabled, cost (número, se SUMA al total)}, agencia?: {enabled, couriers? (con catálogo: ['SHALOM']), otrosCouriers? (string[], otras couriers anotadas como texto), costMode ('INCLUIDO' el flete va en el precio | 'FIJO' se suma `cost` | 'PAGA_EN_DESTINO' el cliente lo paga al recoger), cost?}, recojo?: {enabled}}, askDocument? (pedir DNI de quien recoge en agencia), charge?: {domicilio?, agencia?, recojo?} cada uno {mode ('SEGUN_MODO' el modo de cobro de Pagos | 'TOTAL' todo antes | 'ADELANTO' adelanto al pedir y saldo después | 'CONTRA_ENTREGA'), advanceMode? ('FIXED' monto fijo | 'PERCENT' % del total | 'SHIPPING' solo el envío), advanceValue?}, pickupKeyRelease? ('AL_DESPACHAR' | 'AL_PAGAR_SALDO': cuándo el cliente puede ver la clave de recojo), notifications?: {DESPACHADO?, LISTO_PARA_RECOGER?, ENTREGADO?, CANCELADO?, ADELANTO_RECIBIDO?, PAGO_COMPLETO?} cada uno {enabled, message ('' = plantilla de fábrica)}}. Plantillas: variables {nombre} {pedido} {total} {pagado} {saldo} {agencia} {direccionAgencia} {guia} {clave} {courier} y variantes {Hola|Buenas}; una línea cuyas variables salen vacías se omite; {clave} sale vacía mientras no corresponda entregarla. QUÉ CAMBIA al encender: el agente ofrece los tipos de entrega encendidos, busca agencias (buscar_agencias), registra el pedido con su envío, SUMA el costo al total, cobra lo que toca (adelanto o saldo) y valida comprobantes por ese monto; el pedido guarda agencia, DNI, guía, clave, pagado y saldo. Cuándo ofrecer agencia o cómo pedir el adelanto lo redacta el dueño en el PROMPT del agente (configurar_agente), no hay reglas fijas. La validación AUTOMÁTICA del adelanto requiere ValidPay; sin ValidPay el dueño registra el pago con registrar_pago_pedido o en Pedidos. Devuelve `conEstaConfiguracion` (frases de lo que hará el agente): muéstraselas al dueño. Solo rubro comercial. Llámala tras confirmación, mostrando antes qué va a cambiar.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["data"],
+        properties: { data: { type: "object", additionalProperties: true } },
+      },
     },
   },
   {
@@ -1788,7 +1860,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "proponer_formulario",
       description:
-        "SOLO en el asistente de arranque: vuelca al formulario del paso los datos que el dueño dictó (paso 1: businessHours, deliveryConfig, meetingUrl, modality, address, durationMin, bookingLeadMinutes; paso 3: methods[{method, number, holder}], paymentMode, notificationPhone). NO guarda: el dueño confirma con «Continuar».",
+        "SOLO en el asistente de arranque: vuelca al formulario del paso los datos que el dueño dictó (paso 1: businessHours, deliveryConfig, meetingUrl, modality, address, durationMin, bookingLeadMinutes; paso 3: methods[{method, number, holder}], paymentMode, notificationPhone; SOLO rubro comercial: paso 1 agencyShipping {enabled, costMode ('INCLUIDO' | 'FIJO' | 'PAGA_EN_DESTINO'), cost?} = envío por agencia (Shalom) y quién paga el flete; paso 3 advance {enabled, mode ('FIXED' | 'PERCENT'), value} = cobra un adelanto al pedir y el saldo después). NO guarda: el dueño confirma con «Continuar».",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1892,12 +1964,27 @@ const COMMON_FIELDS =
   "INVITACIÓN A LA TIENDA (por producto): digitalDelivery.storeInviteEnabled=true hace que el ÚLTIMO mensaje de la entrega por WhatsApp sea una invitación a visitar la tienda web con su link (storeInviteText opcional, admite {tienda} para el link y spintax; vacío = '🛍️ Tenemos más productos que te pueden interesar. Visita nuestra tienda: {tienda}'). Si está activa REEMPLAZA al cross-sell y a la frase genérica del catálogo (un solo cierre). Solo se envía si la tienda está publicada (ver_tienda → lista); si no, el cierre es el de siempre. Si el dueño pide activarla 'en todos los productos', hazlo producto por producto con actualizar_producto tras UNA confirmación. " +
   "PRESENTACIÓN: presentationMessage (mensaje de presentación FIJO — si existe, la ficha se envía tal cual en vez de auto-generarse); presentationMessageMediaUrl/presentationMessageMediaType (banner adjunto al mensaje: la ficha viaja como media con el texto de caption; usa la URL de un archivo del producto o un adjunto de esta conversación; '' lo quita); presentationFollowups = [{message, mediaUrl?, mediaType?}] (secuencia que se envía DESPUÉS de la ficha — al enviarla REEMPLAZA la lista completa: manda la versión final; [] la limpia). Los archivos ya subidos se gestionan con configurar_archivo_producto (showInPresentation true = va adjunto en la presentación, false = on-demand; description; principal; orden=N para moverlo a esa posición) y se borran con eliminar_archivo_producto (tras confirmación; avisa si el archivo se usa como banner, seguimiento o recordatorio). El agente VE TODOS los archivos del producto (hasta 60 en su prompt, ver_producto muestra posicion) y envía hasta 12 por llamada; el orden del panel = orden en que los ve. SPINTAX ANTI-BLOQUEO: presentationMessage, presentationFollowups, la description de los archivos (va como caption), digitalDelivery.instructions/followupMessages/crossSellPitch/storeInviteText y los mensajes de recordatorios/campañas admiten variantes {Hola|Buenas|Qué tal} — cada cliente recibe una combinación distinta y así la ficha no llega idéntica a todos; recomiéndalo (3 o más variantes en saludo, verbo y cierre; nunca en precios ni links). La ficha AUTOMÁTICA (sin presentationMessage) no admite variantes en sus títulos. Tras cambiar la presentación, VERIFICA con previsualizar_ficha (muestra UNA variante).";
 
+/** Pedido por id o código (sin distinguir mayúsculas). */
+async function findOrderRef(companyId: string, ref: string) {
+  const isId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref);
+  return prisma.order.findFirst({
+    where: { companyId, ...(isId ? { id: ref } : { orderCode: { equals: ref, mode: "insensitive" } }) },
+    select: { id: true, orderCode: true },
+  });
+}
+
+/** Resultado del aviso al cliente en palabras, para el Copiloto. */
+function noticeText(notice: { sent: boolean; reason?: string } | undefined): string | undefined {
+  if (!notice) return undefined;
+  return notice.sent ? "enviado al cliente" : `no enviado: ${notice.reason ?? "motivo desconocido"}`;
+}
+
 function rubroGuide(vertical: string | undefined): string {
   switch (vertical) {
     case "RESTAURANT":
       return `Rubro RESTAURANTE (cada producto = un plato/bebida). ${COMMON_FIELDS} Además: category = SECCIÓN del menú (Entradas, Principales, Bebidas...); verticalData.modifierGroups = [{name, required (bool), options: [{label, priceDelta (número, 0 si no cambia el precio)}]}] para tamaños/extras (ej. Tamaño* Personal:0/Familiar:8); attributes con Ingredientes y "Tiempo de preparación".`;
     case "PHYSICAL_GOODS":
-      return `Rubro COMERCIAL (productos físicos: ropa, ferretería, licorería...). ${COMMON_FIELDS} Además: stock (número, si controla inventario); variants = [{name, options: string[], sortOrder}] para Talla/Color (las opciones NO cambian el precio); physicalDelivery = {requiresAddress: true, deliveryCost?, deliveryTime?, pickupAvailable, deliveryAreas: string[]} (zonas de entrega — pregunta las zonas si va a crear el primero).`;
+      return `Rubro COMERCIAL (productos físicos: ropa, ferretería, licorería...). ${COMMON_FIELDS} Además: stock (número, si controla inventario); variants = [{name, options: string[], sortOrder}] para Talla/Color (las opciones NO cambian el precio); physicalDelivery = {requiresAddress: true, deliveryCost?, deliveryTime?, pickupAvailable, deliveryAreas: string[]} (zonas de entrega — pregunta las zonas si va a crear el primero). ENVÍOS (opcional, apagado al nacer): con configurar_envios el negocio enciende envío a domicilio, por AGENCIA (catálogo de Shalom, buscar_agencias) o recojo, el costo de envío que se suma al total, ADELANTO y SALDO por tipo de entrega y avisos al cliente por estado del pedido; los pedidos se siguen con listar_pedidos, actualizar_pedido (estado, guía, clave, avisar) y registrar_pago_pedido.`;
     case "SERVICE":
       return `Rubro SERVICIOS (cada producto = un servicio, con cita opcional). ${COMMON_FIELDS} Además: durationMin (minutos de la cita — con esto el agente agenda con horarios reales), slotCapacity (citas simultáneas, default 1), bookingLeadMinutes, bookingHorizonDays; verticalData.modality ('presencial'|'online'|'ambas') y verticalData.meetingUrl (enlace FIJO de videollamada Meet/Zoom de ESTE servicio; si falta se usa el del negocio, configurar_empresa meetingUrl); deliveryMethod/support como texto libre si aplica. Para captar LEADS de servicios sin venta directa (desarrollo, consultoría, proyectos), lo habitual es un flujo de calificación (ver_bloques_flujo → crear_flujo) con preguntas answers de opciones numeradas (una opción por servicio o rango, sin opciones «1»,«2» aparte), etiquetas y columnas del CRM y derivación a humano con aviso por WhatsApp; si los leads vienen de Meta Ads, el anuncio del catálogo pone la etiqueta de origen y la columna de entrada (configurar_anuncio) y el flujo se dispara con onAdLead. Si quiere que tras calificar el AGENTE converse (dudas, agendar la llamada), recomienda botMode HYBRID: el flujo termina en to-agent y el catálogo debe tener un servicio por línea de negocio (precio como texto 'desde…' o 'según cotización', FAQs y objeciones) más un servicio 'Llamada de diagnóstico' con durationMin para agendar. AGENDA DEL AGENTE: consulta los huecos reales por día y franja (fecha/horaDesde/horaHasta), ve el horario de atención (configurar_empresa businessHours) y recuerda los horarios que ofreció para agendar directo cuando el cliente elige; si el dueño reporta 'dijo que no había horarios' revisa con leer_conversacion, el horario de atención, los bloqueos y durationMin del servicio. Si quiere que el agente mueva el tablero solo, configurar_agente crmTool con lista blanca: «Reunión agendada» (cuando la cita quedó confirmada), «Propuesta enviada» (cuando pide la propuesta por escrito), «Perdido / En pausa» (cuando dice que no le interesa) y etiqueta «🔥 Caliente» (pide precio, fecha o propuesta), cada una con su 'cuando'.`;
     case "REAL_ESTATE":
@@ -3194,6 +3281,20 @@ export async function runCopilotTool(
               nota: "Índice en memoria por producto (se rehace al reiniciar y cada DRIVE_INDEX_REFRESH_HOURS). El agente busca con buscar_en_drive / obtener_muestra; qué comparte lo define su prompt; el sistema retira links de carpetas de la entrega a quien no compró. Requiere la API key de Google en el servidor y links de Drive en digitalDelivery.",
             };
           })().catch(() => null),
+          // Envíos (solo rubro comercial): config efectiva + frases interpretadas + catálogo de agencias.
+          envios: await getShippingConfig(companyId)
+            .then(async (s) =>
+              s.available
+                ? {
+                    enabled: s.config.enabled,
+                    conEstaConfiguracion: s.summary,
+                    config: s.config,
+                    catalogoAgencias: await agencyCatalogStatus().catch(() => null),
+                    nota: "Se cambia con configurar_envios (fusiona, no reemplaza) o en Empresa → Envíos. Apagado = pedidos y cobro como siempre. Los avisos por estado solo salen si están encendidos aquí; los mensajes vacíos usan la plantilla de fábrica.",
+                  }
+                : null,
+            )
+            .catch(() => null),
           tienda: await getStorefrontConfig(companyId)
             .then((c) => ({ enabled: c.enabled, url: c.status.url, lista: c.status.lista }))
             .catch(() => null),
@@ -4039,6 +4140,60 @@ export async function runCopilotTool(
     case "listar_pedidos": {
       const limit = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
       const estado = asStr(args.estado)?.toUpperCase();
+      // Envío y montos: solo en pedidos que los tienen (negocios con «Envíos»).
+      const shippingOfOrder = (o: {
+        deliveryType: string | null; courier: string | null; agencyName: string | null; agencyAddress: string | null;
+        recipientDocument: string | null; recipientPhone: string | null; trackingCode: string | null; pickupKey: string | null;
+        shippingAmount: number | null; totalAmount: number | null; advanceAmount: number | null; paidAmount: number | null; balanceAmount: number | null;
+      }) => ({
+        ...(o.deliveryType || o.trackingCode || o.pickupKey || o.agencyName
+          ? {
+              envio: {
+                tipo: o.deliveryType,
+                courier: o.courier,
+                agencia: o.agencyName,
+                direccionAgencia: o.agencyAddress,
+                documento: o.recipientDocument,
+                telefonoRecibe: o.recipientPhone,
+                guia: o.trackingCode,
+                clave: o.pickupKey,
+                costo: o.shippingAmount,
+              },
+            }
+          : {}),
+        ...(o.totalAmount != null
+          ? { montos: { total: o.totalAmount, adelanto: o.advanceAmount, pagado: o.paidAmount, saldo: o.balanceAmount } }
+          : {}),
+      });
+      const codigoRef = asStr(args.codigo);
+      if (codigoRef) {
+        const ref = await findOrderRef(companyId, codigoRef);
+        if (!ref) return { result: JSON.stringify({ ok: false, error: `pedido «${codigoRef}» no encontrado` }), wrote: false };
+        const d = await getOrderDetail(companyId, ref.id);
+        return {
+          result: JSON.stringify({
+            ok: true,
+            pedido: {
+              id: d.id,
+              codigo: d.orderCode,
+              estado: d.status,
+              total: d.total,
+              pago: d.paymentStatus,
+              metodoPago: d.paymentMethod,
+              fecha: d.createdAt,
+              cliente: { nombre: d.customer?.name ?? d.customerName, phone: d.customer?.phone ?? null },
+              direccion: d.address,
+              referencia: d.reference,
+              notas: d.notes,
+              items: (d.items ?? []).map((i) => ({ producto: i.productName, cantidad: i.quantity, variante: i.variantLabel, precio: i.unitPrice, subtotal: i.lineTotal })),
+              ...shippingOfOrder(d),
+              pagos: d.payments.map((p) => ({ monto: p.amount, tipo: p.kind, metodo: p.method, origen: p.source, nota: p.note, fecha: p.createdAt })),
+              historial: (d.statusHistory ?? []).slice(0, 10).map((h) => ({ estado: h.toStatus, por: h.changedBy, nota: h.note, fecha: h.createdAt })),
+            },
+          }),
+          wrote: false,
+        };
+      }
       const orders = await listOrders(companyId);
       const filtered = estado ? orders.filter((o) => o.status === estado) : orders;
       const rows = filtered.slice(0, limit).map((o) => ({
@@ -4050,6 +4205,7 @@ export async function runCopilotTool(
         fecha: o.createdAt,
         cliente: { nombre: o.customer?.name ?? null, phone: o.customer?.phone ?? null },
         items: (o.items ?? []).map((i) => ({ producto: i.productName, cantidad: i.quantity })),
+        ...shippingOfOrder(o),
       }));
       return { result: JSON.stringify({ total: filtered.length, mostrados: rows.length, items: rows }), wrote: false };
     }
@@ -4414,16 +4570,158 @@ export async function runCopilotTool(
 
     case "actualizar_pedido": {
       const codigo = asStr(args.codigo) ?? "";
-      const estado = (asStr(args.estado) ?? "").toUpperCase() as OrderStatus;
-      const VALID: OrderStatus[] = ["PEDIDO_REGISTRADO", "EN_COORDINACION", "DESPACHADO", "CANCELADO", "PENDIENTE_PAGO", "PAGADO", "ENTREGADO"];
-      if (!VALID.includes(estado)) return { result: JSON.stringify({ ok: false, error: `estado inválido; usa ${VALID.join(" | ")}` }), wrote: false };
-      const order = await prisma.order.findFirst({ where: { companyId, OR: [{ id: /^[0-9a-f-]{36}$/i.test(codigo) ? codigo : "00000000-0000-0000-0000-000000000000" }, { orderCode: codigo }] }, select: { id: true, orderCode: true } });
+      const estadoRaw = (asStr(args.estado) ?? "").toUpperCase();
+      const VALID: OrderStatus[] = ["PEDIDO_REGISTRADO", "EN_COORDINACION", "DESPACHADO", "LISTO_PARA_RECOGER", "CANCELADO", "PENDIENTE_PAGO", "PAGADO", "ENTREGADO"];
+      if (estadoRaw && !VALID.includes(estadoRaw as OrderStatus)) return { result: JSON.stringify({ ok: false, error: `estado inválido; usa ${VALID.join(" | ")}` }), wrote: false };
+      const estado = (estadoRaw || null) as OrderStatus | null;
+      // Datos de envío: solo los que vinieron ('' borra el dato).
+      const text = (v: unknown) => (typeof v === "string" ? v.trim() || null : undefined);
+      const shipping = {
+        trackingCode: text(args.guia),
+        pickupKey: text(args.clave),
+        deliveryType: text(args.tipoEntrega)?.toUpperCase(),
+        agencyId: asStr(args.agenciaId) || undefined,
+        agencyText: text(args.agenciaTexto),
+        courier: text(args.courier),
+        recipientDocument: text(args.documento),
+        recipientPhone: text(args.telefonoRecibe),
+        shippingAmount: args.costoEnvio === undefined || args.costoEnvio === null || !Number.isFinite(Number(args.costoEnvio)) ? undefined : Number(args.costoEnvio),
+      };
+      const hasShipping = Object.values(shipping).some((v) => v !== undefined);
+      if (!estado && !hasShipping) {
+        return { result: JSON.stringify({ ok: false, error: "indica estado y/o datos de envío (guia, clave, agenciaId, agenciaTexto, tipoEntrega, documento, telefonoRecibe, costoEnvio)" }), wrote: false };
+      }
+      const order = await findOrderRef(companyId, codigo);
+      if (!order) return { result: JSON.stringify({ ok: false, error: `pedido «${codigo}» no encontrado` }), wrote: false };
+      let wroteShipping = false;
+      try {
+        // Primero el envío: así el aviso del estado ya sale con guía, clave y agencia.
+        if (hasShipping) {
+          await updateOrderShipping(companyId, order.id, shipping);
+          wroteShipping = true;
+        }
+        const avisar = args.avisar === true;
+        const u = estado
+          ? await updateOrderStatus(companyId, order.id, estado, { note: asStr(args.nota) ?? null, changedBy: "copiloto", notify: avisar })
+          : null;
+        const d = await getOrderDetail(companyId, order.id);
+        return {
+          result: JSON.stringify({
+            ok: true,
+            codigo: order.orderCode,
+            estado: d.status,
+            pago: d.paymentStatus,
+            total: d.total,
+            ...(d.totalAmount != null ? { pagado: d.paidAmount, saldo: d.balanceAmount } : {}),
+            envio: { tipo: d.deliveryType, courier: d.courier, agencia: d.agencyName, guia: d.trackingCode, clave: d.pickupKey, costo: d.shippingAmount },
+            ...(estado
+              ? {
+                  aviso: avisar
+                    ? noticeText(u?.notice) ?? "ese estado no tiene aviso al cliente"
+                    : "no se avisó al cliente (pasa avisar=true para enviarlo)",
+                }
+              : {}),
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        return {
+          result: JSON.stringify({
+            ok: false,
+            error: err instanceof Error ? err.message : "no se pudo actualizar",
+            ...(wroteShipping ? { nota: "los datos de envío SÍ se guardaron; falló el cambio de estado" } : {}),
+          }),
+          wrote: wroteShipping,
+        };
+      }
+    }
+
+    case "registrar_pago_pedido": {
+      const codigo = asStr(args.codigo) ?? "";
+      const monto = Number(args.monto);
+      if (!Number.isFinite(monto) || monto <= 0) return { result: JSON.stringify({ ok: false, error: "monto inválido: indica un número mayor a 0" }), wrote: false };
+      const KINDS: PaymentKind[] = ["ADELANTO", "SALDO", "TOTAL", "OTRO"];
+      const tipoRaw = (asStr(args.tipo) ?? "").toUpperCase();
+      if (tipoRaw && !KINDS.includes(tipoRaw as PaymentKind)) return { result: JSON.stringify({ ok: false, error: `tipo inválido; usa ${KINDS.join(" | ")}` }), wrote: false };
+      const order = await findOrderRef(companyId, codigo);
       if (!order) return { result: JSON.stringify({ ok: false, error: `pedido «${codigo}» no encontrado` }), wrote: false };
       try {
-        const u = await updateOrderStatus(companyId, order.id, estado, { note: asStr(args.nota) ?? null, changedBy: "copiloto" });
-        return { result: JSON.stringify({ ok: true, codigo: order.orderCode, estado: (u as { status?: string }).status ?? estado }), wrote: true };
+        const r = await registerOrderPayment(companyId, order.id, {
+          amount: monto,
+          method: asStr(args.metodo) ?? null,
+          note: asStr(args.nota) ?? null,
+          kind: (tipoRaw || undefined) as PaymentKind | undefined,
+          source: "COPILOTO",
+          createdBy: "copiloto",
+        });
+        return {
+          result: JSON.stringify({
+            ok: true,
+            codigo: order.orderCode,
+            registrado: { monto: r.payment.amount, tipo: r.payment.kind },
+            estado: r.order.status,
+            pago: r.order.paymentStatus,
+            total: r.order.totalAmount,
+            pagado: r.order.paidAmount,
+            saldo: r.order.balanceAmount,
+            pagadoCompleto: r.payment.fullyPaid,
+            aviso: noticeText(r.notice) ?? "sin aviso al cliente",
+            nota: "Si el chat estaba pausado por este pago, el bot ya quedó reactivado.",
+          }),
+          wrote: true,
+        };
       } catch (err) {
-        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo actualizar" }), wrote: false };
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo registrar el pago" }), wrote: false };
+      }
+    }
+
+    case "buscar_agencias": {
+      const query = (asStr(args.consulta) ?? "").trim().slice(0, 120);
+      if (!query) return { result: JSON.stringify({ ok: false, error: "indica consulta: la zona (departamento, provincia o distrito) o el nombre de la agencia" }), wrote: false };
+      try {
+        const r = await searchAgencies({ query, offset: Math.max(0, Number(args.offset) || 0), limit: 8 });
+        return {
+          result: JSON.stringify({
+            ok: true,
+            total: r.total,
+            siguienteOffset: r.siguienteOffset,
+            resultados: r.results,
+            nota: r.results.length
+              ? `${r.total} agencia(s) coinciden${r.hayMas ? `; más con offset=${r.siguienteOffset}` : ""}. Las de coincidencia 'debil' solo se parecen. El id sirve para actualizar_pedido agenciaId.`
+              : "Sin agencias para esa búsqueda. Prueba con el distrito o la provincia. Si el catálogo está vacío, ver_configuracion → envios.catalogoAgencias lo indica (se sincroniza solo cada 24 h).",
+          }),
+          wrote: false,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo buscar" }), wrote: false };
+      }
+    }
+
+    case "configurar_envios": {
+      const data = args.data;
+      if (!data || typeof data !== "object" || Array.isArray(data) || !Object.keys(data).length) {
+        return { result: JSON.stringify({ ok: false, error: "data vacío: indica qué cambiar (enabled, types, charge, askDocument, pickupKeyRelease, notifications)" }), wrote: false };
+      }
+      try {
+        const s = await patchShippingConfig(companyId, data);
+        return {
+          result: JSON.stringify({
+            ok: true,
+            enabled: s.config.enabled,
+            conEstaConfiguracion: s.summary,
+            config: s.config,
+            nota: s.config.enabled
+              ? "Guardado. Cuándo ofrecer cada tipo de entrega y cómo pedir el adelanto se redacta en el prompt del agente (configurar_agente). Los avisos apagados no se envían."
+              : "Guardado, pero «Envíos» sigue APAGADO (enabled=false): el agente toma pedidos y cobra como siempre.",
+          }),
+          wrote: true,
+        };
+      } catch (err) {
+        const zodIssues = (err as { issues?: Array<{ path?: unknown[]; message?: string }> }).issues;
+        const msg = Array.isArray(zodIssues)
+          ? zodIssues.slice(0, 5).map((i) => `${(i.path ?? []).join(".")}: ${i.message}`).join("; ")
+          : err instanceof Error ? err.message : "no se pudo guardar";
+        return { result: JSON.stringify({ ok: false, error: msg }), wrote: false };
       }
     }
 
@@ -5672,6 +5970,7 @@ const SYSTEM_GUIDE = [
   "- ASISTENTE DE ARRANQUE (/bienvenida): las cuentas nuevas aterrizan ahí en 4 pasos (Tu negocio → Tus productos, con foto de la carta → Cómo cobras → Pruébalo en el simulador y conectar WhatsApp). Se puede salir con «Lo hago después» y retomar desde Inicio («Retomar el asistente»); vuelve a abrirse al entrar hasta completarse (deja de abrirse solo tras 3 salidas) y se puede repetir desde el Centro de ayuda. MODO SIMPLE: mientras la puesta en marcha no esté completa el menú muestra solo Inicio, Conversaciones, Productos, Agente IA, Pagos y WhatsApp (+ Pedidos/Reservas según rubro) y un enlace «Ver todo el panel» que despliega el resto. PLANTILLAS POR RUBRO: toda cuenta nueva nace con prompt y reglas del rubro, un tablero de CRM con columnas y etiquetas, respuestas rápidas básicas y el recordatorio de compra pendiente activado; todo es editable y, si cambia de rubro sin productos, se reemplaza por la plantilla del nuevo rubro. ver_configuracion → puestaEnMarcha muestra si está completa, el paso actual y si el menú está en modo simple.",
   "- IA DE PRUEBA: las cuentas que se registran solas pueden nacer con la key de IA de FlowApp (ver_configuracion → agente.ia.fuenteKey 'plataforma') con un TOPE de respuestas (agente + Copiloto). Al agotarse, el agente deja de responder y el Copiloto devuelve error hasta que el dueño ponga su PROPIA API key en Agente IA → Modelo (desde el panel; nunca por chat): con key propia no hay tope. El superadmin puede asignar o quitar la IA de prueba a una cuenta ya existente desde Clientes → Editar. Si el dueño pregunta por qué el bot no responde, revisa primero agente.ia.mensajesPrueba.agotado.",
   "- Comprobantes (/comprobantes): pagos/vouchers recibidos y su validación. Por chat: listar_comprobantes (con id) y, tras confirmación explícita, aprobar_comprobante (cuenta como venta y entrega), rechazar_comprobante, ignorar_comprobante y asociar_comprobante (producto/teléfono). Desde la ficha del cliente (Conversaciones → pestaña Contacto) el asesor también puede reenviar el acceso de una compra aprobada POR CORREO (si el producto tiene entrega por correo activa).",
+  "- ENVÍOS (solo rubro comercial; Empresa → pestaña Envíos, sub-pestañas Tipos de entrega · Cobro · Avisos al cliente; nace APAGADO y apagado nada cambia): el negocio elige cómo entrega (a domicilio con costo, por AGENCIA con el catálogo de Shalom, recojo en tienda), quién paga el flete de agencia (incluido, monto fijo que se suma, o el cliente lo paga al recoger), si pide DNI de quien recoge, y CÓMO COBRA por tipo de entrega: según el modo de Pagos, todo antes, ADELANTO (monto fijo, % o solo el envío) y SALDO después, o contra entrega. Encendido, el agente ofrece esos tipos, busca agencias por zona (catálogo que se refresca solo cada 24 h; no cotiza ni rastrea), registra el pedido con su envío, suma el costo al total, cobra primero el adelanto y luego el saldo, y sabe el estado del pedido vigente (total, pagado, saldo, agencia, guía y la clave cuando ya corresponde). La validación automática del adelanto necesita ValidPay; sin ValidPay el dueño registra el pago en Pedidos («Registrar pago») o con registrar_pago_pedido: el bot se reactiva solo y el cliente recibe la confirmación. Mercado Pago cobra lo que toca del pedido. AVISOS POR ESTADO (todos apagados al nacer, plantilla editable con {nombre} {pedido} {total} {pagado} {saldo} {agencia} {direccionAgencia} {guia} {clave} {courier}): Despachado, Listo para recoger, Entregado, Cancelado, Adelanto recibido, Pago completo; al cambiar el estado en Pedidos hay una casilla «Avisar al cliente» (aquí: actualizar_pedido avisar=true) y solo sale si ese aviso está encendido; respeta «no contactar» y la ventana de 24 h de Meta, y si no sale queda una nota en el chat. Por chat: ver_configuracion → envios, configurar_envios (fusiona), buscar_agencias, listar_pedidos (envío, pagado, saldo, pagos), actualizar_pedido (estado, guía, clave, agencia, avisar) y registrar_pago_pedido. Cuándo ofrecer agencia o cómo pedir el adelanto lo escribe el dueño en el prompt del agente. Fuera de alcance por ahora: rastreo y creación de guías en Shalom, cotizar flete por destino, catálogo de otras couriers (se anotan como texto).",
   "- Pedidos (/pedidos): solo rubros restaurante y comercial. Reservas (/reservas) y Reservas online (Canales → pestaña Reservas online, /whatsapp?tab=reservas): solo rubros servicios e inmobiliaria. Vencimientos (/vencimientos): solo rubro streaming.",
   "- Productos (/productos): el catálogo que vende el agente (esto también lo configuro YO por chat). Los productos digitales pueden tener ENTREGA POR CORREO a pedido del cliente (editar producto → pestaña 'Entrega del acceso' → sub-pestaña 'Correo', o digitalDelivery.emailEnabled por chat): si el cliente que ya pagó pide el acceso por email, el agente se lo envía y guarda su correo. También pueden tener INVITACIÓN A LA TIENDA (sub-pestaña 'Tienda' o digitalDelivery.storeInviteEnabled): el último mensaje tras entregar invita a visitar la tienda web con su link (reemplaza al cross-sell y al catálogo; requiere tienda publicada). Cada producto puede tener OFERTA con vigencia (precio de oferta + desde/hasta): vigente, el agente la presenta, cobra y valida ese precio y el normal sale tachado como 'antes'. Además hay OFERTAS ESCALONADAS en los recordatorios: cada paso puede llevar su precio (si el cliente no compra, el recordatorio 1 ofrece un precio y el 2 uno mejor — solo para ese cliente). La PRESENTACIÓN (mensaje fijo presentationMessage, banner y mensajes adicionales) se edita en editar producto → pestaña 'Detalles' (en Infoproducto se llama 'Contenido') → sub-pestaña 'Lo que envía al presentar', en todos los rubros salvo Restaurante y Streaming; si no hay mensaje fijo, la ficha se arma sola con descripción, beneficios, 'incluye' y precio (previsualizar_ficha la muestra).",
   "- Empresa (/empresa): pestañas Negocio (nombre, identificador, teléfono administrador, rubro, MONEDA del negocio — soles S/ por defecto o dólares $, todo el embudo la usa: fichas, carrito, cobro, validación, reportes — y zona horaria), Entrega (delivery, rubros físicos), Agenda (horario de atención, videollamada, bloqueos, calendario) y Anuncios. Los reportes programados se movieron a Dashboard → Reportes programados. El modo del bot, la firma y el ritmo de mensajes YA NO están aquí: viven en Agente IA → Bot y avisos. Incluye el tab Anuncios: catálogo de anuncios Meta (mapea IDs/títulos de anuncios a descripciones amigables para los leads y el reporte por anuncio).",
@@ -5778,6 +6077,11 @@ const TOOL_LABELS: Record<string, string> = {
   configurar_recordatorios: "Configurando recordatorios",
   configurar_tienda: "Configurando la tienda web",
   configurar_chat_web: "Configurando el chat web",
+  configurar_envios: "Configurando los envíos",
+  buscar_agencias: "Buscando agencias",
+  listar_pedidos: "Revisando tus pedidos",
+  actualizar_pedido: "Actualizando el pedido",
+  registrar_pago_pedido: "Registrando el pago",
   ver_crm: "Revisando tu CRM",
   crear_crm: "Creando el tablero",
   crear_columna: "Creando columna",

@@ -12,7 +12,7 @@ type V = BusinessVertical;
 
 const STEP1_FIELDS: Record<V, string> = {
   RESTAURANT: "horario de atención por día (businessHours), si hace delivery y a qué zonas, costo y tiempo de envío, si hay recojo en local y la dirección (deliveryConfig: {cost, time, areas[], pickupAvailable, requiresAddress})",
-  PHYSICAL_GOODS: "horario de atención, si hace envíos y a qué zonas, costo y tiempo de envío, si hay recojo en tienda y la dirección (deliveryConfig)",
+  PHYSICAL_GOODS: "horario de atención, si hace envíos y a qué zonas, costo y tiempo de envío, si hay recojo en tienda y la dirección (deliveryConfig), y si envía a provincias por AGENCIA (Shalom): en ese caso quién paga el flete (va incluido en el precio, es un monto fijo que se suma, o el cliente lo paga al recoger) → proponer_formulario agencyShipping {enabled: true, costMode: 'INCLUIDO' | 'FIJO' | 'PAGA_EN_DESTINO', cost?}",
   SERVICE: "modalidad (presencial, videollamada o ambas), dirección del local, enlace fijo de videollamada (meetingUrl), días y horario de citas (businessHours), duración por defecto de la cita y anticipación mínima",
   REAL_ESTATE: "zonas donde opera, modalidad de visitas, días y horario para visitas (businessHours), duración de una visita",
   INFOPRODUCT: "horario de atención (businessHours) y por qué canal entrega los accesos (WhatsApp, correo o ambos)",
@@ -58,6 +58,9 @@ export function onboardingScript(vertical: V, step: OnboardingStep): string {
     3: [
       "Paso 3 — Cómo cobras. Pide: método (Yape, Plin, transferencia, Mercado Pago), número y nombre del titular tal como aparece en la app (el titular es OBLIGATORIO en cada método: sin él no se guarda), cuándo cobra (antes con captura, contra entrega o que elija el cliente) y el WhatsApp de avisos. Puede tener varios bancos: manda cada uno como un método (method = nombre del banco). Llama proponer_formulario con {methods:[{method, number, holder}], paymentMode, notificationPhone}.",
       "Explica en una línea que el agente lee la captura y valida el pago solo. No pidas datos bancarios completos por chat si el dueño no quiere: puede escribirlos en el formulario.",
+      ...(vertical === "PHYSICAL_GOODS"
+        ? ["Rubro comercial: pregunta UNA vez si cobra un ADELANTO al tomar el pedido y el saldo después (común en envíos por agencia). Si dice que sí, pide cuánto (monto fijo o porcentaje) y llama proponer_formulario con advance {enabled: true, mode: 'FIXED' | 'PERCENT', value}. Si no, no insistas. Lo fino (avisos al cliente por estado, clave de recojo, cobro distinto por tipo de entrega) se ajusta después en Empresa → Envíos: dilo en una línea solo si usó agencia o adelanto."]
+        : []),
     ],
     4: [
       "Paso 4 — Pruébalo. El dueño está chateando con su agente en el simulador. Si te cuenta algo que no le gustó de una respuesta, propón el ajuste concreto (regla o frase del prompt) y aplícalo con configurar_agente SOLO tras su confirmación. Recuérdale que el último paso es conectar WhatsApp con el QR.",
