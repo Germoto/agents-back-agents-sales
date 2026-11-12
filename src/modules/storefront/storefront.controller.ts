@@ -9,7 +9,9 @@ import {
   listCoupons,
   previewCoupon,
   quoteStoreCart,
+  searchStoreAgencies,
   updateCoupon,
+  type StoreCartItemInput,
   getPublicOrder,
   getPublicStore,
   getStoreOgHtml,
@@ -83,13 +85,19 @@ export async function storeEventsController(req: Request, res: Response) {
 }
 
 export async function storeQuoteController(req: Request, res: Response) {
-  const body = req.body as { productIds: string[]; coupon?: string | null; bumpProductId?: string | null };
+  const body = req.body as { productIds?: string[]; items?: StoreCartItemInput[]; coupon?: string | null; bumpProductId?: string | null; entrega?: string | null; cobro?: string | null };
   return res.json(await quoteStoreCart(String(req.params.slug), body));
 }
 
 export async function storeCouponPreviewController(req: Request, res: Response) {
-  const body = req.body as { code: string; productIds: string[] };
-  return res.json(await previewCoupon(String(req.params.slug), body.code, body.productIds));
+  const body = req.body as { code: string; productIds?: string[]; items?: StoreCartItemInput[] };
+  return res.json(await previewCoupon(String(req.params.slug), body.code, body.productIds ?? (body.items ?? []).map((it) => it.productId), body.items));
+}
+
+/** Buscador de agencias del checkout de la tienda física. */
+export async function storeAgenciesController(req: Request, res: Response) {
+  const { q, offset } = req.query as unknown as { q?: string; offset?: number };
+  return res.json(await searchStoreAgencies(String(req.params.slug), String(q ?? ""), Number(offset) || 0));
 }
 
 /** Suscripción al boletín de la tienda (pie). */

@@ -165,16 +165,38 @@ export const storeMetricsQuerySchema = z.object({
 });
 
 // POST /:slug/coupon (previsualizar descuento)
-export const storeCouponPreviewSchema = z.object({
-  code: z.string().trim().min(1).max(30),
-  productIds: z.array(z.string().uuid()).min(1).max(10),
+// Línea del carrito de la tienda física: producto, cantidad y lo elegido en la ficha (talla, color…).
+export const storeCartItemSchema = z.object({
+  productId: z.string().uuid(),
+  qty: z.coerce.number().int().min(1).max(99),
+  variante: z.record(z.string().max(40), z.string().max(60)).optional().nullable(),
 });
+const hasProducts = (d: { productIds?: string[]; items?: unknown[] }) => Boolean(d.productIds?.length || d.items?.length);
 
-// POST /:slug/quote — cotización del carrito (combo + bump + cupón)
-export const storeQuoteSchema = z.object({
-  productIds: z.array(z.string().uuid()).min(1).max(10),
-  coupon: z.string().trim().max(30).optional().nullable(),
-  bumpProductId: z.string().uuid().optional().nullable(),
+export const storeCouponPreviewSchema = z
+  .object({
+    code: z.string().trim().min(1).max(30),
+    productIds: z.array(z.string().uuid()).min(1).max(10).optional(),
+    items: z.array(storeCartItemSchema).min(1).max(30).optional(),
+  })
+  .refine(hasProducts, { message: "Elige al menos un producto", path: ["productIds"] });
+
+// POST /:slug/quote — cotización del carrito (combo + bump + cupón; en tienda física también envío y cobro)
+export const storeQuoteSchema = z
+  .object({
+    productIds: z.array(z.string().uuid()).min(1).max(10).optional(),
+    items: z.array(storeCartItemSchema).min(1).max(30).optional(),
+    coupon: z.string().trim().max(30).optional().nullable(),
+    bumpProductId: z.string().uuid().optional().nullable(),
+    entrega: z.string().trim().max(20).optional().nullable(),
+    cobro: z.enum(["adelantado", "contra_entrega"]).optional().nullable(),
+  })
+  .refine(hasProducts, { message: "Elige al menos un producto", path: ["productIds"] });
+
+// GET /:slug/agencies — buscador público de agencias del checkout
+export const storeAgenciesQuerySchema = z.object({
+  q: z.string().trim().max(80).optional().default(""),
+  offset: z.coerce.number().int().min(0).max(500).optional().default(0),
 });
 
 // Panel: cupones

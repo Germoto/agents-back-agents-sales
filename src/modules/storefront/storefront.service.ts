@@ -65,13 +65,18 @@ import {
   isSimplePhysicalProduct,
   physicalSettingsOf,
   publicDeliveryOptions,
+  resolveVariantChoice,
   sanitizePhysicalSettings,
   storeKindOf,
   storeVariantsOf,
+  webOrderAmounts,
   type StoreKind,
+  type VariantChoice,
+  type WebChargeContext,
 } from "./storefront-physical";
 import { loadShippingConfig } from "../shipping/shipping.service";
-import { enabledDeliveryTypes, shippingOn } from "../shipping/shipping-config";
+import { enabledDeliveryTypes, parseDeliveryType, shippingOn, type ShippingConfig } from "../shipping/shipping-config";
+import { searchAgencies } from "../shipping/agency-search";
 import { companyTracksStock } from "../orders/orders.service";
 
 // ---------------------------------------------------------------------------
@@ -695,10 +700,222 @@ async function priceCart(
   return { items, subtotal, combo: { discount: combo.discount, label: combo.label, kind: combo.kind, bundle: combo.bundle, next: combo.next, nextBundle: combo.nextBundle }, bump, coupon, total };
 }
 
+// ---------------------------------------------------------------------------
+// Tienda física: carrito con cantidades y variantes
+// ---------------------------------------------------------------------------
+
+/** Línea del carrito tal como llega del navegador. */
+export type StoreCartItemInput = { productId: string; qty: number; variante?: Record<string, string> | null };
+
+export type PhysicalCartLine = {
+  productId: string;
+  name: string;
+  qty: number;
+  /** Precio de lista por unidad (los descuentos van aparte, no se reparten en las líneas). */
+  unitPrice: number;
+  variant: VariantChoice[];
+  variantLabel: string | null;
+};
+
+export type PhysicalCartPricing = {
+  lines: PhysicalCartLine[];
+  /** Suma de lista de los productos. */
+  subtotal: number;
+  combo: CartPricing["combo"];
+  coupon: CartPricing["coupon"];
+  /** Productos con descuento por cantidad y cupón aplicados (sin envío). */
+  productsTotal: number;
+};
+
+const MAX_CART_LINES = 30;
+
+/**
+ * Precio del carrito físico. Valida cada línea contra el catálogo (elegible, variantes,
+ * tope por producto y stock si el negocio lo controla), aplica el descuento por cantidad
+ * y el cupón sobre los productos; el envío se suma después (webOrderAmounts).
+ * `checkVariants: false` solo para previsualizar un cupón desde el carrito.
+ */
+async function pricePhysicalCart(
+  company: StoreCompany,
+  cfg: { productIds: string[]; volumePricing: unknown; physical?: unknown },
+  input: { items: StoreCartItemInput[]; coupon?: string | null },
+  opts: { checkVariants?: boolean } = {},
+): Promise<PhysicalCartPricing> {
+  if (!input.items.length) throw new AppError("Elige al menos un producto", 400);
+  const settings = physicalSettingsOf(cfg.physical);
+  const [eligible, tracksStock] = await Promise.all([eligibleProducts(company.id, cfg.productIds, "PHYSICAL"), companyTracksStock(company.id)]);
+  const symbol = symbolFor(company.currency);
+  const lines: PhysicalCartLine[] = [];
+  const qtyByProduct = new Map<string, number>();
+  for (const raw of input.items) {
+    const p = eligible.find((x) => x.id === raw.productId);
+    if (!p) throw new AppError(input.items.length > 1 ? "Algún producto del carrito ya no está disponible" : "Producto no disponible", 404);
+    const qty = Math.round(Number(raw.qty));
+    if (!Number.isFinite(qty) || qty < 1) throw new AppError(`La cantidad de «${p.name}» no es válida`, 400);
+    const unitPrice = parsePrice(mapBotProduct(p, { currencySymbol: symbol, timezone: company.timezone }).price);
+    if (unitPrice <= 0) throw new AppError(`«${p.name}» no tiene un precio válido para compra online`, 409);
+    let variant: VariantChoice[] = [];
+    let variantLabel: string | null = null;
+    if (opts.checkVariants !== false) {
+      const v = resolveVariantChoice(storeVariantsOf(p), raw.variante);
+      if (!v.ok) throw new AppError(`Elige ${v.missing.toLowerCase()} para «${p.name}»`, 400);
+      variant = v.choice;
+      variantLabel = v.label;
+    }
+    qtyByProduct.set(p.id, (qtyByProduct.get(p.id) ?? 0) + qty);
+    // La misma variante repetida se junta en una sola línea; variantes distintas van aparte.
+    const same = lines.find((l) => l.productId === p.id && l.variantLabel === variantLabel);
+    if (same) same.qty += qty;
+    else lines.push({ productId: p.id, name: p.name, qty, unitPrice, variant, variantLabel });
+  }
+  if (lines.length > MAX_CART_LINES) throw new AppError("El carrito tiene demasiados productos distintos", 400);
+  // Tope y stock se miran por producto (sumando sus variantes): el stock es del producto.
+  for (const [productId, qty] of qtyByProduct) {
+    const p = eligible.find((x) => x.id === productId) as EligibleRow;
+    if (qty > settings.maxQtyPerItem) throw new AppError(`Puedes pedir hasta ${settings.maxQtyPerItem} unidades de «${p.name}»`, 400);
+    if (tracksStock && typeof p.stock === "number" && qty > p.stock) {
+      throw new AppError(p.stock <= 0 ? `«${p.name}» está agotado` : `Solo quedan ${p.stock} de «${p.name}»`, 409);
+    }
+  }
+  const subtotal = Number(lines.reduce((acc, l) => acc + l.unitPrice * l.qty, 0).toFixed(2));
+  // Descuento por cantidad de unidades. «Todos los productos» es solo de la tienda digital.
+  const vp = volumePricingOf(cfg.volumePricing);
+  const combo = computeCombo(
+    lines.map((l) => ({ productId: l.productId, name: l.name, unitPrice: l.unitPrice, qty: l.qty })),
+    { ...vp, allBundle: { ...vp.allBundle, enabled: false } },
+    eligible.map((p) => p.id),
+  );
+  const afterCombo = Number((subtotal - combo.discount).toFixed(2));
+  // El cupón descuenta sobre los productos, nunca sobre el envío.
+  const coupon = input.coupon?.trim() ? await validateCoupon(company.id, input.coupon, Array.from(qtyByProduct.keys()), afterCombo) : null;
+  const productsTotal = Number((afterCombo - (coupon?.discount ?? 0)).toFixed(2));
+  if (productsTotal <= 0) throw new AppError("El total del pedido debe ser mayor a 0", 409);
+  return {
+    lines,
+    subtotal,
+    combo: { discount: combo.discount, label: combo.label, kind: combo.kind, bundle: false, next: combo.next, nextBundle: null },
+    coupon,
+    productsTotal,
+  };
+}
+
+/** Líneas del carrito físico: `items`, o `productIds` como cantidad 1 (carritos y enlaces viejos). */
+function cartItemsOf(input: { items?: StoreCartItemInput[] | null; productIds?: string[] | null }): StoreCartItemInput[] {
+  if (input.items?.length) return input.items;
+  return Array.from(new Set(input.productIds ?? [])).map((productId) => ({ productId, qty: 1 }));
+}
+
+/** Entrega y cobro de la web para una tienda física: config de Envíos + lo que la tienda permite. */
+async function physicalChargeContext(
+  company: StoreCompany,
+  cfg: { manualPaymentsEnabled: boolean; physical?: unknown },
+  ent: { legacy: boolean; modules: string[] },
+): Promise<{ shipCfg: ShippingConfig | null; ctx: WebChargeContext; pay: Awaited<ReturnType<typeof storePaymentOptions>> }> {
+  const [pay, shipCfg] = await Promise.all([storePaymentOptions(company.id, cfg, ent), loadShippingConfig(company.id)]);
+  const ctx: WebChargeContext = {
+    paymentMode: pay.pc?.paymentMode,
+    codEnabled: physicalSettingsOf(cfg.physical).codEnabled,
+    canPayOnline: pay.mercadoPago || pay.manual.length > 0,
+    symbol: symbolFor(company.currency),
+  };
+  return { shipCfg, ctx, pay };
+}
+
+type StoreQuoteInput = {
+  productIds?: string[] | null;
+  items?: StoreCartItemInput[] | null;
+  bumpProductId?: string | null;
+  coupon?: string | null;
+  /** Tipo de entrega elegido (tienda física). Sin él la cotización llega hasta los productos. */
+  entrega?: string | null;
+  /** Cómo paga, cuando el negocio deja elegir: 'adelantado' | 'contra_entrega'. */
+  cobro?: string | null;
+};
+
+/** Cotización de la tienda física: productos, descuentos, envío, total, «pagas ahora» y saldo. */
+async function quotePhysicalCart(company: StoreCompany, cfg: Parameters<typeof physicalChargeContext>[1] & Parameters<typeof pricePhysicalCart>[1], ent: { legacy: boolean; modules: string[] }, input: StoreQuoteInput) {
+  const [pricing, charge] = await Promise.all([
+    pricePhysicalCart(company, cfg, { items: cartItemsOf(input), coupon: input.coupon ?? null }),
+    physicalChargeContext(company, cfg, ent),
+  ]);
+  const { shipCfg, ctx, pay } = charge;
+  const money = (n: number) => `${ctx.symbol} ${n.toFixed(2)}`;
+  const tipos = publicDeliveryOptions(shipCfg, ctx);
+  if (!tipos.length || !shipCfg) throw new AppError("Esta tienda aún no tiene formas de entrega disponibles", 409);
+  // Con un solo tipo de entrega no hay nada que elegir; con varios, hasta que el comprador elija
+  // la cotización muestra solo los productos.
+  const pedido = input.entrega?.trim() ? parseDeliveryType(input.entrega) : null;
+  if (input.entrega?.trim() && (!pedido || !tipos.some((t) => t.tipo === pedido))) {
+    throw new AppError("Ese tipo de entrega no está disponible en esta tienda", 409);
+  }
+  const tipo = pedido ?? (tipos.length === 1 ? tipos[0].tipo : null);
+  const entrega = tipo ? tipos.find((t) => t.tipo === tipo) ?? null : null;
+  const web = tipo ? webOrderAmounts(shipCfg, tipo, input.cobro, ctx, pricing.productsTotal) : null;
+  if (web && !web.ok) throw new AppError("Ese tipo de entrega no está disponible en esta tienda", 409);
+  const total = web?.ok ? web.amounts.total : pricing.productsTotal;
+  const payNow = web?.ok ? web.payNow : null;
+  const pc = pay.pc;
+  // El recargo de Mercado Pago se calcula sobre lo que se paga ahora (total o adelanto).
+  const totalMp =
+    payNow && pay.mercadoPago && pc
+      ? mpLinkAmount(payNow, { feeMode: pc.mpFeeMode, feePercent: Number(pc.mpFeePercent), feeFixed: Number(pc.mpFeeFixed), feeIgv: pc.mpFeeIgv })
+      : payNow;
+  return {
+    kind: "PHYSICAL" as const,
+    lineas: pricing.lines.map((l) => ({
+      productId: l.productId,
+      name: l.name,
+      qty: l.qty,
+      variante: l.variantLabel,
+      unitPrice: l.unitPrice,
+      unitPriceText: money(l.unitPrice),
+      lineTotal: Number((l.unitPrice * l.qty).toFixed(2)),
+      lineTotalText: money(l.unitPrice * l.qty),
+    })),
+    subtotal: pricing.subtotal,
+    subtotalText: money(pricing.subtotal),
+    combo: pricing.combo.discount > 0 ? { discount: pricing.combo.discount, discountText: money(pricing.combo.discount), label: pricing.combo.label, kind: pricing.combo.kind, bundle: false } : null,
+    siguienteTramo: pricing.combo.next,
+    siguienteBundle: null,
+    bump: null,
+    cupon: pricing.coupon ? { code: pricing.coupon.code, discount: pricing.coupon.discount, discountText: money(pricing.coupon.discount) } : null,
+    productos: pricing.productsTotal,
+    productosText: money(pricing.productsTotal),
+    entrega:
+      entrega && web?.ok
+        ? { tipo: entrega.tipo, label: entrega.label, costo: web.amounts.shipping, costoTexto: entrega.costoTexto, fleteEnDestino: web.amounts.shippingPaidAtDestination }
+        : null,
+    cobro: web?.ok ? { modo: web.option.modo, cobro: web.option.cobro, texto: web.option.texto } : null,
+    total,
+    totalText: money(total),
+    pagasAhora: payNow,
+    pagasAhoraText: payNow === null ? null : money(payNow),
+    saldo: web?.ok ? web.balance : null,
+    saldoText: web?.ok ? money(web.balance) : null,
+    totalMp: totalMp === null ? null : Number(totalMp.toFixed(2)),
+    totalMpText: totalMp === null ? null : money(totalMp),
+  };
+}
+
+/** Público: buscador de agencias del checkout, limitado a las couriers con catálogo que usa el negocio. */
+export async function searchStoreAgencies(slug: string, query: string, offset = 0) {
+  const { company, kind } = await resolveStore(slug);
+  if (kind !== "PHYSICAL") throw new AppError("Tienda no encontrada", 404);
+  const shipCfg = await loadShippingConfig(company.id);
+  const vacio = { total: 0, results: [], hayMas: false, siguienteOffset: null };
+  if (!shippingOn(shipCfg) || !enabledDeliveryTypes(shipCfg).includes("AGENCIA")) return vacio;
+  const couriers = shipCfg.types.agencia.couriers as string[];
+  if (!couriers.length) return vacio;
+  return searchAgencies({ query, couriers, offset, limit: 8 });
+}
+
 /** Público: cotización del carrito (combo, bump, cupón, total y total con recargo de MP). */
-export async function quoteStoreCart(slug: string, input: { productIds: string[]; bumpProductId?: string | null; coupon?: string | null }) {
-  const { company, cfg, ent } = await resolveStore(slug);
-  const [pricing, pay] = await Promise.all([priceCart(company, cfg, input), storePaymentOptions(company.id, cfg, ent)]);
+export async function quoteStoreCart(slug: string, input: StoreQuoteInput) {
+  const { company, cfg, ent, kind } = await resolveStore(slug);
+  if (kind === "PHYSICAL") return quotePhysicalCart(company, cfg, ent, input);
+  // Digital: cantidad 1 por producto; las líneas nuevas se leen como ids.
+  const productIds = input.productIds?.length ? input.productIds : (input.items ?? []).map((it) => it.productId);
+  const [pricing, pay] = await Promise.all([priceCart(company, cfg, { productIds, bumpProductId: input.bumpProductId, coupon: input.coupon }), storePaymentOptions(company.id, cfg, ent)]);
   const symbol = symbolFor(company.currency);
   const money = (n: number) => `${symbol} ${n.toFixed(2)}`;
   const pc = pay.pc;
@@ -1611,8 +1828,24 @@ export async function validateCoupon(companyId: string, codeRaw: string, product
 }
 
 /** Público: previsualiza el descuento de un cupón para el carrito actual. */
-export async function previewCoupon(slug: string, code: string, productIds: string[]) {
+export async function previewCoupon(slug: string, code: string, productIds: string[], items?: StoreCartItemInput[] | null) {
   const { company, cfg, kind } = await resolveStore(slug);
+  if (kind === "PHYSICAL") {
+    // Físico: el cupón descuenta sobre los productos con cantidades (después del descuento por cantidad, antes del envío).
+    if (!code.trim()) throw new AppError("Escribe el código del cupón", 400);
+    const pricing = await pricePhysicalCart(company, cfg, { items: cartItemsOf({ items, productIds }), coupon: code }, { checkVariants: false });
+    const r = pricing.coupon as NonNullable<PhysicalCartPricing["coupon"]>;
+    const sym = symbolFor(company.currency);
+    return {
+      valid: true,
+      code: r.code,
+      discount: r.discount,
+      discountText: `${sym} ${r.discount.toFixed(2)}`,
+      total: pricing.productsTotal,
+      totalText: `${sym} ${pricing.productsTotal.toFixed(2)}`,
+      descripcion: r.type === "PERCENT" ? `${r.value}% de descuento` : `${sym} ${r.value.toFixed(2)} de descuento`,
+    };
+  }
   const eligible = await eligibleProducts(company.id, cfg.productIds, kind);
   const chosen = eligible.filter((p) => productIds.includes(p.id));
   if (!chosen.length) throw new AppError("Producto no disponible", 404);

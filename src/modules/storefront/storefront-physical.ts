@@ -9,7 +9,7 @@
 
 import { isPlainAmount, parseAmount, planGroupOf } from "../products/product-plans";
 import { courierLabel } from "../shipping/agency-search";
-import { enabledDeliveryTypes, shippingOn, type DeliveryType, type ShippingConfig } from "../shipping/shipping-config";
+import { computeOrderAmounts, enabledDeliveryTypes, shippingOn, type DeliveryType, type OrderAmounts, type ShippingConfig } from "../shipping/shipping-config";
 
 export type StoreKind = "DIGITAL" | "PHYSICAL";
 
@@ -107,6 +107,29 @@ export function storeVariantsOf(p: { variants: { name: string; options: unknown 
   return out.slice(0, 6);
 }
 
+export type VariantChoice = { group: string; option: string };
+
+/**
+ * Valida lo que el comprador eligió en la ficha contra los grupos del producto: cada
+ * grupo debe traer una opción que exista. Devuelve la elección con los nombres del
+ * catálogo (no los que mandó el navegador) o el grupo que falta.
+ */
+export function resolveVariantChoice(
+  groups: StoreVariantGroup[],
+  chosen: unknown,
+): { ok: true; choice: VariantChoice[]; label: string | null } | { ok: false; missing: string } {
+  const sent = new Map<string, string>();
+  for (const [k, v] of Object.entries(obj(chosen))) sent.set(k.trim().toLowerCase(), String(v ?? "").trim().toLowerCase());
+  const choice: VariantChoice[] = [];
+  for (const g of groups) {
+    const want = sent.get(g.name.toLowerCase());
+    const option = want ? g.options.find((o) => o.toLowerCase() === want) : undefined;
+    if (!option) return { ok: false, missing: g.name };
+    choice.push({ group: g.name, option });
+  }
+  return { ok: true, choice, label: choice.length ? choice.map((c) => `${c.group}: ${c.option}`).join(", ") : null };
+}
+
 // ---------------------------------------------------------------------------
 // Entrega y cobro que ofrece la web
 // ---------------------------------------------------------------------------
@@ -137,6 +160,13 @@ export type WebChargeContext = {
   symbol: string;
 };
 
+/** Costo de envío que se suma al total para un tipo de entrega (0 si va incluido o se paga en destino). */
+export function shippingCostOf(cfg: ShippingConfig, tipo: DeliveryType): number {
+  if (tipo === "DOMICILIO") return Math.max(0, cfg.types.domicilio.cost || 0);
+  if (tipo === "AGENCIA" && cfg.types.agencia.costMode === "FIJO") return Math.max(0, cfg.types.agencia.cost || 0);
+  return 0;
+}
+
 /**
  * Cobros que la web ofrece para un tipo de entrega, según la regla del dueño en Envíos.
  * Contra entrega solo si la tienda lo permite; los cobros con pago, solo si hay medios
@@ -148,7 +178,10 @@ export function webChargeOptions(cfg: ShippingConfig, tipo: DeliveryType, ctx: W
   let options: WebChargeOption[];
   if (rule.mode === "TOTAL") options = [{ modo: "TOTAL", cobro: null, texto: "Pagas el total al hacer el pedido." }];
   else if (rule.mode === "CONTRA_ENTREGA") options = [{ modo: "CONTRA_ENTREGA", cobro: null, texto: alRecibir }];
-  else if (rule.mode === "ADELANTO") {
+  else if (rule.mode === "ADELANTO" && (rule.advanceMode === "SHIPPING" ? shippingCostOf(cfg, tipo) <= 0 : !(rule.advanceValue > 0))) {
+    // Adelanto que siempre da 0 (p. ej. «el envío» en un tipo sin costo): en la práctica es contra entrega.
+    options = [{ modo: "CONTRA_ENTREGA", cobro: null, texto: alRecibir }];
+  } else if (rule.mode === "ADELANTO") {
     const cuanto =
       rule.advanceMode === "FIXED"
         ? `${ctx.symbol} ${rule.advanceValue.toFixed(2)}`
@@ -164,6 +197,7 @@ export function webChargeOptions(cfg: ShippingConfig, tipo: DeliveryType, ctx: W
         { modo: "CONTRA_ENTREGA", cobro: "contra_entrega", texto: alRecibir },
       ];
     } else if (mode === "BEFORE_DELIVERY") options = [{ modo: "TOTAL", cobro: null, texto: "Pagas el total al hacer el pedido." }];
+    else if (mode === "MANUAL") options = [{ modo: "CONTRA_ENTREGA", cobro: null, texto: "El pago lo coordinas por WhatsApp después de hacer el pedido." }];
     else options = [{ modo: "CONTRA_ENTREGA", cobro: null, texto: alRecibir }];
   }
   return options.filter((o) => (o.modo === "CONTRA_ENTREGA" ? ctx.codEnabled : ctx.canPayOnline));
@@ -193,11 +227,11 @@ export function publicDeliveryOptions(cfg: ShippingConfig | null, ctx: WebCharge
     if (!cobros.length) continue;
     const base = { tipo, label: DELIVERY_LABELS[tipo], cobros, pideDocumento: cfg.askDocument && tipo !== "DOMICILIO" };
     if (tipo === "DOMICILIO") {
-      const cost = Math.max(0, cfg.types.domicilio.cost || 0);
+      const cost = shippingCostOf(cfg, tipo);
       out.push({ ...base, costo: cost, costoTexto: cost > 0 ? money(cost) : "Gratis" });
     } else if (tipo === "AGENCIA") {
       const ag = cfg.types.agencia;
-      const cost = ag.costMode === "FIJO" ? Math.max(0, ag.cost || 0) : 0;
+      const cost = shippingCostOf(cfg, tipo);
       const costoTexto =
         ag.costMode === "PAGA_EN_DESTINO" ? "El flete lo pagas en la agencia al recoger" : ag.costMode === "INCLUIDO" || cost <= 0 ? "Incluido en el precio" : money(cost);
       out.push({
@@ -222,4 +256,65 @@ export function deliveryBlockedReason(cfg: ShippingConfig, tipo: DeliveryType, c
   const soloContraEntrega = all.every((o) => o.modo === "CONTRA_ENTREGA");
   if (soloContraEntrega) return "se cobra contra entrega y la tienda no tiene encendido «Contra entrega en la web»";
   return "necesita un medio de pago en línea (Mercado Pago o Yape/Plin en Pagos)";
+}
+
+// ---------------------------------------------------------------------------
+// Montos del pedido web
+// ---------------------------------------------------------------------------
+
+export type WebOrderAmounts = {
+  tipo: DeliveryType;
+  /** Cobro aplicado (el único posible o el que eligió el comprador). */
+  option: WebChargeOption;
+  /** Modo de cobro efectivo del pedido, listo para el pedido real. */
+  paymentMode: "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL" | undefined;
+  amounts: OrderAmounts;
+  /** Lo que se paga ahora en la web (0 = nada, el pedido se registra sin pago en línea). */
+  payNow: number;
+  /** Lo que queda por pagar después (al recibir o al coordinar). */
+  balance: number;
+};
+
+export type WebOrderAmountsResult =
+  | ({ ok: true } & WebOrderAmounts)
+  | { ok: false; code: "TYPE_NOT_OFFERED" | "MISSING_PAYMENT_CHOICE" | "COD_DISABLED" };
+
+/**
+ * Envío, total, «pagas ahora» y saldo de un pedido web. La cotización y el checkout
+ * pasan por aquí para que el comprador pague exactamente lo que vio. `subtotal` es el
+ * de productos con descuentos (el envío se suma después).
+ * `requireChoice`: en el checkout, si el negocio deja elegir cómo pagar, la elección es
+ * obligatoria; la cotización muestra la primera opción mientras el comprador no elige.
+ */
+export function webOrderAmounts(
+  cfg: ShippingConfig,
+  tipo: DeliveryType,
+  cobro: unknown,
+  ctx: WebChargeContext,
+  subtotal: number,
+  opts: { requireChoice?: boolean } = {},
+): WebOrderAmountsResult {
+  const options = webChargeOptions(cfg, tipo, ctx);
+  if (!options.length) return { ok: false, code: "TYPE_NOT_OFFERED" };
+  let option = options[0];
+  if (options.length > 1) {
+    const choice = String(cobro ?? "").trim().toLowerCase();
+    const picked = options.find((o) => o.cobro === choice);
+    if (!picked && opts.requireChoice) return { ok: false, code: "MISSING_PAYMENT_CHOICE" };
+    option = picked ?? options[0];
+  }
+  const configured = String(ctx.paymentMode ?? "").toUpperCase();
+  const paymentMode: WebOrderAmounts["paymentMode"] =
+    option.cobro === "adelantado"
+      ? "BEFORE_DELIVERY"
+      : option.cobro === "contra_entrega"
+        ? "CASH_ON_DELIVERY"
+        : configured === "BEFORE_DELIVERY" || configured === "CASH_ON_DELIVERY" || configured === "MANUAL"
+          ? configured
+          : undefined;
+  const amounts = computeOrderAmounts(cfg, { subtotal, deliveryType: tipo, paymentMode });
+  const payNow = amounts.chargeMode === "CONTRA_ENTREGA" ? 0 : amounts.advance;
+  // Sin nada que pagar ahora el pedido entra sin pago en línea: solo si la tienda lo permite.
+  if (payNow <= 0 && !ctx.codEnabled) return { ok: false, code: "COD_DISABLED" };
+  return { ok: true, tipo, option, paymentMode, amounts, payNow, balance: Math.round((amounts.total - payNow) * 100) / 100 };
 }
