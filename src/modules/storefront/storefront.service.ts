@@ -39,7 +39,15 @@ import { claimPayment, matchPayments, updatePaymentStatus } from "../public-paym
 import type { AiSettings } from "../../lib/ai-providers";
 import { reportStorePurchase, storePixelId, type StoreWebClient } from "../meta-capi/meta-capi.service";
 import { signDownloadToken } from "../../lib/jwt";
-import { cancelOrderEmails, emailRemindersOf, sanitizeEmailReminders, scheduleAbandonedCheckout, schedulePostPurchase, type EmailReminders } from "./storefront-email.service";
+import {
+  cancelOrderEmails,
+  emailRemindersOf,
+  queueOrderConfirmationEmail,
+  sanitizeEmailReminders,
+  scheduleAbandonedCheckout,
+  schedulePostPurchase,
+  type EmailReminders,
+} from "./storefront-email.service";
 import {
   announcementOf,
   computeCombo,
@@ -84,7 +92,7 @@ import { loadShippingConfig } from "../shipping/shipping.service";
 import { enabledDeliveryTypes, normalizeShippingConfig, parseDeliveryType, shippingOn, type ShippingConfig } from "../shipping/shipping-config";
 import { courierLabel, searchAgencies } from "../shipping/agency-search";
 import { resolveOrderShipping, type OrderShippingErrorCode } from "../shipping/order-shipping-resolver";
-import { createOrderForStoreOrder, shippingSnapshotOf, storeOrderLinesOf, type StoreShippingSnapshot } from "./storefront-order.service";
+import { PURCHASED_STORE_ORDER, createOrderForStoreOrder, shippingSnapshotOf, storeOrderLinesOf, type StoreShippingSnapshot } from "./storefront-order.service";
 import { companyTracksStock } from "../orders/orders.service";
 import { applyOrderPayment, moneyOf } from "../orders/order-money";
 import { releasedPickupKey, renderNoticeTemplate } from "../orders/order-notify.service";
@@ -1557,7 +1565,8 @@ export async function fulfillStoreOrder(
   });
   if (claim.count === 0) return { ok: true, duplicate: true as const, receiptId };
   void cancelOrderEmails(order.id, "Pedido pagado");
-  void schedulePostPurchase(order);
+  // En físico el post-compra se programa cuando el pedido real llega a ENTREGADO.
+  if (!physical) void schedulePostPurchase(order);
 
   const amountText = `${symbolFor(order.currency)} ${opts.paid.toFixed(2)}`;
 
@@ -1772,10 +1781,8 @@ async function announcePhysicalOrder(storeOrderId: string, opts: { stockWarnings
     // 1) Dueño.
     const snap = shippingSnapshotOf(so.shipping);
     const stockWarnings = opts.stockWarnings ?? (await stockShortfall(companyId, so.items).catch(() => [] as string[]));
-    const productos =
-      storeOrderLinesOf(so.items)
-        .map((l) => `${l.qty} x ${l.name}${l.variant ? ` (${l.variant})` : ""}`)
-        .join(", ") || so.productName;
+    const lineas = storeOrderLinesOf(so.items).map((l) => `${l.qty} x ${l.name}${l.variant ? ` (${l.variant})` : ""}`);
+    const productos = lineas.join(", ") || so.productName;
     const contacto = [phone ? `+${phone.replace(/\D/g, "")}` : "", so.email ?? ""].filter(Boolean).join(" · ");
     const destino = snap ? [DELIVERY_LABELS[snap.deliveryType], deliveryDestination(snap)].filter(Boolean).join(" · ") : "";
     const panel = (env.FRONTEND_URL || "").replace(/\/$/, "");
@@ -1794,7 +1801,23 @@ async function announcePhysicalOrder(storeOrderId: string, opts: { stockWarnings
       .join("\n");
     void notifyOwner(companyId, ownerText).catch(() => undefined);
 
-    // 2) Comprador.
+    // 2) Comprador: correo de «pedido recibido» si dejó correo, y confirmación por WhatsApp.
+    const trackingUrl = storeOrderUrl(so.company.slug, so.id, so.accessToken);
+    void queueOrderConfirmationEmail({
+      storeOrderId: so.id,
+      companyId,
+      customerId: so.customerId,
+      email: so.email,
+      name: so.name,
+      code,
+      lines: lineas.length ? lineas : [so.productName],
+      total: fmt(total),
+      paid: paid > 0.005 ? fmt(paid) : "",
+      balance: balance > 0.005 ? fmt(balance) : "",
+      cod,
+      delivery: destino,
+      trackingUrl,
+    });
     if (!phone) return;
     const [cfg, convo] = await Promise.all([
       prisma.storefrontConfig.findUnique({ where: { companyId }, select: { physical: true } }),
@@ -1821,7 +1844,7 @@ async function announcePhysicalOrder(storeOrderId: string, opts: { stockWarnings
       total: fmt(total),
       pagado: paid > 0.005 ? fmt(paid) : "",
       saldo: balance > 0.005 ? fmt(balance) : "",
-      seguimiento: storeOrderUrl(so.company.slug, so.id, so.accessToken),
+      seguimiento: trackingUrl,
     });
     if (!text) {
       await notSent("el mensaje de confirmación quedó vacío");
@@ -2411,7 +2434,11 @@ export type StoreMetricsOpts = { days?: number; from?: string; to?: string; prod
  */
 export async function storeMetrics(companyId: string, opts: StoreMetricsOpts | number = 30) {
   const o: StoreMetricsOpts = typeof opts === "number" ? { days: opts } : opts;
-  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true, currency: true } });
+  const [company, storeCfg] = await Promise.all([
+    prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true, currency: true, vertical: true } }),
+    prisma.storefrontConfig.findUnique({ where: { companyId }, select: { physical: true } }),
+  ]);
+  const isPhysical = storeKindOf(company?.vertical, storeCfg?.physical) === "PHYSICAL";
   const tz = company?.timezone ?? "America/Lima";
   const ymd = /^\d{4}-\d{2}-\d{2}$/;
   const days = Math.min(365, Math.max(1, Math.round(o.days ?? 30)));
@@ -2449,16 +2476,26 @@ export async function storeMetrics(companyId: string, opts: StoreMetricsOpts | n
   }
   const orderWhere = { companyId, createdAt: { gte: since, lte: until }, ...(productId ? { productIds: { has: productId } } : {}) };
   const [orders, pending, names] = await Promise.all([
-    prisma.storeOrder.findMany({ where: { ...orderWhere, status: "ENTREGADO" }, select: { amount: true, currency: true } }),
-    prisma.storeOrder.findMany({ where: { ...orderWhere, status: { in: ["PENDIENTE", "EN_REVISION"] } }, select: { amount: true, currency: true } }),
+    // Compras: digital entregado, o físico pagado o confirmado con su pedido real vigente.
+    prisma.storeOrder.findMany({
+      where: { ...orderWhere, ...PURCHASED_STORE_ORDER },
+      select: { amount: true, orderTotal: true, currency: true, order: { select: { totalAmount: true, advanceAmount: true, paidAmount: true } } },
+    }),
+    prisma.storeOrder.findMany({ where: { ...orderWhere, status: { in: ["PENDIENTE", "EN_REVISION"] } }, select: { amount: true, orderTotal: true, currency: true } }),
     byProduct.size
       ? prisma.product.findMany({ where: { companyId, id: { in: [...byProduct.keys()] } }, select: { id: true, name: true } })
       : Promise.resolve([] as { id: string; name: string }[]),
   ]);
   const nameOf = new Map(names.map((n) => [n.id, n.name]));
-  const ingresos = orders.reduce((acc, o2) => acc + Number(o2.amount), 0);
+  // En físico el valor de la venta es el total del pedido (`amount` es solo lo pagado en la
+  // web: el adelanto, o 0 en contra entrega). En digital `orderTotal` no existe.
+  const valueOf = (o2: { amount: unknown; orderTotal: unknown }) => Number(o2.orderTotal ?? o2.amount);
+  const ingresos = orders.reduce((acc, o2) => acc + valueOf(o2), 0);
   const currency = orders[0]?.currency ?? pending[0]?.currency ?? company?.currency ?? "PEN";
-  const pendMonto = pending.reduce((acc, o2) => acc + Number(o2.amount), 0);
+  const pendMonto = pending.reduce((acc, o2) => acc + valueOf(o2), 0);
+  // Físico: cuánto de esas ventas ya entró y cuánto falta cobrar (saldos y contra entrega).
+  const cobrado = orders.reduce((acc, o2) => acc + (o2.order ? (moneyOf(o2.order)?.paid ?? 0) : valueOf(o2)), 0);
+  const porCobrar = Math.max(0, ingresos - cobrado);
   const visitas = sessions.size;
   const money = (n: number) => `${symbolFor(currency)} ${n.toFixed(2)}`;
   // Embudo: cada paso con % del paso anterior y % de las visitas (para que se note dónde se cae).
@@ -2467,7 +2504,7 @@ export async function storeMetrics(companyId: string, opts: StoreMetricsOpts | n
     { id: "vistas", label: "Vistas de producto", value: count.PRODUCT_VIEW, fuente: "Aperturas de una ficha (PRODUCT_VIEW)" },
     { id: "carrito", label: "Agregaron al carrito", value: count.ADD_TO_CART, fuente: "Clics en «Agregar» (ADD_TO_CART)" },
     { id: "checkout", label: "Iniciaron el pago", value: count.CHECKOUT, fuente: "Pulsaron «Pagar» (CHECKOUT)" },
-    { id: "compras", label: "Compras", value: orders.length, fuente: "Pedidos entregados" },
+    { id: "compras", label: "Compras", value: orders.length, fuente: isPhysical ? "Pedidos pagados o confirmados" : "Pedidos entregados" },
   ];
   const embudo = steps.map((st, i) => ({
     ...st,
@@ -2478,6 +2515,7 @@ export async function storeMetrics(companyId: string, opts: StoreMetricsOpts | n
     dias: days,
     rango: { from: since.toISOString(), to: until.toISOString() },
     productId,
+    tipo: isPhysical ? ("PHYSICAL" as const) : ("DIGITAL" as const),
     visitas,
     vistasProducto: count.PRODUCT_VIEW,
     agregadosAlCarrito: count.ADD_TO_CART,
@@ -2490,6 +2528,10 @@ export async function storeMetrics(companyId: string, opts: StoreMetricsOpts | n
     ingresosText: money(ingresos),
     ticketPromedio: orders.length ? Number((ingresos / orders.length).toFixed(2)) : 0,
     ticketPromedioText: money(orders.length ? ingresos / orders.length : 0),
+    // Solo tienda física: `ingresos` es el valor de los pedidos; aquí va lo ya cobrado y lo que falta.
+    ...(isPhysical
+      ? { cobrado: Number(cobrado.toFixed(2)), cobradoText: money(cobrado), porCobrar: Number(porCobrar.toFixed(2)), porCobrarText: money(porCobrar) }
+      : {}),
     pendientes: { pedidos: pending.length, monto: Number(pendMonto.toFixed(2)), montoText: money(pendMonto) },
     conversion: visitas > 0 ? Number(((buyers.size / visitas) * 100).toFixed(1)) : null,
     embudo,
@@ -2700,8 +2742,8 @@ export async function deleteCoupon(companyId: string, id: string) {
 // ---------------------------------------------------------------------------
 
 /** Campos JSON de venta resueltos con defaults (para el panel y el copiloto). */
-function resolvedSales(cfg: { emailReminders: unknown; announcement: unknown; volumePricing: unknown; salesSettings: unknown }) {
-  const emailReminders: EmailReminders = emailRemindersOf(cfg.emailReminders);
+function resolvedSales(cfg: { emailReminders: unknown; announcement: unknown; volumePricing: unknown; salesSettings: unknown }, kind: StoreKind) {
+  const emailReminders: EmailReminders = emailRemindersOf(cfg.emailReminders, kind);
   return { emailReminders, announcement: announcementOf(cfg.announcement), volumePricing: volumePricingOf(cfg.volumePricing) as VolumePricing, salesSettings: salesSettingsOf(cfg.salesSettings) };
 }
 
@@ -2709,7 +2751,8 @@ export async function getStorefrontConfig(companyId: string) {
   const cfg =
     (await prisma.storefrontConfig.findUnique({ where: { companyId } })) ??
     (await prisma.storefrontConfig.create({ data: { companyId } }));
-  return { ...cfg, ...resolvedSales(cfg), physical: physicalSettingsOf(cfg.physical), status: await storefrontStatus(companyId, cfg.enabled) };
+  const kind = await companyStoreKind(companyId, cfg.physical ?? null);
+  return { ...cfg, ...resolvedSales(cfg, kind), physical: physicalSettingsOf(cfg.physical), status: await storefrontStatus(companyId, cfg.enabled) };
 }
 
 export async function updateStorefrontConfig(
@@ -2772,8 +2815,12 @@ export async function updateStorefrontConfig(
     if (data.salesSettings !== undefined) merged.salesSettings = deepMergeJson(cur?.salesSettings ?? {}, data.salesSettings);
     if (data.announcement !== undefined) merged.announcement = deepMergeJson(cur?.announcement ?? {}, data.announcement);
     if (data.volumePricing !== undefined) merged.volumePricing = deepMergeJson(cur?.volumePricing ?? {}, data.volumePricing);
-    if (data.emailReminders !== undefined) merged.emailReminders = deepMergeJson(emailRemindersOf(cur?.emailReminders), data.emailReminders);
     if (data.physical !== undefined) merged.physical = deepMergeJson(cur?.physical ?? {}, data.physical);
+    if (data.emailReminders !== undefined) {
+      // Lo que el negocio no personalizó parte de los textos de su tipo de tienda.
+      const kind = await companyStoreKind(companyId, merged.physical ?? cur?.physical ?? null);
+      merged.emailReminders = deepMergeJson(emailRemindersOf(cur?.emailReminders, kind), data.emailReminders);
+    }
     data = merged;
   }
   const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
@@ -2782,6 +2829,7 @@ export async function updateStorefrontConfig(
   // Tipo de tienda con el que quedará la config tras este guardado (decide qué productos son válidos).
   const nextKind = data.heroSlides !== undefined || data.productOverrides !== undefined ? await companyStoreKind(companyId, data.physical) : "DIGITAL";
   const eligibleRows = data.heroSlides !== undefined || data.productOverrides !== undefined ? await eligibleProducts(companyId, [], nextKind) : [];
+  const emailKind: StoreKind = data.emailReminders !== undefined ? await companyStoreKind(companyId, data.physical) : "DIGITAL";
   let productOverrides: ProductOverrides | undefined;
   if (data.productOverrides !== undefined) {
     productOverrides = {};
@@ -2867,7 +2915,7 @@ export async function updateStorefrontConfig(
     ...(faqs !== undefined ? { faqs: faqs as unknown as Prisma.InputJsonValue } : {}),
     ...(data.footerTagline !== undefined ? { footerTagline: data.footerTagline?.trim().slice(0, 160) || null } : {}),
     ...(productOverrides !== undefined ? { productOverrides: productOverrides as unknown as Prisma.InputJsonValue } : {}),
-    ...(data.emailReminders !== undefined ? { emailReminders: sanitizeEmailReminders(data.emailReminders) as unknown as Prisma.InputJsonValue } : {}),
+    ...(data.emailReminders !== undefined ? { emailReminders: sanitizeEmailReminders(data.emailReminders, emailKind) as unknown as Prisma.InputJsonValue } : {}),
     ...(data.announcement !== undefined ? { announcement: sanitizeAnnouncement(data.announcement) as unknown as Prisma.InputJsonValue } : {}),
     ...(data.volumePricing !== undefined ? { volumePricing: sanitizeVolumePricing(data.volumePricing) as unknown as Prisma.InputJsonValue } : {}),
     ...(data.salesSettings !== undefined ? { salesSettings: sanitizeSalesSettings(data.salesSettings) as unknown as Prisma.InputJsonValue } : {}),
@@ -2904,7 +2952,8 @@ export async function updateStorefrontConfig(
     },
   });
   tlsAskCache.clear();
-  return { ...cfg, ...resolvedSales(cfg), physical: physicalSettingsOf(cfg.physical), status: await storefrontStatus(companyId, cfg.enabled) };
+  const kind = await companyStoreKind(companyId, cfg.physical ?? null);
+  return { ...cfg, ...resolvedSales(cfg, kind), physical: physicalSettingsOf(cfg.physical), status: await storefrontStatus(companyId, cfg.enabled) };
 }
 
 /**

@@ -14,6 +14,7 @@ import { AppError } from "../../lib/app-error";
 import { mailerEnabled, sendMail } from "../../lib/mailer";
 import { normalizeEmail } from "../../lib/email";
 import { storeUrl } from "./storefront-url";
+import { PURCHASED_STORE_ORDER } from "./storefront-order.service";
 import { fillVars, renderStoreEmail, unsubUrlFor, type EmailVars } from "./storefront-email.service";
 
 export type CampaignAudience = {
@@ -72,7 +73,7 @@ function md(c: { metadata: Prisma.JsonValue | null }): Record<string, unknown> {
 async function purchaseInfo(companyId: string, customerIds: string[]) {
   if (!customerIds.length) return new Map<string, { last: string | null; names: string[]; days: number | null }>();
   const orders = await prisma.storeOrder.findMany({
-    where: { companyId, status: "ENTREGADO", customerId: { in: customerIds } },
+    where: { companyId, ...PURCHASED_STORE_ORDER, customerId: { in: customerIds } },
     select: { customerId: true, productName: true, items: true, createdAt: true },
     orderBy: { createdAt: "desc" },
   });
@@ -111,7 +112,10 @@ export async function resolveAudience(companyId: string, rawAudience: unknown): 
     if (a.tagId) where = { ...where, tagLinks: { some: { tagId: a.tagId } } };
     if (a.source === "buyers") {
       const buyers = await prisma.storeOrder.findMany({
-        where: { companyId, status: "ENTREGADO", ...(a.productId ? { OR: [{ productId: a.productId }, { productIds: { has: a.productId } }] } : {}) },
+        where: {
+          companyId,
+          AND: [PURCHASED_STORE_ORDER, ...(a.productId ? [{ OR: [{ productId: a.productId }, { productIds: { has: a.productId } }] }] : [])],
+        },
         select: { customerId: true },
         distinct: ["customerId"],
       });
@@ -246,7 +250,7 @@ async function withMetrics(companyId: string, c: CampaignRow) {
     prisma.storeEvent.count({ where: { companyId, type: "EMAIL_CLICK", campaignId: c.id } }),
     c.startedAt
       ? prisma.storeOrder.count({
-          where: { companyId, status: "ENTREGADO", createdAt: { gte: c.startedAt, lte: new Date(c.startedAt.getTime() + 72 * 3_600_000) }, metadata: { path: ["web", "url"], string_contains: c.id } },
+          where: { companyId, ...PURCHASED_STORE_ORDER, createdAt: { gte: c.startedAt, lte: new Date(c.startedAt.getTime() + 72 * 3_600_000) }, metadata: { path: ["web", "url"], string_contains: c.id } },
         })
       : 0,
   ]);

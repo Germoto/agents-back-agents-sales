@@ -7,6 +7,7 @@
  * comprador recibe exactamente lo que vio aunque la configuración cambie después.
  */
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { symbolFor } from "../../lib/currency";
@@ -35,6 +36,18 @@ export type StoreShippingSnapshot = {
 
 /** Línea de un pedido web físico (`StoreOrder.items`). */
 export type StoreOrderLine = { productId: string; name: string; unitPrice: number; qty: number; variant: string | null; options: VariantChoice[] };
+
+/**
+ * Pedidos de tienda que cuentan como compra (métricas, audiencias, campañas): el digital
+ * ya entregado, o el físico pagado o confirmado con su pedido real vigente (no cancelado).
+ * En una tienda digital no hay pedido real, así que equivale a `status: "ENTREGADO"`.
+ */
+export const PURCHASED_STORE_ORDER: Prisma.StoreOrderWhereInput = {
+  OR: [
+    { status: "ENTREGADO" },
+    { status: { in: ["PAGADO", "CONFIRMADO"] }, order: { is: { status: { not: "CANCELADO" } } } },
+  ],
+};
 
 function obj(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};

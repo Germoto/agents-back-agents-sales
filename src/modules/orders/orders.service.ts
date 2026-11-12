@@ -7,6 +7,7 @@ import { findAgencyById } from "../shipping/agency-search";
 import { parseDeliveryType } from "../shipping/shipping-config";
 import { applyOrderPayment, mapOrder, moneyOf, toDec, type PaymentKind, type PaymentSource } from "./order-money";
 import { afterOrderPaymentOutsideChat, noticeEventForStatus, notifyOrderEvent, type OrderNoticeResult } from "./order-notify.service";
+import { schedulePostPurchaseOnDelivery } from "../storefront/storefront-email.service";
 
 const ORDER_INCLUDE = {
   customer: true,
@@ -121,6 +122,8 @@ export async function updateOrderStatus(
     status: updated.status,
     customerName: updated.customerName,
   });
+  // Pedido de la tienda web ya entregado: programa su correo post-compra (si dejó correo).
+  if (status === "ENTREGADO") void schedulePostPurchaseOnDelivery(companyId, orderId);
   // Aviso al cliente (solo si quien cambia el estado lo pidió y el evento está encendido).
   const event = opts.notify ? noticeEventForStatus(status) : null;
   const notice = event ? await notifyOrderEvent(companyId, orderId, event) : undefined;

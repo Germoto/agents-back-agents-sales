@@ -242,7 +242,7 @@ export const storeSubscribeSchema = z.object({
 
 // Panel: correos
 export const storeEmailsQuerySchema = z.object({
-  kind: z.enum(["ABANDONED_CHECKOUT", "POST_PURCHASE", "WELCOME", "CAMPAIGN", "TEST"]).optional(),
+  kind: z.enum(["ABANDONED_CHECKOUT", "POST_PURCHASE", "WELCOME", "CAMPAIGN", "TEST", "ORDER_CONFIRMATION"]).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 export const storeEmailTestSchema = z.object({

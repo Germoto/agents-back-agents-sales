@@ -7,6 +7,10 @@
  * Reglas: nunca a quien se dio de baja (Customer.metadata.emailOptOut); tope diario por
  * negocio (STORE_EMAIL_DAILY_CAP) y ritmo por minuto (STORE_EMAIL_PER_MINUTE); los
  * recordatorios de un pedido se cancelan solos cuando el pedido se paga o falla.
+ *
+ * Tienda de productos físicos: los textos por defecto son otros (no hablan de accesos),
+ * el post-compra se programa cuando el pedido real llega a ENTREGADO y el comprador que
+ * dejó correo recibe además un correo de «pedido recibido» con el enlace de seguimiento.
  */
 
 import crypto from "crypto";
@@ -21,6 +25,7 @@ import { applySpintax } from "../agent/reminder-templates";
 import { plainTextToHtml } from "../agent/delivery.emails";
 import { symbolFor } from "../../lib/currency";
 import { storeUrl } from "./storefront-url";
+import { storeKindOf, type StoreKind } from "./storefront-physical";
 
 // ---------------------------------------------------------------------------
 // Configuración (StorefrontConfig.emailReminders) y defaults
@@ -72,9 +77,45 @@ export const DEFAULT_EMAIL_REMINDERS: EmailReminders = {
   },
 };
 
-export function emailRemindersOf(raw: unknown): EmailReminders {
+/** Defaults de una tienda de productos físicos: hablan de pedido y entrega, no de accesos. */
+export const DEFAULT_EMAIL_REMINDERS_PHYSICAL: EmailReminders = {
+  abandonedCheckout: {
+    enabled: true,
+    steps: [
+      {
+        delayMinutes: 60,
+        subject: "{nombre}, tu pedido de {producto} quedó a medias",
+        body:
+          "{Hola|Qué tal} {nombre} 👋\n\nVimos que empezaste tu pedido de {producto} ({precio}) y quedó a medias. Puedes terminarlo en un minuto desde el botón de abajo.\n\nSi tuviste algún problema con el pago o con el envío, escríbenos y te ayudamos.",
+      },
+      {
+        delayMinutes: 1440,
+        subject: "¿Te ayudamos a terminar tu pedido?",
+        body:
+          "{Hola|Buenas} {nombre},\n\n{Seguimos|Aún estamos} guardando tu pedido de {producto}. Apenas se confirma el pago lo preparamos para la entrega.\n\n¿Alguna duda sobre el envío o el producto? Respóndenos y te ayudamos.",
+      },
+      {
+        delayMinutes: 4320,
+        subject: "Último recordatorio de tu pedido",
+        body:
+          "{nombre}, este es el último recordatorio de tu pedido de {producto}.\n\nSi todavía lo quieres, puedes terminarlo desde el botón de abajo. Después de este correo no te volveremos a escribir por este pedido 🙂",
+      },
+    ],
+  },
+  postPurchase: {
+    enabled: true,
+    delayDays: 3,
+    subject: "¿Cómo te fue con tu pedido?",
+    body:
+      "{Hola|Qué tal} {nombre} 👋\n\nEsperamos que tu pedido de {producto} haya llegado bien. Si tienes alguna duda o algo no llegó como esperabas, respóndenos y lo resolvemos.\n\nCuando quieras volver a comprar, la tienda está a un clic.",
+  },
+  welcome: DEFAULT_EMAIL_REMINDERS.welcome,
+};
+
+/** `kind` solo decide los textos por defecto de lo que el negocio todavía no personalizó. */
+export function emailRemindersOf(raw: unknown, kind: StoreKind = "DIGITAL"): EmailReminders {
   const v = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Partial<EmailReminders>;
-  const d = DEFAULT_EMAIL_REMINDERS;
+  const d = kind === "PHYSICAL" ? DEFAULT_EMAIL_REMINDERS_PHYSICAL : DEFAULT_EMAIL_REMINDERS;
   return {
     abandonedCheckout: {
       enabled: v.abandonedCheckout?.enabled ?? d.abandonedCheckout.enabled,
@@ -86,8 +127,8 @@ export function emailRemindersOf(raw: unknown): EmailReminders {
 }
 
 /** Normaliza/recorta lo que manda el panel o el copiloto antes de guardarlo. */
-export function sanitizeEmailReminders(input: unknown): EmailReminders {
-  const r = emailRemindersOf(input);
+export function sanitizeEmailReminders(input: unknown, kind: StoreKind = "DIGITAL"): EmailReminders {
+  const r = emailRemindersOf(input, kind);
   const byProduct = (v: unknown): Record<string, string> | null => {
     if (!v || typeof v !== "object" || Array.isArray(v)) return null;
     const out: Record<string, string> = {};
@@ -199,14 +240,16 @@ function firstName(name: string | null | undefined): string {
 
 async function storeContext(companyId: string) {
   const [company, cfg] = await Promise.all([
-    prisma.company.findUnique({ where: { id: companyId }, select: { name: true, slug: true, currency: true } }),
+    prisma.company.findUnique({ where: { id: companyId }, select: { name: true, slug: true, currency: true, vertical: true } }),
     prisma.storefrontConfig.findUnique({ where: { companyId } }),
   ]);
   if (!company || !cfg) return null;
+  const kind = storeKindOf(company.vertical, cfg.physical);
   return {
     company,
     cfg,
-    reminders: emailRemindersOf(cfg.emailReminders),
+    kind,
+    reminders: emailRemindersOf(cfg.emailReminders, kind),
     storeName: cfg.title || company.name,
     accent: cfg.accentColor || "#5b34e0",
     base: storeUrl(company.slug),
@@ -233,7 +276,45 @@ async function couponIsUsable(companyId: string, code: string | null | undefined
 // Programación de recordatorios
 // ---------------------------------------------------------------------------
 
-type OrderLike = { id: string; companyId: string; customerId: string; email: string | null; name: string; productId: string; productName: string; amount: Prisma.Decimal | number; currency: string; paymentMethod: string; accessToken: string; items?: unknown };
+type OrderLike = {
+  id: string;
+  companyId: string;
+  customerId: string;
+  email: string | null;
+  name: string;
+  productId: string;
+  productName: string;
+  amount: Prisma.Decimal | number;
+  currency: string;
+  paymentMethod: string;
+  accessToken: string;
+  items?: unknown;
+  /** Solo tienda física: total del pedido (`amount` es lo que toca pagar ahora). */
+  orderTotal?: Prisma.Decimal | number | null;
+  metadata?: unknown;
+};
+
+function isPhysicalOrder(order: OrderLike): boolean {
+  return ((order.metadata ?? {}) as { kind?: unknown }).kind === "PHYSICAL";
+}
+
+/** Precio que se menciona en el correo: en físico el total del pedido, no el adelanto. */
+function orderPriceText(order: OrderLike): string {
+  const total = isPhysicalOrder(order) && order.orderTotal != null ? Number(order.orderTotal) : Number(order.amount);
+  return `${symbolFor(order.currency)} ${total.toFixed(2)}`;
+}
+
+/** Carrito del pedido como `?items=id:cantidad,…` para que la tienda lo restaure. */
+function cartLink(base: string, items: unknown): string {
+  const lines = (Array.isArray(items) ? items : [])
+    .map((raw) => {
+      const l = (raw && typeof raw === "object" ? raw : {}) as { productId?: unknown; qty?: unknown };
+      const qty = Math.max(1, Math.round(Number(l.qty) || 1));
+      return typeof l.productId === "string" && l.productId ? `${l.productId}:${qty}` : "";
+    })
+    .filter(Boolean);
+  return lines.length ? `${base}/carrito?items=${lines.join(",")}` : `${base}/carrito`;
+}
 
 /** Al crear un checkout: encola la secuencia de "checkout abandonado" (se cancela al pagar). */
 export async function scheduleAbandonedCheckout(order: OrderLike): Promise<void> {
@@ -250,10 +331,14 @@ export async function scheduleAbandonedCheckout(order: OrderLike): Promise<void>
       data: { status: "CANCELLED", failureReason: "Reemplazado por un nuevo checkout" },
     });
     const product = await prisma.product.findUnique({ where: { id: order.productId }, select: { slug: true } });
-    const price = `${symbolFor(order.currency)} ${Number(order.amount).toFixed(2)}`;
+    const price = orderPriceText(order);
+    // Yape/Plin: vuelve a su pedido para subir la captura. Mercado Pago: en digital a la
+    // ficha del producto; en físico al carrito con sus productos y cantidades.
     const link = order.paymentMethod === "MANUAL"
       ? `${ctx.base}/gracias?o=${order.id}&t=${order.accessToken}`
-      : `${ctx.base}/p/${product?.slug ?? ""}#comprar`;
+      : isPhysicalOrder(order)
+        ? cartLink(ctx.base, order.items)
+        : `${ctx.base}/p/${product?.slug ?? ""}#comprar`;
     const now = Date.now();
     const rows: Prisma.StoreEmailCreateManyInput[] = [];
     for (const [i, step] of ctx.reminders.abandonedCheckout.steps.entries()) {
@@ -309,7 +394,7 @@ export async function schedulePostPurchase(order: OrderLike): Promise<void> {
     const vars: EmailVars = {
       nombre: firstName(order.name) || "Hola",
       producto: order.productName,
-      precio: `${symbolFor(order.currency)} ${Number(order.amount).toFixed(2)}`,
+      precio: orderPriceText(order),
       relacionado: cross?.name ?? "nuestros otros productos",
       link: ctaUrl,
       cupon: coupon ?? "",
@@ -332,6 +417,84 @@ export async function schedulePostPurchase(order: OrderLike): Promise<void> {
     });
   } catch (err) {
     console.warn("[store-email] no se pudo programar post-compra:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * Tienda física: el post-compra sale a los N días de la ENTREGA, no del pago. Se llama
+ * cuando el pedido real pasa a ENTREGADO; si el pedido no nació en la tienda, o ya tiene
+ * su correo, no hace nada.
+ */
+export async function schedulePostPurchaseOnDelivery(companyId: string, orderId: string): Promise<void> {
+  try {
+    const so = await prisma.storeOrder.findFirst({ where: { companyId, orderId } });
+    if (!so?.email) return;
+    const already = await prisma.storeEmail.findFirst({ where: { orderId: so.id, kind: "POST_PURCHASE" }, select: { id: true } });
+    if (already) return;
+    await schedulePostPurchase(so);
+  } catch (err) {
+    console.warn("[store-email] no se pudo programar post-compra del pedido:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * Tienda física: correo de «pedido recibido» para el comprador que dejó su correo. Es
+ * transaccional (lo dispara su propia compra): sale aunque se haya dado de baja de las
+ * promociones y no lleva cupón ni enlace de baja. Una sola vez por pedido.
+ */
+export async function queueOrderConfirmationEmail(p: {
+  storeOrderId: string;
+  companyId: string;
+  customerId: string;
+  email: string | null;
+  name: string;
+  code: string;
+  lines: string[];
+  total: string;
+  /** Vacío si no pagó nada en la web (contra entrega). */
+  paid: string;
+  /** Vacío si no queda saldo. */
+  balance: string;
+  cod: boolean;
+  delivery: string;
+  trackingUrl: string;
+}): Promise<void> {
+  try {
+    if (!p.email || !mailerEnabled()) return;
+    const ctx = await storeContext(p.companyId);
+    if (!ctx) return;
+    const already = await prisma.storeEmail.findFirst({ where: { orderId: p.storeOrderId, kind: "ORDER_CONFIRMATION" }, select: { id: true } });
+    if (already) return;
+    const first = firstName(p.name);
+    const detail = [
+      `Total: ${p.total}`,
+      p.cod ? "Pago: contra entrega" : p.paid ? `Pagado: ${p.paid}` : "",
+      !p.cod && p.balance ? `Saldo por pagar: ${p.balance}` : "",
+      p.delivery ? `Entrega: ${p.delivery}` : "",
+    ].filter(Boolean);
+    const body = [
+      first ? `Hola ${first} 👋` : "Hola 👋",
+      `Recibimos tu pedido ${p.code} en ${ctx.storeName}. Este es el resumen:`,
+      p.lines.map((l) => `• ${l}`).join("\n"),
+      detail.join("\n"),
+      "Desde el botón de abajo puedes ver el estado de tu pedido cuando quieras.",
+    ].join("\n\n");
+    await prisma.storeEmail.create({
+      data: {
+        companyId: p.companyId,
+        customerId: p.customerId,
+        orderId: p.storeOrderId,
+        kind: "ORDER_CONFIRMATION",
+        email: p.email,
+        subject: `Recibimos tu pedido ${p.code}`,
+        body,
+        ctaLabel: "Ver mi pedido",
+        ctaUrl: withUtm(p.trackingUrl, "order_confirmation"),
+        sendAt: new Date(),
+      },
+    });
+  } catch (err) {
+    console.warn("[store-email] no se pudo encolar el correo del pedido:", err instanceof Error ? err.message : err);
   }
 }
 
@@ -427,7 +590,9 @@ export async function processStoreEmails(): Promise<number> {
       // Reclamar la fila (evita doble envío si el worker se solapa).
       const claimed = await prisma.storeEmail.updateMany({ where: { id: m.id, status: "PENDING" }, data: { status: "SENDING" } });
       if (!claimed.count) continue;
-      if (await customerOptedOut(m.customerId)) {
+      // El correo del pedido es transaccional: la baja de promociones no lo frena.
+      const transactional = m.kind === "ORDER_CONFIRMATION";
+      if (!transactional && (await customerOptedOut(m.customerId))) {
         await prisma.storeEmail.update({ where: { id: m.id }, data: { status: "CANCELLED", failureReason: "Se dio de baja" } });
         continue;
       }
@@ -462,7 +627,7 @@ export async function processStoreEmails(): Promise<number> {
         ctaLabel: m.ctaLabel,
         ctaUrl: m.ctaUrl,
         couponCode: m.couponCode,
-        unsubUrl: m.customerId ? unsubUrlFor(m.companyId, m.customerId) : null,
+        unsubUrl: m.customerId && !transactional ? unsubUrlFor(m.companyId, m.customerId) : null,
         storeLink: ctx.base,
       });
       await sendMail({ to: m.email, subject: m.subject, html, text, fromName: `${ctx.storeName} vía FlowApp` });
