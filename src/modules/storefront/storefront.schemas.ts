@@ -89,6 +89,7 @@ export const updateStorefrontConfigSchema = z.object({
   announcement: z.any().optional(),
   volumePricing: z.any().optional(),
   salesSettings: z.any().optional(),
+  physical: z.any().optional(),
   productOverrides: z
     .record(
       z.string().uuid(),

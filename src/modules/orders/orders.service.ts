@@ -285,7 +285,7 @@ export async function findPendingOrderForCustomer(companyId: string, customerId:
   return order?.id ?? null;
 }
 
-async function companyTracksStock(companyId: string): Promise<boolean> {
+export async function companyTracksStock(companyId: string): Promise<boolean> {
   const cfg = await prisma.agentConfig.findUnique({ where: { companyId }, select: { trackStock: true } });
   return cfg?.trackStock ?? true;
 }

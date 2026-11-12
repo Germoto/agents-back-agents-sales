@@ -43,6 +43,7 @@ import {
   announcementOf,
   computeCombo,
   deepMergeJson,
+  DEFAULT_GUARANTEE,
   DEFAULT_SAMPLE,
   distributeTotal,
   fillPrice,
@@ -58,6 +59,20 @@ import {
   type PricedItem,
   type VolumePricing,
 } from "./storefront-sales";
+import {
+  deliveryBlockedReason,
+  DELIVERY_LABELS,
+  isSimplePhysicalProduct,
+  physicalSettingsOf,
+  publicDeliveryOptions,
+  sanitizePhysicalSettings,
+  storeKindOf,
+  storeVariantsOf,
+  type StoreKind,
+} from "./storefront-physical";
+import { loadShippingConfig } from "../shipping/shipping.service";
+import { enabledDeliveryTypes, shippingOn } from "../shipping/shipping-config";
+import { companyTracksStock } from "../orders/orders.service";
 
 // ---------------------------------------------------------------------------
 // Portada: tipos de la configuración (JSON) y valores por defecto
@@ -162,6 +177,19 @@ export const DEFAULT_TRUST_ITEMS: TrustItem[] = [
   { icon: "✆", title: "Soporte por WhatsApp", sub: "Te ayudamos antes y después de comprar" },
 ];
 
+/** Textos de confianza por defecto de una tienda física (según lo que el negocio ofrece hoy). */
+function physicalTrustItems(entregas: { label: string }[], canPayOnline: boolean): TrustItem[] {
+  const formas = entregas.map((e) => e.label.toLowerCase());
+  return [
+    { icon: "🚚", title: "Recibe tu pedido", sub: formas.length ? `${formas.join(", ").replace(/^./, (c) => c.toUpperCase())}` : "Coordinamos la entrega contigo" },
+    canPayOnline
+      ? { icon: "◎", title: "Yape, Plin o tarjeta", sub: "Pago seguro y validación automática" }
+      : { icon: "◎", title: "Pago contra entrega", sub: "Pagas cuando recibes tu pedido" },
+    { icon: "✆", title: "Soporte por WhatsApp", sub: "Te ayudamos antes y después de comprar" },
+  ];
+}
+const PHYSICAL_GUARANTEE_TEXT = "Si el producto no es lo que prometimos, te devolvemos tu dinero.";
+
 function jsonArray<T>(v: unknown): T[] {
   return Array.isArray(v) ? (v as T[]) : [];
 }
@@ -188,6 +216,7 @@ type StoreCompany = {
   currency: string;
   timezone: string;
   isActive: boolean;
+  vertical: string;
 };
 
 /** Empresa + config de tienda por slug. Lanza 404 si no existe o no está activa. */
@@ -196,7 +225,7 @@ async function resolveStore(slug: string) {
   if (!isValidStoreSlug(s)) throw new AppError("Tienda no encontrada", 404);
   const company = await prisma.company.findUnique({
     where: { slug: s },
-    select: { id: true, name: true, slug: true, currency: true, timezone: true, isActive: true },
+    select: { id: true, name: true, slug: true, currency: true, timezone: true, isActive: true, vertical: true },
   });
   if (!company || !company.isActive) throw new AppError("Tienda no encontrada", 404);
   const cfg = await prisma.storefrontConfig.findUnique({ where: { companyId: company.id } });
@@ -205,7 +234,9 @@ async function resolveStore(slug: string) {
   if (ent.blocked || !(ent.legacy || ent.modules.includes("STOREFRONT"))) {
     throw new AppError("Tienda no disponible", 404);
   }
-  return { company: company as StoreCompany, cfg, ent };
+  // El tipo de tienda lo decide el servidor: física solo en el rubro comercial y con la opción activada.
+  const kind: StoreKind = storeKindOf(company.vertical, cfg.physical);
+  return { company: company as StoreCompany, cfg, ent, kind };
 }
 
 /**
@@ -243,8 +274,20 @@ export async function tlsAsk(domain: string): Promise<boolean> {
 // Catálogo público
 // ---------------------------------------------------------------------------
 
-/** Productos elegibles: digitales, activos, en catálogo, entrega fija y con correo. */
-async function eligibleProducts(companyId: string, productIds: string[]) {
+/**
+ * Productos elegibles. Tienda digital: digitales, activos, en catálogo, entrega fija y
+ * con correo. Tienda física: físicos, activos, en catálogo y con precio simple (los de
+ * precio por plan o con opciones que cambian el precio quedan fuera).
+ */
+async function eligibleProducts(companyId: string, productIds: string[], kind: StoreKind = "DIGITAL") {
+  if (kind === "PHYSICAL") {
+    const physical = await prisma.product.findMany({
+      where: { companyId, active: true, showInCatalog: true, productType: "PHYSICAL", ...(productIds.length ? { id: { in: productIds } } : {}) },
+      include: productRelations,
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    });
+    return physical.filter(isSimplePhysicalProduct);
+  }
   const rows = await prisma.product.findMany({
     where: {
       companyId,
@@ -282,10 +325,22 @@ async function storePaymentOptions(companyId: string, cfg: { manualPaymentsEnabl
 }
 
 export async function getPublicStore(slug: string) {
-  const { company, cfg, ent } = await resolveStore(slug);
+  const { company, cfg, ent, kind } = await resolveStore(slug);
   const symbol = symbolFor(company.currency);
-  const products = await eligibleProducts(company.id, cfg.productIds);
-  const [pay, metaPixelId] = await Promise.all([storePaymentOptions(company.id, cfg, ent), storePixelId(company.id)]);
+  const isPhysical = kind === "PHYSICAL";
+  const physical = physicalSettingsOf(cfg.physical);
+  const products = await eligibleProducts(company.id, cfg.productIds, kind);
+  const [pay, metaPixelId, shipCfg, tracksStock] = await Promise.all([
+    storePaymentOptions(company.id, cfg, ent),
+    storePixelId(company.id),
+    isPhysical ? loadShippingConfig(company.id) : null,
+    isPhysical ? companyTracksStock(company.id) : false,
+  ]);
+  const canPayOnline = pay.mercadoPago || pay.manual.length > 0;
+  // Entrega y cobro que ofrece la web: salen de Empresa → Envíos, la tienda no tiene reglas propias.
+  const entregas = isPhysical
+    ? publicDeliveryOptions(shipCfg, { paymentMode: pay.pc?.paymentMode, codEnabled: physical.codEnabled, canPayOnline, symbol })
+    : [];
   const overrides = overridesOf(cfg);
   const mapped = products
     .map((p, idx) => {
@@ -357,16 +412,25 @@ export async function getPublicStore(slug: string) {
     .sort((a, b2) => a.getTime() - b2.getTime())[0];
   const anuncioEndsAt = anuncio.countdown === "offer" ? (nearestOffer ? nearestOffer.toISOString() : null) : anuncio.countdown === "none" ? null : new Date(anuncio.countdown).toISOString();
   const bundlePriceText = combos.allBundle.price !== null ? `${symbol} ${combos.allBundle.price.toFixed(2)}` : "";
-  const trust = jsonArray<TrustItem>(cfg.trustItems).length ? jsonArray<TrustItem>(cfg.trustItems).slice(0, 4) : DEFAULT_TRUST_ITEMS;
+  const trust = jsonArray<TrustItem>(cfg.trustItems).length
+    ? jsonArray<TrustItem>(cfg.trustItems).slice(0, 4)
+    : isPhysical
+      ? physicalTrustItems(entregas, canPayOnline)
+      : DEFAULT_TRUST_ITEMS;
+  // El combo «todos los productos» es solo de la tienda digital.
+  const allBundleOn = combos.allBundle.enabled && !isPhysical;
+  const guaranteeText = (text: string) => (isPhysical && text === DEFAULT_GUARANTEE.text ? PHYSICAL_GUARANTEE_TEXT : text);
   return {
+    kind,
+    envio: isPhysical ? { tipos: entregas, maxPorProducto: physical.maxQtyPerItem } : null,
     pagos: { mercadoPago: pay.mercadoPago, manual: pay.manual, mpRecargo: pay.mpRecargo },
     portada: { slides, autoplay: cfg.carouselAutoplay, intervalSec: cfg.carouselIntervalSec },
     anuncio: anuncio.enabled && anuncio.text ? { text: anuncio.text, endsAt: anuncioEndsAt && new Date(anuncioEndsAt).getTime() > Date.now() ? anuncioEndsAt : null } : null,
-    combos: combos.enabled && (combos.tiers.length || combos.allBundle.enabled)
+    combos: combos.enabled && (combos.tiers.length || allBundleOn)
       ? {
           tiers: combos.tiers,
-          allBundle: combos.allBundle.enabled ? { price: combos.allBundle.price as number, priceText: bundlePriceText, label: combos.allBundle.label, total: mapped.length } : null,
-          seccion: combos.allBundle.enabled
+          allBundle: allBundleOn ? { price: combos.allBundle.price as number, priceText: bundlePriceText, label: combos.allBundle.label, total: mapped.length } : null,
+          seccion: allBundleOn
             ? {
                 kicker: ventas.comboSection.kicker,
                 headline: fillPrice(ventas.comboSection.headline, bundlePriceText),
@@ -379,7 +443,7 @@ export async function getPublicStore(slug: string) {
     ventas: {
       ctaColor: ventas.ctaColor,
       catalogTitle: ventas.catalogTitle || null,
-      guarantee: ventas.guarantee.enabled ? { days: ventas.guarantee.days, title: ventas.guarantee.title.replace(/\{dias\}/g, String(ventas.guarantee.days)), text: ventas.guarantee.text } : null,
+      guarantee: ventas.guarantee.enabled ? { days: ventas.guarantee.days, title: ventas.guarantee.title.replace(/\{dias\}/g, String(ventas.guarantee.days)), text: guaranteeText(ventas.guarantee.text) } : null,
       cartRecommendations: ventas.cartRecommendations,
       landingBar: ventas.landingBar,
       footer: ventas.footer,
@@ -404,7 +468,9 @@ export async function getPublicStore(slug: string) {
     productos: mapped.map(({ p, b, ov, images, category, categories, recursos, shortDescription }) => {
       const ld = ov?.landing ?? {};
       const priceText = b.priceText ?? b.price;
-      const bump = ld.orderBump && byId.has(ld.orderBump.productId) ? byId.get(ld.orderBump.productId)! : null;
+      // El order bump es solo de la tienda digital.
+      const bump = !isPhysical && ld.orderBump && byId.has(ld.orderBump.productId) ? byId.get(ld.orderBump.productId)! : null;
+      const tracked = isPhysical && tracksStock && typeof p.stock === "number";
       const video = videoEmbedUrl(ld.videoUrl ?? null);
       const guarantee = ld.guarantee ? guaranteeOf(ld.guarantee, ventas.guarantee) : ventas.guarantee;
       const landing = {
@@ -433,10 +499,15 @@ export async function getPublicStore(slug: string) {
               imageUrl: bump.images[0]?.url ?? null,
             }
           : null,
-        guarantee: guarantee.enabled ? { days: guarantee.days, title: guarantee.title.replace(/\{dias\}/g, String(guarantee.days)), text: guarantee.text } : null,
+        guarantee: guarantee.enabled ? { days: guarantee.days, title: guarantee.title.replace(/\{dias\}/g, String(guarantee.days)), text: guaranteeText(guarantee.text) } : null,
       };
       return {
         id: b.id,
+        // Tienda física: lo que el comprador elige (talla, color…), stock si el negocio lo controla y tiempo de entrega.
+        variantes: isPhysical ? storeVariantsOf(p) : [],
+        stock: tracked ? Math.max(0, p.stock as number) : null,
+        agotado: tracked && (p.stock as number) <= 0,
+        tiempoEntrega: isPhysical ? (p.physicalDelivery?.deliveryTime ?? "").trim() || null : null,
         landing,
         slug: b.slug,
         name: b.name,
@@ -504,7 +575,7 @@ export async function getStoreOgHtml(host: string, path: string): Promise<string
   } catch {
     return null;
   }
-  const { company, cfg } = resolved;
+  const { company, cfg, kind } = resolved;
   const base = storeUrl(company.slug);
   const symbol = symbolFor(company.currency);
   const title0 = cfg.title || company.name;
@@ -518,7 +589,7 @@ export async function getStoreOgHtml(host: string, path: string): Promise<string
   const pm = /^\/p\/([^/?#]+)/.exec(target.rest || "/");
   if (pm) {
     const key = decodeURIComponent(pm[1]);
-    const products = await eligibleProducts(company.id, cfg.productIds);
+    const products = await eligibleProducts(company.id, cfg.productIds, kind);
     const product = products.find((p) => p.slug === key || p.id === key);
     if (product) {
       const b = mapBotProduct(product, { currencySymbol: symbol, timezone: company.timezone });
@@ -589,12 +660,12 @@ export type CartPricing = {
  */
 async function priceCart(
   company: StoreCompany,
-  cfg: { productIds: string[]; productOverrides: unknown; volumePricing: unknown },
+  cfg: { productIds: string[]; productOverrides: unknown; volumePricing: unknown; physical?: unknown },
   input: { productIds: string[]; bumpProductId?: string | null; coupon?: string | null },
 ): Promise<CartPricing> {
   const wantedIds = Array.from(new Set(input.productIds));
   if (!wantedIds.length) throw new AppError("Elige al menos un producto", 400);
-  const eligible = await eligibleProducts(company.id, cfg.productIds);
+  const eligible = await eligibleProducts(company.id, cfg.productIds, storeKindOf(company.vertical, cfg.physical));
   const chosen = wantedIds.map((id) => eligible.find((p) => p.id === id)).filter((p): p is EligibleRow => Boolean(p));
   if (chosen.length !== wantedIds.length) throw new AppError(chosen.length ? "Algún producto del carrito ya no está disponible" : "Producto no disponible", 404);
   const symbol = symbolFor(company.currency);
@@ -652,7 +723,10 @@ export async function createStoreCheckout(
   input: { productId?: string; productIds?: string[]; name: string; email: string; phone?: string | null; method?: StoreCheckoutMethod; coupon?: string | null; emailMarketing?: boolean; bumpProductId?: string | null },
   client?: StoreWebClient | null,
 ) {
-  const { company, cfg, ent } = await resolveStore(slug);
+  const { company, cfg, ent, kind } = await resolveStore(slug);
+  // Guarda temporal: la tienda física todavía no tiene checkout propio (pide entrega y
+  // crea un pedido real). Nunca debe pasar por el flujo de entrega digital.
+  if (kind === "PHYSICAL") throw new AppError("El checkout de esta tienda aún no está disponible", 409);
   const companyId = company.id;
   const method: StoreCheckoutMethod = input.method === "MANUAL" ? "MANUAL" : "MERCADOPAGO";
 
@@ -1538,8 +1612,8 @@ export async function validateCoupon(companyId: string, codeRaw: string, product
 
 /** Público: previsualiza el descuento de un cupón para el carrito actual. */
 export async function previewCoupon(slug: string, code: string, productIds: string[]) {
-  const { company, cfg } = await resolveStore(slug);
-  const eligible = await eligibleProducts(company.id, cfg.productIds);
+  const { company, cfg, kind } = await resolveStore(slug);
+  const eligible = await eligibleProducts(company.id, cfg.productIds, kind);
   const chosen = eligible.filter((p) => productIds.includes(p.id));
   if (!chosen.length) throw new AppError("Producto no disponible", 404);
   const symbol = symbolFor(company.currency);
@@ -1643,7 +1717,7 @@ export async function getStorefrontConfig(companyId: string) {
   const cfg =
     (await prisma.storefrontConfig.findUnique({ where: { companyId } })) ??
     (await prisma.storefrontConfig.create({ data: { companyId } }));
-  return { ...cfg, ...resolvedSales(cfg), status: await storefrontStatus(companyId, cfg.enabled) };
+  return { ...cfg, ...resolvedSales(cfg), physical: physicalSettingsOf(cfg.physical), status: await storefrontStatus(companyId, cfg.enabled) };
 }
 
 export async function updateStorefrontConfig(
@@ -1683,14 +1757,16 @@ export async function updateStorefrontConfig(
     announcement?: unknown;
     volumePricing?: unknown;
     salesSettings?: unknown;
+    /** Tienda de productos físicos (solo rubro comercial): { enabled, codEnabled, maxQtyPerItem, autoConfirm, confirmMessage, agentShareLinks }. */
+    physical?: unknown;
     /** true = el panel manda la config completa (reemplaza); false/omitido = parcial, se fusiona con lo guardado (copiloto). */
     replace?: boolean;
   },
 ) {
   // Modo fusión (copiloto): lo que no venga se conserva; null borra; listas reemplazan.
-  const mergeable = data.productOverrides !== undefined || data.salesSettings !== undefined || data.announcement !== undefined || data.volumePricing !== undefined || data.emailReminders !== undefined;
+  const mergeable = data.productOverrides !== undefined || data.salesSettings !== undefined || data.announcement !== undefined || data.volumePricing !== undefined || data.emailReminders !== undefined || data.physical !== undefined;
   if (!data.replace && mergeable) {
-    const cur = await prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productOverrides: true, salesSettings: true, announcement: true, volumePricing: true, emailReminders: true } });
+    const cur = await prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productOverrides: true, salesSettings: true, announcement: true, volumePricing: true, emailReminders: true, physical: true } });
     const merged = { ...data };
     if (data.productOverrides !== undefined) {
       const current = overridesOf(cur ?? {});
@@ -1705,12 +1781,15 @@ export async function updateStorefrontConfig(
     if (data.announcement !== undefined) merged.announcement = deepMergeJson(cur?.announcement ?? {}, data.announcement);
     if (data.volumePricing !== undefined) merged.volumePricing = deepMergeJson(cur?.volumePricing ?? {}, data.volumePricing);
     if (data.emailReminders !== undefined) merged.emailReminders = deepMergeJson(emailRemindersOf(cur?.emailReminders), data.emailReminders);
+    if (data.physical !== undefined) merged.physical = deepMergeJson(cur?.physical ?? {}, data.physical);
     data = merged;
   }
   const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
   const isOwnUpload = (u: string) => u.startsWith(`${base}/uploads/`);
   if (data.logoUrl && !isOwnUpload(data.logoUrl)) throw new AppError("El logo debe ser un archivo subido a FlowApp", 400);
-  const eligibleRows = data.heroSlides !== undefined || data.productOverrides !== undefined ? await eligibleProducts(companyId, []) : [];
+  // Tipo de tienda con el que quedará la config tras este guardado (decide qué productos son válidos).
+  const nextKind = data.heroSlides !== undefined || data.productOverrides !== undefined ? await companyStoreKind(companyId, data.physical) : "DIGITAL";
+  const eligibleRows = data.heroSlides !== undefined || data.productOverrides !== undefined ? await eligibleProducts(companyId, [], nextKind) : [];
   let productOverrides: ProductOverrides | undefined;
   if (data.productOverrides !== undefined) {
     productOverrides = {};
@@ -1800,6 +1879,7 @@ export async function updateStorefrontConfig(
     ...(data.announcement !== undefined ? { announcement: sanitizeAnnouncement(data.announcement) as unknown as Prisma.InputJsonValue } : {}),
     ...(data.volumePricing !== undefined ? { volumePricing: sanitizeVolumePricing(data.volumePricing) as unknown as Prisma.InputJsonValue } : {}),
     ...(data.salesSettings !== undefined ? { salesSettings: sanitizeSalesSettings(data.salesSettings) as unknown as Prisma.InputJsonValue } : {}),
+    ...(data.physical !== undefined ? { physical: sanitizePhysicalSettings(data.physical) as unknown as Prisma.InputJsonValue } : {}),
   };
   if (data.enabled === true) {
     const st = await storefrontStatus(companyId, true);
@@ -1832,36 +1912,65 @@ export async function updateStorefrontConfig(
     },
   });
   tlsAskCache.clear();
-  return { ...cfg, ...resolvedSales(cfg), status: await storefrontStatus(companyId, cfg.enabled) };
+  return { ...cfg, ...resolvedSales(cfg), physical: physicalSettingsOf(cfg.physical), status: await storefrontStatus(companyId, cfg.enabled) };
+}
+
+/**
+ * Tipo de tienda de una empresa (panel, Copiloto, agente). `physicalOverride` permite
+ * evaluar el tipo con unos ajustes que todavía no se guardaron.
+ */
+export async function companyStoreKind(companyId: string, physicalOverride?: unknown): Promise<StoreKind> {
+  const [company, cfg] = await Promise.all([
+    prisma.company.findUnique({ where: { id: companyId }, select: { vertical: true } }),
+    physicalOverride === undefined ? prisma.storefrontConfig.findUnique({ where: { companyId }, select: { physical: true } }) : null,
+  ]);
+  return storeKindOf(company?.vertical, physicalOverride === undefined ? cfg?.physical : physicalOverride);
 }
 
 /** Checklist de requisitos de la tienda (para el panel y el copiloto). */
 export async function storefrontStatus(companyId: string, enabled: boolean) {
   const [company, pc, ent, cfg] = await Promise.all([
-    prisma.company.findUnique({ where: { id: companyId }, select: { slug: true, currency: true, timezone: true } }),
+    prisma.company.findUnique({ where: { id: companyId }, select: { slug: true, currency: true, timezone: true, vertical: true } }),
     prisma.paymentConfig.findUnique({
       where: { companyId },
-      select: { enabled: true, mpEnabled: true, mpAccessToken: true, mpStoreEnabled: true, methods: { select: { method: true } } },
+      select: { enabled: true, paymentMode: true, mpEnabled: true, mpAccessToken: true, mpStoreEnabled: true, methods: { select: { method: true } } },
     }),
     getEntitlements(companyId),
-    prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productIds: true, manualPaymentsEnabled: true, productOverrides: true } }),
+    prisma.storefrontConfig.findUnique({ where: { companyId }, select: { productIds: true, manualPaymentsEnabled: true, productOverrides: true, physical: true } }),
   ]);
+  const physical = physicalSettingsOf(cfg?.physical);
+  const kind = storeKindOf(company?.vertical, cfg?.physical);
+  const isPhysical = kind === "PHYSICAL";
+  const symbol = symbolFor(company?.currency ?? "PEN");
   const overrides = overridesOf(cfg ?? {});
   const slug = company?.slug ?? "";
   const slugProblema = storeSlugProblem(slug);
   // TODOS los elegibles (no filtrados por la selección): la lista del panel debe mostrar
   // también los ocultos para poder volver a activarlos; la visibilidad la decide productIds.
-  const eligible = await eligibleProducts(companyId, []);
-  const sinCorreo = await prisma.product.findMany({
-    where: {
-      companyId,
-      active: true,
-      showInCatalog: true,
-      productType: "DIGITAL",
-      OR: [{ digitalDelivery: null }, { digitalDelivery: { is: { OR: [{ emailEnabled: false }, { assignmentMode: { not: "STATIC" } }] } } }],
-    },
-    select: { id: true, name: true },
-  });
+  const eligible = await eligibleProducts(companyId, [], kind);
+  // Digital: productos que no entran por no tener entrega por correo. Físico: los que no
+  // entran por no tener un precio simple (texto libre, planes u opciones con recargo).
+  const sinCorreo = isPhysical
+    ? []
+    : await prisma.product.findMany({
+        where: {
+          companyId,
+          active: true,
+          showInCatalog: true,
+          productType: "DIGITAL",
+          OR: [{ digitalDelivery: null }, { digitalDelivery: { is: { OR: [{ emailEnabled: false }, { assignmentMode: { not: "STATIC" } }] } } }],
+        },
+        select: { id: true, name: true },
+      });
+  const sinPrecioSimple = isPhysical
+    ? (
+        await prisma.product.findMany({
+          where: { companyId, active: true, showInCatalog: true, productType: "PHYSICAL", id: { notIn: eligible.map((p) => p.id) } },
+          select: { id: true, name: true },
+        })
+      )
+    : [];
+  const shipCfg = isPhysical ? await loadShippingConfig(companyId) : null;
   const moduloTienda = ent.legacy || ent.modules.includes("STOREFRONT");
   const moduloMp = ent.legacy || ent.modules.includes("MERCADOPAGO");
   const mpConectado = Boolean(pc?.mpEnabled && pc.mpAccessToken);
@@ -1872,7 +1981,38 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
   const manualHabilitado = cfg?.manualPaymentsEnabled ?? true;
   const pagosManuales = manualHabilitado && metodosManuales.length > 0;
   const pagosListos = mpConfigurado || pagosManuales;
+  // Tienda física: Envíos manda. Un tipo de entrega encendido puede no salir en la web
+  // (contra entrega sin la opción de la tienda, o cobro con pago sin medios de pago).
+  const chargeCtx = { paymentMode: pc?.paymentMode, codEnabled: physical.codEnabled, canPayOnline: pagosListos, symbol };
+  const entregas = isPhysical ? publicDeliveryOptions(shipCfg, chargeCtx) : [];
+  const tiposEntrega =
+    isPhysical && shippingOn(shipCfg)
+      ? enabledDeliveryTypes(shipCfg).map((tipo) => {
+          const motivo = deliveryBlockedReason(shipCfg, tipo, chargeCtx);
+          return { tipo, label: DELIVERY_LABELS[tipo], enWeb: !motivo, motivo };
+        })
+      : [];
+  const conFoto = eligible.filter((p) => storeImageOf(p, overrides[p.id]));
+  // En físico los pagos dejan de ser requisito si todo lo que ofrece la web es contra entrega.
+  const soloContraEntrega = entregas.length > 0 && entregas.every((e) => e.cobros.every((c) => c.modo === "CONTRA_ENTREGA"));
+  const lista = isPhysical
+    ? enabled && !slugProblema && moduloTienda && entregas.length > 0 && conFoto.length > 0 && (pagosListos || soloContraEntrega)
+    : enabled && !slugProblema && moduloTienda && pagosListos && eligible.length > 0;
   return {
+    kind,
+    // El modo físico solo existe en el rubro comercial; el panel muestra el interruptor según esto.
+    fisicaDisponible: company?.vertical === "PHYSICAL_GOODS",
+    envio: isPhysical
+      ? {
+          enviosEncendido: shippingOn(shipCfg),
+          tiposEntrega,
+          entregasEnWeb: entregas.map((e) => ({ tipo: e.tipo, label: e.label, costoTexto: e.costoTexto, cobros: e.cobros.map((c) => c.texto) })),
+          contraEntregaWeb: physical.codEnabled,
+          controlaStock: await companyTracksStock(companyId),
+        }
+      : null,
+    productosSinFoto: isPhysical ? eligible.filter((p) => !storeImageOf(p, overrides[p.id])).map((p) => ({ id: p.id, name: p.name })) : [],
+    productosSinPrecioSimple: sinPrecioSimple,
     url: slugProblema ? null : storeUrl(slug),
     slug,
     slugValido: !slugProblema,
@@ -1889,12 +2029,14 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
     pagosListos,
     productosElegibles: eligible
       .map((p, idx) => {
-        const b = mapBotProduct(p, { currencySymbol: symbolFor(company?.currency ?? "PEN"), timezone: company?.timezone ?? "America/Lima" });
+        const b = mapBotProduct(p, { currencySymbol: symbol, timezone: company?.timezone ?? "America/Lima" });
         const ov = overrides[p.id];
         return {
           id: p.id,
           name: p.name,
           slug: b.slug,
+          stock: isPhysical ? p.stock ?? null : null,
+          variantes: isPhysical ? storeVariantsOf(p) : [],
           // Valores del PRODUCTO (base) + override de la tienda por separado, para el modal.
           category: b.category ?? null,
           categories: categoriesOf(ov, b.category),
@@ -1916,7 +2058,7 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
       .sort((a, b2) => a.order - b2.order)
       .map(({ order: _o, ...rest }) => rest),
     productosSinCorreo: sinCorreo,
-    lista: enabled && !slugProblema && moduloTienda && pagosListos && eligible.length > 0,
+    lista,
   };
 }
 
