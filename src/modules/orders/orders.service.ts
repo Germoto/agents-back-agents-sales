@@ -6,6 +6,7 @@ import { symbolFor } from "../../lib/currency";
 import { findAgencyById } from "../shipping/agency-search";
 import { parseDeliveryType } from "../shipping/shipping-config";
 import { applyOrderPayment, mapOrder, moneyOf, toDec, type PaymentKind, type PaymentSource } from "./order-money";
+import { afterOrderPaymentOutsideChat, noticeEventForStatus, notifyOrderEvent, type OrderNoticeResult } from "./order-notify.service";
 
 const ORDER_INCLUDE = {
   customer: true,
@@ -51,14 +52,14 @@ export async function updateOrderStatus(
   companyId: string,
   orderId: string,
   status: OrderStatus,
-  opts: { changedBy?: string | null; note?: string | null; paymentSource?: PaymentSource } = {},
+  opts: { changedBy?: string | null; note?: string | null; paymentSource?: PaymentSource; notify?: boolean } = {},
 ) {
   const current = await prisma.order.findFirst({
     where: { id: orderId, companyId },
     include: { items: { select: { productId: true, quantity: true } } },
   });
   if (!current) throw new AppError("Pedido no encontrado", 404);
-  if (current.status === status) return mapOrder(current);
+  if (current.status === status) return { ...mapOrder(current), notice: undefined as OrderNoticeResult | undefined };
   // Pedido con montos que se marca PAGADO a mano con saldo pendiente: el saldo queda
   // anotado como un pago, para que pagado y saldo sigan cuadrando.
   const money = moneyOf(current);
@@ -120,7 +121,10 @@ export async function updateOrderStatus(
     status: updated.status,
     customerName: updated.customerName,
   });
-  return mapOrder(updated);
+  // Aviso al cliente (solo si quien cambia el estado lo pidió y el evento está encendido).
+  const event = opts.notify ? noticeEventForStatus(status) : null;
+  const notice = event ? await notifyOrderEvent(companyId, orderId, event) : undefined;
+  return { ...mapOrder(updated), notice };
 }
 
 export interface RegisterPaymentInput {
@@ -160,7 +164,9 @@ export async function registerOrderPayment(companyId: string, orderId: string, i
     createdBy: input.createdBy,
   });
   if (!payment) throw new AppError("No se pudo registrar el pago", 400);
-  return { payment, order: await getOrderDetail(companyId, orderId) };
+  // Pago fuera del chat: la conversación queda lista para seguir y el cliente recibe el aviso.
+  const notice = payment.already ? undefined : await afterOrderPaymentOutsideChat(companyId, orderId, { fullyPaid: payment.fullyPaid });
+  return { payment, order: await getOrderDetail(companyId, orderId), ...(notice ? { notice } : {}) };
 }
 
 export interface UpdateShippingInput {

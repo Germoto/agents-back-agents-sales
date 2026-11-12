@@ -17,7 +17,7 @@ export async function updateOrderStatusController(req: Request, res: Response) {
     req.user!.companyId,
     String(req.params.id),
     req.body.status as OrderStatus,
-    { changedBy: req.user!.id, note: req.body.note },
+    { changedBy: req.user!.id, note: req.body.note, notify: req.body.notify === true },
   );
   return res.json(order);
 }

@@ -11,6 +11,7 @@ import { clearMpLinkState } from "../agent/payment-methods";
 import { resumeFlowOnPaymentOutcome } from "../flows/flow-engine";
 import { reportCtwaConversion } from "../meta-capi/meta-capi.service";
 import { singleOpenOrderFor, applyOrderPayment } from "../orders/order-money";
+import { afterOrderPaymentOutsideChat } from "../orders/order-notify.service";
 
 export interface ReceiptFilters {
   status?: string | null;
@@ -301,7 +302,7 @@ async function creditReceiptToOpenOrder(
   if (!due) return null;
   const amount = Number(String(receipt.amountPaid ?? "").replace(/[^0-9.]/g, ""));
   if (!Number.isFinite(amount) || amount <= 0 || amount > due.balance + 0.005) return null;
-  return applyOrderPayment({
+  const payment = await applyOrderPayment({
     companyId,
     orderId: due.orderId,
     amount,
@@ -310,6 +311,8 @@ async function creditReceiptToOpenOrder(
     note: "Comprobante aprobado en el panel",
     createdBy: "panel",
   });
+  if (payment && !payment.already) await afterOrderPaymentOutsideChat(companyId, due.orderId, { fullyPaid: payment.fullyPaid });
+  return payment;
 }
 
 /**

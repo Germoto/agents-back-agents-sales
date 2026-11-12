@@ -32,6 +32,8 @@ export type ManualSendGateInput = {
   /** Proveedor del sender que va a usarse: "META" aplica la ventana de 24 h. */
   provider: "SMSTOOLS" | "META" | "WEB" | null;
   optOutAt?: Date | null;
+  /** Avisos transaccionales (estado del pedido): sin espera ni tope de ritmo. */
+  skipPacing?: boolean;
 };
 
 export type ManualSendGateResult =
@@ -62,6 +64,8 @@ export async function checkManualSendGate(input: ManualSendGateInput): Promise<M
       };
     }
   }
+
+  if (input.skipPacing) return { ok: true, esperadoSeg: 0, enviadosUltimaHora: 0, topeHora: 0 };
 
   const now = gateInternals.now();
   const hourAgo = new Date(now - 60 * 60_000);

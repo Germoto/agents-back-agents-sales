@@ -19,6 +19,8 @@ export const updateOrderStatusSchema = z.object({
     "ENTREGADO",
   ]),
   note: z.string().max(500).optional(),
+  // Avisar al cliente por WhatsApp (solo sale si ese aviso está encendido en Envíos).
+  notify: z.boolean().optional(),
 });
 
 export const registerOrderPaymentSchema = z.object({
