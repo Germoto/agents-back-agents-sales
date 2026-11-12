@@ -842,8 +842,9 @@ export async function getPublicOrder(id: string, token: string) {
       : "Esperando la confirmación del pago…",
     EN_REVISION: "Recibimos tu comprobante. Un asesor lo revisa en breve y te enviamos el acceso a tu correo.",
     PAGADO: "Pago confirmado. Preparando tu acceso…",
-    ENTREGADO: `Listo: te enviamos el acceso a ${order.email}. Si no lo ves, revisa spam o promociones.`,
+    ENTREGADO: `Listo: te enviamos el acceso a ${order.email ?? "tu correo"}. Si no lo ves, revisa spam o promociones.`,
     FALLIDO: "Hubo un inconveniente con tu pedido. Escríbenos y lo resolvemos.",
+    CONFIRMADO: "Recibimos tu pedido. Te escribimos por WhatsApp para coordinar la entrega.",
   };
   let pagoManual: { amountText: string; metodos: { method: string; number: string; holder: string }[]; comprobanteSubido: boolean } | null = null;
   if (manual) {
@@ -934,6 +935,7 @@ export async function fulfillStoreOrder(
   let emailOk = false;
   let failure: string | null = null;
   try {
+    if (!order.email) throw new Error("el pedido no tiene correo");
     await sendDigitalDeliveryEmail({ companyId, customerId: order.customerId, receiptId, email: order.email, trigger: "web" });
     emailOk = true;
   } catch (err) {

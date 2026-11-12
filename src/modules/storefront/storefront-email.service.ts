@@ -233,17 +233,20 @@ async function couponIsUsable(companyId: string, code: string | null | undefined
 // Programación de recordatorios
 // ---------------------------------------------------------------------------
 
-type OrderLike = { id: string; companyId: string; customerId: string; email: string; name: string; productId: string; productName: string; amount: Prisma.Decimal | number; currency: string; paymentMethod: string; accessToken: string; items?: unknown };
+type OrderLike = { id: string; companyId: string; customerId: string; email: string | null; name: string; productId: string; productName: string; amount: Prisma.Decimal | number; currency: string; paymentMethod: string; accessToken: string; items?: unknown };
 
 /** Al crear un checkout: encola la secuencia de "checkout abandonado" (se cancela al pagar). */
 export async function scheduleAbandonedCheckout(order: OrderLike): Promise<void> {
   try {
+    // Sin correo (tienda física, donde es opcional) no hay a quién escribirle.
+    const email = order.email;
+    if (!email) return;
     const ctx = await storeContext(order.companyId);
     if (!ctx || !ctx.reminders.abandonedCheckout.enabled || !mailerEnabled()) return;
     if (await customerOptedOut(order.customerId)) return;
     // Un nuevo checkout reemplaza los recordatorios pendientes de otros pedidos del mismo correo.
     await prisma.storeEmail.updateMany({
-      where: { companyId: order.companyId, email: order.email, kind: "ABANDONED_CHECKOUT", status: "PENDING", NOT: { orderId: order.id } },
+      where: { companyId: order.companyId, email, kind: "ABANDONED_CHECKOUT", status: "PENDING", NOT: { orderId: order.id } },
       data: { status: "CANCELLED", failureReason: "Reemplazado por un nuevo checkout" },
     });
     const product = await prisma.product.findUnique({ where: { id: order.productId }, select: { slug: true } });
@@ -262,7 +265,7 @@ export async function scheduleAbandonedCheckout(order: OrderLike): Promise<void>
         customerId: order.customerId,
         orderId: order.id,
         kind: "ABANDONED_CHECKOUT",
-        email: order.email,
+        email,
         subject: fillVars(step.subject, vars),
         body: fillVars(step.body, vars),
         ctaLabel: "Completar mi compra",
@@ -288,6 +291,8 @@ export async function cancelOrderEmails(orderId: string, reason: string, kinds: 
 /** Al entregar: correo post-compra a los N días con el producto relacionado y cupón. */
 export async function schedulePostPurchase(order: OrderLike): Promise<void> {
   try {
+    const email = order.email;
+    if (!email) return;
     const ctx = await storeContext(order.companyId);
     if (!ctx || !ctx.reminders.postPurchase.enabled || !mailerEnabled()) return;
     if (await customerOptedOut(order.customerId)) return;
@@ -316,7 +321,7 @@ export async function schedulePostPurchase(order: OrderLike): Promise<void> {
         customerId: order.customerId,
         orderId: order.id,
         kind: "POST_PURCHASE",
-        email: order.email,
+        email,
         subject: fillVars(pp.subject, vars),
         body: fillVars(pp.body, vars),
         ctaLabel: cross ? `Ver ${cross.name}` : "Ver la tienda",

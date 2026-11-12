@@ -190,7 +190,8 @@ export async function reportStorePurchase(input: {
   companyId: string;
   receiptId: string;
   orderId: string;
-  email: string;
+  /** Opcional: la tienda física puede no tener correo (ahí identifica el teléfono). */
+  email?: string | null;
   phone?: string | null;
   customerId?: string | null;
   productIds: string[];
@@ -211,7 +212,7 @@ export async function reportStorePurchase(input: {
     const value = Number(String(receipt.amountPaid ?? receipt.amountExpected).replace(/[^0-9.]/g, ""));
     const eventTime = Math.floor((receipt.occurredAt ?? receipt.validatedAt ?? new Date()).getTime() / 1000);
     const phoneDigits = (input.phone ?? "").replace(/\D/g, "");
-    const email = input.email.trim().toLowerCase();
+    const email = (input.email ?? "").trim().toLowerCase();
     const c = input.client ?? {};
     const body: Record<string, unknown> = {
       data: [
@@ -222,7 +223,7 @@ export async function reportStorePurchase(input: {
           action_source: "website",
           ...(c.url ? { event_source_url: c.url } : {}),
           user_data: {
-            em: [sha256(email)],
+            ...(email ? { em: [sha256(email)] } : {}),
             ...(phoneDigits ? { ph: [sha256(phoneDigits)] } : {}),
             ...(input.customerId ? { external_id: [sha256(input.customerId)] } : {}),
             ...(c.ip ? { client_ip_address: c.ip } : {}),

@@ -224,69 +224,69 @@ model Company {
   creditTransactions   CreditTransaction[]
   redeemedVouchers     Voucher[]             @relation("RedeemedVouchers")
   reportConfig         ReportConfig?
-  stickerAssets          StickerAsset[]
-  httpConnections        HttpConnection[]
-  httpActions            HttpAction[]
-  httpActionRuns         HttpActionRun[]
+  stickerAssets        StickerAsset[]
+  httpConnections      HttpConnection[]
+  httpActions          HttpAction[]
+  httpActionRuns       HttpActionRun[]
 }
 
 // Config singleton a nivel plataforma (no por tenant). Hoy guarda los rubros
 // habilitados globalmente: el selector de rubro de cada cliente solo muestra
 // estos. Fila única con id="global".
 model PlatformConfig {
-  id                   String             @id @default("global")
-  enabledVerticals     BusinessVertical[]
-  landingScene         String             @default("constelacion")
+  id                        String             @id @default("global")
+  enabledVerticals          BusinessVertical[]
+  landingScene              String             @default("constelacion")
   // Color de acento de la landing pública (#rrggbb); independiente del tema de cada usuario.
-  landingAccent        String?            @default("#3451b2")
+  landingAccent             String?            @default("#3451b2")
   // Agente de ventas de la PLATAFORMA (chat del landing que capta tenants):
   // puntero al tenant oculto "FlowApp Ventas" + base de conocimiento estructurada.
-  salesAgentCompanyId  String?            @db.Uuid
-  salesAgentKnowledge  Json?
+  salesAgentCompanyId       String?            @db.Uuid
+  salesAgentKnowledge       Json?
   // Cobros de la PLATAFORMA con Mercado Pago (los tenants pagan su plan/créditos
   // solos desde Mi plan). Token cifrado con credentials-crypto.
-  mpBillingEnabled     Boolean            @default(false)
-  mpBillingAccessToken String?
+  mpBillingEnabled          Boolean            @default(false)
+  mpBillingAccessToken      String?
   // Avisos al dueño de la PLATAFORMA (nuevos pre-registros, etc.):
   // email destino y teléfono WhatsApp (requiere el tenant de ventas con WA activo).
-  alertEmail           String?
-  alertPhone           String?
+  alertEmail                String?
+  alertPhone                String?
   // Registro en un solo paso: al verificar el correo se crea la cuenta sola
   // (sin aprobación del superadmin) con N días de prueba de acceso completo.
-  autoActivateRegistrations Boolean       @default(false)
-  autoActivateTrialDays     Int           @default(7)
+  autoActivateRegistrations Boolean            @default(false)
+  autoActivateTrialDays     Int                @default(7)
   // IA de prueba: key de la PLATAFORMA que reciben las cuentas auto-activadas
   // (cifrada con credentials-crypto) con tope de respuestas de IA por cliente.
-  trialAiEnabled       Boolean            @default(false)
-  trialAiProvider      String             @default("OPENAI")
-  trialAiModel         String?
-  trialAiApiKey        String?
-  trialAiMessageCap    Int                @default(200)
-  updatedAt            DateTime           @updatedAt
+  trialAiEnabled            Boolean            @default(false)
+  trialAiProvider           String             @default("OPENAI")
+  trialAiModel              String?
+  trialAiApiKey             String?
+  trialAiMessageCap         Int                @default(200)
+  updatedAt                 DateTime           @updatedAt
 }
 
 model User {
-  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId          String    @db.Uuid
+  id                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId          String          @db.Uuid
   name               String
-  phone              String    @unique
+  phone              String          @unique
   // Correo de contacto (del pre-registro o editado por el superadmin).
   email              String?
   // Usuario alternativo de login (lowercase, requiere al menos una letra —
   // así nunca colisiona con un celular). null = solo entra por celular.
-  username           String?   @unique
+  username           String?         @unique
   passwordHash       String
   // Recuperación de contraseña (código de 6 dígitos al correo, hasheado).
   resetCodeHash      String?
   resetCodeExpiresAt DateTime?
-  resetCodeAttempts  Int       @default(0)
+  resetCodeAttempts  Int             @default(0)
   resetCodeSentAt    DateTime?
   role               UserRole
-  isActive           Boolean   @default(true)
+  isActive           Boolean         @default(true)
   uiTheme            Json?
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
-  company            Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  company            Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
   copilotThreads     CopilotThread[]
 
   @@index([companyId])
@@ -499,38 +499,38 @@ model WhatsappConfig {
 }
 
 model PaymentConfig {
-  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId         String          @unique @db.Uuid
-  enabled           Boolean         @default(true)
-  paymentMode       PaymentMode
-  notificationPhone String?
+  id                   String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId            String          @unique @db.Uuid
+  enabled              Boolean         @default(true)
+  paymentMode          PaymentMode
+  notificationPhone    String?
   // --- Mercado Pago (link de pago + autovalidación por webhook) ---
   // Access Token de la aplicación MP del tenant, cifrado AES-256-GCM (credentials-crypto).
-  mpEnabled         Boolean         @default(false)
-  mpAccessToken     String?
+  mpEnabled            Boolean         @default(false)
+  mpAccessToken        String?
   // Comisión de MP: quién la asume y cómo se calcula el recargo del link.
   // TENANT = el negocio la absorbe (link por el precio exacto); CUSTOMER = se
   // traslada al cliente (link con gross-up: (precio + fijo·igv) / (1 − %·igv)).
-  mpFeeMode         String          @default("TENANT")
-  mpFeePercent      Decimal         @default(3.99) @db.Decimal(5, 2)
-  mpFeeFixed        Decimal         @default(1.00) @db.Decimal(8, 2)
-  mpFeeIgv          Boolean         @default(true)
+  mpFeeMode            String          @default("TENANT")
+  mpFeePercent         Decimal         @default(3.99) @db.Decimal(5, 2)
+  mpFeeFixed           Decimal         @default(1.00) @db.Decimal(8, 2)
+  mpFeeIgv             Boolean         @default(true)
   // Mercado Pago POR CANAL: link en el cobro del agente (chat) y/o checkout de la
   // tienda web. Ambos true por defecto (comportamiento histórico); el maestro sigue
   // siendo mpEnabled + token.
-  mpChatEnabled     Boolean         @default(true)
-  mpStoreEnabled    Boolean         @default(true)
+  mpChatEnabled        Boolean         @default(true)
+  mpStoreEnabled       Boolean         @default(true)
   // Link en el chat: ALWAYS = dentro del mensaje de cobro (histórico);
   // ON_REQUEST = solo cuando el cliente lo pide (el agente lo envía aparte).
-  mpChatMode        String          @default("ALWAYS")
+  mpChatMode           String          @default("ALWAYS")
   // Link enviado aparte en el chat: mensaje propio (null = el de fábrica) y
   // vigencia del link en días (null = no vence).
   mpChatLinkMessage    String?
   mpChatLinkExpiryDays Int?
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
-  company           Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  methods           PaymentMethod[]
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  company              Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  methods              PaymentMethod[]
 }
 
 model PaymentMethod {
@@ -961,7 +961,9 @@ model ConversationMessage {
   // Tipo del adjunto ("image"|"video"|"audio"|"document") para render correcto en
   // el panel; null en históricos o texto (el frontend infiere por extensión).
   mediaType       String?
-  /** Nombre visible del documento adjunto (zip, xlsx, pdf…): lo que ve el cliente y el panel. */
+  /**
+   * Nombre visible del documento adjunto (zip, xlsx, pdf…): lo que ve el cliente y el panel.
+   */
   fileName        String?
   rawPayload      Json?
   // Tracking de entrega vía gateway WhatsApp. gatewayId = messageId/wamid (del
@@ -1001,17 +1003,17 @@ model ConversationMessage {
 
 // Galería de stickers del negocio (subidos por el equipo o guardados de los chats).
 model StickerAsset {
-  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId  String   @db.Uuid
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String    @db.Uuid
   // URL pública del .webp ya en /uploads/stickers/{companyId}/…
   url        String
   // UPLOAD (subido/convertido en el panel) | RECEIVED (guardado de un chat)
-  source     String   @default("UPLOAD")
+  source     String    @default("UPLOAD")
   // URL original del sticker recibido (para no guardarlo dos veces).
   sourceUrl  String?
   lastUsedAt DateTime?
-  createdAt  DateTime @default(now())
-  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@index([companyId, lastUsedAt])
   @@index([companyId, sourceUrl])
@@ -1370,6 +1372,8 @@ model Order {
   paidAmount        Decimal?             @db.Decimal(12, 2) // suma de OrderPayment
   trackingCode      String? // guía / número de orden de la courier
   pickupKey         String? // clave de recojo
+  // Origen del pedido: 'WEB' = tienda web. null = pedido del chat (lo de siempre).
+  source            String?
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
   company           Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -1378,6 +1382,7 @@ model Order {
   items             OrderItem[]
   statusHistory     OrderStatusHistory[]
   payments          OrderPayment[]
+  storeOrder        StoreOrder?
 
   @@index([companyId, createdAt])
 }
@@ -1932,6 +1937,9 @@ model StorefrontConfig {
   volumePricing         Json?
   // Ajustes de venta {ctaColor, catalogTitle, comboSection, guarantee, cartRecommendations}.
   salesSettings         Json?
+  // Tienda de productos físicos (solo rubro comercial; apagada por defecto):
+  // {enabled, codEnabled, maxQtyPerItem, autoConfirm, confirmMessage, agentShareLinks}.
+  physical              Json?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -2047,6 +2055,8 @@ enum StoreOrderStatus {
   PAGADO
   ENTREGADO
   FALLIDO
+  // Tienda física: pedido registrado sin pago en línea (contra entrega).
+  CONFIRMADO
 }
 
 model StoreOrder {
@@ -2056,14 +2066,22 @@ model StoreOrder {
   // Snapshot del producto (sin FK: si se borra el producto, el pedido se conserva).
   productId       String           @db.Uuid
   productName     String
-  // Carrito: [{productId, name, unitPrice, qty}] y la lista de ids (vacía en pedidos antiguos).
+  // Carrito: [{productId, name, unitPrice, qty, variant?}] y la lista de ids (vacía en pedidos antiguos).
   items           Json?
   productIds      String[]         @default([]) @db.Uuid
-  email           String
+  // Opcional en la tienda física (ahí manda el WhatsApp); la tienda digital siempre lo pide.
+  email           String?
   name            String
   phone           String?
   // Monto del link de Mercado Pago (incluye comisión si el negocio la traslada).
+  // En la tienda física es lo que toca pagar AHORA (total o adelanto); 0 en contra entrega.
   amount          Decimal          @db.Decimal(12, 2)
+  // Tienda física: total del pedido (productos + envío), foto de la entrega elegida
+  // {deliveryType, address, reference, agency, document, recipientPhone, cobro, amounts}
+  // y el pedido real (Order) que nace al confirmarse el pago o al pedir contra entrega.
+  orderTotal      Decimal?         @db.Decimal(12, 2)
+  shipping        Json?
+  orderId         String?          @unique @db.Uuid
   currency        String           @default("PEN")
   status          StoreOrderStatus @default(PENDIENTE)
   // "MERCADOPAGO" (checkout MP) | "MANUAL" (Yape/Plin con comprobante subido).
@@ -2084,6 +2102,7 @@ model StoreOrder {
   updatedAt       DateTime         @updatedAt
   company         Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
   customer        Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  order           Order?           @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
   @@index([companyId, createdAt])
   @@index([companyId, status])

@@ -115,7 +115,7 @@ export const updateStorefrontConfigSchema = z.object({
 export const storeOrdersQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(25),
-  status: z.enum(["PENDIENTE", "EN_REVISION", "PAGADO", "ENTREGADO", "FALLIDO"]).optional(),
+  status: z.enum(["PENDIENTE", "EN_REVISION", "PAGADO", "ENTREGADO", "FALLIDO", "CONFIRMADO"]).optional(),
 });
 
 // POST /:slug/events (analítica ligera, lote)
