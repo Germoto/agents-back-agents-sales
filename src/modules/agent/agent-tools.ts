@@ -87,12 +87,10 @@ import { normalizeQuietHours, zonedParts } from "../scheduler/quiet-hours";
 import {
   shippingOn,
   enabledDeliveryTypes,
-  parseDeliveryType,
-  computeOrderAmounts,
   type ShippingConfig,
-  type DeliveryType,
 } from "../shipping/shipping-config";
-import { searchAgencies, findAgencyById, courierLabel } from "../shipping/agency-search";
+import { searchAgencies, courierLabel } from "../shipping/agency-search";
+import { resolveOrderShipping, resolvePaymentModeChoice, type OrderPayMode } from "../shipping/order-shipping-resolver";
 import { orderDueFor, applyOrderPayment, acceptsAmount, moneyOf, type OrderDue } from "../orders/order-money";
 
 /** Tope de archivos por envío (enviar_multimedia con fileIds y presentación). */
@@ -678,6 +676,10 @@ export function matchProduct(query: string, products: BotProduct[]): BotProduct 
   return best?.p ?? null;
 }
 
+/** Texto para el modelo cuando el negocio deja elegir cómo pagar y falta la elección. */
+const PAYMENT_CHOICE_ERROR =
+  "Este negocio deja ELEGIR al cliente cómo pagar. Pregúntale si prefiere pago adelantado o contra entrega y vuelve a registrar pasando cobro:'adelantado' o cobro:'contra_entrega'.";
+
 /**
  * Modo de cobro EFECTIVO de un pedido. Si el negocio dejó elegir al cliente
  * (CUSTOMER_CHOICE), la elección debe venir en el parámetro `cobro` de la tool;
@@ -687,35 +689,19 @@ export function matchProduct(query: string, products: BotProduct[]): BotProduct 
 function resolveOrderPaymentMode(
   ctx: TurnContext,
   cobro: unknown,
-): { mode?: "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL"; error?: string } {
-  const configured = (ctx.config.payment as { paymentMode?: string }).paymentMode?.toUpperCase();
-  if (configured === "CUSTOMER_CHOICE") {
-    const choice = String(cobro ?? "").trim().toLowerCase();
-    if (choice === "adelantado") return { mode: "BEFORE_DELIVERY" };
-    if (choice === "contra_entrega") return { mode: "CASH_ON_DELIVERY" };
-    return {
-      error:
-        "Este negocio deja ELEGIR al cliente cómo pagar. Pregúntale si prefiere pago adelantado o contra entrega y vuelve a registrar pasando cobro:'adelantado' o cobro:'contra_entrega'.",
-    };
-  }
-  const mode =
-    configured === "BEFORE_DELIVERY" || configured === "CASH_ON_DELIVERY" || configured === "MANUAL"
-      ? configured
-      : undefined;
-  return { mode };
+): { mode?: OrderPayMode; error?: string } {
+  const pm = resolvePaymentModeChoice((ctx.config.payment as { paymentMode?: string }).paymentMode, cobro);
+  return pm.missingChoice ? { error: PAYMENT_CHOICE_ERROR } : { mode: pm.mode };
 }
 
 function findProductById(ctx: TurnContext, productId: string): BotProduct | undefined {
   return ctx.config.products.find((p) => p.id === productId || p.slug === productId);
 }
 
-type OrderPayMode = "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL";
-
 /**
- * Datos de envío y montos de un pedido con «Envíos» encendido. Valida lo que mandó
- * el modelo contra la configuración (tipo de entrega activo, agencia del catálogo,
- * DNI si el negocio lo pide) y calcula envío, total y adelanto. No decide nada
- * comercial: aplica la regla de cobro que el dueño eligió para ese tipo de entrega.
+ * Datos de envío y montos de un pedido con «Envíos» encendido. La validación vive en
+ * shipping/order-shipping-resolver (la comparte la tienda web); aquí solo se traduce
+ * cada código de error al texto que guía al modelo.
  */
 async function resolveShippingForOrder(
   ctx: TurnContext,
@@ -723,68 +709,42 @@ async function resolveShippingForOrder(
   args: Record<string, unknown>,
   subtotal: number,
 ): Promise<{ shipping?: OrderShippingInput; paymentMode?: OrderPayMode; error?: string }> {
-  const enabled = enabledDeliveryTypes(cfg);
-  const options = enabled.map((t) => t.toLowerCase()).join(", ");
-  const tipo = parseDeliveryType(args.tipoEntrega) ?? (enabled.length === 1 ? enabled[0] : null);
-  if (!tipo) return { error: `Falta tipoEntrega. Pregunta al cliente cómo quiere recibir su pedido (opciones: ${options}) y vuelve a registrar.` };
-  if (!enabled.includes(tipo)) return { error: `El negocio no ofrece entrega por ${tipo.toLowerCase()}. Opciones: ${options}.` };
-
-  const address = String(args.address ?? "").trim();
-  if (tipo === "DOMICILIO" && !address) return { error: "Falta la dirección de entrega (address)." };
-
-  let courier: string | null = null;
-  let agencyId: string | null = null;
-  let agencyName: string | null = null;
-  let agencyAddress: string | null = null;
-  if (tipo === "AGENCIA") {
-    const ag = cfg.types.agencia;
-    const agenciaId = String(args.agenciaId ?? "").trim();
-    const agenciaTexto = String(args.agenciaTexto ?? "").trim();
-    if (agenciaId) {
-      const found = await findAgencyById(agenciaId).catch(() => null);
-      if (!found || !(ag.couriers as string[]).includes(found.courier)) {
-        return { error: "agenciaId no válido: usa el id que devolvió buscar_agencias (no lo inventes) o pasa agenciaTexto con la agencia que indicó el cliente." };
-      }
-      agencyId = found.id;
-      agencyName = found.displayName;
-      agencyAddress = found.address || null;
-      courier = found.courier;
-    } else if (agenciaTexto) {
-      const all = [...(ag.couriers as string[]), ...ag.otrosCouriers];
-      agencyName = agenciaTexto;
-      courier = String(args.courier ?? "").trim() || (all.length === 1 ? all[0] : null);
-    } else {
+  const res = await resolveOrderShipping(
+    cfg,
+    {
+      deliveryType: args.tipoEntrega,
+      address: args.address,
+      agencyId: args.agenciaId,
+      agencyText: args.agenciaTexto,
+      courier: args.courier,
+      document: args.documento,
+      recipientPhone: args.telefonoRecibe,
+      cobro: args.cobro,
+    },
+    { subtotal, configuredPaymentMode: (ctx.config.payment as { paymentMode?: string }).paymentMode },
+  );
+  if (res.ok) return { shipping: res.shipping, paymentMode: res.paymentMode };
+  const options = enabledDeliveryTypes(cfg).map((t) => t.toLowerCase()).join(", ");
+  switch (res.code) {
+    case "MISSING_TYPE":
+      return { error: `Falta tipoEntrega. Pregunta al cliente cómo quiere recibir su pedido (opciones: ${options}) y vuelve a registrar.` };
+    case "TYPE_DISABLED":
+      return { error: `El negocio no ofrece entrega por ${(res.deliveryType ?? "").toLowerCase()}. Opciones: ${options}.` };
+    case "MISSING_ADDRESS":
+      return { error: "Falta la dirección de entrega (address)." };
+    case "AGENCY_INVALID":
+      return { error: "agenciaId no válido: usa el id que devolvió buscar_agencias (no lo inventes) o pasa agenciaTexto con la agencia que indicó el cliente." };
+    case "MISSING_AGENCY":
       return {
         error: agencySearchAvailable(ctx.config)
           ? "Falta la agencia de destino: búscala con buscar_agencias, confirma con el cliente cuál prefiere y pasa su agenciaId."
           : "Falta la agencia de destino: pregunta al cliente a qué agencia lo enviamos y pásala en agenciaTexto (y la courier en courier).",
       };
-    }
+    case "MISSING_DOCUMENT":
+      return { error: "Falta el documento (DNI) de quien va a recoger el pedido: pídeselo al cliente y pásalo en documento." };
+    case "MISSING_PAYMENT_CHOICE":
+      return { error: PAYMENT_CHOICE_ERROR };
   }
-
-  const documento = String(args.documento ?? "").replace(/\s+/g, "").trim();
-  if (cfg.askDocument && tipo !== "DOMICILIO" && !documento) {
-    return { error: "Falta el documento (DNI) de quien va a recoger el pedido: pídeselo al cliente y pásalo en documento." };
-  }
-
-  // «Según el modo de cobro del negocio»: vale la regla de siempre (incluida la elección del cliente).
-  const rule = cfg.charge[tipo.toLowerCase() as "domicilio" | "agencia" | "recojo"];
-  const pm = resolveOrderPaymentMode(ctx, args.cobro);
-  if (rule.mode === "SEGUN_MODO" && pm.error) return { error: pm.error };
-
-  return {
-    paymentMode: pm.mode,
-    shipping: {
-      amounts: computeOrderAmounts(cfg, { subtotal, deliveryType: tipo, paymentMode: pm.mode }),
-      deliveryType: tipo,
-      courier,
-      agencyId,
-      agencyName,
-      agencyAddress,
-      recipientDocument: documento || null,
-      recipientPhone: String(args.telefonoRecibe ?? "").replace(/[^\d+]/g, "") || null,
-    },
-  };
 }
 
 /** Entrega del pedido en una frase (aviso al dueño y respuesta de la tool). */
