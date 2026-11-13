@@ -72,6 +72,7 @@ import {
 } from "./storefront-sales";
 import {
   buyerPhoneDigits,
+  CONFIRM_VARIABLES,
   DEFAULT_CONFIRM_MESSAGE,
   defaultDialPrefix,
   deliveryBlockedReason,
@@ -3052,6 +3053,9 @@ export async function storefrontStatus(companyId: string, enabled: boolean) {
           controlaStock: await companyTracksStock(companyId),
         }
       : null,
+    // Mensaje de confirmación por WhatsApp: variables (chips del panel) y texto por defecto.
+    confirmacion:
+      company?.vertical === "PHYSICAL_GOODS" ? { variables: CONFIRM_VARIABLES, predeterminado: DEFAULT_CONFIRM_MESSAGE } : null,
     productosSinFoto: isPhysical ? eligible.filter((p) => !storeImageOf(p, overrides[p.id])).map((p) => ({ id: p.id, name: p.name })) : [],
     productosSinPrecioSimple: sinPrecioSimple,
     url: slugProblema ? null : storeUrl(slug),
