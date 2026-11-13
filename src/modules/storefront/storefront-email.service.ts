@@ -304,16 +304,29 @@ function orderPriceText(order: OrderLike): string {
   return `${symbolFor(order.currency)} ${total.toFixed(2)}`;
 }
 
-/** Carrito del pedido como `?items=id:cantidad,…` para que la tienda lo restaure. */
+/**
+ * Carrito del pedido como `?items=id:cantidad[:Grupo=Opción;…],…` para que la tienda lo
+ * restaure con sus variantes. Grupo y opción van codificados aparte: los separadores
+ * sobreviven aunque el nombre traiga `:` `;` `=` o `,`.
+ */
 function cartLink(base: string, items: unknown): string {
   const lines = (Array.isArray(items) ? items : [])
     .map((raw) => {
-      const l = (raw && typeof raw === "object" ? raw : {}) as { productId?: unknown; qty?: unknown };
+      const l = (raw && typeof raw === "object" ? raw : {}) as { productId?: unknown; qty?: unknown; options?: unknown };
+      if (typeof l.productId !== "string" || !l.productId) return "";
       const qty = Math.max(1, Math.round(Number(l.qty) || 1));
-      return typeof l.productId === "string" && l.productId ? `${l.productId}:${qty}` : "";
+      const options = (Array.isArray(l.options) ? l.options : [])
+        .map((o) => {
+          const c = (o && typeof o === "object" ? o : {}) as { group?: unknown; option?: unknown };
+          return typeof c.group === "string" && typeof c.option === "string" && c.group && c.option
+            ? `${encodeURIComponent(c.group)}=${encodeURIComponent(c.option)}`
+            : "";
+        })
+        .filter(Boolean);
+      return `${l.productId}:${qty}${options.length ? `:${options.join(";")}` : ""}`;
     })
     .filter(Boolean);
-  return lines.length ? `${base}/carrito?items=${lines.join(",")}` : `${base}/carrito`;
+  return lines.length ? `${base}/carrito?items=${encodeURIComponent(lines.join(","))}` : `${base}/carrito`;
 }
 
 /** Al crear un checkout: encola la secuencia de "checkout abandonado" (se cancela al pagar). */
