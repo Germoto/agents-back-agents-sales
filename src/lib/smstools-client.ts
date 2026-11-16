@@ -84,6 +84,8 @@ type RequestOptions = {
   body?: FormData | URLSearchParams | string | Buffer;
   headers?: Record<string, string>;
   responseType?: "json" | "binary";
+  /** Corta la llamada pasado este tiempo (por defecto sin límite propio). */
+  timeoutMs?: number;
 };
 
 async function smsToolsRequest<T = unknown>(
@@ -107,6 +109,7 @@ async function smsToolsRequest<T = unknown>(
       // de lib.dom no lo incluye, de ahí el cast.
       body: options.body as BodyInit | undefined,
       headers: options.headers,
+      signal: options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined,
     });
   } catch (error) {
     throw new AppError(
@@ -180,7 +183,74 @@ export interface SmsToolsLeadInfo {
   picture_id?: string | null;
 }
 
+/** Grupo de WhatsApp de la cuenta (API /api/get/wa.groups). El gid es estable. */
+export interface SmsToolsGroup {
+  gid: string;
+  name: string;
+}
+
+/** Resultado por número de /api/groupadd/whatsapp, en el mismo orden enviado. */
+export interface SmsToolsGroupAddResult {
+  phone: string;
+  /** added | invite_sent | already_in | invite_failed | cooldown | failed */
+  status: string;
+  code?: number;
+}
+
+/** Tope de números por llamada de groupadd (el gateway responde 400 si se pasa). */
+export const GROUP_ADD_MAX_PHONES = 50;
+// La llamada es síncrona: el gateway agrega uno por uno antes de responder.
+const GROUP_ADD_TIMEOUT_MS = 150_000;
+
 export const smsTools = {
+  /** Grupos de la cuenta de WhatsApp (`unique`). Lanza si el gateway falla. */
+  async getGroups(creds: SmsToolsCredentials, unique: string): Promise<SmsToolsGroup[]> {
+    const base = deriveApiBase(creds.apiUrl);
+    const body = new URLSearchParams({ secret: creds.secret, unique });
+    const data = await smsToolsRequest<SmsToolsGroup[]>(base, "/get/wa.groups", {
+      method: "POST",
+      body,
+      timeoutMs: 30_000,
+    });
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter((g) => g && typeof g.gid === "string" && g.gid)
+      .map((g) => ({ gid: g.gid, name: typeof g.name === "string" && g.name.trim() ? g.name.trim() : g.gid }));
+  },
+
+  /**
+   * Agrega números a un grupo (máx. 50). La cuenta debe ser admin del grupo; si
+   * no lo es, el gid no existe o la cuenta está desconectada, el gateway responde
+   * 500 y esto lanza. `invite` = si la privacidad del contacto impide agregarlo,
+   * se le envía la invitación por privado.
+   */
+  async addToGroup(
+    creds: SmsToolsCredentials,
+    unique: string,
+    gid: string,
+    phones: string[],
+    invite = true,
+  ): Promise<SmsToolsGroupAddResult[]> {
+    if (phones.length === 0) return [];
+    if (phones.length > GROUP_ADD_MAX_PHONES) {
+      throw new AppError(`Máximo ${GROUP_ADD_MAX_PHONES} números por llamada.`, 400);
+    }
+    const base = deriveApiBase(creds.apiUrl);
+    const body = new URLSearchParams({
+      secret: creds.secret,
+      unique,
+      gid,
+      phones: phones.join(","),
+      invite: invite ? "1" : "0",
+    });
+    const data = await smsToolsRequest<SmsToolsGroupAddResult[]>(base, "/groupadd/whatsapp", {
+      method: "POST",
+      body,
+      timeoutMs: GROUP_ADD_TIMEOUT_MS,
+    });
+    return Array.isArray(data) ? data : [];
+  },
+
   /**
    * Datos de identidad de un lead (nombre, foto, LID, negocio). Best-effort:
    * devuelve null si no hay datos (404) o ante cualquier error — nunca lanza.

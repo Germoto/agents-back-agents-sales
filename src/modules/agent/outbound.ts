@@ -119,6 +119,11 @@ export async function sendText(
   return { gatewayId: gatewayIdOf(res) };
 }
 
+/** Agregar contactos a grupos de WhatsApp: solo el gateway SMS Tools lo soporta. */
+export function supportsGroups(sender: WhatsappSender): boolean {
+  return sender.provider === "SMSTOOLS";
+}
+
 /** Encuestas nativas de WhatsApp: solo el gateway SMS Tools las soporta. */
 export function supportsPolls(sender: WhatsappSender): boolean {
   return sender.provider === "SMSTOOLS";

@@ -202,6 +202,7 @@ model Company {
   platformPayments     PlatformPayment[]
   storefront           StorefrontConfig?
   storeOrders          StoreOrder[]
+  whatsappGroups       WhatsappGroup[]
   storeEvents          StoreEvent[]
   coupons              Coupon[]
   storeEmails          StoreEmail[]
@@ -387,6 +388,9 @@ model AgentConfig {
   // etiquetas con su regla "cuándo", solo avanzar, máximo por turno y aviso al
   // dueño. null = APAGADA (default): el agente no toca el CRM por su cuenta.
   crmToolConfig        Json?
+  // Herramienta de grupos del agente (agregar_a_grupo): lista blanca de grupos
+  // guardados con su regla "cuándo". null = APAGADA (default).
+  groupToolConfig      Json?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
   company              Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -602,6 +606,9 @@ model Product {
   // Override opcional de recordatorios por producto y por tipo:
   // { <tipo>: { message?, mediaUrl? } }. Si existe, gana sobre la plantilla del negocio.
   reminderConfig               Json?
+  // Grupos de WhatsApp por momento: { onSale?, onPresentation?, onPayment? } con el
+  // id de un WhatsappGroup guardado. null = el producto no agrega a nadie a un grupo.
+  whatsappGroupConfig          Json?
   sortOrder                    Int                   @default(0)
   createdAt                    DateTime              @default(now())
   updatedAt                    DateTime              @updatedAt
@@ -867,55 +874,56 @@ model Subscription {
 }
 
 model Customer {
-  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId         String                @db.Uuid
-  phone             String
-  name              String?
-  email             String?
-  status            String
+  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId          String                @db.Uuid
+  phone              String
+  name               String?
+  email              String?
+  status             String
   // El cliente pidió que NO le escriban más (opt-out de WhatsApp): campañas y
   // recordatorios automáticos lo excluyen aunque se reactive el bot. null = contactable.
-  optOutAt          DateTime?
+  optOutAt           DateTime?
   // Identidad de WhatsApp (API lead de SMS Tools): contacto username con
   // número oculto (LID) y foto de perfil persistida en /uploads/avatars.
   // El detalle (pushName, isBusiness, about, pictureId…) vive en metadata.waContact.
-  waIsLid           Boolean               @default(false)
-  avatarUrl         String?
+  waIsLid            Boolean               @default(false)
+  avatarUrl          String?
   // @username de WhatsApp (interceptor de inbound); se muestra junto al nombre.
-  waUsername        String?
-  selectedProductId String?               @db.Uuid
+  waUsername         String?
+  selectedProductId  String?               @db.Uuid
   // Ficha de contacto editable desde el panel de Conversaciones.
-  sexo              String?
-  fechaNacimiento   DateTime?
-  idioma            String?
-  origenDeLead      String?
+  sexo               String?
+  fechaNacimiento    DateTime?
+  idioma             String?
+  origenDeLead       String?
   // Atribución de anuncios Meta CTWA (llega SOLO en el primer mensaje del lead;
   // primera gana, los vacíos posteriores no sobrescriben). ctwaClid se guarda
   // ÍNTEGRO (~130 chars): es el token para la futura Meta Conversions API.
-  adSourceId        String?
-  adTitle           String?
-  ctwaClid          String?
-  adSourceUrl       String?
-  lastInteractionAt DateTime
-  metadata          Json
-  createdAt         DateTime              @default(now())
-  updatedAt         DateTime              @updatedAt
-  company           Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  selectedProduct   Product?              @relation(fields: [selectedProductId], references: [id], onDelete: SetNull)
-  messages          ConversationMessage[]
-  conversations     Conversation[]
-  carts             Cart[]
-  scheduledMessages ScheduledMessage[]
-  serviceBookings   ServiceBooking[]
-  orders            Order[]
-  digitalSales      DigitalSale[]
-  paymentReceipts   PaymentReceipt[]
-  crmCards          CrmCard[]
-  tagLinks          CustomerTagLink[]
-  deals             CustomerDeal[]
-  contactNotes      ContactNote[]
-  subscriptions     Subscription[]
-  storeOrders       StoreOrder[]
+  adSourceId         String?
+  adTitle            String?
+  ctwaClid           String?
+  adSourceUrl        String?
+  lastInteractionAt  DateTime
+  metadata           Json
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  company            Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  selectedProduct    Product?              @relation(fields: [selectedProductId], references: [id], onDelete: SetNull)
+  messages           ConversationMessage[]
+  conversations      Conversation[]
+  carts              Cart[]
+  scheduledMessages  ScheduledMessage[]
+  serviceBookings    ServiceBooking[]
+  orders             Order[]
+  digitalSales       DigitalSale[]
+  paymentReceipts    PaymentReceipt[]
+  crmCards           CrmCard[]
+  tagLinks           CustomerTagLink[]
+  deals              CustomerDeal[]
+  contactNotes       ContactNote[]
+  subscriptions      Subscription[]
+  storeOrders        StoreOrder[]
+  whatsappGroupLinks WhatsappGroupMember[]
 
   @@unique([companyId, phone])
   @@index([companyId, lastInteractionAt])
@@ -2217,4 +2225,83 @@ model HttpActionRun {
   @@index([companyId, createdAt])
   @@index([actionId, createdAt])
   @@index([actionId, customerId])
+}
+
+// ---------------------------------------------------------------------------
+// Grupos de WhatsApp (solo gateway SMS Tools): grupos guardados del negocio y
+// cola de «agregar a X al grupo Y». La misma fila es el registro del resultado.
+// ---------------------------------------------------------------------------
+
+enum WhatsappGroupMemberStatus {
+  PENDIENTE
+  PROCESANDO
+  AGREGADO
+  INVITADO
+  YA_ESTABA
+  EN_ESPERA
+  FALLIDO
+  CANCELADO
+}
+
+enum WhatsappGroupAddSource {
+  VENTA
+  PRESENTACION
+  COBRO
+  MANUAL
+  LOTE
+  FLUJO
+  AGENTE
+  COPILOTO
+}
+
+model WhatsappGroup {
+  id           String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId    String                @db.Uuid
+  // Identificador estable del grupo en WhatsApp (…@g.us).
+  gid          String
+  name         String
+  // Error de llamada (cuenta no admin, desconectada, gid inválido): la cola del
+  // grupo se detiene hasta que el dueño la reanude. null = cola activa.
+  pausedReason String?
+  pausedAt     DateTime?
+  // Ritmo anti-bloqueo: no se procesa otro lote de este grupo antes de esta hora.
+  nextBatchAt  DateTime?
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+  company      Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  members      WhatsappGroupMember[]
+
+  @@unique([companyId, gid])
+  @@index([companyId])
+}
+
+model WhatsappGroupMember {
+  id            String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId     String                    @db.Uuid
+  groupId       String                    @db.Uuid
+  customerId    String                    @db.Uuid
+  // Número tal como se envía al gateway (solo dígitos; pseudo-número si es LID).
+  phone         String
+  status        WhatsappGroupMemberStatus @default(PENDIENTE)
+  source        WhatsappGroupAddSource
+  attempts      Int                       @default(0)
+  nextAttemptAt DateTime                  @default(now())
+  // true = un solo contacto (venta, botón): se intenta sin esperar el ritmo de lote.
+  immediate     Boolean                   @default(false)
+  // true = solo se consulta si el invitado ya entró (invite=0: no reenvía la invitación).
+  recheck       Boolean                   @default(false)
+  // Respuesta cruda del gateway en el último intento (added, invite_sent, cooldown…).
+  lastResult    String?
+  lastCode      Int?
+  claimedAt     DateTime?
+  resolvedAt    DateTime?
+  createdAt     DateTime                  @default(now())
+  updatedAt     DateTime                  @updatedAt
+  group         WhatsappGroup             @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  customer      Customer                  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, customerId])
+  @@index([status, nextAttemptAt])
+  @@index([groupId, status])
+  @@index([companyId, customerId])
 }
