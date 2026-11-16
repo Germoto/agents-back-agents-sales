@@ -318,6 +318,8 @@ export async function recordMessage(opts: {
   wamid?: string | null;
   quotedWamid?: string | null;
   quotedPreview?: string | null;
+  /** Nota silenciosa: queda en el chat pero no lo sube en la lista ni avisa como mensaje nuevo. */
+  silent?: boolean;
 }): Promise<string> {
   const created = await prisma.conversationMessage.create({
     data: {
@@ -343,6 +345,14 @@ export async function recordMessage(opts: {
   // Subir el chat al tope de la lista: TODO mensaje (entrante, del bot, del humano,
   // respuesta rápida o recordatorio) actualiza lastMessageAt. listConversations ordena
   // por este campo desc, así el panel se reordena en vivo.
+  if (opts.silent) {
+    // Solo refresca el chat si está abierto (sin reordenar ni saltar a él).
+    socketService.emitToCompany(opts.companyId, SOCKET_EVENTS.MESSAGE_UPDATED, {
+      conversationId: opts.conversationId,
+      messageId: created.id,
+    });
+    return created.id;
+  }
   await prisma.conversation
     .update({ where: { id: opts.conversationId }, data: { lastMessageAt: created.createdAt } })
     .catch(() => undefined);

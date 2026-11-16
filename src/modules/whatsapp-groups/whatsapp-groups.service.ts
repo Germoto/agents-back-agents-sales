@@ -590,7 +590,7 @@ function pauseReasonFor(status: number, message: string, detail = ""): string {
   return message || "El proveedor de WhatsApp rechazó la operación.";
 }
 
-async function noteInChat(companyId: string, customerId: string, text: string): Promise<void> {
+async function noteInChat(companyId: string, customerId: string, text: string, silent = false): Promise<void> {
   const conv = await prisma.conversation.findFirst({
     where: { companyId, customerId, channel: "whatsapp" },
     orderBy: { lastMessageAt: "desc" },
@@ -604,6 +604,7 @@ async function noteInChat(companyId: string, customerId: string, text: string): 
     role: "SYSTEM",
     message: text,
     rawPayload: { source: "wa-group" },
+    silent,
   }).catch(() => undefined);
 }
 
@@ -629,6 +630,11 @@ async function settleParticipants(groupId: string, info: SmsToolsGroupInfo) {
   const phones = [...new Set(info.participants.map((p) => p.phone).filter((p) => p.length >= 6))];
   if (phones.length === 0) return { already: 0, joined: 0 };
   const resolvedAt = new Date();
+  // Invitados que ya entraron: se anota en su chat (sin moverlo en la lista).
+  const accepted = await prisma.whatsappGroupMember.findMany({
+    where: { groupId, status: "INVITADO", phone: { in: phones } },
+    select: { companyId: true, customerId: true, group: { select: { name: true } } },
+  });
   const [already, joined] = await Promise.all([
     prisma.whatsappGroupMember.updateMany({
       where: { groupId, status: "PENDIENTE", phone: { in: phones } },
@@ -639,6 +645,9 @@ async function settleParticipants(groupId: string, info: SmsToolsGroupInfo) {
       data: { status: "AGREGADO", lastResult: "joined", resolvedAt, recheck: false },
     }),
   ]);
+  for (const m of accepted) {
+    void noteInChat(m.companyId, m.customerId, `👥 Aceptó la invitación y entró al grupo «${m.group.name}».`, true);
+  }
   return { already: already.count, joined: joined.count };
 }
 
@@ -776,13 +785,15 @@ async function dispatchNext(companyId: string, creds: Creds, checked: Set<string
     }
     await prisma.whatsappGroupMember.update({ where: { id: next.id }, data });
     emitMembersChanged(companyId, group.id);
-    // Nota en el chat solo para contactos sueltos: un lote no debe reordenar cientos de chats.
-    if (next.immediate) {
+    // Nota en el chat para contactos sueltos. La invitación se anota siempre (el dueño
+    // no ve la tarjeta de WhatsApp en el panel), pero en silencio si viene de un lote:
+    // no debe reordenar cientos de chats.
+    if (next.immediate || status === "INVITADO") {
       const text =
         status === "AGREGADO"
           ? `👥 Agregado al grupo «${group.name}».`
           : status === "INVITADO"
-            ? `👥 Invitación al grupo «${group.name}» enviada (su privacidad no permite agregarlo directo).`
+            ? `👥 Invitación al grupo «${group.name}» enviada por WhatsApp (su privacidad no permite agregarlo directo). Entra cuando la acepte.`
             : status === "YA_ESTABA"
               ? null
               : status === "EN_ESPERA"
@@ -790,7 +801,7 @@ async function dispatchNext(companyId: string, creds: Creds, checked: Set<string
                 : hidden
                   ? `👥 No se pudo agregar al grupo «${group.name}»: su número está oculto.`
                   : `👥 No se pudo agregar al grupo «${group.name}» (${raw}).`;
-      if (text) void noteInChat(companyId, next.customerId, text);
+      if (text) void noteInChat(companyId, next.customerId, text, !next.immediate);
     }
     return true;
   }
