@@ -122,6 +122,21 @@ export const crmToolConfigSchema = z
   });
 export type CrmToolConfig = z.infer<typeof crmToolConfigSchema>;
 
+// Herramienta de grupos de WhatsApp del agente (agregar_a_grupo). Lista blanca
+// de grupos guardados, cada uno con su regla "cuándo" obligatoria.
+export const groupToolConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    groups: z.array(z.object({ groupId: z.string().uuid(), when: whenRule })).max(5).default([]),
+    notifyOwner: z.boolean().default(true),
+  })
+  .superRefine((v, ctx) => {
+    if (v.enabled && !v.groups.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["groups"], message: "Permite al menos un grupo" });
+    }
+  });
+export type GroupToolConfig = z.infer<typeof groupToolConfigSchema>;
+
 // Núcleo de Agente IA (modelo + prompt). Recordatorios y modo de respuesta se
 // guardan por separado (módulos Recordatorios y Pruebas) para no pisarlos.
 /** Frase que el panel guardaba en `rules` para el viejo toggle «Derivar si no sabe responder» (compat). */
@@ -158,6 +173,8 @@ export const coreAgentConfigSchema = z.object({
   catalogMediaFileName: z.string().trim().max(255).nullable().optional(),
   // Herramienta de CRM del agente: undefined = no tocar; null = apagar.
   crmToolConfig: crmToolConfigSchema.nullable().optional(),
+  // Herramienta de grupos del agente: undefined = no tocar; null = apagar.
+  groupToolConfig: groupToolConfigSchema.nullable().optional(),
 });
 
 // PUT /agent-config/reminders — solo followupConfig.

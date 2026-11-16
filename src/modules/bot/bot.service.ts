@@ -7,7 +7,7 @@ import { symbolFor } from "../../lib/currency";
 import { isPlatformSalesCompanyId, getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 import { listCrmStructure } from "../crm/crm.service";
 import { getEntitlements } from "../billing/entitlements";
-import { LEGACY_UNKNOWN_HANDOFF_RULE, type CrmToolConfig } from "../agent-config/agent-config.schemas";
+import { LEGACY_UNKNOWN_HANDOFF_RULE, type CrmToolConfig, type GroupToolConfig } from "../agent-config/agent-config.schemas";
 import { normalizeShippingConfig } from "../shipping/shipping-config";
 
 /** Herramienta de CRM del agente resuelta con NOMBRES (lo que lee el prompt y la tool). */
@@ -62,6 +62,35 @@ async function resolveAgentCrmTool(companyId: string, raw: unknown): Promise<Age
     maxPerTurn: Math.min(3, Math.max(1, Number(cfg.maxPerTurn) || 1)),
     notifyOwner: cfg.notifyOwner !== false,
   };
+}
+
+/** Herramienta de grupos del agente resuelta con NOMBRES. */
+export interface AgentGroupTool {
+  enabled: boolean;
+  groups: Array<{ id: string; name: string; when: string }>;
+  notifyOwner: boolean;
+}
+
+/**
+ * Resuelve groupToolConfig (ids) → grupos guardados. null si está apagada, el
+ * canal no es SMS Tools o ya no queda ningún grupo permitido (la tool no se
+ * expone y el prompt no cambia).
+ */
+async function resolveAgentGroupTool(companyId: string, provider: string, raw: unknown): Promise<AgentGroupTool | null> {
+  const cfg = raw && typeof raw === "object" ? (raw as Partial<GroupToolConfig>) : null;
+  if (!cfg?.enabled || !cfg.groups?.length || provider !== "SMSTOOLS") return null;
+  const saved = await prisma.whatsappGroup.findMany({
+    where: { companyId, id: { in: cfg.groups.map((g) => g.groupId) } },
+    select: { id: true, name: true },
+  });
+  const groups = cfg.groups
+    .map((g) => {
+      const row = saved.find((x) => x.id === g.groupId);
+      return row ? { id: row.id, name: row.name, when: g.when } : null;
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x);
+  if (!groups.length) return null;
+  return { enabled: true, groups, notifyOwner: cfg.notifyOwner !== false };
 }
 
 function normalizePhone(value: string) {
@@ -288,6 +317,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
       catalogMediaFileName: agentConfig.catalogMediaFileName ?? null,
       // Herramienta de CRM del agente (null = apagada: cero consultas extra).
       crmTool: await resolveAgentCrmTool(whatsappConfig.companyId, agentConfig.crmToolConfig),
+      // Herramienta de grupos de WhatsApp del agente (null = apagada: cero consultas extra).
+      groupTool: await resolveAgentGroupTool(whatsappConfig.companyId, whatsappConfig.provider, agentConfig.groupToolConfig),
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
     httpActions,

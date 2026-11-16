@@ -158,6 +158,12 @@ export function crmToolAvailable(config: BotConfig): boolean {
   return !!t?.enabled && (t.columns.length > 0 || t.addTags.length > 0);
 }
 
+/** Herramienta de grupos de WhatsApp del agente: solo con lista blanca activa y canal SMS Tools (bot.service la resuelve). */
+export function groupToolAvailable(config: BotConfig): boolean {
+  const t = config.agent.groupTool;
+  return !!t?.enabled && t.groups.length > 0;
+}
+
 /** Productos digitales cuya entrega contiene links de Google Drive (carpetas/archivos públicos). */
 export function productsWithDrive(config: BotConfig): BotProduct[] {
   return config.products.filter((p) => p.productType === "digital" && deliveryDriveRefs(p.digitalDelivery).length > 0);
@@ -254,6 +260,7 @@ export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
   if (!agencySearchAvailable(config)) hidden.add("buscar_agencias");
   if (!emailDeliveryAvailable(config)) hidden.add("entregar_por_correo");
   if (!crmToolAvailable(config)) hidden.add("actualizar_crm");
+  if (!groupToolAvailable(config)) hidden.add("agregar_a_grupo");
   if (!postponeAvailable(config)) hidden.add("posponer_seguimiento");
   if (!driveSearchAvailable(config)) {
     hidden.add("buscar_en_drive");
@@ -493,6 +500,8 @@ export interface TurnContext {
   crmActionsThisTurn?: number;
   /** Posición del aviso de CRM en adminNotices (se fusiona si la tool se llama otra vez en el turno). */
   crmNoticeIndex?: number;
+  /** agregar_a_grupo ya se usó en ESTE turno (una sola vez por turno). */
+  groupAddThisTurn?: boolean;
   /** Resultados que devolvió Drive (buscar_en_drive / obtener_muestra) en ESTE turno: con
    *  resultados, derivar_humano por CONSULTA se rechaza (el agente sí puede responder). */
   driveHitsThisTurn?: number;
@@ -2689,6 +2698,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "agregar_a_grupo",
+      description:
+        "Agrega al cliente a un grupo de WhatsApp PERMITIDO del negocio. Úsala SOLO cuando se cumpla LITERALMENTE la condición configurada para ese grupo (sección GRUPOS DE WHATSAPP del prompt); si dudas, NO la uses. Una sola vez por turno. `motivo` = cita breve de lo que dijo el cliente que cumple la condición.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["grupo", "motivo"],
+        properties: {
+          grupo: { type: "string", description: "Nombre EXACTO de un grupo permitido" },
+          motivo: { type: "string", description: "Qué dijo el cliente (cita breve)" },
+        },
+      },
+    },
+  },
 ];
 
 // --------------------------------------------------------------------------
@@ -4599,6 +4625,47 @@ export async function executeTool(
         }
       }
       return JSON.stringify({ ok: true, resumen, note: "Listo. NO le digas al cliente que lo moviste o etiquetaste; sigue la conversación con naturalidad." });
+    }
+
+    case "agregar_a_grupo": {
+      // Salvaguardas en servidor: lista blanca estricta, una vez por turno, rastro y aviso.
+      const tool = ctx.config.agent.groupTool;
+      if (!tool || !groupToolAvailable(ctx.config)) return JSON.stringify({ ok: false, error: "La herramienta de grupos no está activada para este negocio." });
+      const norm = (v: unknown) => String(v ?? "").trim().toLowerCase();
+      const allowed = tool.groups.map((g) => `«${g.name}»`).join(", ");
+      const motivo = String(args.motivo ?? "").trim().slice(0, 200);
+      if (!motivo) return JSON.stringify({ ok: false, error: "Indica en motivo qué dijo el cliente que cumple la condición." });
+      const target = tool.groups.find((g) => norm(g.name) === norm(args.grupo));
+      if (!target) return JSON.stringify({ ok: false, error: `El grupo «${String(args.grupo ?? "")}» NO está permitido. Grupos permitidos: ${allowed}.` });
+      if (ctx.groupAddThisTurn) return JSON.stringify({ ok: false, error: "Ya agregaste al cliente a un grupo en este turno; no lo hagas otra vez." });
+      ctx.groupAddThisTurn = true;
+      if (ctx.simulate) {
+        ctx.adminNotices.push(`👥 (Simulación) El agente habría agregado al cliente al grupo «${target.name}». Motivo: “${motivo}”.`);
+        return JSON.stringify({ ok: true, simulado: true, note: `Listo (simulación): el cliente entraría al grupo «${target.name}».` });
+      }
+      const r = await autoGroupAdd(ctx.companyId, target.id, ctx.customerId, "AGENTE");
+      if (!r.ok) {
+        const why: Record<string, string> = {
+          no_contactar: "el cliente pidió no ser contactado",
+          salio_del_grupo: "el cliente salió de ese grupo hace poco y no se le vuelve a agregar",
+          sin_whatsapp: "este chat no es de WhatsApp",
+        };
+        return JSON.stringify({ ok: false, error: `No se pudo agregar al grupo: ${why[r.reason ?? ""] ?? "no está disponible ahora"}. No lo prometas; sigue la conversación normalmente.` });
+      }
+      if (r.reason === "ya_estaba") {
+        return JSON.stringify({ ok: true, unchanged: true, note: `El cliente ya estaba en el grupo «${target.name}» (o su alta ya está en curso). No hace falta repetirlo.` });
+      }
+      await createNote(ctx.companyId, ctx.customerId, {
+        conversationId: ctx.conversationId,
+        text: `🤖 Agente IA: agregado al grupo de WhatsApp «${target.name}». Motivo: “${motivo}”.`,
+      }).catch((err) => console.error("[agent] nota de agregar_a_grupo falló:", err instanceof Error ? err.message : err));
+      if (tool.notifyOwner) {
+        ctx.adminNotices.push(`👥 El agente agregó a ${ctx.customerPhone} al grupo «${target.name}». Motivo: “${motivo}”.`);
+      }
+      return JSON.stringify({
+        ok: true,
+        note: `Listo: el alta al grupo «${target.name}» quedó en curso. Si su privacidad no permite agregarlo directo, WhatsApp le envía una invitación para unirse. Puedes decírselo en UNA línea.`,
+      });
     }
 
     default:

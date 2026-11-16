@@ -11,7 +11,7 @@ import { planOptions } from "../products/product-plans";
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
-import { emailDeliveryAvailable, crmToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
+import { emailDeliveryAvailable, crmToolAvailable, groupToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
 import { describeShippingConfig, type ShippingConfig } from "../shipping/shipping-config";
 import { activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
 import { mpChatOn, mpLinkOnRequest } from "./payment-methods";
@@ -717,6 +717,12 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
               ? ` ETIQUETAS QUE PUEDES QUITAR: ${config.agent.crmTool.removeTags.map((t) => `«${t.name}»`).join(", ")}.`
               : "") +
             (config.agent.crmTool.onlyForward ? " SOLO AVANZAR: no puedes mover a una columna anterior del tablero." : ""),
+        ]
+      : []),
+    // Herramienta de grupos de WhatsApp: SOLO si el dueño la activó con lista blanca.
+    ...(groupToolAvailable(config) && config.agent.groupTool
+      ? [
+          `- GRUPOS DE WHATSAPP (herramienta agregar_a_grupo): puedes agregar al cliente a un grupo del negocio SOLO cuando se cumpla la condición indicada; como máximo una vez por turno. GRUPOS PERMITIDOS (cuándo): ${config.agent.groupTool.groups.map((g) => `«${g.name}» → ${g.when}`).join("; ")}.`,
         ]
       : []),
     "",
