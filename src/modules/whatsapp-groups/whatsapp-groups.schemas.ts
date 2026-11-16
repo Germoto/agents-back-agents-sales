@@ -57,7 +57,8 @@ export const listMembersQuery = z.object({
 // strict: un productId (lote de compradores, retirado) responde 400 en vez de ignorarse.
 export const addToGroupSchema = z
   .object({
-    customerIds: z.array(z.string().uuid()).min(1).max(500),
+    // De a un cliente por petición: no existe el alta en lote desde el panel.
+    customerIds: z.array(z.string().uuid()).length(1, "Se agrega de a un cliente por vez"),
     dryRun: z.boolean().optional(),
   })
   .strict();

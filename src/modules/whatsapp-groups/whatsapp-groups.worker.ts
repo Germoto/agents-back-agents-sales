@@ -1,6 +1,6 @@
 /**
- * Worker de grupos de WhatsApp: cada minuto despacha, por cada grupo con cola, un
- * lote de hasta 20 números y deja el siguiente a 10–15 minutos (ritmo del gateway).
+ * Worker de grupos de WhatsApp: cada minuto despacha la cola de cada negocio, de a
+ * un número por llamada y al ritmo que el negocio configuró (por minuto, hora y día).
  * El estado vive en la base, así que sobrevive a reinicios.
  */
 

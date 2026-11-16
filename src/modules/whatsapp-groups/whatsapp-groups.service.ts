@@ -481,20 +481,26 @@ export async function enqueueGroupAdd(opts: {
         data: { status: "PENDIENTE", source, attempts: 0, nextAttemptAt: new Date(), immediate, recheck: false, resolvedAt: null },
       });
     }
-    if (immediate) {
-      // Sale al momento solo si el ritmo del negocio lo permite; si no, espera con prioridad.
-      void processCompanyQueue(companyId, { single: true }).catch((err) =>
-        console.error("[wa-groups] intento inmediato falló:", err instanceof Error ? err.message : err),
-      );
-    }
   }
   let etaMinutes = 0;
-  if (!immediate && queued > 0) {
+  if (queued > 0) {
+    // Un alta suelta solo espera detrás de las otras sueltas (van primero en la cola).
     const [pacing, ahead] = await Promise.all([
       loadGroupPacing(companyId),
-      prisma.whatsappGroupMember.count({ where: { companyId, status: { in: IN_QUEUE } } }),
+      prisma.whatsappGroupMember.count({
+        where: { companyId, status: { in: IN_QUEUE }, ...(immediate ? { immediate: true } : {}) },
+      }),
     ]);
-    etaMinutes = estimateMinutes(opts.dryRun ? ahead + queued : ahead, pacing);
+    const pending = opts.dryRun ? ahead + queued : ahead;
+    // Sola y con cupo libre: sale ya (0). Si hay otras delante o el ritmo aún no deja, se estima la espera.
+    const goesNow = immediate && pending <= 1 && (await quotaWaitMs(companyId, pacing)) === 0;
+    etaMinutes = goesNow ? 0 : estimateMinutes(pending, pacing);
+  }
+  if (!opts.dryRun && queued > 0 && immediate) {
+    // Sale al momento solo si el ritmo del negocio lo permite; si no, espera con prioridad.
+    void processCompanyQueue(companyId, { single: true }).catch((err) =>
+      console.error("[wa-groups] intento inmediato falló:", err instanceof Error ? err.message : err),
+    );
   }
   return { total: ids.length, queued, skipped, etaMinutes };
 }

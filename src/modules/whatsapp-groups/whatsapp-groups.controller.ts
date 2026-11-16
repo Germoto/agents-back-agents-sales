@@ -65,15 +65,14 @@ export async function listMembersController(req: Request, res: Response) {
 export async function addToGroupController(req: Request, res: Response) {
   const companyId = req.user!.companyId;
   const { customerIds: ids, dryRun } = req.body as { customerIds: string[]; dryRun?: boolean };
-  // Un solo contacto elegido a mano va primero en la cola; el resto, en orden de llegada.
-  const single = ids.length === 1;
+  // Siempre un contacto elegido a mano (el esquema no admite más): va primero en la cola.
   const result = await enqueueGroupAdd({
     companyId,
     groupId: String(req.params.id),
     customerIds: ids,
-    source: single ? "MANUAL" : "LOTE",
-    immediate: single,
-    force: single,
+    source: "MANUAL",
+    immediate: true,
+    force: true,
     dryRun,
   });
   return res.json(result);
