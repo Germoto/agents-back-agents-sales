@@ -28,6 +28,9 @@ export const SOCKET_EVENTS = {
   CRM_UPDATED:          "crm.updated",          // tablero CRM cambió (move/columnas/CRUD)
   CAMPAIGN_PROGRESS:    "campaign.progress",    // avance de una campaña masiva (enviados/fallos/estado)
   WEBCHAT_MESSAGE:      "webchat.message",      // mensaje saliente hacia un visitante del chat web
+  GROUP_MESSAGE_NEW:    "group.message.new",    // mensaje (o línea de evento) en el chat de un grupo de WhatsApp
+  GROUP_MESSAGE_UPDATED:"group.message.updated",// check de entrega, reacción, wamid o destacado de un mensaje de grupo
+  GROUP_UPDATED:        "group.updated",        // datos del grupo cambiaron (participantes, chat encendido, no leídos)
   PREREG_NEW:           "prereg.new",           // pre-registro verificado, listo para aprobar (Control Room)
 } as const;
 

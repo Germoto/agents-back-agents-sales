@@ -5,6 +5,13 @@ import { validate } from "../../middlewares/validate";
 import {
   addToGroupController,
   cancelPendingController,
+  groupInfoController,
+  groupMessagesController,
+  groupReadController,
+  groupSendController,
+  groupStarController,
+  removeParticipantsController,
+  setGroupChatController,
   listAvailableGroupsController,
   listCustomerGroupsController,
   listGroupsController,
@@ -18,8 +25,15 @@ import {
 import {
   addToGroupSchema,
   customerIdParams,
+  groupChatSchema,
   groupIdParams,
+  groupInfoQuery,
+  groupMessageParams,
+  groupMessagesQuery,
+  groupSendSchema,
+  groupStarSchema,
   listMembersQuery,
+  removeParticipantsSchema,
   retryMembersSchema,
   saveGroupSchema,
 } from "./whatsapp-groups.schemas";
@@ -42,5 +56,14 @@ router.post("/:id/add", validate({ params: groupIdParams, body: addToGroupSchema
 router.post("/:id/members/retry", validate({ params: groupIdParams, body: retryMembersSchema }), asyncHandler(retryMembersController));
 router.post("/:id/members/cancel", validate({ params: groupIdParams }), asyncHandler(cancelPendingController));
 router.post("/:id/refresh", validate({ params: groupIdParams }), asyncHandler(refreshInvitedController));
+
+// Chat del grupo (apagado por defecto: se enciende grupo por grupo).
+router.post("/:id/chat", validate({ params: groupIdParams, body: groupChatSchema }), asyncHandler(setGroupChatController));
+router.get("/:id/info", validate({ params: groupIdParams, query: groupInfoQuery }), asyncHandler(groupInfoController));
+router.get("/:id/messages", validate({ params: groupIdParams, query: groupMessagesQuery }), asyncHandler(groupMessagesController));
+router.post("/:id/send", validate({ params: groupIdParams, body: groupSendSchema }), asyncHandler(groupSendController));
+router.post("/:id/read", validate({ params: groupIdParams }), asyncHandler(groupReadController));
+router.post("/:id/messages/:mid/star", validate({ params: groupMessageParams, body: groupStarSchema }), asyncHandler(groupStarController));
+router.post("/:id/participants/remove", validate({ params: groupIdParams, body: removeParticipantsSchema }), asyncHandler(removeParticipantsController));
 
 export default router;

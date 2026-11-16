@@ -2,12 +2,19 @@ import { Request, Response } from "express";
 import { asyncHandler } from "../../lib/async-handler";
 import {
   isGroupWebhook,
+  parseGroupEventWebhook,
+  parseGroupMessageWebhook,
   parseInboundWebhook,
   parseStatusWebhook,
   parseTypingWebhook,
   webhookType,
 } from "../../lib/smstools-client";
 import { handleInbound, handleTypingEvent } from "./agent.service";
+import {
+  applyGroupDeliveryStatus,
+  handleGroupEvent,
+  handleGroupMessage,
+} from "../whatsapp-groups/whatsapp-group-chat.service";
 import { applyDeliveryStatus } from "./conversation.service";
 
 /**
@@ -32,8 +39,31 @@ export const inboundController = asyncHandler(async (req: Request, res: Response
   const status = parseStatusWebhook(req.body);
   if (status) {
     res.json({ success: true });
-    void applyDeliveryStatus([status.messageId, status.wamid], status.status).catch((err) => {
-      console.warn("[agent] applyDeliveryStatus error:", err instanceof Error ? err.message : err);
+    const keys = [status.messageId, status.wamid];
+    void applyDeliveryStatus(keys, status.status)
+      // No es de un chat 1 a 1: puede ser de un mensaje enviado a un grupo.
+      .then((applied) => (applied ? applied : applyGroupDeliveryStatus(keys, status.status)))
+      .catch((err) => {
+        console.warn("[agent] applyDeliveryStatus error:", err instanceof Error ? err.message : err);
+      });
+    return;
+  }
+
+  // Chat de grupos: mensaje o evento de un grupo vigilado. Va a sus propias tablas;
+  // nunca crea clientes ni corre el agente.
+  const groupMessage = parseGroupMessageWebhook(req.body);
+  if (groupMessage) {
+    res.json({ success: true });
+    void handleGroupMessage(groupMessage).catch((err) => {
+      console.warn("[agent] handleGroupMessage error:", err instanceof Error ? err.message : err);
+    });
+    return;
+  }
+  const groupEvent = parseGroupEventWebhook(req.body);
+  if (groupEvent) {
+    res.json({ success: true });
+    void handleGroupEvent(groupEvent).catch((err) => {
+      console.warn("[agent] handleGroupEvent error:", err instanceof Error ? err.message : err);
     });
     return;
   }

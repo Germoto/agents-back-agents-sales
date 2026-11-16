@@ -37,7 +37,7 @@ const processing = new Set<string>();
 type Creds = { apiUrl: string; secret: string; account: string };
 
 /** Credenciales del gateway si el canal del negocio es SMS Tools y está completo. */
-async function loadGroupCreds(companyId: string): Promise<Creds | null> {
+export async function loadGroupCreds(companyId: string): Promise<Creds | null> {
   const wa = await prisma.whatsappConfig.findUnique({
     where: { companyId },
     select: { provider: true, apiUrl: true, secret: true, account: true, provisionPending: true },
@@ -46,7 +46,7 @@ async function loadGroupCreds(companyId: string): Promise<Creds | null> {
   return { apiUrl: wa.apiUrl, secret: wa.secret, account: wa.account };
 }
 
-async function requireGroupCreds(companyId: string): Promise<Creds> {
+export async function requireGroupCreds(companyId: string): Promise<Creds> {
   const creds = await loadGroupCreds(companyId);
   if (!creds) {
     throw new AppError("Los grupos de WhatsApp solo funcionan con el canal SMS Tools conectado.", 400);
@@ -58,7 +58,7 @@ export async function groupsSupported(companyId: string): Promise<boolean> {
   return (await loadGroupCreds(companyId)) !== null;
 }
 
-async function requireGroup(companyId: string, groupId: string) {
+export async function requireGroup(companyId: string, groupId: string) {
   const group = await prisma.whatsappGroup.findFirst({ where: { id: groupId, companyId } });
   if (!group) throw new AppError("Grupo no encontrado", 404);
   return group;
@@ -101,6 +101,25 @@ export async function listSavedGroups(companyId: string) {
     addCount(c, row.status, row._count._all);
     byGroup.set(row.groupId, c);
   }
+  // No leídos del chat de grupo: mensajes ajenos posteriores a la última lectura.
+  const unread = new Map<string, number>();
+  await Promise.all(
+    groups
+      .filter((g) => g.chatEnabled)
+      .map(async (g) =>
+        unread.set(
+          g.id,
+          await prisma.whatsappGroupMessage.count({
+            where: {
+              groupId: g.id,
+              kind: "MENSAJE",
+              fromMe: false,
+              ...(g.lastReadAt ? { createdAt: { gt: g.lastReadAt } } : {}),
+            },
+          }),
+        ),
+      ),
+  );
   return {
     supported,
     groups: groups.map((g) => {
@@ -114,6 +133,14 @@ export async function listSavedGroups(companyId: string) {
         nextBatchAt: g.nextBatchAt,
         counters,
         etaMinutes: estimateMinutes(counters.pendientes),
+        chatEnabled: g.chatEnabled,
+        isAdmin: g.isAdmin,
+        announce: g.announce,
+        avatarUrl: g.avatarUrl,
+        participantCount: g.participantCount,
+        lastMessageAt: g.lastMessageAt,
+        lastMessagePreview: g.lastMessagePreview,
+        unread: unread.get(g.id) ?? 0,
       };
     }),
   };
@@ -140,7 +167,12 @@ export async function saveGroup(companyId: string, data: { gid: string; name: st
 }
 
 export async function removeGroup(companyId: string, groupId: string) {
-  await requireGroup(companyId, groupId);
+  const group = await requireGroup(companyId, groupId);
+  if (group.chatEnabled) {
+    // Deja de vigilar el grupo en el gateway; si falla, se quita igual.
+    const creds = await loadGroupCreds(companyId);
+    if (creds) await smsTools.watchGroup(creds, creds.account, group.gid, false).catch(() => undefined);
+  }
   await prisma.whatsappGroup.delete({ where: { id: groupId } });
 }
 
@@ -539,6 +571,24 @@ export async function processGroup(groupId: string, mode: "immediate" | "batch")
     if (mode === "batch" && group.nextBatchAt && group.nextBatchAt > now) return 0;
     const creds = await loadGroupCreds(group.companyId);
     if (!creds) return 0;
+
+    // Si ya se sabe que la cuenta no es admin, se confirma con el dato fresco antes
+    // de llamar: sin admin el gateway responde 500 y no dice por qué.
+    if (group.isAdmin === false) {
+      const info = await smsTools.getGroupInfo(creds, creds.account, group.gid).catch(() => null);
+      if (info) await prisma.whatsappGroup.update({ where: { id: groupId }, data: { isAdmin: info.isAdmin } });
+      if (info && !info.isAdmin) {
+        const pending = await prisma.whatsappGroupMember.count({ where: { groupId, status: "PENDIENTE" } });
+        if (pending === 0) return 0;
+        const reason = "Tu número no es administrador de este grupo: no puede agregar participantes.";
+        await prisma.whatsappGroup.update({ where: { id: groupId }, data: { pausedReason: reason, pausedAt: new Date() } });
+        void notifyOwner(
+          group.companyId,
+          `⚠️ *Grupo de WhatsApp en pausa*\nNo se pudo agregar clientes al grupo «${group.name}».\n${reason}\nCuando lo corrijas, reanúdalo en Canales → WhatsApp → Grupos.`,
+        ).catch(() => undefined);
+        return 0;
+      }
+    }
 
     if (mode === "immediate") {
       const recent = await prisma.whatsappGroupMember.count({

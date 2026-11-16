@@ -13,6 +13,15 @@ import {
   retryMembers,
   saveGroup,
 } from "./whatsapp-groups.service";
+import {
+  getGroupDetail,
+  listGroupMessages,
+  markGroupRead,
+  removeParticipants,
+  sendGroupMessage,
+  setGroupChat,
+  starGroupMessage,
+} from "./whatsapp-group-chat.service";
 
 export async function listGroupsController(req: Request, res: Response) {
   return res.json(await listSavedGroups(req.user!.companyId));
@@ -72,4 +81,45 @@ export async function refreshInvitedController(req: Request, res: Response) {
 
 export async function listCustomerGroupsController(req: Request, res: Response) {
   return res.json(await listCustomerGroups(req.user!.companyId, String(req.params.customerId)));
+}
+
+// ── Chat del grupo ──────────────────────────────────────────────────────────
+
+export async function setGroupChatController(req: Request, res: Response) {
+  return res.json(await setGroupChat(req.user!.companyId, String(req.params.id), req.body.enabled));
+}
+
+export async function groupInfoController(req: Request, res: Response) {
+  return res.json(
+    await getGroupDetail(req.user!.companyId, String(req.params.id), { refresh: req.query.refresh === "1" }),
+  );
+}
+
+export async function groupMessagesController(req: Request, res: Response) {
+  const q = req.query as { before?: string; limit?: number; starred?: string };
+  return res.json(
+    await listGroupMessages(req.user!.companyId, String(req.params.id), {
+      before: q.before ?? null,
+      limit: q.limit ? Number(q.limit) : undefined,
+      starred: q.starred === "1",
+    }),
+  );
+}
+
+export async function groupSendController(req: Request, res: Response) {
+  return res.status(201).json(await sendGroupMessage(req.user!.companyId, String(req.params.id), req.body, "PANEL"));
+}
+
+export async function groupReadController(req: Request, res: Response) {
+  return res.json(await markGroupRead(req.user!.companyId, String(req.params.id)));
+}
+
+export async function groupStarController(req: Request, res: Response) {
+  return res.json(
+    await starGroupMessage(req.user!.companyId, String(req.params.id), String(req.params.mid), req.body.starred),
+  );
+}
+
+export async function removeParticipantsController(req: Request, res: Response) {
+  return res.json(await removeParticipants(req.user!.companyId, String(req.params.id), req.body.phones));
 }
