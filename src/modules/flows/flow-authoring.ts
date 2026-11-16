@@ -20,6 +20,7 @@ import {
   type BookAppointmentData,
   type HttpRequestData,
   type WaGroupAddData,
+  type WaGroupSendData,
   type ConditionData,
   type CrmMoveData,
   type CrmTagsData,
@@ -54,6 +55,7 @@ export const NODE_DOCS = `BLOQUES DISPONIBLES (type → data → handles de sali
 - book-appointment: {productId? (servicio con agenda), introMessage?, noSlotsMessage?, saveVariable?, timeoutMinutes? (default 30)} → "booked", "no-slots" y "timeout". Ofrece horarios REALES de la agenda y agenda la cita; deja {{cita_fecha}}, {{cita_codigo}}, {{cita_calendario_google}}, {{cita_calendario_ics}} y {{cita_videollamada}} (enlace de Meet/Zoom del servicio o del negocio si la cita es online; el sistema ya envía solo un mensaje con el enlace de videollamada y los de calendario tras agendar).
 - http-request: {actionId? (acción guardada: usa {accion: nombre}), request?: {conexion?/connectionId?, method, url (https, admite {{variables}}), query:[{key,value}], headers:[{key,value}], bodyType:"JSON"|"FORM"|"RAW"|"NONE", body}, responseVar? (default "api"), errorMessage?} → "success" y "error". PETICIÓN HTTP (como el nodo HTTP Request de n8n): llama a una API del negocio (crear licencia, cuenta demo, consultar estado…) y deja la respuesta en variables para los bloques siguientes: {{api.status}}, {{api.body}} y el JSON aplanado {{api.<campo>}} / {{api.<campo>.<subcampo>}} / {{api.items.0.id}} (cambia "api" con responseVar). Prefiere una acción guardada (listar_acciones_http) a una petición inline; NUNCA pongas tokens ni claves en headers: la credencial vive en la conexión. Si falla sale por "error" (conecta esa rama con un texto o un handoff).
 - wa-group-add: {groupId (grupo guardado: usa {grupo: nombre})} → "success" y "error". AGREGAR A GRUPO: mete al cliente en un grupo de WhatsApp del negocio (solo canal SMS Tools; el número del negocio debe ser ADMIN del grupo). El alta va en segundo plano: "success" = quedó encolado o ya estaba; "error" = no se puede (canal Meta/chat web, cliente en «No contactar», salió del grupo hace poco o el grupo ya no está guardado). Si la privacidad del cliente no deja agregarlo, WhatsApp le envía una invitación. No escribe nada al cliente: si quieres avisarle, pon un send-text después.
+- wa-group-send: {groupId (grupo guardado: usa {grupo: nombre}), text? (admite {{variables}}), mediaUrl?, fileName?} → "success" y "error". ENVIAR AL GRUPO: publica un mensaje en un grupo de WhatsApp del negocio cuando el cliente llega a este paso (ej. avisar al equipo de una venta o dar la bienvenida). Requiere el canal SMS Tools y el «Chat del grupo» ENCENDIDO en ese grupo (Canales → WhatsApp → Grupos). Necesita text o mediaUrl. No le escribe al cliente. Para mencionar a alguien del grupo escribe @<número> en el texto. "error" = chat del grupo apagado, grupo solo-admins sin ser admin, canal no compatible o TOPE de seguridad (máximo 12 mensajes automáticos por grupo y hora, sumando flujos y Copiloto). En simulación no envía.
 - crm-move: {crmId, crmColumnId, crmColumnName?} → "next". Mueve al cliente a una columna del CRM.
 - crm-add-tags | crm-remove-tags: {tagIds:[uuid]} → "next". Asigna/quita etiquetas.
 - handoff: {clientText?, notifyText?} → SIN salidas (terminal). Pausa el bot y avisa a un asesor humano.
@@ -81,7 +83,7 @@ export const HARD_RULES = `REGLAS OBLIGATORIAS al proponer un flujo:
 export const AUTHORING_HINTS = `FACILIDADES al usar crear_flujo / editar_flujo:
 - "position" es OPCIONAL: si algún nodo no la trae, el servidor ordena todo el flujo automáticamente (BFS desde start). Si todos los nodos la traen, se respeta.
 - Los ids de edge son opcionales (se generan) y sourceHandle vacío equivale a "next".
-- Puedes referirte a datos del negocio POR NOMBRE (o por id): en crm-move usa {tablero, columna}; en crm-add-tags / crm-remove-tags usa {etiquetas:[nombres]}; en book-appointment y validate-payment usa {producto}; en condition con source "tag" usa {etiqueta}; en flow-control transfer usa {flujo}; en http-request usa {accion} (acción guardada) o request.{conexion}; en wa-group-add usa {grupo}. El servidor los convierte a ids y rechaza con un error claro los que no existan (créalos antes con crear_etiqueta / crear_columna / crear_producto).
+- Puedes referirte a datos del negocio POR NOMBRE (o por id): en crm-move usa {tablero, columna}; en crm-add-tags / crm-remove-tags usa {etiquetas:[nombres]}; en book-appointment y validate-payment usa {producto}; en condition con source "tag" usa {etiqueta}; en flow-control transfer usa {flujo}; en http-request usa {accion} (acción guardada) o request.{conexion}; en wa-group-add y wa-group-send usa {grupo}. El servidor los convierte a ids y rechaza con un error claro los que no existan (créalos antes con crear_etiqueta / crear_columna / crear_producto).
 - En answers/poll/list puedes omitir el id de cada opción (se genera "opt-xxxxxx"); si lo omites, en los edges usa sourceHandle "opt:<label exacto>" o "opt:<posición 1..n>" y el servidor los convierte a "opt:<id>". detectText es opcional.
 - Variables de question/answers (saveVariable) quedan en la ficha del cliente y, en HYBRID, el agente IA las recibe; para que el dueño las reciba por WhatsApp, inclúyelas en el notifyText del handoff con {{variable}}.
 - En el trigger puedes usar "anuncios": [descripciones o ids del catálogo de anuncios] en vez de adEntryIds (se convierten a ids; ver_catalogo_anuncios los lista). Si el dueño capta leads por Meta Ads, prefiere onAdLead a keywords.
@@ -306,7 +308,8 @@ function resolveFlowReferences(rawNodes: LooseNode[], cat: RefCatalog): { nodes:
         if (n.type === "validate-payment" && data.productId && !data.amountMode) data.amountMode = "product";
         break;
       }
-      case "wa-group-add": {
+      case "wa-group-add":
+      case "wa-group-send": {
         if (typeof data.grupo === "string" && data.grupo.trim()) {
           const g = findNamed(cat.waGroups, data.grupo);
           if (!g) errors.push(`${label}: el grupo de WhatsApp «${data.grupo}» no está guardado (ver_grupos_whatsapp / guardar_grupo_whatsapp)`);
@@ -423,7 +426,8 @@ export async function checkFlowReferences(
         if (d.productId && !cat.products.some((x) => x.id === d.productId)) errors.push(`${label}: productId no pertenece a este negocio`);
         break;
       }
-      case "wa-group-add": {
+      case "wa-group-add":
+      case "wa-group-send": {
         const d = n.data as WaGroupAddData;
         if (d.groupId && !cat.waGroups.some((g) => g.id === d.groupId)) errors.push(`${label}: groupId no pertenece a este negocio`);
         break;
@@ -743,6 +747,8 @@ export async function describeFlow(
       }
       case "book-appointment":
         return `Agendar cita: «${nameOf(cat.products, (n.data as BookAppointmentData).productId)}»`;
+      case "wa-group-send":
+        return `Enviar un mensaje al grupo de WhatsApp «${nameOf(cat.waGroups, (n.data as WaGroupSendData).groupId)}»`;
       case "wa-group-add":
         return `Agregar al grupo de WhatsApp «${nameOf(cat.waGroups, (n.data as WaGroupAddData).groupId)}»`;
       case "http-request": {

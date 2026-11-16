@@ -167,6 +167,13 @@ const waGroupAddData = z.object({
   groupId: z.string().uuid().optional(),
   groupName: z.string().max(120).optional(),
 });
+const waGroupSendData = z.object({
+  groupId: z.string().uuid().optional(),
+  groupName: z.string().max(120).optional(),
+  text: z.string().max(4000).optional(),
+  mediaUrl: z.string().max(2000).optional(),
+  fileName: z.string().max(255).optional(),
+});
 
 const httpRequestData = z
   .object({
@@ -251,6 +258,7 @@ export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("book-appointment"), position: positionSchema, data: bookAppointmentData }),
   z.object({ id: z.string().min(1), type: z.literal("http-request"), position: positionSchema, data: httpRequestData }),
   z.object({ id: z.string().min(1), type: z.literal("wa-group-add"), position: positionSchema, data: waGroupAddData }),
+  z.object({ id: z.string().min(1), type: z.literal("wa-group-send"), position: positionSchema, data: waGroupSendData }),
 ]);
 
 export const flowEdgeSchema = z

@@ -53,6 +53,7 @@ export type FlowNodeType =
   | "book-appointment"
   | "http-request"
   | "wa-group-add"
+  | "wa-group-send"
   | "to-agent";
 
 export type DetectMode = "contains" | "equals" | "starts_with" | "ends_with";
@@ -297,6 +298,19 @@ export interface WaGroupAddData {
   groupName?: string;
 }
 
+/** Publicar un mensaje en un grupo de WhatsApp guardado con el chat encendido. */
+export interface WaGroupSendData {
+  /** Id del grupo guardado (Canales → WhatsApp → Grupos). */
+  groupId?: string;
+  /** Nombre del grupo al guardar el bloque (solo para mostrar). */
+  groupName?: string;
+  /** Texto (o caption del adjunto); soporta {{variables}}. */
+  text?: string;
+  mediaUrl?: string;
+  /** Nombre de archivo (documentos). */
+  fileName?: string;
+}
+
 export type FlowNodeData =
   | SendTextData
   | SendMediaData
@@ -316,6 +330,7 @@ export type FlowNodeData =
   | BookAppointmentData
   | HttpRequestData
   | WaGroupAddData
+  | WaGroupSendData
   | Record<string, never>;
 
 export interface FlowNode {
@@ -398,6 +413,7 @@ export function outputHandlesFor(node: FlowNode): string[] {
     }
     case "http-request":
     case "wa-group-add":
+    case "wa-group-send":
       return ["success", "error"];
     case "flow-control":
     case "handoff":

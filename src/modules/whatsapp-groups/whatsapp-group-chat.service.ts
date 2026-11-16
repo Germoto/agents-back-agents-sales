@@ -56,6 +56,15 @@ function participantsOf(group: Pick<WhatsappGroup, "participants">): GroupPartic
     .filter((p) => p.phone);
 }
 
+/** Tipo de adjunto según la extensión de la URL (lo desconocido viaja como documento). */
+export function mediaKindFromUrl(url: string): "image" | "video" | "audio" | "document" {
+  const u = url.toLowerCase().split(/[?#]/)[0];
+  if (/\.(jpe?g|png|gif|webp)$/.test(u)) return "image";
+  if (/\.(mp4|webm|3gp)$/.test(u)) return "video";
+  if (/\.(ogg|opus|mp3|m4a|aac)$/.test(u)) return "audio";
+  return "document";
+}
+
 function previewOf(text: string | null | undefined, mediaType?: string | null): string | null {
   const clean = (text ?? "").replace(/\s+/g, " ").trim();
   if (clean) return clean.slice(0, 160);

@@ -49,6 +49,7 @@ import {
   type BookAppointmentData,
   type HttpRequestData,
   type WaGroupAddData,
+  type WaGroupSendData,
   reminderStepsOf,
   flattenListOptions,
   isSendNode,
@@ -63,6 +64,7 @@ import { createBooking, reasonMessage } from "../bookings/bookings.service";
 import { symbolFor } from "../../lib/currency";
 import { baseVars, loadRunnableAction } from "../http-actions/http-actions.service";
 import { autoGroupAdd } from "../whatsapp-groups/whatsapp-groups.service";
+import { mediaKindFromUrl, sendGroupMessage } from "../whatsapp-groups/whatsapp-group-chat.service";
 import { runHttpAction, toRunnableConnection, toRunnableRequest } from "../http-actions/http-action-runner";
 
 // ---------------------------------------------------------------------------
@@ -1239,6 +1241,38 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
         const r = await autoGroupAdd(io.companyId, data.groupId, io.customerId, "FLUJO");
         pushTrace(io, node, r.ok ? "group:queued" : `group:skipped ${r.reason ?? ""}`.trim());
         nextHandle = r.ok ? "success" : "error";
+        break;
+      }
+
+      case "wa-group-send": {
+        const data = node.data as WaGroupSendData;
+        if (io.simulate) {
+          // En simulación no se publica nada en el grupo.
+          pushTrace(io, node, "group-send:simulated");
+          nextHandle = "success";
+          break;
+        }
+        const mediaUrl = data.mediaUrl?.trim() ? renderTemplate(data.mediaUrl.trim(), io) : null;
+        try {
+          if (!data.groupId) throw new Error("sin grupo");
+          await sendGroupMessage(
+            io.companyId,
+            data.groupId,
+            {
+              text: renderTemplate((data.text ?? "").trim(), io),
+              mediaUrl,
+              mediaKind: mediaUrl ? mediaKindFromUrl(mediaUrl) : null,
+              fileName: data.fileName?.trim() || null,
+            },
+            "FLUJO",
+          );
+          pushTrace(io, node, "group-send:ok");
+          nextHandle = "success";
+        } catch (err) {
+          // Chat apagado, tope por hora, solo-admins o canal no compatible: sigue por «error».
+          pushTrace(io, node, `group-send:error ${err instanceof Error ? err.message : ""}`.trim().slice(0, 160));
+          nextHandle = "error";
+        }
         break;
       }
 

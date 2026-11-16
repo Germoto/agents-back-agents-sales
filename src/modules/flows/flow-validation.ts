@@ -20,6 +20,7 @@ import {
   type BookAppointmentData,
   type HttpRequestData,
   type WaGroupAddData,
+  type WaGroupSendData,
   reminderStepsOf,
   POLL_MIN_OPTIONS,
   POLL_MAX_OPTIONS,
@@ -76,6 +77,7 @@ const NODE_LABEL: Record<string, string> = {
   "book-appointment": "Agendar cita",
   "http-request": "Petición HTTP",
   "wa-group-add": "Agregar a grupo",
+  "wa-group-send": "Enviar al grupo",
 };
 
 function label(node: FlowNode): string {
@@ -443,6 +445,16 @@ export function validateFlow(
         }
         if (!edgeFrom(node.id, "success") && !edgeFrom(node.id, "error")) {
           warnings.push({ code: "GROUP_OUTPUT_UNUSED", message: "Las salidas de «Agregar a grupo» no están conectadas; el flujo terminará ahí.", nodeId: node.id });
+        }
+        break;
+      }
+      case "wa-group-send": {
+        const data = node.data as WaGroupSendData;
+        if (!data.groupId) {
+          errors.push({ code: "GROUP_NO_TARGET", message: "«Enviar al grupo» necesita un grupo de WhatsApp.", nodeId: node.id });
+        }
+        if (!data.text?.trim() && !data.mediaUrl?.trim()) {
+          errors.push({ code: "GROUP_SEND_EMPTY", message: "«Enviar al grupo» necesita un mensaje o un archivo.", nodeId: node.id });
         }
         break;
       }
