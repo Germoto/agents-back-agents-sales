@@ -1,6 +1,12 @@
 import { Request, Response } from "express";
 import { asyncHandler } from "../../lib/async-handler";
-import { parseInboundWebhook, parseStatusWebhook, parseTypingWebhook } from "../../lib/smstools-client";
+import {
+  isGroupWebhook,
+  parseInboundWebhook,
+  parseStatusWebhook,
+  parseTypingWebhook,
+  webhookType,
+} from "../../lib/smstools-client";
 import { handleInbound, handleTypingEvent } from "./agent.service";
 import { applyDeliveryStatus } from "./conversation.service";
 
@@ -29,6 +35,15 @@ export const inboundController = asyncHandler(async (req: Request, res: Response
     void applyDeliveryStatus([status.messageId, status.wamid], status.status).catch((err) => {
       console.warn("[agent] applyDeliveryStatus error:", err instanceof Error ? err.message : err);
     });
+    return;
+  }
+
+  // BARRERA: lo que venga de un grupo (o un evento que no es un mensaje, como un
+  // estado sin `status`) nunca entra al flujo 1 a 1: crearía un cliente falso,
+  // gastaría un lead y el bot respondería.
+  const type = webhookType(req.body);
+  if (isGroupWebhook(req.body) || type === "whatsapp_status" || type === "whatsapp_typing") {
+    res.json({ success: true });
     return;
   }
 

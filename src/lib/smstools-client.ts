@@ -197,10 +197,51 @@ export interface SmsToolsGroupAddResult {
   code?: number;
 }
 
+export interface SmsToolsGroupParticipant {
+  /** Solo dígitos: número real o pseudo-número LID (13 a 16 dígitos). */
+  phone: string;
+  lid: string | null;
+  name: string | null;
+  isAdmin: boolean;
+  isSuperadmin: boolean;
+}
+
+export interface SmsToolsGroupInfo {
+  gid: string;
+  name: string | null;
+  description: string | null;
+  owner: string | null;
+  participantCount: number;
+  /** La cuenta del negocio es admin del grupo (requisito para agregar/sacar). */
+  isAdmin: boolean;
+  /** true = solo los admins pueden escribir. */
+  announce: boolean;
+  locked: boolean;
+  isCommunity: boolean;
+  suspended: boolean;
+  watched: boolean;
+  avatarUrl: string | null;
+  participants: SmsToolsGroupParticipant[];
+}
+
+/** true si el destino es un grupo (…@g.us): no se limpia a dígitos al enviar. */
+export function isGroupJid(value: string | null | undefined): boolean {
+  return typeof value === "string" && /@g\.us$/i.test(value.trim());
+}
+
 /** Tope de números por llamada de groupadd (el gateway responde 400 si se pasa). */
 export const GROUP_ADD_MAX_PHONES = 50;
 // La llamada es síncrona: el gateway agrega uno por uno antes de responder.
 const GROUP_ADD_TIMEOUT_MS = 150_000;
+
+/** Opciones de envío: cita y, en grupos, menciones. */
+export type SmsToolsSendOpts = {
+  quoteWamid?: string | null;
+  /** "" = el cliente (1 a 1), "me" = mensaje propio, o el número del autor (grupos). */
+  quoteFrom?: string;
+  /** Números mencionados (solo dígitos). El texto debe incluir @<número>. */
+  mentions?: string[];
+};
 
 export const smsTools = {
   /** Grupos de la cuenta de WhatsApp (`unique`). Lanza si el gateway falla. */
@@ -230,6 +271,7 @@ export const smsTools = {
     gid: string,
     phones: string[],
     invite = true,
+    action: "add" | "remove" = "add",
   ): Promise<SmsToolsGroupAddResult[]> {
     if (phones.length === 0) return [];
     if (phones.length > GROUP_ADD_MAX_PHONES) {
@@ -243,12 +285,73 @@ export const smsTools = {
       phones: phones.join(","),
       invite: invite ? "1" : "0",
     });
+    // Sin `action` el gateway agrega (compatibilidad): solo viaja al sacar.
+    if (action === "remove") body.set("action", "remove");
     const data = await smsToolsRequest<SmsToolsGroupAddResult[]>(base, "/groupadd/whatsapp", {
       method: "POST",
       body,
       timeoutMs: GROUP_ADD_TIMEOUT_MS,
     });
     return Array.isArray(data) ? data : [];
+  },
+
+  /**
+   * Detalle de un grupo: nombre, descripción, si la cuenta es admin, si solo
+   * escriben admins (`announce`) y la lista de participantes. Lanza si falla.
+   */
+  async getGroupInfo(creds: SmsToolsCredentials, unique: string, gid: string): Promise<SmsToolsGroupInfo | null> {
+    const base = deriveApiBase(creds.apiUrl);
+    const body = new URLSearchParams({ secret: creds.secret, unique, gid });
+    const data = await smsToolsRequest<Record<string, any> | null>(base, "/groupinfo/whatsapp", {
+      method: "POST",
+      body,
+      timeoutMs: 30_000,
+    });
+    if (!data || typeof data !== "object") return null;
+    const flag = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
+    const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+    const participants: SmsToolsGroupParticipant[] = (Array.isArray(data.participants) ? data.participants : [])
+      .filter((p: any) => p && (typeof p.phone === "string" || typeof p.phone === "number"))
+      .map((p: any) => ({
+        // Número real o pseudo-número LID: se usa tal cual como clave (solo dígitos).
+        phone: String(p.phone).replace(/\D/g, ""),
+        lid: text(p.lid),
+        name: text(p.name),
+        isAdmin: flag(p.is_admin) || flag(p.is_superadmin),
+        isSuperadmin: flag(p.is_superadmin),
+      }))
+      .filter((p: SmsToolsGroupParticipant) => p.phone);
+    return {
+      gid: text(data.gid) ?? gid,
+      name: text(data.name),
+      description: text(data.description),
+      owner: text(data.owner),
+      participantCount: Number(data.participant_count) || participants.length,
+      isAdmin: flag(data.is_admin),
+      announce: flag(data.announce),
+      locked: flag(data.locked),
+      isCommunity: flag(data.is_community),
+      suspended: flag(data.suspended),
+      watched: flag(data.watched),
+      avatarUrl: asHttpUrl(text(data.avatar_url)),
+      participants,
+    };
+  },
+
+  /**
+   * Enciende/apaga la vigilancia de un grupo: solo los grupos vigilados mandan
+   * sus mensajes por webhook (`whatsapp_group`). La cuenta debe estar en el grupo.
+   */
+  async watchGroup(creds: SmsToolsCredentials, unique: string, gid: string, watch: boolean): Promise<boolean> {
+    const base = deriveApiBase(creds.apiUrl);
+    const body = new URLSearchParams({ secret: creds.secret, unique, gid, watch: watch ? "1" : "0" });
+    const data = await smsToolsRequest<{ watched?: unknown } | null>(base, "/groupwatch/whatsapp", {
+      method: "POST",
+      body,
+      timeoutMs: 30_000,
+    });
+    const w = data?.watched;
+    return w === undefined || w === null ? watch : w === true || w === 1 || w === "1" || w === "true";
   },
 
   /**
@@ -418,7 +521,7 @@ export const smsTools = {
     account: string,
     to: string,
     message: string,
-    opts?: { quoteWamid?: string | null; quoteFrom?: "" | "me" },
+    opts?: SmsToolsSendOpts,
   ): Promise<SmsToolsMessage> {
     const base = deriveApiBase(creds.apiUrl);
     const body = new URLSearchParams();
@@ -428,11 +531,13 @@ export const smsTools = {
     body.set("type", "text");
     body.set("message", message);
     // Responder citando: wamid del mensaje citado + quién lo escribió ("" =
-    // cliente, "me" = mensaje propio del bot/asesor).
+    // cliente, "me" = mensaje propio del bot/asesor; en grupos, el número del autor).
     if (opts?.quoteWamid) {
       body.set("quote_wamid", opts.quoteWamid);
       body.set("quote_from", opts.quoteFrom ?? "");
     }
+    // Menciones (grupos): números separados por coma; el texto ya trae @<número>.
+    if (opts?.mentions?.length) body.set("mentions", opts.mentions.join(","));
     return smsToolsRequest<SmsToolsMessage>(base, "/send/whatsapp", {
       method: "POST",
       body,
@@ -502,6 +607,7 @@ export const smsTools = {
     mediaUrl: string,
     caption?: string,
     fileName?: string,
+    opts?: SmsToolsSendOpts,
   ): Promise<SmsToolsMessage> {
     const base = deriveApiBase(creds.apiUrl);
 
@@ -512,7 +618,8 @@ export const smsTools = {
     const fields: Record<string, string> = {
       secret: creds.secret,
       account,
-      recipient: to.replace(/\D/g, ""),
+      // Un grupo (…@g.us) viaja tal cual; un número se limpia a dígitos.
+      recipient: isGroupJid(to) ? to.trim() : to.replace(/\D/g, ""),
       type: kind === "document" ? "document" : "media",
       // `message` es OBLIGATORIO para todos los tipos (si falta: "Invalid Parameters!").
       // Los stickers no llevan caption (el gateway lo ignora) pero el campo debe viajar:
@@ -523,6 +630,11 @@ export const smsTools = {
       // inmediato y con "2" en cola lo adelantaba). Kill-switch por env.
       priority: env.SMSTOOLS_MEDIA_PRIORITY,
     };
+    if (opts?.quoteWamid) {
+      fields.quote_wamid = opts.quoteWamid;
+      if (opts.quoteFrom) fields.quote_from = opts.quoteFrom;
+    }
+    if (opts?.mentions?.length) fields.mentions = opts.mentions.join(",");
 
     if (kind === "document") {
       // Documentos (pdf, zip, xlsx, …): document_type = extensión del catálogo (el gateway
@@ -701,6 +813,8 @@ export type DeliveryStatusEvent = {
   messageId: string | null;
   wamid: string | null;
   status: string;
+  /** Destinatario del mensaje; en mensajes a grupos es el gid (…@g.us, sin "+"). */
+  phone: string | null;
 };
 
 /** Estado del indicador de escritura (webhook whatsapp_typing y POST /typing). */
@@ -746,6 +860,7 @@ export function parseStatusWebhook(raw: unknown): DeliveryStatusEvent | null {
     messageId: field(body, data, ["id", "messageId", "message_id"]),
     wamid: field(body, data, ["wamid"]),
     status,
+    phone: field(body, data, ["phone"]),
   };
 }
 
@@ -772,6 +887,143 @@ function field(
 /** Valor del webhook que de verdad es una URL descargable (http/https); el resto ("0", "", "false") → null. */
 function asHttpUrl(value: string | null): string | null {
   return value && /^https?:\/\/\S+$/i.test(value) ? value : null;
+}
+
+/** Tipo inferido de la extensión de la URL (cuando no hay type ni mimetype). */
+function typeFromUrl(url: string): InboundMessage["type"] {
+  const u = url.toLowerCase().split(/[?#]/)[0];
+  if (isDocumentExt(extOf(u))) return "document";
+  if (/\.(mp4|mov|webm|mkv|avi|3gp)$/.test(u)) return "video";
+  if (/\.(ogg|opus|mp3|m4a|aac|wav)$/.test(u)) return "audio";
+  // El gateway entrega los stickers por el webhook normal con attachment=URL .webp.
+  if (/\.webp$/.test(u)) return "sticker";
+  return "image";
+}
+
+// ---------------------------------------------------------------------------
+// Webhooks de GRUPOS (type: whatsapp_group / whatsapp_group_event). Un mensaje
+// de grupo NO es un lead: jamás debe llegar al flujo 1 a 1 (crearía un cliente
+// falso y el bot respondería).
+// ---------------------------------------------------------------------------
+
+/** Mensaje (o reacción) de un grupo vigilado. */
+export type GroupMessageEvent = {
+  gid: string;
+  /** Cuenta WA que lo recibió, si el gateway la incluye. */
+  account: string | null;
+  wamid: string | null;
+  /** Autor, solo dígitos (número real o pseudo-número LID). */
+  authorPhone: string;
+  authorName: string | null;
+  /** true = lo escribió el dueño desde su teléfono. */
+  fromMe: boolean;
+  text: string;
+  mediaUrl: string | null;
+  mediaType: InboundMessage["type"] | null;
+  quotedWamid: string | null;
+  /** Solo en reacciones: wamid del mensaje reaccionado. */
+  targetWamid: string | null;
+  mentions: string[];
+  timestamp: Date | null;
+  raw: unknown;
+};
+
+/** Evento de participantes o de datos del grupo. */
+export type GroupParticipantEvent = {
+  gid: string;
+  account: string | null;
+  action: "join" | "leave" | "promote" | "demote" | "update";
+  /** Afectados, solo dígitos (vacío en update). */
+  phones: string[];
+  by: string | null;
+  reason: string | null;
+  name: string | null;
+  topic: string | null;
+  timestamp: Date | null;
+};
+
+function webhookParts(raw: unknown): { body: Record<string, any>; data: Record<string, any>; type: string } {
+  const body = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
+  const data = (body.data && typeof body.data === "object" ? body.data : {}) as Record<string, any>;
+  return { body, data, type: String(body.type ?? "").toLowerCase() };
+}
+
+function digitList(value: string | null): string[] {
+  if (!value) return [];
+  return [...new Set(value.split(",").map((p) => p.replace(/\D/g, "")).filter(Boolean))];
+}
+
+function epochDate(value: string | null): Date | null {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  // Segundos (contrato) o milisegundos, por si el gateway cambia.
+  const d = new Date(n > 1e12 ? n : n * 1000);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * true si el payload pertenece a un grupo (por tipo, por `gid` o porque el
+ * remitente es …@g.us). Barrera del receptor: lo que dé true NUNCA entra al
+ * flujo de mensajes 1 a 1, se haya podido interpretar o no.
+ */
+export function isGroupWebhook(raw: unknown): boolean {
+  const { body, data, type } = webhookParts(raw);
+  if (type.startsWith("whatsapp_group")) return true;
+  if (isGroupJid(field(body, data, ["gid"]))) return true;
+  return isGroupJid(field(body, data, ["phone", "from", "sender", "remoteJid", "recipient"]));
+}
+
+/** Tipo declarado del webhook (minúsculas), para descartar eventos que no son mensajes. */
+export function webhookType(raw: unknown): string {
+  return webhookParts(raw).type;
+}
+
+/** Mensaje de grupo (type: "whatsapp_group"); null si no lo es o viene incompleto. */
+export function parseGroupMessageWebhook(raw: unknown): GroupMessageEvent | null {
+  const { body, data, type } = webhookParts(raw);
+  if (type !== "whatsapp_group") return null;
+  const gid = field(body, data, ["gid"]);
+  if (!gid || !isGroupJid(gid)) return null;
+  const authorPhone = (field(body, data, ["phone", "from", "sender"]) ?? "").replace(/\D/g, "");
+  const fromMeRaw = (field(body, data, ["from_me", "fromMe"]) ?? "").toLowerCase();
+  const mediaUrl = asHttpUrl(field(body, data, ["attachment", "media_url", "mediaUrl"]));
+  return {
+    gid: gid.trim(),
+    account: field(body, data, ["account", "unique", "device"]),
+    wamid: field(body, data, ["wamid"]),
+    authorPhone,
+    authorName: field(body, data, ["name"]),
+    fromMe: fromMeRaw === "1" || fromMeRaw === "true",
+    text: decodeEntities(field(body, data, ["message", "text", "caption"]) ?? ""),
+    mediaUrl,
+    mediaType: mediaUrl ? typeFromUrl(mediaUrl) : null,
+    quotedWamid: field(body, data, ["quoted_wamid"]),
+    targetWamid: field(body, data, ["target_wamid"]),
+    mentions: digitList(field(body, data, ["mentions"])),
+    timestamp: epochDate(field(body, data, ["timestamp"])),
+    raw,
+  };
+}
+
+/** Evento de grupo (type: "whatsapp_group_event"); null si no lo es o no se reconoce. */
+export function parseGroupEventWebhook(raw: unknown): GroupParticipantEvent | null {
+  const { body, data, type } = webhookParts(raw);
+  if (type !== "whatsapp_group_event") return null;
+  const gid = field(body, data, ["gid"]);
+  if (!gid || !isGroupJid(gid)) return null;
+  const action = (field(body, data, ["action"]) ?? "").toLowerCase();
+  if (!["join", "leave", "promote", "demote", "update"].includes(action)) return null;
+  return {
+    gid: gid.trim(),
+    account: field(body, data, ["account", "unique", "device"]),
+    action: action as GroupParticipantEvent["action"],
+    phones: digitList(field(body, data, ["phones"])),
+    by: (field(body, data, ["by"]) ?? "").replace(/\D/g, "") || null,
+    reason: field(body, data, ["reason"]),
+    name: field(body, data, ["name"]),
+    topic: field(body, data, ["topic"]),
+    timestamp: epochDate(field(body, data, ["timestamp"])),
+  };
 }
 
 export function parseInboundWebhook(raw: unknown): InboundMessage {
@@ -829,16 +1081,6 @@ export function parseInboundWebhook(raw: unknown): InboundMessage {
     return null;
   };
 
-  // Tipo inferido de la extensión de la URL (cuando no hay type ni mimetype).
-  const typeFromUrl = (url: string): InboundMessage["type"] => {
-    const u = url.toLowerCase().split(/[?#]/)[0];
-    if (isDocumentExt(extOf(u))) return "document";
-    if (/\.(mp4|mov|webm|mkv|avi|3gp)$/.test(u)) return "video";
-    if (/\.(ogg|opus|mp3|m4a|aac|wav)$/.test(u)) return "audio";
-    // El gateway entrega los stickers por el webhook normal con attachment=URL .webp.
-    if (/\.webp$/.test(u)) return "sticker";
-    return "image";
-  };
 
   // Detección robusta (no depende del valor exacto de data[type] de SMS Tools):
   // 1) tipo media explícito o mimetype → ese tipo (con o sin caption);

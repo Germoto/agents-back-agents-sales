@@ -2255,24 +2255,99 @@ enum WhatsappGroupAddSource {
 }
 
 model WhatsappGroup {
-  id           String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId    String                @db.Uuid
+  id                 String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId          String                 @db.Uuid
   // Identificador estable del grupo en WhatsApp (…@g.us).
-  gid          String
-  name         String
+  gid                String
+  name               String
   // Error de llamada (cuenta no admin, desconectada, gid inválido): la cola del
   // grupo se detiene hasta que el dueño la reanude. null = cola activa.
-  pausedReason String?
-  pausedAt     DateTime?
+  pausedReason       String?
+  pausedAt           DateTime?
   // Ritmo anti-bloqueo: no se procesa otro lote de este grupo antes de esta hora.
-  nextBatchAt  DateTime?
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
-  company      Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  members      WhatsappGroupMember[]
+  nextBatchAt        DateTime?
+  // --- Chat del grupo (apagado por defecto). Encendido = el grupo está vigilado
+  // en el gateway y sus mensajes llegan por webhook. Sin historial previo.
+  chatEnabled        Boolean                @default(false)
+  watchedAt          DateTime?
+  description        String?
+  avatarUrl          String?
+  participantCount   Int?
+  // La cuenta del negocio es admin del grupo (null = aún no se consultó).
+  isAdmin            Boolean?
+  // true = solo los admins pueden escribir.
+  announce           Boolean                @default(false)
+  // Lista de groupinfo: [{ phone, lid, name, isAdmin, isSuperadmin }].
+  participants       Json?
+  infoSyncedAt       DateTime?
+  lastMessageAt      DateTime?
+  lastMessagePreview String?
+  // Hasta dónde leyó el panel: los mensajes ajenos posteriores son «no leídos».
+  lastReadAt         DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  company            Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  members            WhatsappGroupMember[]
+  messages           WhatsappGroupMessage[]
 
   @@unique([companyId, gid])
   @@index([companyId])
+}
+
+enum WhatsappGroupMessageKind {
+  MENSAJE
+  EVENTO
+}
+
+// Quién escribió un mensaje propio (fromMe): el dueño desde su teléfono, un
+// asesor desde el panel, el Copiloto/MCP o un bloque de flujo.
+enum WhatsappGroupMessageSender {
+  TELEFONO
+  PANEL
+  COPILOTO
+  FLUJO
+}
+
+// Mensajes del chat de un grupo. Tabla propia: un grupo no es un cliente, así
+// que nada de esto toca leads, CRM, métricas ni el bot.
+model WhatsappGroupMessage {
+  id             String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String                      @db.Uuid
+  groupId        String                      @db.Uuid
+  kind           WhatsappGroupMessageKind    @default(MENSAJE)
+  // Id de WhatsApp: llega en el webhook; en los propios se aprende del estado.
+  wamid          String?
+  // messageId del envío por API (correlación con whatsapp_status).
+  gatewayId      String?
+  fromMe         Boolean                     @default(false)
+  sentBy         WhatsappGroupMessageSender?
+  // Autor, solo dígitos (número real o pseudo-número LID de 13 a 16 dígitos).
+  authorPhone    String?
+  authorName     String?
+  // Vínculo opcional con un cliente existente (nunca se crea uno desde aquí).
+  customerId     String?                     @db.Uuid
+  message        String?
+  mediaUrl       String?
+  mediaType      String?
+  fileName       String?
+  quotedWamid    String?
+  quotedPreview  String?
+  // Números mencionados, separados por coma (solo dígitos).
+  mentions       String?
+  // Reacciones de los participantes: [{ phone, name, emoji }].
+  reactions      Json?
+  poll           Json?
+  // Evento (kind EVENTO): { action, phones, by, reason }.
+  eventData      Json?
+  deliveryStatus String?
+  starredAt      DateTime?
+  createdAt      DateTime                    @default(now())
+  group          WhatsappGroup               @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, wamid])
+  @@index([groupId, createdAt])
+  @@index([gatewayId])
+  @@index([wamid])
 }
 
 model WhatsappGroupMember {

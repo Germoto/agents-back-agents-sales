@@ -7,7 +7,7 @@
  */
 
 import { prisma } from "../../lib/prisma";
-import { smsTools } from "../../lib/smstools-client";
+import { smsTools, type SmsToolsSendOpts } from "../../lib/smstools-client";
 import { metaWa, META_MEDIA_LIMITS, mediaTooLargeReason } from "../../lib/meta-wa-client";
 import { AppError } from "../../lib/app-error";
 import { decodeEntities } from "../../lib/html-entities";
@@ -92,7 +92,7 @@ export async function sendText(
   sender: WhatsappSender,
   to: string,
   message: string,
-  opts?: { quoteWamid?: string | null; quoteFrom?: "" | "me" },
+  opts?: SmsToolsSendOpts,
 ): Promise<SendResult> {
   // Nunca mandar entidades HTML al cliente (`&quot;` en vez de comillas).
   message = decodeEntities(message);
@@ -114,7 +114,9 @@ export async function sendText(
     sender.account,
     to,
     message,
-    opts?.quoteWamid ? { quoteWamid: opts.quoteWamid, quoteFrom: opts.quoteFrom ?? "" } : undefined,
+    opts?.quoteWamid || opts?.mentions?.length
+      ? { quoteWamid: opts.quoteWamid, quoteFrom: opts.quoteFrom ?? "", mentions: opts.mentions }
+      : undefined,
   );
   return { gatewayId: gatewayIdOf(res) };
 }
@@ -219,6 +221,8 @@ export async function sendMedia(
   mediaUrl: string,
   caption?: string,
   fileName?: string,
+  // Cita y menciones: solo las usa el gateway SMS Tools (chat de grupos).
+  opts?: SmsToolsSendOpts,
 ): Promise<SendResult> {
   if (caption) caption = decodeEntities(caption);
   if (kind === "document") fileName = await resolveDocumentFileName(mediaUrl, fileName);
@@ -284,6 +288,7 @@ export async function sendMedia(
     mediaUrl,
     caption,
     fileName,
+    opts,
   );
   return { gatewayId: gatewayIdOf(res) };
 }
