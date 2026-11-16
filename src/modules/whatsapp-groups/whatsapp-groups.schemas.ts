@@ -64,6 +64,17 @@ export const addToGroupSchema = z
     message: "Indica clientes o un producto (solo uno de los dos).",
   });
 
+// Ritmo de altas del negocio (mismos límites que GROUP_PACING_LIMITS).
+export const groupPacingSchema = z
+  .object({
+    perMinute: z.number().int().min(1).max(5).optional(),
+    perHour: z.number().int().min(1).max(120).optional(),
+    perDay: z.number().int().min(1).max(1000).optional(),
+  })
+  .refine((v) => v.perMinute !== undefined || v.perHour !== undefined || v.perDay !== undefined, {
+    message: "Indica al menos un valor del ritmo.",
+  });
+
 export const retryMembersSchema = z.object({
   memberIds: z.array(z.string().uuid()).min(1).max(500).optional(),
 });

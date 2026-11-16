@@ -496,6 +496,8 @@ model WhatsappConfig {
   // SMS Tools no respondió al crear la cuenta durante el alta automática:
   // secret vacío hasta que el worker de aprovisionamiento lo complete.
   provisionPending  Boolean              @default(false)
+  // Ritmo de altas a grupos (SMS Tools): { perMinute, perHour, perDay }. null = por defecto.
+  groupAddPacing    Json?
   isActive          Boolean              @default(true)
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt

@@ -2,6 +2,11 @@ import { Request, Response } from "express";
 import {
   cancelPending,
   enqueueGroupAdd,
+  groupAddUsage,
+  loadGroupPacing,
+  saveGroupPacing,
+  DEFAULT_GROUP_PACING,
+  GROUP_PACING_LIMITS,
   listAvailableGroups,
   listCustomerGroups,
   listMembers,
@@ -65,6 +70,25 @@ export async function addToGroupController(req: Request, res: Response) {
     dryRun,
   });
   return res.json(result);
+}
+
+async function pacingPayload(companyId: string, pacing?: Awaited<ReturnType<typeof loadGroupPacing>>) {
+  const [current, usage] = await Promise.all([pacing ?? loadGroupPacing(companyId), groupAddUsage(companyId)]);
+  return {
+    pacing: current,
+    defaults: DEFAULT_GROUP_PACING,
+    limits: GROUP_PACING_LIMITS,
+    usage: { lastHour: usage.lastHour, lastDay: usage.lastDay },
+  };
+}
+
+export async function getPacingController(req: Request, res: Response) {
+  return res.json(await pacingPayload(req.user!.companyId));
+}
+
+export async function savePacingController(req: Request, res: Response) {
+  const companyId = req.user!.companyId;
+  return res.json(await pacingPayload(companyId, await saveGroupPacing(companyId, req.body)));
 }
 
 export async function retryMembersController(req: Request, res: Response) {

@@ -3,26 +3,25 @@
  * de «agregar al cliente X al grupo Y». Nadie llama al gateway directo: todo pedido
  * (venta, botón, lote, flujo, agente, Copiloto) es una fila de WhatsappGroupMember.
  *
- * - Un contacto suelto (immediate) se intenta al momento, en segundo plano.
- * - Los lotes los despacha el worker respetando el ritmo anti-bloqueo del gateway:
- *   hasta 20 números por llamada y 10 a 15 minutos entre llamadas del mismo grupo.
- * - Un error de llamada (cuenta no admin, desconectada, gid inválido) pausa la cola
- *   del grupo y avisa al dueño una sola vez; no se queman reintentos.
+ * - Hay UNA cola por negocio y sale de a un número por llamada, con tres topes
+ *   configurables (por minuto, por hora y por día). Agregar varios de golpe hace que
+ *   WhatsApp bloquee el número, así que ningún camino se salta la cola.
+ * - Un contacto suelto (immediate) tiene prioridad y sale al momento si hay cupo.
+ * - Antes de cada alta se consulta el grupo (groupinfo): suspendido o sin admin pausa
+ *   la cola; quien ya es participante se marca sin llamar al gateway.
+ * - Un error de llamada (desconectada, gid inválido) pausa la cola del grupo y avisa
+ *   al dueño una sola vez; no se queman reintentos.
  */
 
 import { Prisma, WhatsappGroupAddSource, WhatsappGroupMemberStatus } from "@prisma/client";
 import { AppError } from "../../lib/app-error";
 import { prisma } from "../../lib/prisma";
 import type { ProductGroupConfig } from "../../lib/product";
-import { smsTools, type SmsToolsGroupAddResult } from "../../lib/smstools-client";
+import { smsTools, type SmsToolsGroupAddResult, type SmsToolsGroupInfo } from "../../lib/smstools-client";
+import { SOCKET_EVENTS, socketService } from "../../lib/socket";
 import { notifyOwner, recordMessage } from "../agent/conversation.service";
 import { PURCHASED_STORE_ORDER } from "../storefront/storefront-order.service";
 
-export const GROUP_BATCH_SIZE = 20;
-const BATCH_GAP_MIN_MS = 10 * 60_000;
-const BATCH_GAP_MAX_MS = 15 * 60_000;
-/** Tope de altas «al momento» por grupo y hora; el resto espera el ritmo de lote. */
-const IMMEDIATE_HOURLY_CAP = 60;
 const RETRY_DELAY_MS = 24 * 60 * 60_000;
 const MAX_ATTEMPTS = 2;
 const TRANSIENT_RETRY_MS = 5 * 60_000;
@@ -32,6 +31,7 @@ const STALE_CLAIM_MS = 10 * 60_000;
 const SETTLED: WhatsappGroupMemberStatus[] = ["AGREGADO", "INVITADO", "YA_ESTABA"];
 const IN_QUEUE: WhatsappGroupMemberStatus[] = ["PENDIENTE", "PROCESANDO"];
 
+/** Candado en memoria por negocio: una sola alta a la vez, sea del grupo que sea. */
 const processing = new Set<string>();
 
 type Creds = { apiUrl: string; secret: string; account: string };
@@ -65,6 +65,65 @@ export async function requireGroup(companyId: string, groupId: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Ritmo de altas (por negocio)
+// ---------------------------------------------------------------------------
+
+export type GroupPacing = { perMinute: number; perHour: number; perDay: number };
+
+export const DEFAULT_GROUP_PACING: GroupPacing = { perMinute: 1, perHour: 30, perDay: 200 };
+export const GROUP_PACING_LIMITS = {
+  perMinute: { min: 1, max: 5 },
+  perHour: { min: 1, max: 120 },
+  perDay: { min: 1, max: 1000 },
+} as const;
+
+function clampPacing(key: keyof GroupPacing, value: unknown): number {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return DEFAULT_GROUP_PACING[key];
+  const { min, max } = GROUP_PACING_LIMITS[key];
+  return Math.min(max, Math.max(min, n));
+}
+
+export function normalizePacing(raw: unknown): GroupPacing {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Partial<Record<keyof GroupPacing, unknown>>;
+  return {
+    perMinute: clampPacing("perMinute", r.perMinute ?? DEFAULT_GROUP_PACING.perMinute),
+    perHour: clampPacing("perHour", r.perHour ?? DEFAULT_GROUP_PACING.perHour),
+    perDay: clampPacing("perDay", r.perDay ?? DEFAULT_GROUP_PACING.perDay),
+  };
+}
+
+export async function loadGroupPacing(companyId: string): Promise<GroupPacing> {
+  const wa = await prisma.whatsappConfig.findUnique({ where: { companyId }, select: { groupAddPacing: true } });
+  return normalizePacing(wa?.groupAddPacing);
+}
+
+export async function saveGroupPacing(companyId: string, patch: Partial<GroupPacing>): Promise<GroupPacing> {
+  await requireGroupCreds(companyId);
+  const next = normalizePacing({ ...(await loadGroupPacing(companyId)), ...patch });
+  await prisma.whatsappConfig.update({ where: { companyId }, data: { groupAddPacing: next } });
+  return next;
+}
+
+/** Altas enviadas al gateway por el negocio en la última hora y en las últimas 24 h. */
+export async function groupAddUsage(companyId: string, now = new Date()) {
+  const [lastHour, lastDay, last] = await Promise.all([
+    prisma.whatsappGroupMember.count({ where: { companyId, claimedAt: { gt: new Date(now.getTime() - 60 * 60_000) } } }),
+    prisma.whatsappGroupMember.count({ where: { companyId, claimedAt: { gt: new Date(now.getTime() - 24 * 60 * 60_000) } } }),
+    prisma.whatsappGroupMember.findFirst({
+      where: { companyId, claimedAt: { not: null } },
+      orderBy: { claimedAt: "desc" },
+      select: { claimedAt: true },
+    }),
+  ]);
+  return { lastHour, lastDay, lastAt: last?.claimedAt ?? null };
+}
+
+function minGapMs(pacing: GroupPacing): number {
+  return Math.round(60_000 / pacing.perMinute);
+}
+
+// ---------------------------------------------------------------------------
 // Grupos guardados
 // ---------------------------------------------------------------------------
 
@@ -82,18 +141,22 @@ function addCount(c: Counters, status: WhatsappGroupMemberStatus, n: number) {
   else if (status === "FALLIDO") c.fallidos += n;
 }
 
-/** Minutos aproximados para vaciar una cola de `pending` números al ritmo de lote. */
-export function estimateMinutes(pending: number): number {
+/** Minutos aproximados para vaciar una cola de `pending` números al ritmo del negocio. */
+export function estimateMinutes(pending: number, pacing: GroupPacing = DEFAULT_GROUP_PACING): number {
   if (pending <= 0) return 0;
-  const batches = Math.ceil(pending / GROUP_BATCH_SIZE);
-  return Math.round(((batches - 1) * (BATCH_GAP_MIN_MS + BATCH_GAP_MAX_MS)) / 2 / 60_000);
+  const perHour = Math.max(1, Math.min(pacing.perMinute * 60, pacing.perHour));
+  const fullDays = Math.floor((pending - 1) / pacing.perDay);
+  const rest = pending - fullDays * pacing.perDay;
+  return Math.round(fullDays * 24 * 60 + (rest / perHour) * 60);
 }
 
 export async function listSavedGroups(companyId: string) {
-  const [supported, groups, counts] = await Promise.all([
+  const [supported, groups, counts, pacing, usage] = await Promise.all([
     groupsSupported(companyId),
     prisma.whatsappGroup.findMany({ where: { companyId }, orderBy: { createdAt: "asc" } }),
     prisma.whatsappGroupMember.groupBy({ by: ["groupId", "status"], where: { companyId }, _count: { _all: true } }),
+    loadGroupPacing(companyId),
+    groupAddUsage(companyId),
   ]);
   const byGroup = new Map<string, Counters>();
   for (const row of counts) {
@@ -120,8 +183,12 @@ export async function listSavedGroups(companyId: string) {
         ),
       ),
   );
+  const totalPending = [...byGroup.values()].reduce((sum, c) => sum + c.pendientes, 0);
   return {
     supported,
+    pacing,
+    usage: { lastHour: usage.lastHour, lastDay: usage.lastDay },
+    queue: { pending: totalPending, etaMinutes: estimateMinutes(totalPending, pacing) },
     groups: groups.map((g) => {
       const counters = byGroup.get(g.id) ?? emptyCounters();
       return {
@@ -132,7 +199,7 @@ export async function listSavedGroups(companyId: string) {
         pausedAt: g.pausedAt,
         nextBatchAt: g.nextBatchAt,
         counters,
-        etaMinutes: estimateMinutes(counters.pendientes),
+        etaMinutes: estimateMinutes(counters.pendientes, pacing),
         chatEnabled: g.chatEnabled,
         isAdmin: g.isAdmin,
         announce: g.announce,
@@ -317,17 +384,17 @@ export async function cancelPending(companyId: string, groupId: string) {
 }
 
 /**
- * «Actualizar estado»: el gateway no avisa cuando un invitado acepta. Se vuelve a
- * consultar a los invitados con invite=0 (no reenvía la invitación): quien ya entró
- * responde already_in. Va por la cola, con el mismo ritmo de lote.
+ * «Actualizar estado»: consulta los participantes del grupo (groupinfo) y marca como
+ * agregado a cada invitado que ya entró. No reenvía números al gateway.
  */
 export async function refreshInvited(companyId: string, groupId: string) {
-  await requireGroup(companyId, groupId);
-  const res = await prisma.whatsappGroupMember.updateMany({
-    where: { companyId, groupId, status: "INVITADO" },
-    data: { status: "PENDIENTE", recheck: true, immediate: false, nextAttemptAt: new Date() },
-  });
-  return { queued: res.count, etaMinutes: estimateMinutes(res.count) };
+  const group = await requireGroup(companyId, groupId);
+  const creds = await requireGroupCreds(companyId);
+  const info = await smsTools.getGroupInfo(creds, creds.account, group.gid);
+  if (!info) throw new AppError("El proveedor no devolvió los datos del grupo.", 502);
+  await prisma.whatsappGroup.update({ where: { id: groupId }, data: groupInfoData(info) });
+  const updated = await settleParticipants(groupId, info);
+  return { queued: 0, updated: updated.joined, etaMinutes: 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +411,7 @@ export type EnqueueResult = {
 /**
  * Encola clientes para un grupo. Omite visitantes web, «No contactar», los que ya
  * están o ya fueron invitados y los que ya esperan en la cola. `dryRun` solo cuenta.
- * `immediate` (un contacto suelto) dispara el intento en segundo plano.
+ * `immediate` (un contacto suelto) va primero en la cola y sale al momento si hay cupo.
  */
 export async function enqueueGroupAdd(opts: {
   companyId: string;
@@ -399,12 +466,21 @@ export async function enqueueGroupAdd(opts: {
       });
     }
     if (immediate) {
-      void processGroup(groupId, "immediate").catch((err) =>
+      // Sale al momento solo si el ritmo del negocio lo permite; si no, espera con prioridad.
+      void processCompanyQueue(companyId, { single: true }).catch((err) =>
         console.error("[wa-groups] intento inmediato falló:", err instanceof Error ? err.message : err),
       );
     }
   }
-  return { total: ids.length, queued, skipped, etaMinutes: immediate ? 0 : estimateMinutes(queued) };
+  let etaMinutes = 0;
+  if (!immediate && queued > 0) {
+    const [pacing, ahead] = await Promise.all([
+      loadGroupPacing(companyId),
+      prisma.whatsappGroupMember.count({ where: { companyId, status: { in: IN_QUEUE } } }),
+    ]);
+    etaMinutes = estimateMinutes(opts.dryRun ? ahead + queued : ahead, pacing);
+  }
+  return { total: ids.length, queued, skipped, etaMinutes };
 }
 
 /**
@@ -518,9 +594,13 @@ const RESULT_STATUS: Record<string, WhatsappGroupMemberStatus> = {
   cooldown: "EN_ESPERA",
 };
 
-function randomGapMs(): number {
-  return BATCH_GAP_MIN_MS + Math.floor(Math.random() * (BATCH_GAP_MAX_MS - BATCH_GAP_MIN_MS));
-}
+/** Resultado propio: el gateway devolvió failed con código 400 (cliente con número oculto). */
+const HIDDEN_NUMBER = "hidden_number";
+
+/** Espera máxima dentro de una pasada del worker para completar el intervalo entre altas. */
+const MAX_INLINE_WAIT_MS = 50_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** Estado del gateway dentro del AppError (envelope.status), si lo hay. */
 function gatewayStatusOf(err: unknown): number | null {
@@ -529,12 +609,24 @@ function gatewayStatusOf(err: unknown): number | null {
   return d && typeof d === "object" && typeof d.status === "number" ? d.status : null;
 }
 
-function pauseReasonFor(status: number, message: string): string {
+/** Motivo que el gateway adjunta al fallar (envelope.data.error), si lo hay. */
+function gatewayErrorOf(err: unknown): string {
+  if (!(err instanceof AppError)) return "";
+  const d = err.details as { data?: unknown } | null | undefined;
+  const data = d && typeof d === "object" ? d.data : null;
+  const raw = data && typeof data === "object" ? (data as { error?: unknown }).error : null;
+  return typeof raw === "string" ? raw.trim().slice(0, 200) : "";
+}
+
+function pauseReasonFor(status: number, message: string, detail = ""): string {
+  if (/not connected/i.test(detail)) return "Tu WhatsApp está desconectado. Vuelve a conectarlo en Canales → WhatsApp.";
   if (status === 401) return "La API key de SMS Tools no es válida.";
   if (status === 403) return "La API key de SMS Tools no tiene permiso de envío (wa_send).";
   if (status === 404) return "SMS Tools no encontró la cuenta de WhatsApp. Revisa que siga conectada.";
   if (status === 500) {
-    return "WhatsApp no dejó agregar participantes. Lo más probable: tu número no es administrador del grupo, el grupo ya no existe o la cuenta está desconectada.";
+    return detail
+      ? `WhatsApp no dejó agregar participantes. Motivo que dio SMS Tools: ${detail}`
+      : "WhatsApp no dejó agregar participantes y SMS Tools no indicó el motivo.";
   }
   return message || "El proveedor de WhatsApp rechazó la operación.";
 }
@@ -556,180 +648,265 @@ async function noteInChat(companyId: string, customerId: string, text: string): 
   }).catch(() => undefined);
 }
 
+function emitMembersChanged(companyId: string, groupId: string) {
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.GROUP_UPDATED, { groupId, members: true });
+}
+
+function groupInfoData(info: SmsToolsGroupInfo): Prisma.WhatsappGroupUpdateInput {
+  return {
+    participantCount: info.participantCount,
+    isAdmin: info.isAdmin,
+    announce: info.announce,
+    participants: info.participants as unknown as Prisma.InputJsonValue,
+    infoSyncedAt: new Date(),
+  };
+}
+
 /**
- * Despacha UNA llamada al gateway para el grupo. `immediate` toma solo los contactos
- * sueltos y no espera el ritmo; `batch` (worker) toma hasta 20 y agenda el siguiente
- * lote. Devuelve cuántos números se enviaron.
+ * Cruza la cola con los participantes reales del grupo: quien ya está no se envía al
+ * gateway (pendiente → ya estaba) y el invitado que aceptó pasa a agregado.
  */
-export async function processGroup(groupId: string, mode: "immediate" | "batch"): Promise<number> {
-  if (processing.has(groupId)) return 0;
-  processing.add(groupId);
+async function settleParticipants(groupId: string, info: SmsToolsGroupInfo) {
+  const phones = [...new Set(info.participants.map((p) => p.phone).filter((p) => p.length >= 6))];
+  if (phones.length === 0) return { already: 0, joined: 0 };
+  const resolvedAt = new Date();
+  const [already, joined] = await Promise.all([
+    prisma.whatsappGroupMember.updateMany({
+      where: { groupId, status: "PENDIENTE", phone: { in: phones } },
+      data: { status: "YA_ESTABA", lastResult: "already_in", lastCode: null, resolvedAt, immediate: false, recheck: false },
+    }),
+    prisma.whatsappGroupMember.updateMany({
+      where: { groupId, status: "INVITADO", phone: { in: phones } },
+      data: { status: "AGREGADO", lastResult: "joined", resolvedAt, recheck: false },
+    }),
+  ]);
+  return { already: already.count, joined: joined.count };
+}
+
+async function pauseGroup(group: { id: string; companyId: string; name: string }, reason: string): Promise<void> {
+  await prisma.whatsappGroup.update({ where: { id: group.id }, data: { pausedReason: reason, pausedAt: new Date() } });
+  emitMembersChanged(group.companyId, group.id);
+  void notifyOwner(
+    group.companyId,
+    `⚠️ *Grupo de WhatsApp en pausa*\nNo se pudo agregar clientes al grupo «${group.name}».\n${reason}\nCuando lo corrijas, reanúdalo en Canales → WhatsApp → Grupos.`,
+  ).catch(() => undefined);
+}
+
+/** Aparta al grupo unos minutos tras una caída o timeout del gateway. */
+async function backoffGroup(groupId: string): Promise<void> {
+  await prisma.whatsappGroup.update({
+    where: { id: groupId },
+    data: { nextBatchAt: new Date(Date.now() + TRANSIENT_RETRY_MS) },
+  });
+}
+
+/**
+ * Consulta previa a cada alta (la pide el gateway): grupo suspendido o cuenta sin
+ * admin pausan la cola; los que ya son participantes se resuelven sin llamar.
+ * Devuelve false si el grupo no puede recibir altas ahora.
+ */
+async function precheckGroup(
+  group: { id: string; companyId: string; name: string; gid: string },
+  creds: Creds,
+  checked: Set<string>,
+): Promise<boolean> {
+  if (checked.has(group.id)) return true;
+  let info: SmsToolsGroupInfo | null;
   try {
-    const group = await prisma.whatsappGroup.findUnique({ where: { id: groupId } });
-    if (!group || group.pausedReason) return 0;
+    info = await smsTools.getGroupInfo(creds, creds.account, group.gid);
+  } catch (err) {
+    const status = gatewayStatusOf(err);
+    const message = err instanceof Error ? err.message : "Error del proveedor";
+    if (status !== null && [401, 403, 404, 500].includes(status)) {
+      await pauseGroup(group, pauseReasonFor(status, message, gatewayErrorOf(err)));
+    } else {
+      await backoffGroup(group.id);
+    }
+    console.warn(`[wa-groups] groupinfo falló (grupo ${group.id}, estado ${status ?? "red"}): ${message}`);
+    return false;
+  }
+  if (!info) {
+    await pauseGroup(group, "SMS Tools no encontró el grupo. Puede que ya no exista o que tu número ya no esté en él.");
+    return false;
+  }
+  await prisma.whatsappGroup.update({ where: { id: group.id }, data: groupInfoData(info) });
+  if (info.suspended) {
+    await pauseGroup(group, "WhatsApp suspendió este grupo: no se puede agregar a nadie.");
+    return false;
+  }
+  if (!info.isAdmin) {
+    await pauseGroup(group, "Tu número no es administrador de este grupo: no puede agregar participantes.");
+    return false;
+  }
+  const settled = await settleParticipants(group.id, info);
+  if (settled.already + settled.joined > 0) emitMembersChanged(group.companyId, group.id);
+  checked.add(group.id);
+  return true;
+}
+
+/**
+ * Envía UN número al gateway: el siguiente pendiente del negocio (contactos sueltos
+ * primero, luego el más antiguo). Devuelve true si la llamada salió bien.
+ */
+async function dispatchNext(companyId: string, creds: Creds, checked: Set<string>): Promise<boolean> {
+  for (let guard = 0; guard < 10; guard += 1) {
     const now = new Date();
-    if (mode === "batch" && group.nextBatchAt && group.nextBatchAt > now) return 0;
-    const creds = await loadGroupCreds(group.companyId);
-    if (!creds) return 0;
-
-    // Si ya se sabe que la cuenta no es admin, se confirma con el dato fresco antes
-    // de llamar: sin admin el gateway responde 500 y no dice por qué.
-    if (group.isAdmin === false) {
-      const info = await smsTools.getGroupInfo(creds, creds.account, group.gid).catch(() => null);
-      if (info) await prisma.whatsappGroup.update({ where: { id: groupId }, data: { isAdmin: info.isAdmin } });
-      if (info && !info.isAdmin) {
-        const pending = await prisma.whatsappGroupMember.count({ where: { groupId, status: "PENDIENTE" } });
-        if (pending === 0) return 0;
-        const reason = "Tu número no es administrador de este grupo: no puede agregar participantes.";
-        await prisma.whatsappGroup.update({ where: { id: groupId }, data: { pausedReason: reason, pausedAt: new Date() } });
-        void notifyOwner(
-          group.companyId,
-          `⚠️ *Grupo de WhatsApp en pausa*\nNo se pudo agregar clientes al grupo «${group.name}».\n${reason}\nCuando lo corrijas, reanúdalo en Canales → WhatsApp → Grupos.`,
-        ).catch(() => undefined);
-        return 0;
-      }
-    }
-
-    if (mode === "immediate") {
-      const recent = await prisma.whatsappGroupMember.count({
-        where: { groupId, claimedAt: { gt: new Date(now.getTime() - 60 * 60_000) } },
-      });
-      if (recent >= IMMEDIATE_HOURLY_CAP) return 0; // lo toma el worker, a ritmo de lote
-    }
-
-    const base: Prisma.WhatsappGroupMemberWhereInput = { groupId, status: "PENDIENTE", nextAttemptAt: { lte: now } };
-    // Altas reales primero; la re-consulta de invitados (invite=0) va en su propia llamada.
-    let recheck = false;
-    let rows = await prisma.whatsappGroupMember.findMany({
-      where: { ...base, recheck: false, ...(mode === "immediate" ? { immediate: true } : {}) },
+    const next = await prisma.whatsappGroupMember.findFirst({
+      where: {
+        companyId,
+        status: "PENDIENTE",
+        nextAttemptAt: { lte: now },
+        group: { pausedReason: null, OR: [{ nextBatchAt: null }, { nextBatchAt: { lte: now } }] },
+      },
       orderBy: [{ immediate: "desc" }, { createdAt: "asc" }],
-      take: GROUP_BATCH_SIZE,
-      select: { id: true },
+      include: { group: { select: { id: true, companyId: true, name: true, gid: true } } },
     });
-    if (rows.length === 0 && mode === "batch") {
-      recheck = true;
-      rows = await prisma.whatsappGroupMember.findMany({
-        where: { ...base, recheck: true },
-        orderBy: { createdAt: "asc" },
-        take: GROUP_BATCH_SIZE,
-        select: { id: true },
-      });
-    }
-    if (rows.length === 0) return 0;
+    if (!next) return false;
+    const group = next.group;
+    if (!(await precheckGroup(group, creds, checked))) continue;
 
-    const ids = rows.map((r) => r.id);
-    await prisma.whatsappGroupMember.updateMany({
-      where: { id: { in: ids }, status: "PENDIENTE" },
+    // Reclamo atómico: si la consulta previa ya lo resolvió (o alguien lo canceló), sigue otro.
+    const claim = await prisma.whatsappGroupMember.updateMany({
+      where: { id: next.id, status: "PENDIENTE" },
       data: { status: "PROCESANDO", claimedAt: now },
     });
-    const claimed = await prisma.whatsappGroupMember.findMany({
-      where: { id: { in: ids }, status: "PROCESANDO" },
-      orderBy: { createdAt: "asc" },
-    });
-    if (claimed.length === 0) return 0;
+    if (claim.count === 0) continue;
 
     let results: SmsToolsGroupAddResult[];
     try {
-      results = await smsTools.addToGroup(creds, creds.account, group.gid, claimed.map((m) => m.phone), !recheck);
+      results = await smsTools.addToGroup(creds, creds.account, group.gid, [next.phone], true);
     } catch (err) {
       const status = gatewayStatusOf(err);
       const message = err instanceof Error ? err.message : "Error del proveedor";
+      const detail = gatewayErrorOf(err);
       const hard = status !== null && [401, 403, 404, 500].includes(status);
-      await prisma.whatsappGroupMember.updateMany({
-        where: { id: { in: claimed.map((m) => m.id) } },
+      await prisma.whatsappGroupMember.update({
+        where: { id: next.id },
         data: { status: "PENDIENTE", ...(hard ? {} : { nextAttemptAt: new Date(Date.now() + TRANSIENT_RETRY_MS) }) },
       });
-      if (hard) {
-        const reason = pauseReasonFor(status!, message);
-        await prisma.whatsappGroup.update({ where: { id: groupId }, data: { pausedReason: reason, pausedAt: new Date() } });
-        void notifyOwner(
-          group.companyId,
-          `⚠️ *Grupo de WhatsApp en pausa*\nNo se pudo agregar clientes al grupo «${group.name}».\n${reason}\nCuando lo corrijas, reanúdalo en Canales → WhatsApp → Grupos.`,
-        ).catch(() => undefined);
-      } else {
-        // Caída o timeout: reintentar es seguro (quien ya entró responde already_in).
-        await prisma.whatsappGroup.update({
-          where: { id: groupId },
-          data: { nextBatchAt: new Date(Date.now() + TRANSIENT_RETRY_MS) },
-        });
-      }
-      console.warn(`[wa-groups] llamada falló (grupo ${groupId}, estado ${status ?? "red"}): ${message}`);
-      return 0;
+      if (hard) await pauseGroup(group, pauseReasonFor(status!, message, detail));
+      // Caída o timeout: reintentar es seguro (quien ya entró responde already_in).
+      else await backoffGroup(group.id);
+      console.warn(`[wa-groups] llamada falló (grupo ${group.id}, estado ${status ?? "red"}): ${message}${detail ? ` (${detail})` : ""}`);
+      return false;
     }
 
-    // El gateway responde un resultado por número EN EL MISMO ORDEN enviado.
-    const byPhone = new Map(results.map((r) => [String(r.phone ?? "").replace(/\D/g, ""), r]));
+    const r = results[0] ?? null;
+    const code = typeof r?.code === "number" ? r.code : null;
+    const hidden = r?.status === "failed" && code === 400;
+    const raw = hidden ? HIDDEN_NUMBER : r?.status ?? "failed";
+    const status = RESULT_STATUS[raw] ?? null;
     const resolvedAt = new Date();
-    for (let i = 0; i < claimed.length; i += 1) {
-      const m = claimed[i];
-      const r = results[i] ?? byPhone.get(m.phone) ?? null;
-      const raw = r?.status ?? "failed";
-      const code = typeof r?.code === "number" ? r.code : null;
-      let status = RESULT_STATUS[raw] ?? null;
-      const data: Prisma.WhatsappGroupMemberUpdateInput = { lastResult: raw, lastCode: code, recheck: false, immediate: false };
-      if (recheck && !status) {
-        // Sigue sin entrar: queda como invitado, sin gastar intentos.
-        data.status = "INVITADO";
-      } else if (status) {
-        if (recheck && status === "INVITADO") status = "INVITADO";
-        data.status = status;
-        data.resolvedAt = resolvedAt;
-        data.attempts = m.attempts + 1;
-      } else if (m.attempts + 1 < MAX_ATTEMPTS) {
-        data.status = "PENDIENTE";
-        data.attempts = m.attempts + 1;
-        data.nextAttemptAt = new Date(Date.now() + RETRY_DELAY_MS);
-      } else {
-        data.status = "FALLIDO";
-        data.attempts = m.attempts + 1;
-        data.resolvedAt = resolvedAt;
-      }
-      await prisma.whatsappGroupMember.update({ where: { id: m.id }, data });
-      // Nota en el chat solo para contactos sueltos: un lote no debe reordenar cientos de chats.
-      if (mode === "immediate" && m.immediate) {
-        const text =
-          status === "AGREGADO"
-            ? `👥 Agregado al grupo «${group.name}».`
-            : status === "INVITADO"
-              ? `👥 Invitación al grupo «${group.name}» enviada (su privacidad no permite agregarlo directo).`
-              : status === "YA_ESTABA"
-                ? null
-                : status === "EN_ESPERA"
-                  ? `👥 No se pudo agregar al grupo «${group.name}»: salió del grupo hace poco.`
+    const data: Prisma.WhatsappGroupMemberUpdateInput = {
+      lastResult: raw,
+      lastCode: code,
+      recheck: false,
+      immediate: false,
+      attempts: next.attempts + 1,
+    };
+    if (status) {
+      data.status = status;
+      data.resolvedAt = resolvedAt;
+    } else if (!hidden && next.attempts + 1 < MAX_ATTEMPTS) {
+      data.status = "PENDIENTE";
+      data.nextAttemptAt = new Date(Date.now() + RETRY_DELAY_MS);
+    } else {
+      // Un número oculto no se puede agregar nunca: no se reintenta.
+      data.status = "FALLIDO";
+      data.resolvedAt = resolvedAt;
+    }
+    await prisma.whatsappGroupMember.update({ where: { id: next.id }, data });
+    emitMembersChanged(companyId, group.id);
+    // Nota en el chat solo para contactos sueltos: un lote no debe reordenar cientos de chats.
+    if (next.immediate) {
+      const text =
+        status === "AGREGADO"
+          ? `👥 Agregado al grupo «${group.name}».`
+          : status === "INVITADO"
+            ? `👥 Invitación al grupo «${group.name}» enviada (su privacidad no permite agregarlo directo).`
+            : status === "YA_ESTABA"
+              ? null
+              : status === "EN_ESPERA"
+                ? `👥 No se pudo agregar al grupo «${group.name}»: salió del grupo hace poco.`
+                : hidden
+                  ? `👥 No se pudo agregar al grupo «${group.name}»: su número está oculto.`
                   : `👥 No se pudo agregar al grupo «${group.name}» (${raw}).`;
-        if (text) void noteInChat(group.companyId, m.customerId, text);
+      if (text) void noteInChat(companyId, next.customerId, text);
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Cuánto falta para que el ritmo del negocio permita otra alta: 0 = ya, null = tope
+ * de la hora o del día alcanzado (se retoma solo cuando la ventana avanza).
+ */
+async function quotaWaitMs(companyId: string, pacing: GroupPacing): Promise<number | null> {
+  const now = new Date();
+  const usage = await groupAddUsage(companyId, now);
+  if (usage.lastDay >= pacing.perDay || usage.lastHour >= pacing.perHour) return null;
+  if (!usage.lastAt) return 0;
+  return Math.max(0, minGapMs(pacing) - (now.getTime() - usage.lastAt.getTime()));
+}
+
+/**
+ * Despacha la cola de un negocio respetando su ritmo: de a un número por llamada,
+ * hasta `perMinute` altas por pasada, repartidas dentro del minuto (nunca seguidas).
+ * `single` (alta al momento) intenta una sola. Devuelve cuántas altas salieron.
+ */
+export async function processCompanyQueue(companyId: string, opts?: { single?: boolean }): Promise<number> {
+  if (processing.has(companyId)) return 0;
+  processing.add(companyId);
+  try {
+    const creds = await loadGroupCreds(companyId);
+    if (!creds) return 0;
+    const pacing = await loadGroupPacing(companyId);
+    const rounds = opts?.single ? 1 : pacing.perMinute;
+    const checked = new Set<string>();
+    let sent = 0;
+    for (let i = 0; i < rounds; i += 1) {
+      const wait = await quotaWaitMs(companyId, pacing);
+      if (wait === null) break;
+      if (wait > 0) {
+        // El alta al momento no espera: queda primera en la cola y la toma el worker.
+        if (opts?.single || wait > MAX_INLINE_WAIT_MS) break;
+        // Pausa irregular: nunca dos altas seguidas ni a intervalos exactos.
+        await sleep(wait + Math.round(Math.random() * 4_000));
       }
+      if (!(await dispatchNext(companyId, creds, checked))) break;
+      sent += 1;
     }
-    if (mode === "batch") {
-      await prisma.whatsappGroup.update({
-        where: { id: groupId },
-        data: { nextBatchAt: new Date(Date.now() + randomGapMs()) },
-      });
-    }
-    return claimed.length;
+    return sent;
   } finally {
-    processing.delete(groupId);
+    processing.delete(companyId);
   }
 }
 
-/** Tick del worker: recupera reclamos colgados y despacha un lote por grupo con cola. */
+/** Tick del worker: recupera reclamos colgados y despacha la cola de cada negocio. */
 export async function runGroupQueueTick(): Promise<void> {
   const now = new Date();
   await prisma.whatsappGroupMember.updateMany({
     where: { status: "PROCESANDO", claimedAt: { lt: new Date(now.getTime() - STALE_CLAIM_MS) } },
     data: { status: "PENDIENTE" },
   });
+  // Re-consultas del esquema anterior (invite=0): ya no viajan al gateway.
+  await prisma.whatsappGroupMember.updateMany({
+    where: { status: "PENDIENTE", recheck: true },
+    data: { status: "INVITADO", recheck: false },
+  });
   const due = await prisma.whatsappGroupMember.findMany({
     where: { status: "PENDIENTE", nextAttemptAt: { lte: now }, group: { pausedReason: null } },
-    select: { groupId: true },
-    distinct: ["groupId"],
+    select: { companyId: true },
+    distinct: ["companyId"],
     take: 200,
   });
-  for (const { groupId } of due) {
-    try {
-      await processGroup(groupId, "batch");
-    } catch (err) {
-      console.error("[wa-groups] lote falló:", err instanceof Error ? err.message : err);
-    }
-  }
+  // Cada negocio lleva su propio ritmo: uno lento no frena a los demás.
+  await Promise.all(
+    due.map(({ companyId }) =>
+      processCompanyQueue(companyId).catch((err) =>
+        console.error("[wa-groups] cola falló:", err instanceof Error ? err.message : err),
+      ),
+    ),
+  );
 }

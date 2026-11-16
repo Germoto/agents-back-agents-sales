@@ -7,6 +7,8 @@ import {
   cancelPendingController,
   groupInfoController,
   groupMessagesController,
+  getPacingController,
+  savePacingController,
   groupReadController,
   groupSendController,
   groupStarController,
@@ -30,6 +32,7 @@ import {
   groupInfoQuery,
   groupMessageParams,
   groupMessagesQuery,
+  groupPacingSchema,
   groupSendSchema,
   groupStarSchema,
   listMembersQuery,
@@ -46,6 +49,9 @@ router.use(requireAuth);
 router.get("/", asyncHandler(listGroupsController));
 router.get("/available", asyncHandler(listAvailableGroupsController));
 router.post("/", validate({ body: saveGroupSchema }), asyncHandler(saveGroupController));
+// Ritmo de altas del negocio (por minuto, por hora y por día).
+router.get("/pacing", asyncHandler(getPacingController));
+router.put("/pacing", validate({ body: groupPacingSchema }), asyncHandler(savePacingController));
 router.get("/customer/:customerId", validate({ params: customerIdParams }), asyncHandler(listCustomerGroupsController));
 router.delete("/:id", validate({ params: groupIdParams }), asyncHandler(removeGroupController));
 router.post("/:id/resume", validate({ params: groupIdParams }), asyncHandler(resumeGroupController));
