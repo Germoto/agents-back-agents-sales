@@ -3,6 +3,7 @@ import authRoutes from "../modules/auth/auth.routes";
 import businessRoutes from "../modules/business/business.routes";
 import agentConfigRoutes from "../modules/agent-config/agent-config.routes";
 import whatsappConfigRoutes from "../modules/whatsapp-config/whatsapp-config.routes";
+import whatsappGroupsRoutes from "../modules/whatsapp-groups/whatsapp-groups.routes";
 import paymentConfigRoutes from "../modules/payment-config/payment-config.routes";
 import productsRoutes from "../modules/products/products.routes";
 import copilotRoutes from "../modules/copilot/copilot.routes";
@@ -61,6 +62,8 @@ const router = Router();
 router.use("/auth", authRoutes);
 router.use("/business", billingGuard(), businessRoutes);
 router.use("/agent-config", billingGuard(), agentConfigRoutes);
+// Grupos de WhatsApp (SMS Tools): va ANTES para que no lo capture el router del canal.
+router.use("/whatsapp-config/groups", billingGuard(), whatsappGroupsRoutes);
 router.use("/whatsapp-config", billingGuard(), whatsappConfigRoutes);
 router.use("/payment-config", billingGuard(), paymentConfigRoutes);
 router.use("/products", billingGuard(), productsRoutes);

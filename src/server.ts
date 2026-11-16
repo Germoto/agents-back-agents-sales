@@ -11,6 +11,7 @@ import { ensureSalesAgentBootTouchups } from "./modules/admin-console/sales-agen
 import { startDriveIndexWorker } from "./modules/drive/drive-index.worker";
 import { startCourierSyncWorker } from "./modules/shipping/courier-sync.worker";
 import { startWhatsappProvisionWorker } from "./modules/whatsapp-config/whatsapp-provision.worker";
+import { startWhatsappGroupsWorker } from "./modules/whatsapp-groups/whatsapp-groups.worker";
 
 const httpServer = createServer(app);
 
@@ -33,6 +34,8 @@ httpServer.listen(env.PORT, () => {
   startCourierSyncWorker();
   // Alta automática: completa el canal SMS Tools de las cuentas que nacieron con el proveedor caído.
   startWhatsappProvisionWorker();
+  // Grupos de WhatsApp: despacha la cola de altas a grupos a ritmo de lote.
+  startWhatsappGroupsWorker();
   // Reanuda las campañas masivas que quedaron en ejecución antes del reinicio
   void resumeRunningCampaigns();
   // Ajustes idempotentes del tenant de plataforma (agente de ventas del landing)
