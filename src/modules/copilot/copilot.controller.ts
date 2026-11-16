@@ -82,6 +82,13 @@ import {
   saveGroup,
 } from "../whatsapp-groups/whatsapp-groups.service";
 import {
+  getGroupDetail,
+  listGroupMessages,
+  removeParticipants,
+  sendGroupMessage,
+  setGroupChat,
+} from "../whatsapp-groups/whatsapp-group-chat.service";
+import {
   transcribeConversationMessage,
   listConversations,
   listConversationMessages,
@@ -1747,7 +1754,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "ver_grupos_whatsapp",
       description:
-        "GRUPOS DE WHATSAPP (Canales → WhatsApp → Grupos; solo con SMS Tools): muestra los grupos GUARDADOS del negocio con sus contadores (agregados, invitados, pendientes, en espera, fallidos), el estado de la cola (minutos estimados, si está PAUSADA y por qué) y, con traerDeLaCuenta=true, TODOS los grupos de la cuenta de WhatsApp para elegir cuál guardar. FlowApp agrega clientes a un grupo ya existente; no crea grupos, no saca gente ni escribe en el grupo. La cuenta de WhatsApp debe ser ADMIN del grupo. Solo lectura.",
+        "GRUPOS DE WHATSAPP (Canales → WhatsApp → Grupos; solo con SMS Tools): muestra los grupos GUARDADOS del negocio con sus contadores (agregados, invitados, pendientes, en espera, fallidos), el estado de la cola (minutos estimados, si está PAUSADA y por qué) y, con traerDeLaCuenta=true, TODOS los grupos de la cuenta de WhatsApp para elegir cuál guardar. Cada grupo indica además si tiene el CHAT encendido (chat), si la cuenta es admin, si es solo-admins, el último mensaje y los mensajes sin leer. FlowApp trabaja sobre grupos ya existentes: no crea grupos. Para agregar o sacar gente la cuenta de WhatsApp debe ser ADMIN del grupo. Solo lectura.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1760,7 +1767,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "guardar_grupo_whatsapp",
       description:
-        "Guarda un grupo de la cuenta de WhatsApp en la lista del negocio (para poder usarlo en productos, flujos, el agente y lotes), lo QUITA de la lista (quitar=true: borra su registro de miembros en FlowApp, NO saca a nadie del grupo real) o REANUDA su cola pausada (reanudar=true, tras corregir la causa: p. ej. hacer admin a la cuenta). `grupo` = nombre o gid tal como sale en ver_grupos_whatsapp. Confirma con el dueño antes de quitar.",
+        "Guarda un grupo de la cuenta de WhatsApp en la lista del negocio (para poder usarlo en productos, flujos, el agente y lotes), lo QUITA de la lista (quitar=true: borra su registro de miembros en FlowApp, NO saca a nadie del grupo real) REANUDA su cola pausada (reanudar=true, tras corregir la causa: p. ej. hacer admin a la cuenta) o ENCIENDE / APAGA el «Chat del grupo» de un grupo ya guardado (chat=true/false: con el chat encendido FlowApp empieza a recibir y guardar los mensajes de ese grupo desde ese momento, sin historial anterior, y se puede leer y escribir con leer_chat_grupo / enviar_mensaje_grupo; el bot nunca responde en grupos). `grupo` = nombre o gid tal como sale en ver_grupos_whatsapp. Confirma con el dueño antes de quitar.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1769,6 +1776,7 @@ export const TOOLS: ToolDefinition[] = [
           grupo: { type: "string", description: "nombre o gid (…@g.us) del grupo" },
           quitar: { type: "boolean" },
           reanudar: { type: "boolean" },
+          chat: { type: "boolean", description: "true enciende el chat del grupo, false lo apaga (el grupo debe estar guardado)" },
         },
       },
     },
@@ -1816,6 +1824,80 @@ export const TOOLS: ToolDefinition[] = [
           pagina: { type: "number" },
           accion: { type: "string", enum: ["reintentar", "cancelar_pendientes", "actualizar_invitados"] },
           miembroIds: { type: "array", items: { type: "string" }, description: "ids de la lista, solo para 'reintentar'" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ver_info_grupo",
+      description:
+        "CHAT DE GRUPOS: detalle de un grupo GUARDADO de WhatsApp: descripción, cantidad de participantes, si la cuenta del negocio es ADMIN, si es «solo admins» (announce: solo los administradores pueden escribir), si el chat está encendido, mensajes sin leer y la lista de participantes (teléfono o identificador, nombre, si es admin y, si coincide con un cliente del negocio, su nombre e id). Con actualizar=true vuelve a consultar a WhatsApp. Solo lectura.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["grupo"],
+        properties: {
+          grupo: { type: "string", description: "nombre o id del grupo guardado (ver_grupos_whatsapp)" },
+          actualizar: { type: "boolean", description: "true = recarga los datos desde WhatsApp" },
+          buscar: { type: "string", description: "filtra participantes por nombre o teléfono" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "leer_chat_grupo",
+      description:
+        "CHAT DE GRUPOS: lee los últimos mensajes de un grupo guardado que tenga el «Chat del grupo» ENCENDIDO (guardar_grupo_whatsapp chat=true). Cada mensaje trae id, autor (nombre y teléfono; propio=true si lo escribió el negocio y por dónde: TELEFONO, PANEL, COPILOTO o FLUJO), hora, texto, adjunto, a qué mensaje responde, menciones y reacciones; los EVENTOS (alguien entró, salió, cambió el nombre) salen como líneas de sistema. No hay historial anterior al momento en que se encendió el chat. Los mensajes de un grupo NO son leads: el bot no los responde. Solo lectura (no marca como leído).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["grupo"],
+        properties: {
+          grupo: { type: "string", description: "nombre o id del grupo guardado" },
+          limite: { type: "number", description: "cuántos mensajes (1-50, por defecto 20)" },
+          antesDe: { type: "string", description: "id de un mensaje: trae los anteriores a ese (paginación hacia atrás)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "enviar_mensaje_grupo",
+      description:
+        "CHAT DE GRUPOS: publica UN mensaje REAL en un grupo de WhatsApp guardado con el chat encendido; lo ven TODOS los participantes a nombre del negocio. Texto y/o un adjunto por URL (imagen, video, audio o documento). Para RESPONDER a un mensaje pasa citarMensajeId (id de leer_chat_grupo). Para MENCIONAR escribe @<número> en el texto y pasa esos números en `mencionar` (deben ser participantes). No se puede reaccionar. Falla si el chat está apagado, si el grupo es «solo admins» y la cuenta no es admin, o si se superó el tope de seguridad (12 mensajes automáticos por grupo y hora, sumando flujos y Copiloto). OBLIGATORIO: muéstrale al dueño el texto exacto y el grupo, y envía SOLO tras su confirmación explícita; nunca por iniciativa propia.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["grupo"],
+        properties: {
+          grupo: { type: "string", description: "nombre o id del grupo guardado" },
+          mensaje: { type: "string", description: "texto (o caption del adjunto)" },
+          mediaUrl: { type: "string", description: "URL pública del adjunto (opcional)" },
+          nombreArchivo: { type: "string", description: "nombre visible si es un documento" },
+          citarMensajeId: { type: "string", description: "id del mensaje del grupo al que responde" },
+          mencionar: { type: "array", items: { type: "string" }, description: "números a mencionar (el texto debe traer @<número>)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sacar_de_grupo",
+      description:
+        "CHAT DE GRUPOS: SACA participantes de un grupo de WhatsApp guardado (máx. 50 por llamada). La cuenta del negocio debe ser ADMIN del grupo. Es una acción real e inmediata: la persona deja de estar en el grupo y en la lista de FlowApp queda como CANCELADO (no se vuelve a agregar sola). `telefonos` = números o identificadores tal como salen en ver_info_grupo. OBLIGATORIO: confirma con el dueño a quién se saca y de qué grupo antes de llamar; nunca por iniciativa propia.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["grupo", "telefonos"],
+        properties: {
+          grupo: { type: "string", description: "nombre o id del grupo guardado" },
+          telefonos: { type: "array", items: { type: "string" }, description: "participantes a sacar (1-50)" },
         },
       },
     },
@@ -5830,6 +5912,11 @@ export async function runCopilotTool(
             nombre: g.name,
             gid: g.gid,
             ...g.counters,
+            chat: g.chatEnabled,
+            cuentaEsAdmin: g.isAdmin,
+            soloAdmins: g.announce,
+            participantes: g.participantCount,
+            ...(g.chatEnabled ? { ultimoMensaje: g.lastMessagePreview, ultimoMensajeEl: g.lastMessageAt, sinLeer: g.unread } : {}),
             minutosEstimados: g.etaMinutes,
             pausado: g.pausedReason ? { causa: g.pausedReason, desde: g.pausedAt } : null,
             proximoLote: g.nextBatchAt,
@@ -5844,8 +5931,22 @@ export async function runCopilotTool(
     case "guardar_grupo_whatsapp": {
       try {
         const ref = String(args.grupo ?? "").trim();
-        if (args.quitar === true || args.reanudar === true) {
+        if (args.quitar === true || args.reanudar === true || typeof args.chat === "boolean") {
           const g = matchGroupRef(await savedGroupRefs(companyId), ref);
+          if (typeof args.chat === "boolean" && args.quitar !== true && args.reanudar !== true) {
+            await setGroupChat(companyId, g.id, args.chat);
+            return {
+              result: JSON.stringify({
+                ok: true,
+                grupo: g.name,
+                chatEncendido: args.chat,
+                nota: args.chat
+                  ? "Chat encendido: desde ahora se guardan los mensajes del grupo (lo anterior no existe). Se ve en Conversaciones → Grupos."
+                  : "Chat apagado: FlowApp deja de recibir los mensajes de ese grupo. Lo ya guardado se conserva.",
+              }),
+              wrote: true,
+            };
+          }
           if (args.quitar === true) {
             await removeGroup(companyId, g.id);
             return { result: JSON.stringify({ ok: true, quitado: g.name, nota: "Se quitó de la lista de FlowApp con su registro de miembros. Nadie salió del grupo real. Los productos, flujos o el agente que lo usaban dejan de agregar." }), wrote: true };
@@ -6003,6 +6104,118 @@ export async function runCopilotTool(
         };
       } catch (err) {
         return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo leer el grupo" }), wrote: false };
+      }
+    }
+    case "ver_info_grupo": {
+      try {
+        const g = matchGroupRef(await savedGroupRefs(companyId), args.grupo);
+        const d = await getGroupDetail(companyId, g.id, { refresh: args.actualizar === true });
+        const q = String(args.buscar ?? "").trim().toLowerCase();
+        const parts = q
+          ? d.participants.filter((p) => `${p.phone} ${p.name ?? ""} ${p.customerName ?? ""}`.toLowerCase().includes(q))
+          : d.participants;
+        return {
+          result: JSON.stringify({
+            ok: true,
+            id: d.id,
+            nombre: d.name,
+            descripcion: d.description,
+            chatEncendido: d.chatEnabled,
+            cuentaEsAdmin: d.isAdmin,
+            soloAdmins: d.announce,
+            participantes: d.participantCount,
+            sinLeer: d.unread,
+            datosDesactualizados: d.stale,
+            actualizadoEl: d.infoSyncedAt,
+            listaParticipantes: parts.slice(0, 200).map((p) => ({
+              telefono: p.phone,
+              nombre: p.customerName ?? p.name,
+              admin: p.isAdmin || p.isSuperadmin,
+              ...(p.customerId ? { clienteId: p.customerId } : {}),
+            })),
+            ...(parts.length > 200 ? { nota: `Se muestran 200 de ${parts.length}; usa buscar para filtrar.` } : {}),
+          }),
+          wrote: false,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo leer el grupo" }), wrote: false };
+      }
+    }
+    case "leer_chat_grupo": {
+      try {
+        const g = matchGroupRef(await savedGroupRefs(companyId), args.grupo);
+        const limite = Math.min(Math.max(Math.trunc(Number(args.limite) || 20), 1), 50);
+        const antesDe = String(args.antesDe ?? "").trim() || null;
+        const page = await listGroupMessages(companyId, g.id, { limit: limite, before: antesDe });
+        return {
+          result: JSON.stringify({
+            ok: true,
+            grupo: g.name,
+            hayMasAnteriores: page.hasMore,
+            mensajes: page.messages.map((m) => ({
+              id: m.id,
+              tipo: m.kind === "EVENTO" ? "evento" : "mensaje",
+              hora: m.createdAt,
+              ...(m.kind === "EVENTO"
+                ? {}
+                : m.fromMe
+                  ? { propio: true, enviadoDesde: m.sentBy }
+                  : { autor: m.authorName ?? m.authorPhone, telefono: m.authorPhone, ...(m.customerId ? { clienteId: m.customerId } : {}) }),
+              texto: m.message,
+              ...(m.mediaUrl ? { adjunto: { url: m.mediaUrl, tipo: m.mediaType, nombre: m.fileName } } : {}),
+              ...(m.quotedPreview ? { respondeA: m.quotedPreview } : {}),
+              ...(m.mentions.length ? { menciones: m.mentions } : {}),
+              ...(m.reactions.length ? { reacciones: m.reactions.map((r) => `${r.emoji} ${r.name ?? r.phone}`) } : {}),
+              ...(m.fromMe && m.deliveryStatus ? { estado: m.deliveryStatus } : {}),
+            })),
+            ...(page.messages.length ? {} : { nota: "Sin mensajes. El chat de un grupo empieza cuando se enciende «Chat del grupo»; lo anterior no existe." }),
+          }),
+          wrote: false,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo leer el chat del grupo" }), wrote: false };
+      }
+    }
+    case "enviar_mensaje_grupo": {
+      try {
+        const g = matchGroupRef(await savedGroupRefs(companyId), args.grupo);
+        const text = String(args.mensaje ?? "").trim();
+        const mediaUrl = String(args.mediaUrl ?? "").trim() || null;
+        if (!text && !mediaUrl) throw new AppError("Indica el mensaje o un adjunto.", 400);
+        if (mediaUrl && !/^https?:\/\//i.test(mediaUrl)) throw new AppError("mediaUrl debe ser una URL pública (http/https).", 400);
+        const sent = await sendGroupMessage(
+          companyId,
+          g.id,
+          {
+            text,
+            mediaUrl,
+            mediaKind: mediaUrl ? mediaKindFromUrl(mediaUrl) : null,
+            fileName: String(args.nombreArchivo ?? "").trim() || null,
+            quoteMessageId: String(args.citarMensajeId ?? "").trim() || null,
+            mentions: Array.isArray(args.mencionar) ? (args.mencionar as unknown[]).map(String) : undefined,
+          },
+          "COPILOTO",
+        );
+        return {
+          result: JSON.stringify({ ok: true, enviadoA: g.name, mensajeId: sent.id, texto: sent.message, nota: "Publicado en el grupo. El ✓✓ llega después (un solo estado por mensaje, no por persona)." }),
+          wrote: true,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo enviar al grupo" }), wrote: false };
+      }
+    }
+    case "sacar_de_grupo": {
+      try {
+        const g = matchGroupRef(await savedGroupRefs(companyId), args.grupo);
+        const phones = Array.isArray(args.telefonos) ? (args.telefonos as unknown[]).map(String).filter(Boolean) : [];
+        if (!phones.length || phones.length > 50) throw new AppError("Indica entre 1 y 50 participantes.", 400);
+        const r = await removeParticipants(companyId, g.id, phones);
+        return {
+          result: JSON.stringify({ ok: r.removed.length > 0, grupo: g.name, sacados: r.removed, noSePudo: r.failed }),
+          wrote: r.removed.length > 0,
+        };
+      } catch (err) {
+        return { result: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "no se pudo sacar del grupo" }), wrote: false };
       }
     }
     case "listar_acciones_http": {
@@ -6498,7 +6711,8 @@ const SYSTEM_GUIDE = [
   "- Conversaciones (/conversaciones): chats en vivo; el asesor humano puede intervenir (el bot se pausa), usar respuestas rápidas con /comando y reactivar el bot. Los mensajes muestran checks de entrega/lectura (✓/✓✓), las reacciones emoji del cliente y las respuestas citadas. En atención humana el asesor también puede REACCIONAR con emoji a cualquier mensaje y RESPONDER CITANDO un mensaje (como en WhatsApp), pasando el mouse sobre la burbuja. El chat muestra en vivo cuando el cliente está escribiendo o grabando audio, y el cliente ve 'escribiendo…' en su WhatsApp cuando el asesor o el bot redactan. Las llamadas entrantes se rechazan automáticamente y aparecen como evento 📞 en el chat (el bot responde por texto). CHATS FIJADOS: el dueño puede fijar chats sin límite (botón Fijar en el chat o fijar_conversacion por aquí); la lista muestra los 2 fijados más recientes y el resto con 'Ver más'. CHATS FAVORITOS (distinto de fijar): «Marcar favorito» en el menú ⋯ pone un corazón en la lista y el filtro «Solo favoritos» los aísla (favorito en listar_conversaciones, filtro favoritos:true). MENSAJES DESTACADOS: la estrella de cada burbuja (hover en escritorio, mantener pulsado en móvil) lo marca y la pestaña «Destacados» del panel lateral los lista y salta al mensaje (destacado:true en leer_conversacion). CITAS: tocar la cita de un mensaje salta al mensaje citado. AUDIOS: se transcriben solos si hay key de OpenAI para audios; si no se transcribió (o el chat está en atención humana y quieres leerlo), el asesor usa clic derecho → Transcribir sobre el audio (en el celular, mantener pulsado) o tú transcribir_audio; no dispara al agente. STICKERS: los que manda el cliente se ven sin burbuja y se guardan en la galería del negocio con «Guardar sticker»; el asesor envía stickers desde el botón del composer (galería + «Subir imagen», que se convierte sola a WebP 512×512); por aquí NO se envían stickers. El agente IA SÍ 've' los stickers que manda el cliente: visión los describe en una frase (personaje, emoción, texto) y responde en contexto; no pasan por la lectura de comprobantes. NOTAS vs RESPUESTAS DEL FLUJO: la pestaña Notas son notas privadas del equipo (el agente NO las ve); las «Respuestas del flujo» (lo que el cliente contestó en bloques de pregunta de un flujo, chips 📝 en las tarjetas del CRM y lista en Contacto) SÍ entran al contexto del agente y se borran con la × (en el CRM o en Contacto) o con gestionar_cliente_crm quitarRespuestasFlujo. NO CONTACTAR: si un cliente pide que no le escriban más (ya no me escribas, no me molestes…), el agente se despide en una línea, pasa el chat a atención humana, cancela TODOS sus recordatorios pendientes y avisa al dueño por WhatsApp; el cliente queda marcado 'No contactar' (noContactar en ver_cliente/listar_conversaciones) y campañas de WhatsApp y correo + recordatorios automáticos lo excluyen aunque se reactive el bot. La marca se quita desde el chat (Quitar marca) o con actualizar_cliente {noContactar:false}; se pone a mano con {noContactar:true}. ACCIONES HTTP (Integraciones → Acciones HTTP, como el nodo HTTP Request de n8n): el dueño guarda CONEXIONES (URL base + credencial cifrada: Bearer, API key en cabecera o query, Basic; el secreto solo se escribe en el panel y nunca se muestra) y ACCIONES (peticiones con método, URL, query, cabeceras y cuerpo JSON con variables {{nombre}}, {{telefono}}, {{correo}}, {{producto}}, {{precio}}, {{pedido}}, variables del flujo y {{param.x}}). La respuesta queda aplanada en variables {{api.status}}, {{api.body}}, {{api.<campo>.<subcampo>}} (responseVar cambia el prefijo). Se usan en TRES lugares: (1) FLUJOS, bloque «Petición HTTP» (http-request, salidas success/error); (2) ENTREGA DEL PRODUCTO, digitalDelivery.assignmentMode 'HTTP_ACTION' + httpActionId: al confirmar el pago se llama a la API y el mensaje de entrega usa {api.campo}; si la API falla el cliente recibe 'un asesor te lo envía', el dueño un aviso con el error y la venta queda en entrega manual; no se genera dos veces para la misma venta; (3) AGENTE IA: una acción con agentEnabled se vuelve la herramienta accion_<slug> (agentDescription = cuándo usarla; agentParams = datos que pide al cliente; oncePerCustomer = una vez por cliente, p. ej. una licencia demo); CUÁNDO ofrecerla lo decide el prompt del dueño, no el sistema. SUBIR ARCHIVOS DESDE CLAUDE.AI: las imágenes o archivos que el dueño pega en el chat de Claude NO llegan a FlowApp; usa crear_enlace_subida {productId} y dale el enlace (30 min) para que los suba ahí; luego configúralos. Herramientas: listar_acciones_http, probar_accion_http (llama a la API real), crear_accion_http / editar_accion_http (edición PARCIAL: solo lo que mandas cambia; sin credenciales en headers), liberar_accion_http (vuelve a permitir una acción 'una vez por cliente' a un cliente; reiniciar_conversacion también la libera). Si el agente recibe bloqueado:true es que esa acción ya se usó con el cliente y sigue la regla del prompt del dueño. El panel tiene «Importar cURL» y «Probar». Historial de ejecuciones en Integraciones → Acciones HTTP → Ejecuciones (secretos enmascarados). ARCHIVOS: se puede subir y enviar cualquier archivo pdf, xml, xls/xlsx, doc/docx, zip, rar, 7z, txt, csv o pptx (hasta 100 MB; imagen/video/audio hasta 50 MB) desde Recursos, respuestas rápidas, campañas, recordatorios, flujos (bloque Enviar documento), presentación y entrega del producto, tienda y el chat; el cliente lo recibe como documento descargable con su nombre. En Meta solo txt/xls/xlsx/doc/docx/ppt/pptx/pdf viajan como documento; zip/rar/7z/csv/xml se envían como enlace. El agente IA ve los archivos que manda el cliente como '[el cliente envió un archivo: nombre]' (no los abre) y puede enviar los del producto con enviar_multimedia. PESTAÑA RECURSOS del chat (junto a Contacto/Respuestas/Notas): lista la BIBLIOTECA de multimedia del negocio — archivos de productos + multimedia de recordatorios (generales y por producto), banner y mensajes adicionales de presentación y mensajes post-venta — con su origen, filtro por producto y buscador; el asesor la envía al cliente con un clic, con o sin su descripción (al enviarla, el panel resuelve las variantes {a|b} y {nombre}); la misma biblioteca se consulta por aquí con listar_recursos. AVISOS AL DUEÑO: cuando el agente deriva a humano (consulta sin respuesta, negociación, reclamo, pago, flujo, campaña) y cuando un cliente escribe en un chat en atención humana, el dueño recibe un WhatsApp con el link directo al chat (flowapp.pe/conversaciones?id=…). TOMAR EL CONTROL DE UN CHAT DESDE AQUÍ (lo mismo que hace el asesor en el panel): leer_conversacion (trae el id de cada mensaje) → enviar_mensaje_cliente (texto y/o imagen/video/audio/archivo por URL, citando con citarMensajeId; por defecto pasa el chat a atención humana) o enviar_respuesta_rapida (/comando con sus acciones) o reaccionar_mensaje (emoji) → programar_recordatorio_cliente para un seguimiento a una hora → al terminar, atencion_humana {activar:false} REACTIVA el bot (si no, el agente IA no vuelve a responderle). Reactivar el bot (desde el panel, con BOT <número> por WhatsApp o con atencion_humana) limpia la derivación: el agente retoma con lo que respondió el asesor y NO vuelve a derivar por el mismo motivo (solo si el cliente pide una persona o hay un problema nuevo). atencion_humana {activar:true} pausa el bot sin escribir. iniciar_conversacion abre un chat con un número nuevo (solo tras confirmación; en Meta no se puede sin plantilla). reiniciar_conversacion borra el historial (irreversible, solo tras confirmación). Límites automáticos de los envíos del copiloto: nunca a clientes noContactar; en Meta solo dentro de la ventana de 24 h desde el último mensaje del cliente (fuera de ella usa un recordatorio o campaña con plantilla); ritmo anti-bloqueo igual al de los recordatorios (tope por hora y separación entre clientes distintos; si devuelve reintentarEnSeg, espera). La firma del negocio se agrega sola a cada mensaje. Escribe como una persona del negocio: corto, una idea y una pregunta; precios, pagos y enlaces SOLO de ver_producto/ver_configuracion/ver_tienda, nunca inventados.",
   "- CONVERSACIONES (/conversaciones): la lista del panel busca y filtra en TODO el historial del negocio (nombre, teléfono, etapa, etiqueta, anuncio) con scroll infinito, y los mensajes de cada chat se cargan por tramos (los más recientes primero, «Cargar anteriores» arriba). En móvil: lista → chat (atrás vuelve a la lista) → herramientas en hoja inferior (Contacto, Respuestas, Notas, Destacados, Recursos); el menú ⋯ del chat tiene Mensajes destacados, Fijar, Marcar favorito, Etiquetas, Recordatorio, No contactar, Fondo, Reiniciar y Eliminar; escribir en un chat con el bot activo toma el control automáticamente.\n" +
   "- BÚSQUEDA EN GOOGLE DRIVE (entrega): si la entrega de un producto digital (digitalDelivery.instructions / followupMessages) trae links de carpetas públicas de Drive, el servidor arma un ÍNDICE EN MEMORIA por producto (nombres, rutas, tamaños; nada en la base; se rehace al reiniciar, cada 12 h y cuando cambian los links; tope 30 000 entradas: packs enormes quedan 'parcial' y lo que falta se busca en vivo). El agente busca en TODOS los niveles con búsqueda aproximada (tool buscar_en_drive: mayúsculas, tildes, orden y errores pequeños no importan), lista carpetas paginadas (carpetaId + offset), saca UNA muestra directa (obtener_muestra: un archivo suelto, nunca carpeta; clasifica la coincidencia exacta/parcial/débil con `puntaje` 0-1 y NO da por encontrado lo débil —solo parecido de letras, ej. 'metallica' ≈ 'medallita'—: responde encontrado:false con `sugerencias` de carpetas/categorías cercanas; `minCoincidencia` ajusta el umbral, default parcial) y adjunta archivos pequeños (enviar_archivo_drive). Qué comparte antes/después del pago lo escribe el dueño en el PROMPT del agente (Agente → prompt/reglas o configurar_agente), sin reglas fijas; PERO el SISTEMA, por su cuenta, retira cualquier link de CARPETA de la entrega que el bot intente mandar a un cliente que no compró (deja nota 🔒 en el chat); las carpetas de muestra que el dueño puso en la ficha, FAQs, objeciones o recordatorios del producto siempre pasan, y los links de archivos sueltos no se tocan. Con resultados de Drive en el turno, el agente NO deriva por CONSULTA. Requiere carpetas 'cualquiera con el enlace' y la API key de Google de la plataforma (ver_configuracion → driveBusqueda muestra el estado del índice por producto; no la configura el dueño). El dueño prueba aquí con buscar_en_drive / obtener_muestra (reindexar=true fuerza el índice). Comillas: el sistema decodifica entidades HTML (&quot;) en mensajes entrantes y salientes. ADJUNTOS DE DRIVE, dos reglas del sistema: (1) antes de adjuntar un .mp4/.m4v/.3gp/.m4a revisa su formato REAL (no solo la extensión): si el video no es MP4 con H.264 (ej. un MOV o un HEVC/H.265 renombrado a .mp4, que muchos celulares y el panel no reproducen) o el audio no es AAC, NO lo adjunta y el agente lo manda por link; la solución de fondo es volver a exportar ese archivo en MP4 H.264. (2) Un mismo archivo de Drive no se adjunta dos veces al mismo cliente: si el agente lo vuelve a pedir (ej. el cliente dice 'no carga'), el sistema manda el link del archivo en su lugar.",
-  "- GRUPOS DE WHATSAPP (Canales → WhatsApp → Grupos; solo con SMS Tools, con Meta o chat web aparece bloqueado): FlowApp AGREGA clientes a grupos que el dueño ya tiene (no crea grupos, no saca gente, no escribe ni lee el grupo). Primero se GUARDA el grupo (ver_grupos_whatsapp traerDeLaCuenta=true + guardar_grupo_whatsapp). Formas de agregar: automática por producto (grupoWhatsapp: alComprar / alPresentar / alCobrar), manual desde Conversaciones (menú ⋯ o pestaña Contacto) y el chat del CRM, en lote desde el CRM (botón «+ Grupo» en la barra de selección), compradores antiguos de un producto (pestaña Grupos o agregar_a_grupo_whatsapp productId), bloque de flujo «Agregar a grupo» (wa-group-add, salidas éxito/error) y la tool opcional del agente (configurar_agente grupoTool). REGLAS: la cuenta de WhatsApp debe ser ADMIN del grupo (si no, la cola de ese grupo se PAUSA y se avisa al dueño una vez; tras corregirlo se reanuda); nunca se agrega a visitantes web ni a clientes en «No contactar»; nadie se duplica; quien salió del grupo no se vuelve a agregar solo. RITMO: un contacto suelto va al instante; los lotes salen de a 20 cada 10 a 15 minutos (500 ≈ 5 horas) para no arriesgar el número. INVITACIONES: por la privacidad del cliente muchos reciben una invitación en vez de entrar directo; cuenta como hecho y no se sabe si aceptó hasta 'actualizar_invitados' (ver_miembros_grupo). Un fallo se reintenta una vez a las 24 h y luego queda FALLIDO con «Reintentar». En modo simulación no se agrega a nadie.",
+  "- GRUPOS DE WHATSAPP (Canales → WhatsApp → Grupos; solo con SMS Tools, con Meta o chat web aparece bloqueado): FlowApp AGREGA clientes a grupos que el dueño ya tiene y, si se enciende el «Chat del grupo», permite LEER y ESCRIBIR en ellos (no crea grupos, no cambia nombre/foto, no nombra admins). Primero se GUARDA el grupo (ver_grupos_whatsapp traerDeLaCuenta=true + guardar_grupo_whatsapp). Formas de agregar: automática por producto (grupoWhatsapp: alComprar / alPresentar / alCobrar), manual desde Conversaciones (menú ⋯ o pestaña Contacto) y el chat del CRM, en lote desde el CRM (botón «+ Grupo» en la barra de selección), compradores antiguos de un producto (pestaña Grupos o agregar_a_grupo_whatsapp productId), bloque de flujo «Agregar a grupo» (wa-group-add, salidas éxito/error) y la tool opcional del agente (configurar_agente grupoTool). REGLAS: la cuenta de WhatsApp debe ser ADMIN del grupo (si no, la cola de ese grupo se PAUSA y se avisa al dueño una vez; tras corregirlo se reanuda); nunca se agrega a visitantes web ni a clientes en «No contactar»; nadie se duplica; quien salió del grupo no se vuelve a agregar solo. RITMO: un contacto suelto va al instante; los lotes salen de a 20 cada 10 a 15 minutos (500 ≈ 5 horas) para no arriesgar el número. INVITACIONES: por la privacidad del cliente muchos reciben una invitación en vez de entrar directo; cuenta como hecho y no se sabe si aceptó hasta 'actualizar_invitados' (ver_miembros_grupo). Un fallo se reintenta una vez a las 24 h y luego queda FALLIDO con «Reintentar». En modo simulación no se agrega a nadie.",
+  "- CHAT DE GRUPOS (Conversaciones → selector «Chats | Grupos»; solo SMS Tools): cada grupo guardado tiene un interruptor «Chat del grupo», APAGADO por defecto (guardar_grupo_whatsapp chat=true o Canales → WhatsApp → Grupos). Encendido: FlowApp recibe y guarda los mensajes del grupo desde ese momento (SIN historial anterior) y el dueño puede responder, citar, mencionar con @, mandar adjuntos y encuestas, ver participantes y sacar gente (si la cuenta es admin). Tools: ver_grupos_whatsapp (chat, último mensaje, sin leer), ver_info_grupo (participantes, admin, solo-admins), leer_chat_grupo, enviar_mensaje_grupo y sacar_de_grupo. REGLAS: un mensaje de grupo NO es un lead (no crea cliente ni gasta cuota) y el agente IA y los flujos JAMÁS responden en un grupo; lo único automático es el bloque de flujo «Enviar al grupo» (wa-group-send), que publica cuando el flujo de un cliente llega a ese paso. Tope de seguridad: 12 mensajes automáticos por grupo y hora (flujos + Copiloto); el asesor en el panel no tiene tope. Grupo «solo admins»: solo se puede escribir si la cuenta es admin. LÍMITES de WhatsApp vía SMS Tools: se VEN las reacciones de los participantes pero no se puede reaccionar; hay un solo ✓✓/visto por mensaje (el primero de cualquier participante), no por persona; un participante puede aparecer con un identificador en vez de su número (privacidad). Si la cuenta sale del grupo, el chat se apaga solo y se avisa al dueño.",
   "- COLA DE RECORDATORIOS: cada respuesta del bot programa TODOS los pasos de la secuencia de golpe (delays desde ese momento). El worker respeta el tope por hora y el horario; si varios pasos de un cliente están vencidos envía solo el más reciente (activando el precio de la oferta escalonada más avanzada; nunca sube un precio ya ofrecido) y cancela los demás; un paso con más de 12 h de atraso vence si ya hay uno más nuevo (48 h si es el último); el paso 1 de cada lead tiene prioridad sobre pasos atrasados. listar_recordatorios_programados muestra el total real y los atrasados: si los atrasados crecen, la capacidad (tope/hora × horas) no cubre la demanda. cancelar_recordatorios cancela uno, una selección por ids o un lote por filtro (cliente, tipo, producto, atraso): en lote primero soloContar y confirmación del dueño. editar_recordatorio cambia el texto, la multimedia o la hora de UN recordatorio pendiente (en el panel: Recordatorios → Programados → ✎ Editar); para cambiar muchos, cambia la secuencia. El listado va por páginas (pagina, hayMas, siguientePagina): el total real es `total`, nunca el número de filas mostradas. SEGUIMIENTO INTELIGENTE (configurar_recordatorios {resume, postpone, aiReview}; las tres nacen apagadas): «no repetir pasos» hace que la secuencia continúe en el paso siguiente cuando el cliente responde y vuelve a callar; «posponer a pedido» da al agente la herramienta posponer_seguimiento (un ítem con pospuesto:true es ese mensaje; mientras está vigente no salen otros recordatorios a ese cliente) y trae una GUARDIA: si el agente promete escribir en una fecha («te escribo el lunes a las 9») sin llamar a la herramienta, ese texto no sale y el sistema le exige programarla; si aun así no lo hace, el sistema programa ese día el mensaje de respaldo (postpone.fallbackMessage) y, si no logra leer la fecha, deja una nota interna 🗓️ en el chat. Para saber si el agente llamó a una herramienta en un turno, leer_conversacion devuelve turnosDelAgente; «revisión con IA» lee el chat antes de enviar y puede omitir un paso (cancelado con motivo «Omitido por revisión IA: …»), gasta consultas de IA y tiene tope diario. Si el dueño se queja de recordatorios que ignoran la conversación o repiten mensajes, explícale estas tres opciones con ver_configuracion → recordatorios.seguimientoInteligente y actívalas solo con su confirmación.\n" +
   "- CRM (/crm): tablero kanban de clientes con columnas y etiquetas (módulo CRM). El Inbox del panel muestra los últimos 100 contactos sin colocar con «Cargar más» y búsqueda por nombre/teléfono; los clientes siguen existiendo aunque no estén en pantalla. CLIENTES por chat: ver_cliente (ficha + notas), actualizar_cliente (nombre, correo, número, datos), agregar_nota_cliente, gestionar_cliente_crm (columna/etiquetas; con quitarRespuestasFlujo borra las respuestas del chatbot 📝 que se ven en la tarjeta y en Contacto — el agente las volverá a preguntar; solo tras confirmación) y eliminar_cliente (solo tras confirmación). PEDIDOS: actualizar_pedido cambia el estado (avisa al cliente como el panel). CITAS: crear_cita, actualizar_cita (estado o reprogramar) y bloquear_horario (bloqueos de agenda: crear, listar, quitar). CALENDARIO: tras cada cita confirmada por el agente o un flujo, el cliente recibe por WhatsApp enlaces para agregarla a Google Calendar / iPhone (crear_cita devuelve esos enlaces en 'calendario' para que el dueño los pegue si la creó a mano) y, si tiene correo en su ficha, una invitación por email. El dueño ve TODAS sus citas y bloqueos en su propio calendario suscribiendo la URL ICS de Empresa → Agenda → «Calendario en tu teléfono» (iPhone: Ajustes → Calendario → Cuentas → Añadir cuenta → Otro → Añadir calendario suscrito; Google Calendar: Otros calendarios → + → Desde URL; Outlook: Agregar calendario → Suscribirse desde web). Es de UN solo sentido (FlowApp → calendario) y se refresca cada ~1 h según el dispositivo; no hay sincronización con Google OAuth. VIDEOLLAMADA (citas online): el dueño pega un enlace FIJO de Meet/Zoom en el servicio (actualizar_producto verticalData.meetingUrl) o uno por defecto para todo el negocio (configurar_empresa meetingUrl); con eso el cliente recibe '🎥 Enlace de la videollamada' junto con los enlaces de calendario al confirmar/reprogramar, en los recordatorios, en el evento del calendario (como ubicación) y en el correo. No se envía si la cita quedó como presencial (modality) o si no hay enlace. Para crear la sala fija de Meet: meet.google.com → «Nueva reunión» → «Crear una reunión para más tarde» → copiar el enlace (los clientes piden unirse y el dueño los admite; Google borra la sala si pasa 1 año sin usarse). crear_cita devuelve 'calendario.meetingUrl'. Aún no hay enlace único por cita (eso requeriría conectar Google con OAuth). REPROGRAMAR: el agente ve en su prompt la cita vigente del cliente y la MUEVE con reprogramar_cita; agendar_servicio no crea una segunda cita si ya hay una vigente (solo con adicional:true). Si el dueño ve citas duplicadas de antes de este cambio, cancele la vieja con actualizar_cita.",
   "- Campañas (/campanas): envíos masivos por WhatsApp (módulo Campañas). Puedes crearlas tú con crear_campana (queda EN BORRADOR): audiencia por etiquetas del CRM, etapa del embudo, anuncio de origen o teléfonos; secuencia de mensajes con {nombre} y SPINTAX {Hola|Buenas|Qué tal} (cada destinatario recibe una variante — recomiéndalo siempre); y ritmo anti-ban con RANGOS aleatorios definidos por el usuario (intervalSec–intervalMaxSec entre contactos, pausa pauseSec–pauseMaxSec cada pauseEvery), tope diario y horario HH:mm. DEFAULTS SEGUROS si no se indica otra cosa: 45–90 s entre contactos, pausa 180–300 s cada 10, tope 60/día (cuenta todas las campañas del negocio), horario 09:00–21:00. GOTCHAS: sin sendFrom, el tope diario reanuda a MEDIANOCHE (recomienda horario 09:00–21:00); tiempos exactos sin rango son patrón detectable (recomienda rango, ej. 60–120 s); en números nuevos recomienda tope diario 30–50 y subirlo de a poco; sin spintax todos reciben el mismo texto (pide ≥3 variantes en saludo, verbo y cierre; nunca en precios ni links). PROTECCIONES AUTOMÁTICAS: solo UNA campaña en curso por negocio; si 5 envíos seguidos fallan se pausa sola (pauseReason failures) y avisa al dueño por WhatsApp. Flujo seguro OBLIGATORIO: previsualizar_audiencia_campana (total real tras exclusiones) → crear borrador → mostrar total + resumenDeEnvio al usuario → enviar_prueba_campana a su número → iniciar_campana SOLO tras su confirmación explícita (el envío masivo es irreversible) → ver_campana para el seguimiento (cómo va, por qué espera, fallidos) → pausar_campana / reanudar_campana (reversibles) o cancelar_campana (irreversible, confirmación con el nombre). MULTIMEDIA EN CAMPAÑAS: para adjuntar algo ya subido (archivo de producto, video de un recordatorio, banner de presentación) usa listar_recursos y pasa su url como mediaUrl en los mensajes — en el panel es el botón 'Insertar recurso' del paso Mensajes.",
@@ -6581,7 +6795,7 @@ export async function buildSystem(companyId: string, opts: { mode?: "panel" | "o
     "- LINK DE MERCADO PAGO EN EL CHAT: el agente puede enviarlo las veces que haga falta (cada envío es un link nuevo con el monto vigente) y sabe si ya envió uno, por cuánto y hace cuánto, así que no hace falta escribir en el prompt reglas como «el link que te dejé arriba». El agente nunca reenvía un link viejo copiándolo del chat: si lo intenta, el sistema descarta ese texto y envía un link nuevo (eso también levanta la pausa de seguimiento que el cliente hubiera pedido). El ESTILO del mensaje del link se cambia con configurar_pagos {mpLinkMessage}, no en el prompt del agente; el vencimiento con {mpLinkExpiryDays} (apagado por defecto). Si el dueño cuenta que el agente prometió el link y no llegó: el sistema ya lo envía solo cuando el agente lo promete (y si Mercado Pago falla, el agente ofrece los métodos manuales o deriva).",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",
-    "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana, eliminar_cliente, reiniciar_conversacion, iniciar_conversacion, cancelar_recordatorios, agregar_a_grupo_whatsapp (lotes: antes soloContar) y quitar un grupo guardado: SOLO si lo pidió explícitamente y confirmó. Nunca elimines ni escribas a números nuevos por iniciativa propia.",
+    "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana, eliminar_cliente, reiniciar_conversacion, iniciar_conversacion, cancelar_recordatorios, agregar_a_grupo_whatsapp (lotes: antes soloContar), enviar_mensaje_grupo (muestra antes el texto exacto: lo ve todo el grupo), sacar_de_grupo y quitar un grupo guardado: SOLO si lo pidió explícitamente y confirmó. Nunca elimines ni escribas a números nuevos por iniciativa propia.",
     "- ESCRIBIR A CLIENTES (enviar_mensaje_cliente, enviar_respuesta_rapida): son mensajes REALES que el cliente recibe en su WhatsApp a nombre del negocio. Lee antes la conversación, un mensaje por llamada, no insistas si el cliente no respondió al anterior, y reporta cada envío al dueño. Si el dueño te dio una instrucción permanente (p. ej. 'atiende y cierra los leads que vayan quedando'), puedes actuar sin pedir confirmación en cada mensaje, siempre dentro de esa instrucción. Cuando termines de atender a alguien, devuelve el chat al bot con atencion_humana {activar:false}.",
     "- No gestionas datos sensibles (API keys de OpenAI, tokens de Mercado Pago/Meta, credenciales de WhatsApp): para eso indícale la página del panel correspondiente (Agente IA → Modelo para las API keys de IA; Integraciones para Mercado Pago y Meta; WhatsApp API para el canal).",
     "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación 1:1 desde Inicio (/inicio). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",
