@@ -47,6 +47,8 @@ export const updateUiThemeSchema = z.object({
       newMessage: z.boolean(),
       receiptNew: z.boolean(),
       receiptStatus: z.boolean(),
+      // Mensaje nuevo en un grupo de WhatsApp (ausente = apagado).
+      groupMessage: z.boolean().optional(),
     })
     .optional(),
 });
