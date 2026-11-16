@@ -50,8 +50,16 @@ export async function resumeGroupController(req: Request, res: Response) {
 }
 
 export async function listMembersController(req: Request, res: Response) {
-  const q = req.query as unknown as { filter?: string; search?: string; page: number; pageSize: number };
-  return res.json(await listMembers(req.user!.companyId, String(req.params.id), q));
+  // Express 5 vuelve a leer la query en cada acceso: los números validados llegan como texto.
+  const q = req.query as { filter?: string; search?: string; page?: string; pageSize?: string };
+  return res.json(
+    await listMembers(req.user!.companyId, String(req.params.id), {
+      filter: q.filter,
+      search: q.search,
+      page: Math.max(1, Number(q.page) || 1),
+      pageSize: Math.min(100, Math.max(1, Number(q.pageSize) || 25)),
+    }),
+  );
 }
 
 export async function addToGroupController(req: Request, res: Response) {
