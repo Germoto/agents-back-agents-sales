@@ -5,6 +5,7 @@ import {
   groupAddUsage,
   loadGroupPacing,
   saveGroupPacing,
+  saveInviteMessage,
   DEFAULT_GROUP_PACING,
   GROUP_PACING_LIMITS,
   listAvailableGroups,
@@ -87,6 +88,10 @@ export async function getPacingController(req: Request, res: Response) {
 export async function savePacingController(req: Request, res: Response) {
   const companyId = req.user!.companyId;
   return res.json(await pacingPayload(companyId, await saveGroupPacing(companyId, req.body)));
+}
+
+export async function saveInviteMessageController(req: Request, res: Response) {
+  return res.json(await saveInviteMessage(req.user!.companyId, String(req.params.id), req.body.message));
 }
 
 export async function retryMembersController(req: Request, res: Response) {

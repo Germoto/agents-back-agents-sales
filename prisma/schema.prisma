@@ -2268,6 +2268,9 @@ model WhatsappGroup {
   pausedAt           DateTime?
   // Ritmo anti-bloqueo: no se procesa otro lote de este grupo antes de esta hora.
   nextBatchAt        DateTime?
+  // Mensaje propio que se envía al cliente cuando WhatsApp solo permite invitarlo
+  // (la tarjeta de invitación no se puede editar). null = apagado.
+  inviteMessage      String?
   // --- Chat del grupo (apagado por defecto). Encendido = el grupo está vigilado
   // en el gateway y sus mensajes llegan por webhook. Sin historial previo.
   chatEnabled        Boolean                @default(false)

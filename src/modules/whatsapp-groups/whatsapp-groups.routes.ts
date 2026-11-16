@@ -9,6 +9,7 @@ import {
   groupMessagesController,
   getPacingController,
   savePacingController,
+  saveInviteMessageController,
   groupReadController,
   groupSendController,
   groupStarController,
@@ -33,6 +34,7 @@ import {
   groupMessageParams,
   groupMessagesQuery,
   groupPacingSchema,
+  groupInviteMessageSchema,
   groupSendSchema,
   groupStarSchema,
   listMembersQuery,
@@ -54,6 +56,11 @@ router.get("/pacing", asyncHandler(getPacingController));
 router.put("/pacing", validate({ body: groupPacingSchema }), asyncHandler(savePacingController));
 router.get("/customer/:customerId", validate({ params: customerIdParams }), asyncHandler(listCustomerGroupsController));
 router.delete("/:id", validate({ params: groupIdParams }), asyncHandler(removeGroupController));
+router.put(
+  "/:id/invite-message",
+  validate({ params: groupIdParams, body: groupInviteMessageSchema }),
+  asyncHandler(saveInviteMessageController),
+);
 router.post("/:id/resume", validate({ params: groupIdParams }), asyncHandler(resumeGroupController));
 
 // Miembros y cola.

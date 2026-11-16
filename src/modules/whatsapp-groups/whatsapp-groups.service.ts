@@ -19,7 +19,8 @@ import { prisma } from "../../lib/prisma";
 import type { ProductGroupConfig } from "../../lib/product";
 import { smsTools, type SmsToolsGroupAddResult, type SmsToolsGroupInfo } from "../../lib/smstools-client";
 import { SOCKET_EVENTS, socketService } from "../../lib/socket";
-import { notifyOwner, recordMessage } from "../agent/conversation.service";
+import { notifyOwner, recordMessage, sendHumanReply } from "../agent/conversation.service";
+import { applySpintax } from "../agent/reminder-templates";
 
 const RETRY_DELAY_MS = 24 * 60 * 60_000;
 const MAX_ATTEMPTS = 2;
@@ -199,6 +200,7 @@ export async function listSavedGroups(companyId: string) {
         nextBatchAt: g.nextBatchAt,
         counters,
         etaMinutes: estimateMinutes(counters.pendientes, pacing),
+        inviteMessage: g.inviteMessage,
         chatEnabled: g.chatEnabled,
         isAdmin: g.isAdmin,
         announce: g.announce,
@@ -248,6 +250,21 @@ export async function resumeGroup(companyId: string, groupId: string) {
     where: { id: groupId },
     data: { pausedReason: null, pausedAt: null, nextBatchAt: null },
   });
+}
+
+/** Tope del mensaje que acompaña la invitación. */
+export const INVITE_MESSAGE_MAX = 1000;
+
+/** Guarda (o apaga, con texto vacío) el mensaje que acompaña la invitación del grupo. */
+export async function saveInviteMessage(companyId: string, groupId: string, message: string | null) {
+  await requireGroup(companyId, groupId);
+  const text = (message ?? "").trim().slice(0, INVITE_MESSAGE_MAX);
+  const saved = await prisma.whatsappGroup.update({
+    where: { id: groupId },
+    data: { inviteMessage: text || null },
+    select: { id: true, name: true, inviteMessage: true },
+  });
+  return saved;
 }
 
 /**
@@ -608,6 +625,48 @@ async function noteInChat(companyId: string, customerId: string, text: string, s
   }).catch(() => undefined);
 }
 
+/** Origen de los mensajes de invitación (rawPayload.source). */
+const INVITE_SOURCE = "wa-group-invite";
+
+/**
+ * Envía el mensaje propio del negocio tras la invitación de WhatsApp. Variables:
+ * {nombre} y {grupo}; admite variantes {a|b}. Lleva la firma como todo mensaje
+ * saliente. Nunca lanza: si falla, queda una nota en el chat y no se reintenta.
+ */
+async function sendInviteMessage(
+  companyId: string,
+  customerId: string,
+  group: { name: string; inviteMessage: string | null },
+): Promise<void> {
+  const template = (group.inviteMessage ?? "").trim();
+  if (!template) return;
+  try {
+    const customer = await prisma.customer.findFirst({
+      where: { id: customerId, companyId },
+      select: { name: true, optOutAt: true },
+    });
+    if (!customer || customer.optOutAt) return;
+    const conv = await prisma.conversation.findFirst({
+      where: { companyId, customerId, channel: "whatsapp" },
+      orderBy: { lastMessageAt: "desc" },
+      select: { id: true },
+    });
+    if (!conv) return;
+    const nombre = (customer.name ?? "").trim().split(/\s+/)[0] ?? "";
+    const text = applySpintax(template)
+      .replace(/\{nombre\}/gi, nombre)
+      .replace(/\{grupo\}/gi, group.name)
+      .replace(/[^\S\n]{2,}/g, " ")
+      .replace(/[^\S\n]+([,.!?])/g, "$1")
+      .trim();
+    if (!text) return;
+    await sendHumanReply(companyId, conv.id, text, { source: INVITE_SOURCE });
+  } catch (err) {
+    console.warn(`[wa-groups] mensaje de invitación falló (cliente ${customerId}): ${err instanceof Error ? err.message : err}`);
+    void noteInChat(companyId, customerId, `👥 No se pudo enviar tu mensaje de invitación al grupo «${group.name}».`, true);
+  }
+}
+
 function emitMembersChanged(companyId: string, groupId: string) {
   socketService.emitToCompany(companyId, SOCKET_EVENTS.GROUP_UPDATED, { groupId, members: true });
 }
@@ -727,7 +786,7 @@ async function dispatchNext(companyId: string, creds: Creds, checked: Set<string
         group: { pausedReason: null, OR: [{ nextBatchAt: null }, { nextBatchAt: { lte: now } }] },
       },
       orderBy: [{ immediate: "desc" }, { createdAt: "asc" }],
-      include: { group: { select: { id: true, companyId: true, name: true, gid: true } } },
+      include: { group: { select: { id: true, companyId: true, name: true, gid: true, inviteMessage: true } } },
     });
     if (!next) return false;
     const group = next.group;
@@ -801,7 +860,12 @@ async function dispatchNext(companyId: string, creds: Creds, checked: Set<string
                 : hidden
                   ? `👥 No se pudo agregar al grupo «${group.name}»: su número está oculto.`
                   : `👥 No se pudo agregar al grupo «${group.name}» (${raw}).`;
-      if (text) void noteInChat(companyId, next.customerId, text, !next.immediate);
+      if (text) await noteInChat(companyId, next.customerId, text, !next.immediate);
+    }
+    // Mensaje propio del negocio: una sola vez por persona y grupo (no en reintentos
+    // de alguien a quien ya se le envió la invitación).
+    if (status === "INVITADO" && next.lastResult !== "invite_sent") {
+      void sendInviteMessage(companyId, next.customerId, group);
     }
     return true;
   }

@@ -62,6 +62,11 @@ export const addToGroupSchema = z
   })
   .strict();
 
+// Mensaje que acompaña la invitación del grupo ("" o null = apagado).
+export const groupInviteMessageSchema = z.object({
+  message: z.string().max(1000).nullable(),
+});
+
 // Ritmo de altas del negocio (mismos límites que GROUP_PACING_LIMITS).
 export const groupPacingSchema = z
   .object({
