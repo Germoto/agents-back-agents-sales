@@ -15,6 +15,7 @@ import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
 import { normalizePhoneDigits } from "../../lib/identifier";
+import { waGroupsByCustomer, type CustomerWaGroup } from "../whatsapp-groups/customer-groups";
 
 function emitCrmUpdated(companyId: string, crmId?: string) {
   socketService.emitToCompany(companyId, SOCKET_EVENTS.CRM_UPDATED, { crmId: crmId ?? null });
@@ -198,6 +199,8 @@ export interface CrmBoardCard {
   sortOrder: number | null;
   /** Respuestas que el cliente dio en el chatbot de flujos (Customer.metadata.flowVars). */
   flowVars?: Record<string, string>;
+  /** Grupos de WhatsApp en los que está el cliente (agregado, ya estaba o invitado). */
+  waGroups?: CustomerWaGroup[];
 }
 
 function flowVarsOf(metadata: unknown): Record<string, string> | undefined {
@@ -308,7 +311,7 @@ async function buildBoardCards(
   if (!customerIds.length) return cards;
   const conversationIds = conversations.map((c) => c.id);
 
-  const [lastMessages, tagLinks, receipts, dealSums, adMap] = await Promise.all([
+  const [lastMessages, tagLinks, receipts, dealSums, adMap, waGroups] = await Promise.all([
     // Último mensaje por conversación en UNA query (usa el índice
     // ConversationMessage(conversationId, createdAt)).
     conversationIds.length
@@ -335,6 +338,8 @@ async function buildBoardCards(
       _sum: { amount: true },
     }),
     resolveAdDescriptions(companyId),
+    // Grupos de WhatsApp de cada cliente (agregado, ya estaba o invitado).
+    waGroupsByCustomer(companyId, customerIds),
   ]);
 
   const lastMessageByConvo = new Map(lastMessages.map((m) => [m.conversationId, m]));
@@ -377,6 +382,7 @@ async function buildBoardCards(
         (receiptsByCustomer.get(customer.id) ?? 0) + (dealsByCustomer.get(customer.id) ?? 0),
       sortOrder,
       ...(flowVars ? { flowVars } : {}),
+      ...(waGroups.has(customer.id) ? { waGroups: waGroups.get(customer.id) } : {}),
     };
   }
 

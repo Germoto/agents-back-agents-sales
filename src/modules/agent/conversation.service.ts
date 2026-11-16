@@ -6,6 +6,7 @@
  * ConversationMessage que se le pasa a OpenAI cada turno.
  */
 
+import { customerWaGroupsSelect, toCustomerWaGroups } from "../whatsapp-groups/customer-groups";
 import { Prisma, ConversationRole, ScheduledMessageType } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { cancelPendingReminders, scheduleReminder } from "../scheduler/scheduler.service";
@@ -518,6 +519,7 @@ const conversationSummarySelect = {
       adTitle: true,
       optOutAt: true,
       tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
+      whatsappGroupLinks: customerWaGroupsSelect,
     },
   },
   messages: {
@@ -772,13 +774,16 @@ function serializeCustomerWithTags(
     adTitle?: string | null;
     optOutAt?: Date | null;
     tagLinks: Array<{ tag: { id: string; name: string; color: string } }>;
+    whatsappGroupLinks?: Parameters<typeof toCustomerWaGroups>[0];
   },
   adMap?: Map<string, string>,
 ) {
-  const { tagLinks, adSourceId, adTitle, ...rest } = customer;
+  const { tagLinks, whatsappGroupLinks, adSourceId, adTitle, ...rest } = customer;
   return {
     ...rest,
     tags: tagLinks.map((l) => l.tag),
+    // Grupos de WhatsApp en los que está (o fue invitado): se ven en la lista y la cabecera.
+    waGroups: toCustomerWaGroups(whatsappGroupLinks),
     ad: adInfoFor(adMap ?? new Map(), adSourceId, adTitle),
   };
 }
