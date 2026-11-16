@@ -4,7 +4,8 @@ import path from "path";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { isPrivateStoragePath, moveProductFile, privateDownloadUrl } from "../../lib/uploads";
-import { mapAdminProduct, productRelations } from "../../lib/product";
+import { mapAdminProduct, productRelations, type ProductGroupConfig } from "../../lib/product";
+import { cleanProductGroupConfig } from "../whatsapp-groups/whatsapp-groups.service";
 import { env } from "../../config/env";
 
 type ProductPayload = {
@@ -36,6 +37,7 @@ type ProductPayload = {
   category?: string | null;
   verticalData?: Record<string, unknown> | null;
   reminderConfig?: Record<string, unknown> | null;
+  whatsappGroupConfig?: ProductGroupConfig | null;
   sortOrder?: number;
   aliases: string[];
   benefits: Array<{ value: string; sortOrder: number }>;
@@ -383,6 +385,7 @@ export async function getProduct(companyId: string, productId: string) {
 }
 
 export async function createProduct(companyId: string, payload: ProductPayload) {
+  const groupConfig = await cleanProductGroupConfig(companyId, payload.whatsappGroupConfig);
   const productType = await resolveProductType(companyId, payload.productType);
   // Producto físico sin entrega propia (Copiloto, asistente, import): hereda la entrega
   // del negocio (Empresa → Entrega) para que el agente tenga costo/zonas desde el día 1.
@@ -442,6 +445,7 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         category: payload.category ?? null,
         verticalData: payload.verticalData == null ? Prisma.JsonNull : (payload.verticalData as Prisma.InputJsonValue),
         reminderConfig: payload.reminderConfig == null ? Prisma.JsonNull : (payload.reminderConfig as Prisma.InputJsonValue),
+        ...(groupConfig !== undefined ? { whatsappGroupConfig: groupConfig ?? Prisma.JsonNull } : {}),
         sortOrder,
       },
     });
@@ -458,6 +462,8 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
 }
 
 export async function updateProduct(companyId: string, productId: string, payload: ProductPayload) {
+  // undefined = el cliente no envió el campo (panel viejo, import): no se toca.
+  const groupConfig = await cleanProductGroupConfig(companyId, payload.whatsappGroupConfig);
   await ensureProductBelongsToCompany(companyId, productId);
   const productType = await resolveProductType(companyId, payload.productType);
 
@@ -495,6 +501,7 @@ export async function updateProduct(companyId: string, productId: string, payloa
         category: payload.category ?? null,
         verticalData: payload.verticalData == null ? Prisma.JsonNull : (payload.verticalData as Prisma.InputJsonValue),
         reminderConfig: payload.reminderConfig == null ? Prisma.JsonNull : (payload.reminderConfig as Prisma.InputJsonValue),
+        ...(groupConfig !== undefined ? { whatsappGroupConfig: groupConfig ?? Prisma.JsonNull } : {}),
         // El orden se gestiona desde la lista (drag); no se pisa al editar si no viene.
         ...(payload.sortOrder != null ? { sortOrder: payload.sortOrder } : {}),
       },

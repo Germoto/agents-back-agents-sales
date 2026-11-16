@@ -95,6 +95,7 @@ import { courierLabel, searchAgencies } from "../shipping/agency-search";
 import { resolveOrderShipping, type OrderShippingErrorCode } from "../shipping/order-shipping-resolver";
 import { PURCHASED_STORE_ORDER, createOrderForStoreOrder, shippingSnapshotOf, storeOrderLinesOf, type StoreShippingSnapshot } from "./storefront-order.service";
 import { companyTracksStock } from "../orders/orders.service";
+import { autoGroupAddForProducts } from "../whatsapp-groups/whatsapp-groups.service";
 import { applyOrderPayment, moneyOf } from "../orders/order-money";
 import { releasedPickupKey, renderNoticeTemplate } from "../orders/order-notify.service";
 
@@ -1568,6 +1569,10 @@ export async function fulfillStoreOrder(
   void cancelOrderEmails(order.id, "Pedido pagado");
   // En físico el post-compra se programa cuando el pedido real llega a ENTREGADO.
   if (!physical) void schedulePostPurchase(order);
+  // Grupo de WhatsApp «al comprar» (digital; en físico lo dispara el pago del pedido real).
+  if (!physical) {
+    void autoGroupAddForProducts(companyId, [order.productId, ...(order.productIds ?? [])], order.customerId, "onSale");
+  }
 
   const amountText = `${symbolFor(order.currency)} ${opts.paid.toFixed(2)}`;
 

@@ -13,6 +13,7 @@ import { loadWhatsappSender, sendText, sendMedia } from "../agent/outbound";
 import { applyFirma } from "../agent/firma";
 import { recordMessage, setBotPaused, saveState, type ConversationState } from "../agent/conversation.service";
 import { applyCrmAndTagActions } from "../crm/crm.service";
+import { autoGroupAddForProducts } from "../whatsapp-groups/whatsapp-groups.service";
 import type { QuickReplyMessageInput, QuickReplyActionsInput } from "./quick-replies.schemas";
 
 const quickReplySelect = {
@@ -275,6 +276,8 @@ export async function sendQuickReply(
   // en el state. Así, al reactivarse tras modo humano, el bot sabe qué producto
   // se atendió y NO vuelve a presentar la info que ya envió el humano.
   if (actions?.presentProductId) {
+    // Grupo de WhatsApp «al presentar» del producto (segundo plano).
+    void autoGroupAddForProducts(companyId, [actions.presentProductId], convo.customerId, "onPresentation");
     try {
       const state = (convo.state as ConversationState) ?? {};
       const productId = actions.presentProductId;

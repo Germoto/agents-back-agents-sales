@@ -90,6 +90,16 @@ export const productBodySchema = z.object({
   verticalData: z.record(z.string(), z.unknown()).nullable().optional(),
   // Override de recordatorios por producto y tipo: { <tipo>: { message?, mediaUrl? } }.
   reminderConfig: z.record(z.string(), z.unknown()).nullable().optional(),
+  // Grupo de WhatsApp al que se agrega al cliente (id de un grupo guardado) al comprar,
+  // al presentar o al enviar los métodos de pago. No enviarlo = no tocar; null = quitar.
+  whatsappGroupConfig: z
+    .object({
+      onSale: z.string().uuid().nullable().optional(),
+      onPresentation: z.string().uuid().nullable().optional(),
+      onPayment: z.string().uuid().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
   // Orden ya NO se teclea: en create se auto-asigna (append) y en la lista se reordena
   // arrastrando. Opcional para compat.
   sortOrder: z.coerce.number().int().min(0).optional(),

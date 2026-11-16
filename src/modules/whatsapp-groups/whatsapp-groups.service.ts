@@ -13,6 +13,7 @@
 import { Prisma, WhatsappGroupAddSource, WhatsappGroupMemberStatus } from "@prisma/client";
 import { AppError } from "../../lib/app-error";
 import { prisma } from "../../lib/prisma";
+import type { ProductGroupConfig } from "../../lib/product";
 import { smsTools, type SmsToolsGroupAddResult } from "../../lib/smstools-client";
 import { notifyOwner, recordMessage } from "../agent/conversation.service";
 import { PURCHASED_STORE_ORDER } from "../storefront/storefront-order.service";
@@ -149,6 +150,27 @@ export async function resumeGroup(companyId: string, groupId: string) {
     where: { id: groupId },
     data: { pausedReason: null, pausedAt: null, nextBatchAt: null },
   });
+}
+
+/**
+ * Limpia la configuración de grupo de un producto antes de guardarla: solo quedan
+ * ids de grupos guardados de ESTE negocio. undefined = no tocar; null = sin grupos.
+ */
+export async function cleanProductGroupConfig(
+  companyId: string,
+  cfg: ProductGroupConfig | null | undefined,
+): Promise<ProductGroupConfig | null | undefined> {
+  if (cfg === undefined) return undefined;
+  if (cfg === null) return null;
+  const wanted = [cfg.onSale, cfg.onPresentation, cfg.onPayment].filter((v): v is string => Boolean(v));
+  if (wanted.length === 0) return null;
+  const rows = await prisma.whatsappGroup.findMany({ where: { companyId, id: { in: wanted } }, select: { id: true } });
+  const valid = new Set(rows.map((r) => r.id));
+  const out: ProductGroupConfig = {};
+  if (cfg.onSale && valid.has(cfg.onSale)) out.onSale = cfg.onSale;
+  if (cfg.onPresentation && valid.has(cfg.onPresentation)) out.onPresentation = cfg.onPresentation;
+  if (cfg.onPayment && valid.has(cfg.onPayment)) out.onPayment = cfg.onPayment;
+  return Object.keys(out).length ? out : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +402,36 @@ export async function autoGroupAdd(
   } catch (err) {
     console.warn("[wa-groups] alta automática omitida:", err instanceof Error ? err.message : err);
     return { ok: false, reason: "no_disponible" };
+  }
+}
+
+const MOMENT_SOURCE = { onSale: "VENTA", onPresentation: "PRESENTACION", onPayment: "COBRO" } as const;
+
+/**
+ * Alta automática por producto para los caminos que no pasan por el agente (tienda
+ * web, respuesta rápida): lee el grupo configurado en cada producto. Best-effort.
+ */
+export async function autoGroupAddForProducts(
+  companyId: string,
+  productIds: Array<string | null | undefined>,
+  customerId: string | null | undefined,
+  moment: keyof typeof MOMENT_SOURCE,
+): Promise<void> {
+  const ids = [...new Set(productIds.filter((v): v is string => Boolean(v)))];
+  if (!customerId || ids.length === 0) return;
+  try {
+    const products = await prisma.product.findMany({
+      where: { companyId, id: { in: ids } },
+      select: { whatsappGroupConfig: true },
+    });
+    const groupIds = new Set<string>();
+    for (const p of products) {
+      const gid = (p.whatsappGroupConfig as ProductGroupConfig | null)?.[moment];
+      if (gid) groupIds.add(gid);
+    }
+    for (const gid of groupIds) await autoGroupAdd(companyId, gid, customerId, MOMENT_SOURCE[moment]);
+  } catch (err) {
+    console.warn("[wa-groups] alta por producto omitida:", err instanceof Error ? err.message : err);
   }
 }
 

@@ -152,6 +152,32 @@ export async function singleOpenOrderFor(companyId: string, customerId: string):
   return { ...money, orderId: o.id, orderCode: o.orderCode, status: o.status };
 }
 
+/** Agrega al cliente del pedido al grupo «al comprar» de cada producto. Best-effort. */
+async function addOrderBuyersToGroups(companyId: string, orderId: string): Promise<void> {
+  try {
+    const order = await prisma.order.findFirst({
+      where: { id: orderId, companyId },
+      select: {
+        customerId: true,
+        product: { select: { whatsappGroupConfig: true } },
+        items: { select: { product: { select: { whatsappGroupConfig: true } } } },
+      },
+    });
+    if (!order?.customerId) return;
+    const groupIds = new Set<string>();
+    for (const p of [order.product, ...order.items.map((i) => i.product)]) {
+      const onSale = (p?.whatsappGroupConfig as { onSale?: string | null } | null | undefined)?.onSale;
+      if (onSale) groupIds.add(onSale);
+    }
+    if (groupIds.size === 0) return;
+    // Import diferido: evita un ciclo con el módulo de grupos (usa la tienda web).
+    const { autoGroupAdd } = await import("../whatsapp-groups/whatsapp-groups.service");
+    for (const gid of groupIds) await autoGroupAdd(companyId, gid, order.customerId, "VENTA");
+  } catch (err) {
+    console.warn("[orders] grupo de WhatsApp al pagar omitido:", err instanceof Error ? err.message : err);
+  }
+}
+
 export interface ApplyPaymentInput {
   companyId: string;
   orderId: string;
@@ -208,6 +234,7 @@ export async function applyOrderPayment(input: ApplyPaymentInput): Promise<Apply
           amount: Number(dup.amount),
           money: before,
           previousStatus: order.status,
+          firstPayment: false,
         };
       }
     }
@@ -244,7 +271,7 @@ export async function applyOrderPayment(input: ApplyPaymentInput): Promise<Apply
         data: { orderId: order.id },
       });
     }
-    return { already: false, order, kind, amount, money, previousStatus: order.status };
+    return { already: false, order, kind, amount, money, previousStatus: order.status, firstPayment: before.paid <= EPS };
   });
   if (!result) return null;
 
@@ -268,6 +295,10 @@ export async function applyOrderPayment(input: ApplyPaymentInput): Promise<Apply
       }).catch(() => null);
       if (u) status = u.status;
     }
+  }
+  // Primer pago acreditado del pedido: grupo de WhatsApp «al comprar» de sus productos.
+  if (!result.already && result.firstPayment) {
+    void addOrderBuyersToGroups(input.companyId, result.order.id);
   }
   if (!result.already && status === result.order.status) {
     // Sin cambio de estado no hubo evento: avisar al panel para que refresque montos.

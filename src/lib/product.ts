@@ -1,6 +1,9 @@
 import { signDownloadToken } from "./jwt";
 import { Prisma } from "@prisma/client";
 
+/** Grupo de WhatsApp (id de WhatsappGroup guardado) por momento del producto. */
+export type ProductGroupConfig = { onSale?: string | null; onPresentation?: string | null; onPayment?: string | null };
+
 const productArgs = Prisma.validator<Prisma.ProductDefaultArgs>()({
   include: {
     aliases: true,
@@ -121,6 +124,7 @@ export function mapAdminProduct(product: ProductWithRelations) {
     category: product.category ?? null,
     verticalData: (product.verticalData ?? null) as Record<string, unknown> | null,
     reminderConfig: (product.reminderConfig ?? null) as Record<string, unknown> | null,
+    whatsappGroupConfig: (product.whatsappGroupConfig ?? null) as ProductGroupConfig | null,
     // Agenda de citas (rubro SERVICE): el panel y el widget necesitan estos datos.
     durationMin: product.durationMin,
     slotCapacity: product.slotCapacity,
@@ -240,6 +244,7 @@ export function mapBotProduct(
     category: product.category ?? null,
     verticalData: (product.verticalData ?? null) as Record<string, unknown> | null,
     reminderConfig: (product.reminderConfig ?? null) as Record<string, unknown> | null,
+    whatsappGroupConfig: (product.whatsappGroupConfig ?? null) as ProductGroupConfig | null,
     benefits: product.benefits.map((item) => item.value),
     includes: product.includes.map((item) => item.value),
     bonuses: product.bonuses.map((item) => item.value),

@@ -91,6 +91,7 @@ import {
 } from "../shipping/shipping-config";
 import { searchAgencies, courierLabel } from "../shipping/agency-search";
 import { resolveOrderShipping, resolvePaymentModeChoice, type OrderPayMode } from "../shipping/order-shipping-resolver";
+import { autoGroupAdd } from "../whatsapp-groups/whatsapp-groups.service";
 import { orderDueFor, applyOrderPayment, acceptsAmount, moneyOf, type OrderDue } from "../orders/order-money";
 
 /** Tope de archivos por envío (enviar_multimedia con fileIds y presentación). */
@@ -1281,6 +1282,8 @@ export async function assignAndBuildDelivery(
           console.error("[agent] acciones CRM de venta fallaron:", err instanceof Error ? err.message : err);
         }
       }
+      // Grupo de WhatsApp «al comprar»: se encola y se intenta en segundo plano.
+      void autoGroupAdd(opts.companyId, find(pid)?.whatsappGroupConfig?.onSale, opts.customerId, "VENTA");
     }
   }
 
@@ -2836,6 +2839,8 @@ export async function executeTool(
             console.error("[agent] acciones CRM al presentar fallaron:", err instanceof Error ? err.message : err);
           }
         }
+        // Grupo de WhatsApp «al presentar» (segundo plano, no frena la ficha).
+        void autoGroupAdd(ctx.companyId, product.whatsappGroupConfig?.onPresentation, ctx.customerId, "PRESENTACION");
       }
 
       const fichaVertical = (ctx.config.business as { vertical?: string }).vertical;
@@ -3491,6 +3496,8 @@ export async function executeTool(
               console.error("[agent] acciones CRM al cobrar fallaron:", err instanceof Error ? err.message : err);
             }
           }
+          // Grupo de WhatsApp «al enviar los métodos de pago» (segundo plano).
+          void autoGroupAdd(ctx.companyId, findProductById(ctx, pid)?.whatsappGroupConfig?.onPayment, ctx.customerId, "COBRO");
         }
       }
 
