@@ -53,16 +53,14 @@ export const listMembersQuery = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(25),
 });
 
-// Agregar: por clientes (uno o lote) o por compradores de un producto. dryRun solo cuenta.
+// Agregar: siempre por clientes elegidos (uno o varios). dryRun solo cuenta.
+// strict: un productId (lote de compradores, retirado) responde 400 en vez de ignorarse.
 export const addToGroupSchema = z
   .object({
-    customerIds: z.array(z.string().uuid()).min(1).max(500).optional(),
-    productId: z.string().uuid().optional(),
+    customerIds: z.array(z.string().uuid()).min(1).max(500),
     dryRun: z.boolean().optional(),
   })
-  .refine((v) => Boolean(v.customerIds?.length) !== Boolean(v.productId), {
-    message: "Indica clientes o un producto (solo uno de los dos).",
-  });
+  .strict();
 
 // Ritmo de altas del negocio (mismos límites que GROUP_PACING_LIMITS).
 export const groupPacingSchema = z

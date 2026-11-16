@@ -20,7 +20,6 @@ import type { ProductGroupConfig } from "../../lib/product";
 import { smsTools, type SmsToolsGroupAddResult, type SmsToolsGroupInfo } from "../../lib/smstools-client";
 import { SOCKET_EVENTS, socketService } from "../../lib/socket";
 import { notifyOwner, recordMessage } from "../agent/conversation.service";
-import { PURCHASED_STORE_ORDER } from "../storefront/storefront-order.service";
 
 const RETRY_DELAY_MS = 24 * 60 * 60_000;
 const MAX_ATTEMPTS = 2;
@@ -541,46 +540,6 @@ export async function autoGroupAddForProducts(
   } catch (err) {
     console.warn("[wa-groups] alta por producto omitida:", err instanceof Error ? err.message : err);
   }
-}
-
-/** Compradores de un producto: entregas digitales, comprobantes aprobados, pedidos y tienda web. */
-export async function resolveBuyers(companyId: string, productId: string): Promise<string[]> {
-  const [sales, receipts, orders, storeOrders] = await Promise.all([
-    prisma.digitalSale.findMany({
-      where: { companyId, productId, status: "ENTREGADO" },
-      select: { customerId: true },
-      distinct: ["customerId"],
-    }),
-    prisma.paymentReceipt.findMany({
-      where: { companyId, status: "APROBADO", customerId: { not: null }, OR: [{ productId }, { productIds: { has: productId } }] },
-      select: { customerId: true },
-      distinct: ["customerId"],
-    }),
-    prisma.order.findMany({
-      where: {
-        companyId,
-        AND: [
-          { OR: [{ productId }, { items: { some: { productId } } }] },
-          {
-            OR: [
-              { status: { in: ["PAGADO", "DESPACHADO", "LISTO_PARA_RECOGER", "ENTREGADO"] } },
-              { status: { not: "CANCELADO" }, paymentStatus: { in: ["PAGADO", "PAGO_PARCIAL"] } },
-            ],
-          },
-        ],
-      },
-      select: { customerId: true },
-      distinct: ["customerId"],
-    }),
-    prisma.storeOrder.findMany({
-      where: { companyId, AND: [PURCHASED_STORE_ORDER, { OR: [{ productId }, { productIds: { has: productId } }] }] },
-      select: { customerId: true },
-      distinct: ["customerId"],
-    }),
-  ]);
-  const out = new Set<string>();
-  for (const r of [...sales, ...receipts, ...orders, ...storeOrders]) if (r.customerId) out.add(r.customerId);
-  return [...out];
 }
 
 // ---------------------------------------------------------------------------

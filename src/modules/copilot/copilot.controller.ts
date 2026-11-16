@@ -76,7 +76,6 @@ import {
   listSavedGroups,
   refreshInvited,
   removeGroup,
-  resolveBuyers,
   resumeGroup,
   retryMembers as retryGroupMembers,
   saveGroup,
@@ -1786,7 +1785,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "agregar_a_grupo_whatsapp",
       description:
-        "AGREGA clientes a un grupo GUARDADO de WhatsApp. Elige UNA audiencia: clientes (teléfonos o ids), etiquetas (clientes con CUALQUIERA de esas etiquetas), columna (clientes en esa columna de un tablero) o productId (compradores de ese producto). Se omiten solos: visitantes del chat web, clientes en «No contactar», los que ya están o ya están en cola y los que salieron del grupo. Un solo cliente se intenta al instante; un LOTE entra a la cola y sale de a 20 cada 10 a 15 minutos (500 contactos ≈ 5 horas) para cuidar la cuenta. Muchos clientes reciben una INVITACIÓN en vez de entrar directo (su privacidad): cuenta como hecho. FLUJO OBLIGATORIO en lotes: primero soloContar=true, muéstrale al dueño cuántos entran, cuántos se omiten y el tiempo estimado, y agrega SOLO tras su confirmación explícita.",
+        "AGREGA clientes a un grupo GUARDADO de WhatsApp. Elige UNA audiencia: clientes (teléfonos o ids), etiquetas (clientes con CUALQUIERA de esas etiquetas) o columna (clientes en esa columna de un tablero); máximo 500 por llamada. NO existe la audiencia «compradores de un producto». Se omiten solos: visitantes del chat web, clientes en «No contactar», los que ya están o ya están en cola y los que salieron del grupo. TODO pasa por UNA cola por negocio que agrega DE A UNO, con tope por minuto, por hora y por día (de fábrica 1 por minuto, 30 por hora, 200 por día; se cambia con configurar_ritmo_grupos): agregar seguido hace que WhatsApp bloquee el número. Un solo cliente va primero en la cola y sale al momento si hay cupo; varios esperan su turno (200 contactos ≈ un día con el ritmo de fábrica). Muchos clientes reciben una INVITACIÓN en vez de entrar directo (su privacidad): cuenta como hecho. FLUJO OBLIGATORIO en lotes: primero soloContar=true, muéstrale al dueño cuántos entran, cuántos se omiten y el tiempo estimado, y agrega SOLO tras su confirmación explícita.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -1801,7 +1800,6 @@ export const TOOLS: ToolDefinition[] = [
             required: ["columna"],
             properties: { tablero: { type: "string", description: "nombre del tablero (opcional si hay uno solo)" }, columna: { type: "string" } },
           },
-          productId: { type: "string", description: "uuid del producto: sus compradores" },
           soloContar: { type: "boolean", description: "true = solo cuenta (entran, omitidos, minutos), no agrega a nadie" },
         },
       },
@@ -5980,10 +5978,9 @@ export async function runCopilotTool(
         const refs = Array.isArray(args.clientes) ? (args.clientes as unknown[]).map((v) => String(v).trim()).filter(Boolean) : [];
         const tagNames = asStrList(args.etiquetas) ?? [];
         const col = (args.columna && typeof args.columna === "object" ? args.columna : null) as LooseData | null;
-        const productId = String(args.productId ?? "").trim();
-        const used = [refs.length > 0, tagNames.length > 0, Boolean(col), Boolean(productId)].filter(Boolean).length;
+        const used = [refs.length > 0, tagNames.length > 0, Boolean(col)].filter(Boolean).length;
         if (used !== 1) {
-          return { result: JSON.stringify({ ok: false, error: "Indica UNA audiencia: clientes, etiquetas, columna o productId." }), wrote: false };
+          return { result: JSON.stringify({ ok: false, error: "Indica UNA audiencia: clientes, etiquetas o columna." }), wrote: false };
         }
         let customerIds: string[] = [];
         const noEncontrados: string[] = [];
@@ -5996,7 +5993,7 @@ export async function runCopilotTool(
               noEncontrados.push(ref);
             }
           }
-        } else if (tagNames.length || col) {
+        } else {
           const { boards, tags } = await listCrmStructure(companyId);
           const low = (v: unknown) => String(v ?? "").trim().toLowerCase();
           if (tagNames.length) {
@@ -6019,10 +6016,11 @@ export async function runCopilotTool(
             const cards = await prisma.crmCard.findMany({ where: { companyId, columnId: column.id }, select: { customerId: true } });
             customerIds = cards.map((c) => c.customerId);
           }
-        } else {
-          customerIds = await resolveBuyers(companyId, productId);
         }
         customerIds = [...new Set(customerIds)];
+        if (customerIds.length > 500) {
+          return { result: JSON.stringify({ ok: false, error: `Esa audiencia tiene ${customerIds.length} clientes y el máximo por llamada es 500. Acótala con otra etiqueta o columna, o pasa los clientes en tandas.` }), wrote: false };
+        }
         if (!customerIds.length) {
           return { result: JSON.stringify({ ok: true, total: 0, entran: 0, ...(noEncontrados.length ? { noEncontrados } : {}), nota: "Nadie coincide con esa audiencia." }), wrote: false };
         }
@@ -6045,13 +6043,13 @@ export async function runCopilotTool(
             total: res.total,
             [dryRun ? "entrarian" : "entran"]: res.queued,
             omitidos: res.skipped,
-            minutosEstimados: single ? 0 : res.etaMinutes,
+            minutosEstimados: res.etaMinutes,
             ...(noEncontrados.length ? { noEncontrados } : {}),
             nota: dryRun
-              ? "Muestra estos números al dueño y agrega solo si confirma (misma llamada sin soloContar)."
+              ? "Muestra estos números al dueño (con el tiempo estimado) y agrega solo si confirma (misma llamada sin soloContar)."
               : single
-                ? "Se intenta ahora mismo; el resultado (agregado o invitación enviada) aparece en ver_miembros_grupo y como nota 👥 en el chat."
-                : "En cola: salen de a 20 cada 10 a 15 minutos. El avance se ve con ver_grupos_whatsapp o en Canales → WhatsApp → Grupos.",
+                ? "Va primero en la cola: sale al momento si el ritmo del negocio lo permite (si no, en el siguiente turno). El resultado aparece en ver_miembros_grupo y como nota 👥 en el chat."
+                : "En cola: salen DE A UNO al ritmo del negocio (ver_grupos_whatsapp muestra el ritmo, lo usado y el tiempo estimado). El avance también se ve en Canales → WhatsApp → Grupos.",
           }),
           wrote: !dryRun && res.queued > 0,
         };

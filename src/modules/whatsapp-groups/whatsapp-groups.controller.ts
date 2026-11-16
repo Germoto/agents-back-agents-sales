@@ -13,7 +13,6 @@ import {
   listSavedGroups,
   refreshInvited,
   removeGroup,
-  resolveBuyers,
   resumeGroup,
   retryMembers,
   saveGroup,
@@ -56,10 +55,9 @@ export async function listMembersController(req: Request, res: Response) {
 
 export async function addToGroupController(req: Request, res: Response) {
   const companyId = req.user!.companyId;
-  const { customerIds, productId, dryRun } = req.body as { customerIds?: string[]; productId?: string; dryRun?: boolean };
-  const ids = productId ? await resolveBuyers(companyId, productId) : customerIds ?? [];
-  // Un solo contacto elegido a mano va al momento; el resto, a ritmo de lote.
-  const single = !productId && ids.length === 1;
+  const { customerIds: ids, dryRun } = req.body as { customerIds: string[]; dryRun?: boolean };
+  // Un solo contacto elegido a mano va primero en la cola; el resto, en orden de llegada.
+  const single = ids.length === 1;
   const result = await enqueueGroupAdd({
     companyId,
     groupId: String(req.params.id),
