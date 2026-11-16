@@ -52,6 +52,7 @@ export type FlowNodeType =
   | "validate-payment"
   | "book-appointment"
   | "http-request"
+  | "wa-group-add"
   | "to-agent";
 
 export type DetectMode = "contains" | "equals" | "starts_with" | "ends_with";
@@ -288,6 +289,14 @@ export interface QuestionData {
   timeoutMinutes?: number;
 }
 
+/** Agregar al cliente a un grupo de WhatsApp guardado (solo canal SMS Tools). */
+export interface WaGroupAddData {
+  /** Id del grupo guardado (Canales → WhatsApp → Grupos). */
+  groupId?: string;
+  /** Nombre del grupo al guardar el bloque (solo para mostrar). */
+  groupName?: string;
+}
+
 export type FlowNodeData =
   | SendTextData
   | SendMediaData
@@ -306,6 +315,7 @@ export type FlowNodeData =
   | ValidatePaymentData
   | BookAppointmentData
   | HttpRequestData
+  | WaGroupAddData
   | Record<string, never>;
 
 export interface FlowNode {
@@ -387,6 +397,7 @@ export function outputHandlesFor(node: FlowNode): string[] {
       return (data.timeoutMinutes ?? 30) > 0 ? [...base, "timeout"] : base;
     }
     case "http-request":
+    case "wa-group-add":
       return ["success", "error"];
     case "flow-control":
     case "handoff":

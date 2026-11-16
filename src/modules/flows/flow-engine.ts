@@ -48,6 +48,7 @@ import {
   type ValidatePaymentData,
   type BookAppointmentData,
   type HttpRequestData,
+  type WaGroupAddData,
   reminderStepsOf,
   flattenListOptions,
   isSendNode,
@@ -61,6 +62,7 @@ import { calendarLinksMessage } from "../bookings/calendar.service";
 import { createBooking, reasonMessage } from "../bookings/bookings.service";
 import { symbolFor } from "../../lib/currency";
 import { baseVars, loadRunnableAction } from "../http-actions/http-actions.service";
+import { autoGroupAdd } from "../whatsapp-groups/whatsapp-groups.service";
 import { runHttpAction, toRunnableConnection, toRunnableRequest } from "../http-actions/http-action-runner";
 
 // ---------------------------------------------------------------------------
@@ -1224,6 +1226,20 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
         await armBookingTimeout(activeFlow, node, io);
         pushTrace(io, node, "awaiting-booking");
         return;
+      }
+
+      case "wa-group-add": {
+        const data = node.data as WaGroupAddData;
+        if (io.simulate) {
+          // En simulación no se agrega a nadie.
+          pushTrace(io, node, "group:simulated");
+          nextHandle = "success";
+          break;
+        }
+        const r = await autoGroupAdd(io.companyId, data.groupId, io.customerId, "FLUJO");
+        pushTrace(io, node, r.ok ? "group:queued" : `group:skipped ${r.reason ?? ""}`.trim());
+        nextHandle = r.ok ? "success" : "error";
+        break;
       }
 
       case "http-request": {

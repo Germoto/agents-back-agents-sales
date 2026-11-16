@@ -19,6 +19,7 @@ import {
   type ValidatePaymentData,
   type BookAppointmentData,
   type HttpRequestData,
+  type WaGroupAddData,
   reminderStepsOf,
   POLL_MIN_OPTIONS,
   POLL_MAX_OPTIONS,
@@ -74,6 +75,7 @@ const NODE_LABEL: Record<string, string> = {
   "validate-payment": "Validar pago",
   "book-appointment": "Agendar cita",
   "http-request": "Petición HTTP",
+  "wa-group-add": "Agregar a grupo",
 };
 
 function label(node: FlowNode): string {
@@ -431,6 +433,16 @@ export function validateFlow(
             message: "La salida «Error» de «Petición HTTP» no está conectada; si la API falla el flujo terminará en silencio.",
             nodeId: node.id,
           });
+        }
+        break;
+      }
+      case "wa-group-add": {
+        const data = node.data as WaGroupAddData;
+        if (!data.groupId) {
+          errors.push({ code: "GROUP_NO_TARGET", message: "«Agregar a grupo» necesita un grupo de WhatsApp.", nodeId: node.id });
+        }
+        if (!edgeFrom(node.id, "success") && !edgeFrom(node.id, "error")) {
+          warnings.push({ code: "GROUP_OUTPUT_UNUSED", message: "Las salidas de «Agregar a grupo» no están conectadas; el flujo terminará ahí.", nodeId: node.id });
         }
         break;
       }

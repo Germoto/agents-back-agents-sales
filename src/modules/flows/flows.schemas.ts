@@ -163,6 +163,11 @@ const httpRequestInline = z.object({
   bodyType: z.enum(["NONE", "JSON", "FORM", "RAW"]).default("JSON"),
   body: z.string().max(16_000).optional(),
 });
+const waGroupAddData = z.object({
+  groupId: z.string().uuid().optional(),
+  groupName: z.string().max(120).optional(),
+});
+
 const httpRequestData = z
   .object({
     actionId: z.string().uuid().optional(),
@@ -245,6 +250,7 @@ export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("validate-payment"), position: positionSchema, data: validatePaymentData }),
   z.object({ id: z.string().min(1), type: z.literal("book-appointment"), position: positionSchema, data: bookAppointmentData }),
   z.object({ id: z.string().min(1), type: z.literal("http-request"), position: positionSchema, data: httpRequestData }),
+  z.object({ id: z.string().min(1), type: z.literal("wa-group-add"), position: positionSchema, data: waGroupAddData }),
 ]);
 
 export const flowEdgeSchema = z
