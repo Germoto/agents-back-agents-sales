@@ -3,7 +3,12 @@ import { AppError } from "../../lib/app-error";
 import { encryptCredential, decryptCredential } from "../../lib/credentials-crypto";
 import { mpGetMe } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
-import { DEFAULT_MP_LINK_MESSAGE, DEFAULT_MP_LINK_MESSAGE_WITH_FEE } from "../agent/payment-methods";
+import {
+  DEFAULT_ADVANCE_CHARGE_MESSAGE,
+  DEFAULT_CHARGE_MESSAGE,
+  DEFAULT_MP_LINK_MESSAGE,
+  DEFAULT_MP_LINK_MESSAGE_WITH_FEE,
+} from "../agent/payment-methods";
 
 /** Mercado Pago es un módulo de paquete: las empresas legacy pasan. */
 async function assertMpAllowedByPlan(companyId: string) {
@@ -107,6 +112,9 @@ function mapPaymentConfig(config: {
     notification: {
       whatsappPhone: config.notificationPhone,
     },
+    // Textos de fábrica del mensaje de cobro, escritos con variables (referencia para el panel).
+    defaultChargeMessage: DEFAULT_CHARGE_MESSAGE,
+    defaultAdvanceChargeMessage: DEFAULT_ADVANCE_CHARGE_MESSAGE,
   };
 }
 
@@ -221,7 +229,17 @@ export async function upsertPaymentConfig(companyId: string, data: {
     sortOrder: number;
   }>;
   paymentMode: PaymentMode;
+  /** Mensaje de cobro propio: undefined = no cambia; null o vacío = el de fábrica. */
+  chargeMessage?: string | null;
+  advanceChargeMessage?: string | null;
 }) {
+  // Solo se tocan si vienen en la petición (un panel viejo en caché no los borra).
+  const chargeTexts = {
+    ...(data.chargeMessage !== undefined ? { chargeMessage: data.chargeMessage?.trim() || null } : {}),
+    ...(data.advanceChargeMessage !== undefined
+      ? { advanceChargeMessage: data.advanceChargeMessage?.trim() || null }
+      : {}),
+  };
   const config = await prisma.$transaction(async (tx) => {
     const paymentConfig = await tx.paymentConfig.upsert({
       where: { companyId },
@@ -229,11 +247,13 @@ export async function upsertPaymentConfig(companyId: string, data: {
         enabled: data.enabled,
         paymentMode: data.paymentMode,
         notificationPhone: data.notificationPhone,
+        ...chargeTexts,
       },
       create: {
         enabled: data.enabled,
         paymentMode: data.paymentMode,
         notificationPhone: data.notificationPhone,
+        ...chargeTexts,
         company: {
           connect: { id: companyId },
         },

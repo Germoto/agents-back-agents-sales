@@ -533,6 +533,10 @@ model PaymentConfig {
   // vigencia del link en días (null = no vence).
   mpChatLinkMessage    String?
   mpChatLinkExpiryDays Int?
+  // Mensaje de cobro propio (null = la plantilla de fábrica): cobro total y cobro
+  // de adelanto (pedido con saldo). Variables: {nombre} {monto} {total} {saldo} {metodos} {pedido}.
+  chargeMessage        String?
+  advanceChargeMessage String?
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
   company              Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)

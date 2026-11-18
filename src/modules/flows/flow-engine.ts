@@ -1484,6 +1484,9 @@ async function preparePaymentCharge(
       chatMode?: string | null;
       chatLinkExpiryDays?: number | null;
     } | null;
+    // Mensaje de cobro propio del negocio (null = el de fábrica).
+    chargeMessage?: string | null;
+    advanceChargeMessage?: string | null;
   };
   if (!payment?.enabled || (!payment.methods.length && !payment.mp?.enabled)) return null;
 
@@ -1520,6 +1523,8 @@ async function preparePaymentCharge(
     title,
     productIds,
     simulate: io.simulate,
+    // El bloque cobra el monto completo: usa el texto de cobro total si el negocio escribió uno.
+    charge: { kind: "total", nombre: io.customerName, total: amountText },
   });
   return { text, productIds };
 }

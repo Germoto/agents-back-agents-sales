@@ -56,7 +56,7 @@ import { drivePurchased, blockedFolderIds, allowedFolderIds } from "../drive/dri
 import { needsMediaProbe, probeDriveMedia } from "../../lib/drive-media-probe";
 import { fallbackLinkText } from "./delivery";
 import { decryptCredential } from "../../lib/credentials-crypto";
-import { composePaymentMethodsMessage, mpChatOn, clearMpLinkState } from "./payment-methods";
+import { composePaymentMethodsMessage, mpChatOn, clearMpLinkState, type ChargeInfo } from "./payment-methods";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
 import { publicStoreUrlIfLive } from "../storefront/storefront-public-url";
@@ -924,6 +924,31 @@ function orderChargeHead(due: OrderDue, sym: string): string {
     return `Saldo del pedido *${due.orderCode}*: *${money(due.now)}* 😊\nTotal ${money(due.total)} · ya pagaste ${money(due.paid)}`;
   }
   return `Total del pedido *${due.orderCode}*: *${money(due.now)}* 😊`;
+}
+
+/**
+ * Datos del cobro para el mensaje propio del negocio (Pagos → Mensaje de cobro).
+ * Sin texto propio para este tipo de cobro devuelve undefined: no se consulta nada
+ * y el mensaje de fábrica sale igual que siempre.
+ */
+async function chargeInfoFor(ctx: TurnContext, due: OrderDue | null, amountText: string): Promise<ChargeInfo | undefined> {
+  const sym = symbolFor(ctx.config.business.currency);
+  const money = (n: number) => `${sym} ${n.toFixed(2)}`;
+  const rest = due ? Math.round((due.balance - due.now) * 100) / 100 : 0;
+  const kind: ChargeInfo["kind"] = rest > 0.005 ? "advance" : "total";
+  const payment = ctx.config.payment as { chargeMessage?: string | null; advanceChargeMessage?: string | null };
+  const template = kind === "advance" ? payment.advanceChargeMessage : payment.chargeMessage;
+  if (!template?.trim()) return undefined;
+  const customer = ctx.simulate
+    ? null
+    : await prisma.customer.findUnique({ where: { id: ctx.customerId }, select: { name: true } }).catch(() => null);
+  return {
+    kind,
+    nombre: customer?.name ?? null,
+    total: due ? money(due.total) : amountText,
+    saldo: kind === "advance" ? money(rest) : null,
+    pedido: due?.orderCode ?? null,
+  };
 }
 
 /** Producto en la forma que esperan drive-search / drive-index (id + companyId + entrega). */
@@ -3471,6 +3496,7 @@ export async function executeTool(
               orderId: orderDue.orderId === "sim" ? undefined : orderDue.orderId,
             }
           : {}),
+        charge: await chargeInfoFor(ctx, orderDue, amountText),
       });
       // Sin link no hay nada que enviar: que el agente no lo prometa.
       if (soloLink && !text) {

@@ -268,6 +268,9 @@ export async function buildBotConfig(companyId: string, account?: string) {
       notification: {
         whatsappPhone: paymentConfig.notificationPhone,
       },
+      // Mensaje de cobro propio (null = el de fábrica): cobro total y cobro de adelanto.
+      chargeMessage: paymentConfig.chargeMessage,
+      advanceChargeMessage: paymentConfig.advanceChargeMessage,
       // Mercado Pago: el token viaja CIFRADO tal como está en BD; se descifra
       // recién al crear la preference (agent-tools) para no exponerlo en logs.
       mp: {

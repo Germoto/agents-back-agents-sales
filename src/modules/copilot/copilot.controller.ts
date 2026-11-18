@@ -31,7 +31,13 @@ import { createProduct, updateProduct, deleteProduct, getProduct } from "../prod
 import { updateBusinessProfile, type DeliveryConfigInput } from "../business/business.service";
 import { upsertAgentConfig, updateAgentReminders } from "../agent-config/agent-config.service";
 import { upsertPaymentConfig, updateMercadoPagoConfig } from "../payment-config/payment-config.service";
-import { DEFAULT_MP_LINK_MESSAGE, MP_LINK_MESSAGE_MAX } from "../agent/payment-methods";
+import {
+  DEFAULT_ADVANCE_CHARGE_MESSAGE,
+  DEFAULT_CHARGE_MESSAGE,
+  DEFAULT_MP_LINK_MESSAGE,
+  MP_LINK_MESSAGE_MAX,
+  chargeTemplateError,
+} from "../agent/payment-methods";
 import {
   createCrm,
   updateCrm,
@@ -897,7 +903,7 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "configurar_pagos",
       description:
-        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (se FUSIONAN por método+número: agrega nuevos y actualiza titulares; para QUITAR uno usa reemplazarMetodos=true con la lista final completa), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE), mpChatMode? ('OFF' | 'ALWAYS' | 'ON_REQUEST': LINK DE MERCADO PAGO EN EL CHAT de WhatsApp), mpStoreEnabled? (true/false: Mercado Pago en la tienda web), mpChatEnabled? (compatibilidad: true/false enciende o apaga el chat sin cambiar el modo), mpLinkMessage? (texto propio del MENSAJE DEL LINK; null = el de fábrica), mpLinkExpiryDays? (1 a 30: días de vigencia del link del chat; null o 0 = no vence)}. MODOS DEL CHAT: OFF = el agente cobra solo con los métodos manuales; ALWAYS = el link va dentro del mensaje de cobro junto a Yape/Plin (el de siempre); ON_REQUEST = el cobro lleva solo los métodos manuales y el agente manda el link en un mensaje aparte cuando el cliente pide otro medio (otro banco, transferencia, tarjeta), con el mismo monto del cobro (carrito u oferta activa de ese cliente); el pago por link se aprueba y entrega solo. Con ON_REQUEST: (a) CUÁNDO ofrecer el link lo decide el PROMPT del agente: tras activarlo revisa el prompt con ver_configuracion (si dice algo como «solo Yape o Plin» el agente seguirá negando otros medios) y propón al dueño una línea con configurar_agente, ej. «Si el cliente no puede pagar con Yape o Plin o pide tarjeta u otro banco, ofrécele el link de Mercado Pago»; (b) el bloque «Validar pago» de los flujos NO envía el link; (c) un negocio sin métodos manuales lo envía siempre. Si la comisión la paga el cliente, se suma al monto del link (ver_configuracion → pagos.mercadoPago.comision). REENVÍO DEL LINK: no hay límite de una vez; el agente puede enviarlo las veces que haga falta, cada envío genera un link NUEVO con el monto vigente (carrito u oferta activa de ese cliente) y el agente ve en su contexto si ya envió uno, por cuánto y hace cuánto. MENSAJE DEL LINK (mpLinkMessage): es el mensaje aparte con el que el agente envía el link cuando el cliente lo pide; variables {monto} (monto del cobro, con la comisión si la paga el cliente), {link} (si el texto no lo trae, el link va al final) y {vence} (fecha de vencimiento; si el link no vence, la línea que lo usa se omite); admite variantes {a|b}; máximo 600 caracteres. El ESTILO de ese mensaje se cambia AQUÍ, no en el prompt del agente; no aplica al link que va dentro del mensaje de cobro del modo ALWAYS. Muestra el texto al dueño antes de guardarlo. VENCIMIENTO (mpLinkExpiryDays): apagado por defecto (el link no vence); con N días, pasado el plazo Mercado Pago muestra el link como no disponible y, si el cliente lo vuelve a pedir, el agente genera otro con el monto vigente; aplica solo al link del chat, no a la tienda web. Requiere Mercado Pago conectado. Un cambio SOLO de Mercado Pago (mpChatMode / mpStoreEnabled / mpChatEnabled / mpLinkMessage / mpLinkExpiryDays) no toca ni exige métodos manuales. El Access Token de Mercado Pago NO se gestiona por chat: se conecta en Integraciones. Llámala SOLO tras confirmación.",
+        "Actualiza los PAGOS manuales. `data` es PARCIAL: {enabled?, notificationPhone? (WhatsApp donde avisar pagos), methods?: [{method (ej. 'Yape','Plin','BCP'), number, holder}] (se FUSIONAN por método+número: agrega nuevos y actualiza titulares; para QUITAR uno usa reemplazarMetodos=true con la lista final completa), paymentMode? (BEFORE_DELIVERY|CASH_ON_DELIVERY|MANUAL|CUSTOMER_CHOICE), mpChatMode? ('OFF' | 'ALWAYS' | 'ON_REQUEST': LINK DE MERCADO PAGO EN EL CHAT de WhatsApp), mpStoreEnabled? (true/false: Mercado Pago en la tienda web), mpChatEnabled? (compatibilidad: true/false enciende o apaga el chat sin cambiar el modo), mpLinkMessage? (texto propio del MENSAJE DEL LINK; null = el de fábrica), mpLinkExpiryDays? (1 a 30: días de vigencia del link del chat; null o 0 = no vence), mensajeCobro? (texto propio del MENSAJE DE COBRO total; null = el de fábrica), mensajeCobroAdelanto? (texto propio del cobro de ADELANTO de un pedido; null = el de fábrica)}. MENSAJE DE COBRO (mensajeCobro / mensajeCobroAdelanto): el texto con el que el sistema pide el pago (monto + cuentas) NO lo redacta la IA: es una plantilla. Por defecto sale la de fábrica de siempre y ningún negocio cambia solo; cada texto es opcional e independiente. mensajeCobro se usa en el cobro normal, el total de un pedido, el saldo final y el bloque «Validar pago» de los flujos; mensajeCobroAdelanto solo cuando un pedido con envío se paga en parte ahora y queda saldo. Variables: {nombre} (cliente), {monto} (lo que paga ahora), {total}, {saldo} (lo que queda después; solo adelanto), {metodos} (medios de pago con número y titular, sin negritas: uno solo va dentro de la frase, varios uno por línea), {pedido} (el código del pedido solo aparece si el texto lo usa) y variantes {a|b}. OBLIGATORIO que el texto lleve {monto} y {metodos} (sin ellos no se guarda); máximo 600 caracteres; una línea con {total}, {saldo} o {pedido} sin valor se omite. Ejemplo de adelanto: «Listo {nombre}, para separarlo yapea o plinea {monto} al {metodos}. Los {saldo} restantes los pagas cuando llegue a la agencia. Me mandas la captura y listo.» El link de Mercado Pago del modo ALWAYS se sigue agregando al final; un negocio que cobra solo con Mercado Pago (sin métodos manuales) mantiene el de fábrica. Al proponer un texto propio recomienda conservar el pedido de la captura o el nombre del titular (ayuda a validar el pago). El ESTILO del cobro se cambia AQUÍ, no en el prompt del agente. Muestra el texto al dueño antes de guardarlo. MODOS DEL CHAT: OFF = el agente cobra solo con los métodos manuales; ALWAYS = el link va dentro del mensaje de cobro junto a Yape/Plin (el de siempre); ON_REQUEST = el cobro lleva solo los métodos manuales y el agente manda el link en un mensaje aparte cuando el cliente pide otro medio (otro banco, transferencia, tarjeta), con el mismo monto del cobro (carrito u oferta activa de ese cliente); el pago por link se aprueba y entrega solo. Con ON_REQUEST: (a) CUÁNDO ofrecer el link lo decide el PROMPT del agente: tras activarlo revisa el prompt con ver_configuracion (si dice algo como «solo Yape o Plin» el agente seguirá negando otros medios) y propón al dueño una línea con configurar_agente, ej. «Si el cliente no puede pagar con Yape o Plin o pide tarjeta u otro banco, ofrécele el link de Mercado Pago»; (b) el bloque «Validar pago» de los flujos NO envía el link; (c) un negocio sin métodos manuales lo envía siempre. Si la comisión la paga el cliente, se suma al monto del link (ver_configuracion → pagos.mercadoPago.comision). REENVÍO DEL LINK: no hay límite de una vez; el agente puede enviarlo las veces que haga falta, cada envío genera un link NUEVO con el monto vigente (carrito u oferta activa de ese cliente) y el agente ve en su contexto si ya envió uno, por cuánto y hace cuánto. MENSAJE DEL LINK (mpLinkMessage): es el mensaje aparte con el que el agente envía el link cuando el cliente lo pide; variables {monto} (monto del cobro, con la comisión si la paga el cliente), {link} (si el texto no lo trae, el link va al final) y {vence} (fecha de vencimiento; si el link no vence, la línea que lo usa se omite); admite variantes {a|b}; máximo 600 caracteres. El ESTILO de ese mensaje se cambia AQUÍ, no en el prompt del agente; no aplica al link que va dentro del mensaje de cobro del modo ALWAYS. Muestra el texto al dueño antes de guardarlo. VENCIMIENTO (mpLinkExpiryDays): apagado por defecto (el link no vence); con N días, pasado el plazo Mercado Pago muestra el link como no disponible y, si el cliente lo vuelve a pedir, el agente genera otro con el monto vigente; aplica solo al link del chat, no a la tienda web. Requiere Mercado Pago conectado. Un cambio SOLO de Mercado Pago (mpChatMode / mpStoreEnabled / mpChatEnabled / mpLinkMessage / mpLinkExpiryDays) o SOLO del mensaje de cobro (mensajeCobro / mensajeCobroAdelanto) no toca ni exige métodos manuales. El Access Token de Mercado Pago NO se gestiona por chat: se conecta en Integraciones. Llámala SOLO tras confirmación.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -2726,6 +2732,19 @@ function describeMpLinkOptions(payment: { mpChatLinkMessage: string | null; mpCh
   };
 }
 
+/** Mensaje de cobro (Pagos → Mensaje de cobro): texto propio o el de fábrica, para total y adelanto. */
+function describeChargeMessages(payment: { chargeMessage: string | null; advanceChargeMessage: string | null } | null) {
+  const total = payment?.chargeMessage?.trim() || null;
+  const advance = payment?.advanceChargeMessage?.trim() || null;
+  return {
+    cobroTotal: { personalizado: Boolean(total), texto: total ?? DEFAULT_CHARGE_MESSAGE },
+    cobroAdelanto: { personalizado: Boolean(advance), texto: advance ?? DEFAULT_ADVANCE_CHARGE_MESSAGE },
+    variables:
+      "{nombre} = nombre del cliente · {monto} = lo que paga ahora · {total} = total de la compra o del pedido · {saldo} = lo que queda después (solo adelanto) · {metodos} = medios de pago con número y titular · {pedido} = código del pedido (solo sale si el texto lo usa) · variantes {a|b}",
+    nota: "Se cambian con configurar_pagos {mensajeCobro, mensajeCobroAdelanto}; null vuelve al de fábrica. Un texto propio debe llevar {monto} y {metodos}.",
+  };
+}
+
 function zodErrorsText(err: { issues: Array<{ path: PropertyKey[]; message: string }> }): string {
   return err.issues.map((i) => `${i.path.map(String).join(".") || "raíz"}: ${i.message}`).join("; ");
 }
@@ -3668,6 +3687,8 @@ export async function runCopilotTool(
                 paymentMode: payment.paymentMode,
                 notificationPhone: payment.notificationPhone,
                 methods: payment.methods.map((m) => ({ method: m.method, number: m.number, holder: m.holder })),
+                // Texto con el que el sistema pide el pago (cobro total y cobro de adelanto).
+                mensajeCobro: describeChargeMessages(payment),
                 mercadoPago: {
                   conectado: Boolean(payment.mpAccessToken),
                   activo: payment.mpEnabled,
@@ -3809,6 +3830,20 @@ export async function runCopilotTool(
         }
         mpLinkExpiryDays = days === 0 ? null : days;
       }
+      // Mensaje de cobro propio (null o vacío = el de fábrica); con texto exige {monto} y {metodos}.
+      const chargeTexts: { chargeMessage?: string | null; advanceChargeMessage?: string | null } = {};
+      for (const [arg, column] of [["mensajeCobro", "chargeMessage"], ["mensajeCobroAdelanto", "advanceChargeMessage"]] as const) {
+        const raw = data[arg];
+        if (raw === undefined) continue;
+        if (raw !== null && typeof raw !== "string") {
+          return { result: JSON.stringify({ ok: false, error: `${arg} debe ser un texto, o null para volver al de fábrica` }), wrote: false };
+        }
+        const text = typeof raw === "string" ? raw.trim() || null : null;
+        const error = chargeTemplateError(text);
+        if (error) return { result: JSON.stringify({ ok: false, error: `${arg}: ${error}` }), wrote: false };
+        chargeTexts[column] = text;
+      }
+      const chargeTouched = Object.keys(chargeTexts).length > 0;
       const mpTouched =
         Boolean(mpChatMode) ||
         typeof data.mpChatEnabled === "boolean" ||
@@ -3823,7 +3858,7 @@ export async function runCopilotTool(
         data.methods !== undefined ||
         data.paymentMode !== undefined ||
         args.reemplazarMetodos === true;
-      const skipManual = mpTouched && !manualTouched;
+      const skipManual = (mpTouched || chargeTouched) && !manualTouched;
       const methods = Array.isArray(data.methods)
         ? (data.methods as Array<{ method?: unknown; number?: unknown; holder?: unknown }>)
             .map((m, i) => ({
@@ -3870,6 +3905,16 @@ export async function runCopilotTool(
             (current?.paymentMode ?? "BEFORE_DELIVERY"),
         });
       }
+      // Mensaje de cobro: se guarda aparte para no exigir métodos ni teléfono de avisos.
+      let chargeView: Record<string, unknown> = {};
+      if (chargeTouched) {
+        const saved = await prisma.paymentConfig.upsert({
+          where: { companyId },
+          update: chargeTexts,
+          create: { companyId, enabled: true, paymentMode: "BEFORE_DELIVERY", ...chargeTexts },
+        });
+        chargeView = { mensajeCobro: describeChargeMessages(saved) };
+      }
       // Mercado Pago por canal (no toca el token ni la comisión).
       let mpNota = "";
       let mpView: Record<string, unknown> = {};
@@ -3906,7 +3951,15 @@ export async function runCopilotTool(
         };
       }
       return {
-        result: JSON.stringify({ ok: true, nota: (skipManual ? "Mercado Pago actualizado (los métodos manuales no se tocaron)." : "Pagos actualizados (lo no enviado se conservó).") + mpNota, ...mpView }),
+        result: JSON.stringify({
+          ok: true,
+          nota:
+            (skipManual
+              ? `${[chargeTouched ? "Mensaje de cobro" : "", mpTouched ? "Mercado Pago" : ""].filter(Boolean).join(" y ")} actualizado (los métodos manuales no se tocaron).`
+              : "Pagos actualizados (lo no enviado se conservó).") + mpNota,
+          ...chargeView,
+          ...mpView,
+        }),
         wrote: true,
       };
     }
@@ -6933,6 +6986,7 @@ export async function buildSystem(companyId: string, opts: { mode?: "panel" | "o
     "- DISEÑADOR: con generar_imagen creas banners de oferta, fotos de producto y creativos con IA (se guardan en el servidor y su URL sirve en cualquier configuración: banner de presentación, pasos de recordatorio, followups, respuestas rápidas, campañas, o como foto de producto vía adjuntar_foto_producto). Cuesta dinero al negocio (usa su key de OpenAI) → SOLO tras confirmación. Flujo OBLIGATORIO: generar → mostrar la URL al usuario → su aprobación → adjuntar → verificar (previsualizar_ficha). Textos del banner van LITERALES entre comillas en el prompt. Si el negocio no tiene key de OpenAI, deriva al panel (Agente IA); JAMÁS pidas ni recibas keys por chat.",
     "- HONESTIDAD DE ACCIONES: solo puedes hacer lo que tus herramientas permiten. Si no tienes herramienta para algo, DILO claramente y sugiere dónde hacerlo en el panel. NUNCA digas que actualizaste, cambiaste o eliminaste algo sin haber llamado la herramienta correspondiente y recibido ok.",
     "- RECORDATORIOS: los generales del negocio van por configurar_recordatorios; los PROPIOS de un producto (y la renovación de streaming) van en el campo reminderConfig del producto (actualizar_producto). REGLA: después de activar «posponer a pedido» (postpone) o el link de Mercado Pago «solo si lo piden» (mpChatMode ON_REQUEST), propón al dueño la línea para el prompt del agente y guárdala con configurar_agente tras su OK: el sistema le da la herramienta al agente, pero CUÁNDO usarla es política del negocio y vive en su prompt. Una secuencia post-venta PROGRAMADA (días después de la compra) NO existe como configuración: si te la piden, ofrece los mensajes post-entrega (digitalDelivery.followupMessages, inmediatos tras entregar) y dilo con honestidad.",
+    "- MENSAJE DE COBRO: el texto con el que se pide el pago (monto y cuentas) lo arma el sistema con una plantilla, no la IA. Si el dueño dice que el cobro suena a robot, que no quiere el código del pedido o que quiere otro tono, NO se arregla en el prompt del agente: se cambia con configurar_pagos {mensajeCobro, mensajeCobroAdelanto} (o en Pagos → Mensaje de cobro). Por defecto queda la plantilla de fábrica; null vuelve a ella. ver_configuracion → pagos.mensajeCobro muestra los textos vigentes.",
     "- LINK DE MERCADO PAGO EN EL CHAT: el agente puede enviarlo las veces que haga falta (cada envío es un link nuevo con el monto vigente) y sabe si ya envió uno, por cuánto y hace cuánto, así que no hace falta escribir en el prompt reglas como «el link que te dejé arriba». El agente nunca reenvía un link viejo copiándolo del chat: si lo intenta, el sistema descarta ese texto y envía un link nuevo (eso también levanta la pausa de seguimiento que el cliente hubiera pedido). El ESTILO del mensaje del link se cambia con configurar_pagos {mpLinkMessage}, no en el prompt del agente; el vencimiento con {mpLinkExpiryDays} (apagado por defecto). Si el dueño cuenta que el agente prometió el link y no llegó: el sistema ya lo envía solo cuando el agente lo promete (y si Mercado Pago falla, el agente ofrece los métodos manuales o deriva).",
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",

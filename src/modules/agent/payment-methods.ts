@@ -40,6 +40,93 @@ export interface PaymentConfigLike {
   enabled?: boolean;
   methods: PaymentMethodEntry[];
   mp?: MpConfigLike | null;
+  /** Mensaje de cobro propio del negocio (null = el de fábrica). */
+  chargeMessage?: string | null;
+  /** Mensaje propio del cobro de adelanto de un pedido (null = el de fábrica). */
+  advanceChargeMessage?: string | null;
+}
+
+/** Datos del cobro para el mensaje propio del negocio (no cambian el mensaje de fábrica). */
+export interface ChargeInfo {
+  /** "advance" = se paga una parte ahora y queda saldo; "total" = todo lo demás. */
+  kind: "total" | "advance";
+  nombre?: string | null;
+  /** Total del pedido o de la compra, ya con símbolo. */
+  total?: string | null;
+  /** Lo que queda por pagar después de este cobro (solo en adelantos). */
+  saldo?: string | null;
+  /** Código del pedido (solo cuando el cobro es de un pedido). */
+  pedido?: string | null;
+}
+
+export const CHARGE_MESSAGE_MAX = 600;
+const CHARGE_CLOSING =
+  "Cuando pagues, envíame la *captura* o el *nombre del titular* de tu Yape/Plin (desde donde pagaste) y te confirmo al instante ✅";
+/** Equivalentes de fábrica escritos con variables: el panel los muestra como punto de partida. */
+export const DEFAULT_CHARGE_MESSAGE = `Son *{monto}* 😊\n\n{metodos}\n\n${CHARGE_CLOSING}`;
+export const DEFAULT_ADVANCE_CHARGE_MESSAGE =
+  "Adelanto del pedido *{pedido}*: *{monto}* 😊\n" +
+  `Total {total} · después queda un saldo de {saldo}\n\n{metodos}\n\n${CHARGE_CLOSING}`;
+
+/** Un mensaje de cobro propio debe decir cuánto y a dónde pagar. null = válido. */
+export function chargeTemplateError(template: string | null | undefined): string | null {
+  const text = (template ?? "").trim();
+  if (!text) return null;
+  if (text.length > CHARGE_MESSAGE_MAX) {
+    return `El mensaje de cobro admite hasta ${CHARGE_MESSAGE_MAX} caracteres (tiene ${text.length})`;
+  }
+  const missing = ["{monto}", "{metodos}"].filter((v) => !text.toLowerCase().includes(v));
+  return missing.length ? `Al mensaje de cobro le falta ${missing.join(" y ")}` : null;
+}
+
+/** Medios de pago para el mensaje propio: sin negritas; uno solo va en línea, varios uno por línea. */
+function plainMethods(methods: PaymentMethodEntry[]): string {
+  if (methods.length === 1) {
+    const m = methods[0];
+    return `${m.method} ${m.number} (${m.holder})`;
+  }
+  return methods.map((m) => `• ${m.method}: ${m.number} (${m.holder})`).join("\n");
+}
+
+/**
+ * Mensaje de cobro propio: primero las variantes {a|b} y después las variables.
+ * Una línea que usa {total}, {saldo} o {pedido} sin valor se omite, salvo que sea
+ * la línea del monto o de los medios de pago (ahí la variable solo se quita).
+ * Devuelve null si el texto no trae {monto} y {metodos}: el cobro sale con el de fábrica.
+ */
+export function renderChargeMessage(
+  template: string,
+  vars: { nombre?: string | null; monto: string; total?: string | null; saldo?: string | null; pedido?: string | null; metodos: string },
+): string | null {
+  if (chargeTemplateError(template) || !template.trim()) return null;
+  const optional: Record<string, string> = {
+    total: (vars.total ?? "").trim(),
+    saldo: (vars.saldo ?? "").trim(),
+    pedido: (vars.pedido ?? "").trim(),
+  };
+  const nombre = (vars.nombre ?? "").trim();
+  let out = applySpintax(template.trim())
+    .split("\n")
+    .filter((line) => {
+      if (/\{(monto|metodos)\}/i.test(line)) return true;
+      return !Object.keys(optional).some((k) => !optional[k] && new RegExp(`\\{${k}\\}`, "i").test(line));
+    })
+    .join("\n");
+  // Sin nombre: se quita la variable con el espacio que la precede («Listo {nombre},» → «Listo,»).
+  out = nombre ? out.replace(/\{nombre\}/gi, () => nombre) : out.replace(/[^\S\n]*\{nombre\}/gi, "");
+  out = out
+    .replace(/\{monto\}/gi, () => vars.monto)
+    .replace(/\{total\}/gi, () => optional.total)
+    .replace(/\{saldo\}/gi, () => optional.saldo)
+    .replace(/\{pedido\}/gi, () => optional.pedido)
+    .replace(/\{metodos\}/gi, () => vars.metodos)
+    // Restos de una variable vacía: signo suelto al inicio de línea y espacios dobles.
+    .replace(/^[^\S\n]*[,;:][^\S\n]*/gm, "")
+    .replace(/[^\S\n]{2,}/g, " ")
+    .replace(/[^\S\n]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return out || null;
 }
 
 /** ¿Mercado Pago está encendido para el cobro por chat? (maestro + token + canal chat). */
@@ -139,6 +226,8 @@ export async function composePaymentMethodsMessage(opts: {
   head?: string;
   /** Pedido al que se acredita el pago del link (viaja en la referencia de Mercado Pago). */
   orderId?: string;
+  /** Datos para el mensaje de cobro propio del negocio; sin texto propio no se usan. */
+  charge?: ChargeInfo;
 }): Promise<{
   text: string;
   mpLinkIncluded: boolean;
@@ -248,6 +337,32 @@ export async function composePaymentMethodsMessage(opts: {
     : withFee
     ? `\n\n💳 O con tarjeta por Mercado Pago (total ${symbol} ${linkAmount.toFixed(2)}, incluye la comisión):\n${link}`
     : `\n\n💳 O con tarjeta y otros medios por aquí:\n${link}`;
+
+  // Mensaje de cobro propio del negocio (aditivo): solo con texto guardado para este
+  // tipo de cobro y al menos un medio manual. Cualquier fallo cae al de fábrica de abajo.
+  const ownTemplate = (
+    (opts.charge?.kind === "advance" ? opts.payment.advanceChargeMessage : opts.payment.chargeMessage) ?? ""
+  ).trim();
+  if (ownTemplate && opts.payment.methods.length) {
+    try {
+      const own = renderChargeMessage(ownTemplate, {
+        nombre: opts.charge?.nombre,
+        monto: opts.amountText,
+        total: opts.charge?.total ?? opts.amountText,
+        saldo: opts.charge?.saldo,
+        pedido: opts.charge?.pedido,
+        metodos: plainMethods(opts.payment.methods),
+      });
+      if (own) {
+        return { text: own + mpLine, mpLinkIncluded: Boolean(mpLine), mpLinkAvailable: Boolean(mpAllowed), mpLinkFailed };
+      }
+    } catch (err) {
+      console.error(
+        `[payments] mensaje de cobro propio falló company=${opts.companyId}; sale el de fábrica:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 
   // Texto corto y natural: monto → cuenta(s) → qué mandar para validar. Se
   // conservan las dos vías (captura o nombre del titular) y la aclaración de que
