@@ -3978,14 +3978,24 @@ export async function executeTool(
       // un asesor (no hacer dar vueltas al cliente).
       const attempts = (Number(ctx.state.paymentAttempts) || 0) + 1;
       ctx.state.paymentAttempts = attempts;
-      if (attempts >= 3) {
-        markHandoff(ctx, "HUMAN[PAGO]: no se pudo validar el pago automáticamente (3 intentos)");
+      // El mismo pedido de dato no se repite seguido (pasó en prod: «dime el nombre del
+      // titular» tres veces): si toca repetirlo, se deriva al asesor de una vez.
+      const lastAsk = ctx.state.lastValidationAsk;
+      const repeated =
+        !!result.kind && lastAsk?.kind === result.kind && Date.now() - new Date(lastAsk.at).getTime() < 30 * 60_000;
+      ctx.state.lastValidationAsk = result.kind ? { kind: result.kind, at: new Date().toISOString() } : null;
+      if (attempts >= 3 || repeated) {
+        markHandoff(
+          ctx,
+          `HUMAN[PAGO]: no se pudo validar el pago automáticamente (${repeated && attempts < 3 ? "el cliente no dio el dato pedido" : "3 intentos"})`,
+        );
         ctx.state.paymentAttempts = 0;
+        ctx.state.lastValidationAsk = null;
         ctx.outbox.push({
           kind: "text",
           text: "Voy a pasar tu caso a un asesor para validar tu pago cuanto antes 🙏 En un momentito te confirma. ¡Gracias por tu paciencia!",
         });
-        return JSON.stringify({ ok: true, approved: false, derived: true, note: "Derivado a un asesor tras 3 intentos de validación. Deja tu texto final vacío." });
+        return JSON.stringify({ ok: true, approved: false, derived: true, note: "Derivado a un asesor: no se pudo validar el pago. Deja tu texto final vacío." });
       }
       if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
       return JSON.stringify({ ok: true, approved: false, kind: result.kind, note: "Ya le respondí al cliente pidiéndole el dato para validar. NO agregues texto ni apruebes; deja tu texto final vacío." });

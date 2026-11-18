@@ -82,6 +82,8 @@ export interface ConversationState {
   receiptAutoHandledAt?: string | null;
   /** Intentos fallidos de validación por falta de dato (Plin sin nombre): tras 3 se deriva a un asesor. */
   paymentAttempts?: number;
+  /** Último dato que validar_pago le pidió al cliente (motivo y hora): si toca repetirlo, se deriva. */
+  lastValidationAsk?: { kind: string; at: string } | null;
   /** SIMULACIÓN: productIds del combo capturados al validar pago (el carrito se cierra antes de entregar). */
   pendingDeliveryProductIds?: string[];
   /** Mercado Pago: preference del último link de pago enviado y su monto (para el webhook). */
