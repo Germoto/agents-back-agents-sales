@@ -155,6 +155,19 @@ import {
   deleteAdCatalogEntry,
 } from "../ad-catalog/ad-catalog.service";
 import { prepareImageUrl, resolveAiSettings } from "../../lib/ai-providers";
+import {
+  addPending,
+  canRetryConfirmed,
+  confirmedArgs,
+  describeAction,
+  gateFor,
+  pendingKey,
+  PENDING_MAX_PER_TURN,
+  takePending,
+  type ConfirmCardItem,
+  type CopilotPermission,
+  type PendingAction,
+} from "./copilot-permissions";
 import { onboardingScript, onboardingSuggestions, type OnboardingStep } from "./onboarding-script";
 import { getOnboarding } from "../onboarding/onboarding.service";
 
@@ -182,6 +195,11 @@ interface CopilotBody {
   /** Asistente de arranque: guion por paso. */
   mode?: "panel" | "onboarding";
   step?: OnboardingStep;
+  /** Modo de permiso del chat (de fábrica: confirmar). */
+  permiso?: CopilotPermission;
+  /** Ids de la tarjeta de confirmación aceptados / descartados con los botones. */
+  confirmar?: string[];
+  cancelar?: string[];
 }
 
 /** Herramientas SOLO de interfaz (no escriben; el panel las dibuja). No se exportan al MCP. */
@@ -200,7 +218,20 @@ export interface CopilotUi {
   form?: Record<string, unknown>;
   /** Gráfico de barras o tarjetas de métricas dibujado por el panel (mostrar_grafico). */
   chart?: { titulo?: string; tipo: "barras" | "tarjetas"; series: { label: string; value: number; hint?: string }[] };
+  /** Tarjeta de confirmación: acciones que el sistema retuvo hasta que el dueño pulse «Confirmar». */
+  confirm?: { acciones: ConfirmCardItem[] };
 }
+
+/** Solo existe en el turno del panel cuando hay propuestas pendientes (no va en TOOLS ni en el MCP). */
+const CONFIRM_PENDING_TOOL: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "confirmar_pendientes",
+    description:
+      "Ejecuta acciones PENDIENTES DE CONFIRMACIÓN propuestas en tu turno anterior, tal como se mostraron en la tarjeta. Úsala SOLO si el último mensaje del dueño las confirma con claridad ('sí', 'dale', 'confirmo'). {ids}: los ids de la lista de pendientes. No sirve para acciones propuestas en este mismo turno.",
+    parameters: { type: "object", additionalProperties: false, required: ["ids"], properties: { ids: { type: "array", items: { type: "string" } } } },
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Tools (laxas — la validación real es zod/servicios al ejecutar)
@@ -6836,6 +6867,8 @@ const SYSTEM_GUIDE = [
   "- Respuestas rápidas (/respuestas-rapidas, módulo Respuestas rápidas): biblioteca de plantillas con multimedia y acciones; también se ven y envían desde la pestaña Respuestas del chat.",
   "- Centro de ayuda (/ayuda): manuales, videos y guías publicados por FlowApp.",
   "",
+  "MODOS DEL COPILOTO (solo en el chat del panel): junto a la caja de texto hay un selector con tres modos. «Solo consulta»: lee, analiza y explica, no cambia nada. «Pedir confirmación» (de fábrica): antes de cada cambio aparece una tarjeta con los datos exactos y los botones «Confirmar» / «Cancelar»; nada se guarda ni se envía hasta pulsar «Confirmar» (también vale responder «sí»). La tarjeta vale solo para el mensaje siguiente: si el dueño cambia de tema, se descarta. «Automático»: ejecuta sin preguntar, salvo lo irreversible, que siempre pide tarjeta (borrar, lanzar/reanudar/cancelar campañas, reiniciar o iniciar conversaciones, publicar o sacar gente de un grupo, cancelar recordatorios o suscripciones). Sin tarjeta pasan las lecturas, las pruebas en seco y cinco acciones inofensivas (nota interna, fijar chat, adjuntar foto a un producto, transcribir audio, crear enlace de subida). El modo se recuerda en ese navegador; el asistente de arranque siempre pide confirmación. En el conector MCP (Claude.ai) no hay tarjetas: allí el permiso lo pide la propia app por cada herramienta.",
+  "",
   "PLANES Y MÓDULOS: cada plan incluye módulos (Campañas masivas, CRM kanban, Flujos guiados, Embudo de ventas, Chat web, Mercado Pago, Webhooks, Tienda web) y un límite de leads/mes. Si una página no aparece en el menú del tenant es porque su plan no incluye ese módulo o su rubro no la usa. Los precios vigentes están en la sección PLANES de este prompt; el plan propio del negocio se consulta con ver_mi_plan.",
   "=== FIN DE LA GUÍA ===",
 ].join("\n");
@@ -6843,7 +6876,21 @@ const SYSTEM_GUIDE = [
 // ---------------------------------------------------------------------------
 // System prompt + snapshot del negocio
 // ---------------------------------------------------------------------------
-export async function buildSystem(companyId: string, opts: { mode?: "panel" | "onboarding"; step?: OnboardingStep } = {}): Promise<string> {
+/** Regla de escritura según el modo de permiso. Sin modo (conector MCP) queda la regla clásica. */
+function writeRule(permiso?: CopilotPermission): string {
+  if (permiso === "confirmar") {
+    return "- CANDADO DE CONFIRMACIÓN (modo «Pedir confirmación»): cuando el dueño pida un cambio y tengas los datos, LLAMA la herramienta de escritura directamente. El sistema NO la ejecuta: le muestra al dueño una tarjeta con los datos exactos y los botones «Confirmar» / «Cancelar», y a ti te devuelve requiereConfirmacion. Entonces resume en 1-2 frases lo que quedó propuesto y espera: no digas que ya está hecho, no repitas la llamada y no uses ofrecer_opciones para confirmar (la tarjeta ya trae los botones). Varias acciones del mismo pedido van en el MISMO turno para que salgan en una sola tarjeta. Donde estas reglas o las herramientas digan «tras confirmación», esa confirmación ES la tarjeta: no la pidas además por texto. Las lecturas y las pruebas en seco (soloContar, soloValidar) se ejecutan al instante. Si falta un dato o el pedido es ambiguo, pregunta antes de llamar.";
+  }
+  if (permiso === "auto") {
+    return "- MODO AUTOMÁTICO: el dueño eligió que ejecutes sin pedir confirmación. Cuando el pedido sea claro, hazlo e informa qué quedó hecho. Lo irreversible (borrar, lanzar/reanudar/cancelar campañas, reiniciar o iniciar conversaciones, publicar o sacar gente de un grupo, cancelar recordatorios o suscripciones) igual sale como tarjeta con «Confirmar» / «Cancelar»: el sistema la retiene y te devuelve requiereConfirmacion; resume y espera. Si el pedido es ambiguo, pregunta antes.";
+  }
+  if (permiso === "consulta") {
+    return "- MODO SOLO CONSULTA: el dueño eligió que NO cambies nada. Puedes leer, analizar y explicar. Si pide un cambio, cuéntale qué harías y dile que cambie el selector de modo (junto a la caja de texto) a «Pedir confirmación» para aplicarlo. Las herramientas de escritura están bloqueadas por el sistema.";
+  }
+  return "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.";
+}
+
+export async function buildSystem(companyId: string, opts: { mode?: "panel" | "onboarding"; step?: OnboardingStep; permiso?: CopilotPermission } = {}): Promise<string> {
   const [company, productCount, agent, payment, plansSection] = await Promise.all([
     prisma.company.findUnique({ where: { id: companyId }, select: { name: true, vertical: true, timezone: true } }),
     prisma.product.count({ where: { companyId } }),
@@ -6876,7 +6923,7 @@ export async function buildSystem(companyId: string, opts: { mode?: "panel" | "o
     plansSection,
     "",
     "REGLAS:",
-    "- FLUJO OBLIGATORIO para escribir: primero entiende lo que quiere, luego PROPONLE un resumen claro y espera su CONFIRMACIÓN ('sí', 'dale', 'confirmo'). SOLO entonces llama las herramientas de escritura. NUNCA escribas sin confirmación previa en esta conversación.",
+    writeRule(opts.permiso),
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
     "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto: usa la URL EXACTA que aparece en la línea [Adjuntos de este mensaje: …] del mensaje del usuario (NUNCA un data:URI ni una URL inventada). Si el usuario ya adjuntó la imagen, NO le pidas re-adjuntarla. Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
     "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención; la firma y el modo del bot se ven en el panel en Agente IA → Bot y avisos), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial; flags: negotiationHandoff = negociar una vez y derivar, unknownHandoff = derivar con motivo CONSULTA cuando no sabe responder en vez de inventar o prometer 'consultar', humanChatAlerts = avisar al dueño por WhatsApp cuando un cliente escribe en un chat en atención humana), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido), los FLUJOS de chatbot (ver_bloques_flujo, ver_flujo, crear_flujo, editar_flujo, activar_flujo) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia; si la respuesta tiene «Marcar la venta como entregada», al usarla en el panel el asesor elige el canal: solo por el chat, solo por correo o ambos — el correo solo sale para productos con entrega por correo activa y deja una nota 📧 en el chat). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
@@ -6890,7 +6937,11 @@ export async function buildSystem(companyId: string, opts: { mode?: "panel" | "o
     "- ONBOARDING de un negocio nuevo (catálogo vacío): el ORDEN correcto es (1) confirmar rubro y datos de la empresa — el rubro se BLOQUEA en cuanto existan productos —, (2) crear los productos, (3) configurar pagos, (4) ajustar el agente. Guía al usuario en ese orden sin abrumarlo.",
     "- actualizar_producto/configurar_empresa/configurar_agente/configurar_pagos son PARCIALES y ADITIVOS: envía solo los campos a cambiar; el resto se conserva, y las LISTAS enviadas (beneficios, FAQs, aliases, variantes, métodos de pago, reglas, dominios, mensajes) se AGREGAN/FUSIONAN con lo existente — NUNCA borran nada por sí solas. Para QUITAR un elemento o reescribir una lista completa: lee lo actual (ver_producto/ver_configuracion), confirma con el usuario QUÉ se elimina, y llama la tool con el flag reemplazar*/reemplazar=true enviando la versión FINAL completa.",
     "- eliminar_producto, eliminar_pedido_tienda, eliminar_campana, eliminar_cliente, reiniciar_conversacion, iniciar_conversacion, cancelar_recordatorios, agregar_a_grupo_whatsapp (un cliente por llamada; nunca encadenes muchas), configurar_ritmo_grupos (advierte el riesgo de bloqueo antes de subirlo), configurar_mensaje_invitacion_grupo (muestra el texto antes de guardarlo), enviar_mensaje_grupo (muestra antes el texto exacto: lo ve todo el grupo), sacar_de_grupo y quitar un grupo guardado: SOLO si lo pidió explícitamente y confirmó. Nunca elimines ni escribas a números nuevos por iniciativa propia.",
-    "- ESCRIBIR A CLIENTES (enviar_mensaje_cliente, enviar_respuesta_rapida): son mensajes REALES que el cliente recibe en su WhatsApp a nombre del negocio. Lee antes la conversación, un mensaje por llamada, no insistas si el cliente no respondió al anterior, y reporta cada envío al dueño. Si el dueño te dio una instrucción permanente (p. ej. 'atiende y cierra los leads que vayan quedando'), puedes actuar sin pedir confirmación en cada mensaje, siempre dentro de esa instrucción. Cuando termines de atender a alguien, devuelve el chat al bot con atencion_humana {activar:false}.",
+    "- ESCRIBIR A CLIENTES (enviar_mensaje_cliente, enviar_respuesta_rapida): son mensajes REALES que el cliente recibe en su WhatsApp a nombre del negocio. Lee antes la conversación, un mensaje por llamada, no insistas si el cliente no respondió al anterior, y reporta cada envío al dueño. " +
+      (opts.permiso === "confirmar"
+        ? "Cada envío sale como tarjeta de confirmación; si el dueño quiere que atiendas chats por tu cuenta ('atiende y cierra los leads'), dile que cambie el selector de modo a «Automático»."
+        : "Si el dueño te dio una instrucción permanente (p. ej. 'atiende y cierra los leads que vayan quedando'), puedes actuar sin pedir confirmación en cada mensaje, siempre dentro de esa instrucción.") +
+      " Cuando termines de atender a alguien, devuelve el chat al bot con atencion_humana {activar:false}.",
     "- No gestionas datos sensibles (API keys de OpenAI, tokens de Mercado Pago/Meta, credenciales de WhatsApp): para eso indícale la página del panel correspondiente (Agente IA → Modelo para las API keys de IA; Integraciones para Mercado Pago y Meta; WhatsApp API para el canal).",
     "- DUDAS DE USO DEL SISTEMA (cómo conectar WhatsApp, dónde está algo, planes, integraciones...): responde ÚNICAMENTE con la GUÍA DEL SISTEMA y los PLANES VIGENTES de este prompt, nombrando la página del menú y sus pasos reales. Si algo no está en la guía, dilo con honestidad y sugiere el Centro de ayuda (/ayuda) o la capacitación 1:1 desde Inicio (/inicio). NUNCA inventes pasos, botones ni limitaciones (ej.: la conexión por QR SÍ existe, vía SMS Tools). Para preguntas sobre el plan del propio negocio usa ver_mi_plan.",
     "- Tras crear/modificar, resume QUÉ quedó hecho y sugiere el siguiente paso (revisar en el panel, probar en el simulador...).",
@@ -6960,6 +7011,7 @@ export async function runCopilotTurn(
   companyId: string,
   body: CopilotBody,
   onEvent?: (e: CopilotTurnEvent) => void,
+  userId?: string,
 ): Promise<{ reply: string; wrote: boolean; ui?: CopilotUi }> {
   const agentConfig = await prisma.agentConfig.findUnique({ where: { companyId } });
   if (!agentConfig?.openaiApiKey) {
@@ -6976,7 +7028,35 @@ export async function runCopilotTurn(
   void consumePlatformAi(companyId).catch(() => undefined);
   const { apiKey, model, baseUrl, caps } = resolveAiSettings(agentConfig);
 
-  const system = await buildSystem(companyId, { mode: body.mode, step: body.step });
+  // Candado de confirmación. El asistente de arranque siempre pide confirmación.
+  const permiso: CopilotPermission = body.mode === "onboarding" ? "confirmar" : (body.permiso ?? "confirmar");
+  const pendKey = pendingKey(companyId, userId, body.mode === "onboarding" ? "onboarding" : "panel");
+  // Propuestas del turno anterior: valen solo para este mensaje.
+  const previous = takePending(pendKey);
+  const confirmIds = new Set(body.confirmar ?? []);
+  const cancelIds = new Set(body.cancelar ?? []);
+  const confirmedNow = permiso === "consulta" ? [] : previous.filter((p) => confirmIds.has(p.id));
+  let stillPending = permiso === "consulta" ? [] : previous.filter((p) => !confirmIds.has(p.id) && !cancelIds.has(p.id));
+  const staleConfirm = confirmIds.size > 0 && confirmedNow.length === 0;
+
+  const pendingNotes: string[] = [];
+  if (stillPending.length) {
+    pendingNotes.push(
+      "",
+      "ACCIONES PENDIENTES DE CONFIRMACIÓN (las propusiste en tu turno anterior y el dueño las vio en una tarjeta; aún NO se ejecutaron):",
+      ...stillPending.map((p) => {
+        const card = describeAction(p);
+        return `- id ${p.id}: ${card.titulo}${card.detalle.length ? ` (${card.detalle.slice(0, 4).map((d) => `${d.campo}: ${d.valor}`).join("; ")})` : ""}`;
+      }),
+      "Si el último mensaje del dueño las confirma con claridad, llama confirmar_pendientes con esos ids (se ejecuta exactamente lo que vio). Si pide cambios, vuelve a llamar la herramienta con los datos corregidos (saldrá una tarjeta nueva). Si habla de otra cosa, ignóralas: ya vencieron.",
+    );
+  }
+  if (staleConfirm) {
+    pendingNotes.push("", "AVISO: el dueño pulsó «Confirmar» en una tarjeta que ya no está vigente (venció o ya se había ejecutado). NO ejecutes nada por eso: dile que la propuesta venció y que te lo pida de nuevo si aún lo quiere.");
+  }
+  if (cancelIds.size) pendingNotes.push("", "AVISO: el dueño pulsó «Cancelar» en la tarjeta: esas acciones se descartaron y no se ejecutó nada. Confírmaselo en una frase.");
+
+  const system = (await buildSystem(companyId, { mode: body.mode, step: body.step, permiso })) + pendingNotes.join("\n");
   const history = body.messages.slice(-HISTORY_LIMIT);
 
   // Adjuntos disponibles en TODA la conversación (para adjuntar_foto_producto,
@@ -7020,7 +7100,57 @@ export async function runCopilotTurn(
 
   let wroteAny = false;
   const ui: CopilotUi = {};
-  const tools = toolsFor(body.mode, body.step);
+  const confirmItems: ConfirmCardItem[] = [];
+  /** Bloques de UI del turno; con tarjeta de confirmación sobran los botones de opciones. */
+  const uiOut = (): CopilotUi | undefined => {
+    if (confirmItems.length) {
+      ui.confirm = { acciones: confirmItems };
+      delete ui.options;
+    }
+    return Object.keys(ui).length ? ui : undefined;
+  };
+  const baseTools = toolsFor(body.mode, body.step);
+  const knownTools = new Set(baseTools.map((t) => t.function.name));
+  const tools = stillPending.length ? [...baseTools, CONFIRM_PENDING_TOOL] : baseTools;
+
+  /** Ejecuta una acción que el dueño ya confirmó (con los argumentos guardados, no con los que diga el modelo). */
+  const confirmedLines: string[] = [];
+  const retryBudget = new Map<string, number>();
+  const runConfirmed = async (p: PendingAction): Promise<string> => {
+    const title = describeAction(p).titulo;
+    onEvent?.({ type: "status", tool: p.tool, label: title });
+    let result: string;
+    let wrote = false;
+    try {
+      ({ result, wrote } = await runCopilotTool(companyId, p.tool, confirmedArgs(p.tool, p.args), attachmentsByUrl));
+    } catch (err) {
+      result = JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "error ejecutando la herramienta" });
+    }
+    wroteAny = wroteAny || wrote;
+    let ok = true;
+    try {
+      ok = (JSON.parse(result) as { ok?: boolean }).ok !== false;
+    } catch {
+      ok = true;
+    }
+    // Si falló sin escribir nada, el modelo puede corregir y reintentar esa misma herramienta (la intención ya fue aprobada).
+    if (!ok && !wrote && canRetryConfirmed(p.tool, p.args)) retryBudget.set(p.tool, (retryBudget.get(p.tool) ?? 0) + 2);
+    confirmedLines.push(`${ok ? "✅" : "❌"} ${title}`);
+    onEvent?.({ type: "tool_done", tool: p.tool, label: title, ok });
+    return result;
+  };
+
+  // Botón «Confirmar»: el sistema ejecuta lo guardado ANTES de darle el turno al modelo.
+  if (confirmedNow.length) {
+    messages.push({
+      role: "assistant",
+      content: null,
+      tool_calls: confirmedNow.map((p) => ({ id: `conf_${p.id}`, type: "function" as const, function: { name: p.tool, arguments: JSON.stringify(p.args) } })),
+    });
+    for (const p of confirmedNow) {
+      messages.push({ role: "tool", tool_call_id: `conf_${p.id}`, content: await runConfirmed(p) });
+    }
+  }
   // Paso 2 del asistente: si el dueño manda la foto o una lista con precios, la primera
   // iteración DEBE proponer (Haiku tendía a saltarse el guion y crear directo).
   const lastUser = [...history].reverse().find((m) => m.role === "user");
@@ -7033,7 +7163,7 @@ export async function runCopilotTurn(
     // se emite (suele ser un "voy a…" redundante); solo el texto final llega en vivo.
     let buffered = "";
     let streamed = "";
-    const r = onEvent
+    const r = await (async () => onEvent
       ? await chatCompletionStream({
           apiKey,
           model,
@@ -7051,8 +7181,14 @@ export async function runCopilotTurn(
           console.warn("[copilot] stream falló, reintento sin stream:", err instanceof Error ? err.message : err);
           return chatCompletion({ apiKey, model, baseUrl, temperature: 0.3, maxTokens: 2500, messages, tools, toolChoice });
         })
-      : await chatCompletion({ apiKey, model, baseUrl, temperature: 0.3, maxTokens: 2500, messages, tools, toolChoice });
+      : await chatCompletion({ apiKey, model, baseUrl, temperature: 0.3, maxTokens: 2500, messages, tools, toolChoice }))().catch((err) => {
+      // Si la IA falla DESPUÉS de ejecutar lo confirmado, el dueño igual debe saber qué quedó hecho.
+      if (!confirmedLines.length) throw err;
+      console.warn("[copilot] la IA falló tras ejecutar acciones confirmadas:", err instanceof Error ? err.message : err);
+      return null;
+    });
     void caps;
+    if (!r) return { reply: `Esto quedó ejecutado:\n${confirmedLines.join("\n")}`, wrote: wroteAny, ui: uiOut() };
 
     if (!r.toolCalls.length) {
       const reply = r.content?.trim() || "¿En qué te ayudo con la configuración? 🙂";
@@ -7066,7 +7202,7 @@ export async function runCopilotTurn(
         }
         void streamed;
       }
-      return { reply, wrote: wroteAny, ui: Object.keys(ui).length ? ui : undefined };
+      return { reply, wrote: wroteAny, ui: uiOut() };
     }
 
     messages.push({ role: "assistant", content: r.content, tool_calls: r.toolCalls });
@@ -7079,6 +7215,62 @@ export async function runCopilotTurn(
         continue;
       }
       const label = toolLabel(call.function.name);
+      // «Sí» escrito: el modelo confirma por id y se ejecuta lo guardado del turno anterior.
+      if (call.function.name === "confirmar_pendientes") {
+        const ids = new Set(Array.isArray(parsedArgs.ids) ? parsedArgs.ids.map(String) : []);
+        const chosen = stillPending.filter((p) => ids.has(p.id));
+        stillPending = stillPending.filter((p) => !ids.has(p.id));
+        const resultados: Array<{ id: string; accion: string; resultado: unknown }> = [];
+        for (const p of chosen) {
+          const raw = await runConfirmed(p);
+          let parsed: unknown = raw;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            /* resultado en texto */
+          }
+          resultados.push({ id: p.id, accion: p.tool, resultado: parsed });
+        }
+        const unknownIds = [...ids].filter((id) => !chosen.some((p) => p.id === id));
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify({
+            ok: chosen.length > 0,
+            resultados,
+            ...(unknownIds.length ? { noVigentes: unknownIds, nota: "Esos ids no están pendientes: solo se confirman acciones propuestas en un turno ANTERIOR y una sola vez." } : {}),
+          }),
+        });
+        continue;
+      }
+      // Candado: las escrituras no se ejecutan sin la tarjeta (o se bloquean en solo consulta).
+      let gate = knownTools.has(call.function.name) ? gateFor(call.function.name, parsedArgs, permiso) : "run";
+      if (gate === "ask" && (retryBudget.get(call.function.name) ?? 0) > 0 && canRetryConfirmed(call.function.name, parsedArgs)) {
+        retryBudget.set(call.function.name, (retryBudget.get(call.function.name) ?? 0) - 1);
+        gate = "run";
+      }
+      if (gate === "deny") {
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify({ ok: false, modoSoloConsulta: true, error: "El dueño tiene el Copiloto en «Solo consulta»: no se cambió nada. Explícale qué harías y que cambie el selector de modo a «Pedir confirmación» para aplicarlo." }),
+        });
+        continue;
+      }
+      if (gate === "ask") {
+        const pending = addPending(pendKey, call.function.name, parsedArgs);
+        if (pending && !confirmItems.some((c) => c.id === pending.id)) confirmItems.push(describeAction(pending));
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify(
+            pending
+              ? { ok: false, requiereConfirmacion: true, pendienteId: pending.id, nota: "NO se ejecutó. El panel ya le muestra al dueño una tarjeta con estos datos y los botones «Confirmar» / «Cancelar». Resume en 1-2 frases lo propuesto y espera su respuesta. No repitas esta llamada, no digas que ya está hecho y no uses ofrecer_opciones para confirmar." }
+              : { ok: false, error: `Demasiadas acciones por confirmar en un turno (máximo ${PENDING_MAX_PER_TURN}). Pide confirmar estas primero y sigue después.` },
+          ),
+        });
+        continue;
+      }
       onEvent?.({ type: "status", tool: call.function.name, label });
       try {
         collectUi(ui, call.function.name, parsedArgs);
@@ -7103,12 +7295,12 @@ export async function runCopilotTurn(
   return {
     reply: "Hice varias operaciones seguidas y me quedé sin turno 😅. Dime si seguimos con lo que faltó.",
     wrote: wroteAny,
-    ui: Object.keys(ui).length ? ui : undefined,
+    ui: uiOut(),
   };
 }
 
 export async function copilotChatController(req: Request, res: Response) {
-  const result = await runCopilotTurn(req.user!.companyId, req.body as CopilotBody);
+  const result = await runCopilotTurn(req.user!.companyId, req.body as CopilotBody, undefined, req.user!.id);
   return res.json(result);
 }
 
@@ -7127,7 +7319,7 @@ export async function copilotChatStreamController(req: Request, res: Response) {
   };
   const keepAlive = setInterval(() => res.write(": ping\n\n"), 15_000);
   try {
-    const result = await runCopilotTurn(req.user!.companyId, req.body as CopilotBody, (e) => write(e.type, e));
+    const result = await runCopilotTurn(req.user!.companyId, req.body as CopilotBody, (e) => write(e.type, e), req.user!.id);
     write("done", result);
   } catch (err) {
     const message = err instanceof AppError ? err.message : err instanceof Error ? err.message : "No pude responder. Intenta de nuevo.";

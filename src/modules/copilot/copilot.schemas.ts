@@ -33,6 +33,11 @@ export const copilotChatSchema = z.object({
   // Asistente de arranque: el Copiloto sigue el guion del paso (1 negocio, 2 productos, 3 cobros, 4 prueba).
   mode: z.enum(["panel", "onboarding"]).optional(),
   step: z.number().int().min(1).max(4).optional(),
+  // Modo de permiso elegido en el chat: solo consulta, pedir confirmación (de fábrica) o automático.
+  permiso: z.enum(["consulta", "confirmar", "auto"]).optional(),
+  // Ids de la tarjeta de confirmación que el dueño aceptó o descartó con los botones.
+  confirmar: z.array(z.string().max(32)).max(30).optional(),
+  cancelar: z.array(z.string().max(32)).max(30).optional(),
 });
 
 /** Creación en lote desde el asistente (paso 2): mismos campos laxos que crear_producto.data. */
