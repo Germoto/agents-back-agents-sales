@@ -56,7 +56,7 @@ import {
 } from "./flow-types";
 import { applyCrmAndTagActions } from "../crm/crm.service";
 import { getEntitlements } from "../billing/entitlements";
-import { composePaymentMethodsMessage } from "../agent/payment-methods";
+import { composePaymentMethodsMessage, ownerReviewsPayments } from "../agent/payment-methods";
 import { schedulePaymentRecheck } from "../scheduler/scheduler.service";
 import { getAvailableSlots, isSlotAvailable, formatSlotLabel } from "../bookings/availability.service";
 import { calendarLinksMessage } from "../bookings/calendar.service";
@@ -1585,7 +1585,7 @@ async function resumePaymentAwaiting(flow: LoadedFlow, node: FlowNode, io: FlowI
 
   // Señales de pago: código leído por visión del voucher + dígitos del texto + posible titular.
   const lastReceipt = io.state.lastReceipt as
-    | { securityCode?: string | null; operationNumber?: string | null; at?: string | null; mediaUrl?: string | null }
+    | { securityCode?: string | null; operationNumber?: string | null; at?: string | null; mediaUrl?: string | null; amountText?: string | null }
     | undefined;
   const codes = [lastReceipt?.securityCode, lastReceipt?.operationNumber, ...(text.match(/\d{3,}/g) ?? [])]
     .map((c) => String(c ?? "").replace(/\D/g, ""))
@@ -1605,11 +1605,42 @@ async function resumePaymentAwaiting(flow: LoadedFlow, node: FlowNode, io: FlowI
     return;
   }
 
-  const { tryApprovePayment } = await import("../agent/agent-tools");
+  const { tryApprovePayment, createReviewReceipt } = await import("../agent/agent-tools");
   const { buildBotConfig } = await import("../bot/bot.service");
   const config = await buildBotConfig(io.companyId);
   const expected =
     data.amountMode === "fixed" && Number(data.amount) > 0 ? Number(data.amount) : undefined;
+
+  // «La reviso yo» (Pagos → Validación de comprobantes): no se valida; el pago queda
+  // como comprobante en revisión y el bloque sigue por su rama de revisión manual.
+  if (ownerReviewsPayments(config.payment)) {
+    const receiptAt = receiptFresh ? (lastReceipt?.at ?? null) : null;
+    const prev = io.state.paymentReview;
+    const prevFresh = !!prev?.at && Date.now() - new Date(prev.at).getTime() < 24 * 60 * 60_000;
+    if (prev && prevFresh && (!receiptAt || prev.receiptAt === receiptAt)) {
+      // Mismo pago ya reportado: se sigue esperando al dueño sin repetir mensajes.
+      await armPaymentTimeout(flow, node, io);
+      pushTrace(io, node, "payment:owner-review-waiting");
+      return;
+    }
+    const reviewAt = new Date().toISOString();
+    const read = receiptAt ? Number(String(lastReceipt?.amountText ?? "").replace(/[^0-9.]/g, "")) : NaN;
+    const productId = typeof io.state.selectedProductId === "string" ? io.state.selectedProductId : null;
+    await createReviewReceipt({
+      companyId: io.companyId,
+      customerId: io.customerId,
+      conversationId: io.conversationId,
+      customerPhone: io.customerPhone,
+      currency: config.business.currency,
+      productIds: productId ? [productId] : [],
+      amount: Number.isFinite(read) && read > 0 ? read : expected,
+      receipt: receiptAt ? lastReceipt : null,
+      key: receiptAt ?? reviewAt,
+      meta: { flowId: flow.id, expectedAmount: expected ?? null },
+    });
+    io.state.paymentReview = { at: reviewAt, receiptAt };
+    return goPaymentReview(flow, node, io, { ownerReview: true });
+  }
   const result = await tryApprovePayment({
     companyId: io.companyId,
     customerId: io.customerId,
@@ -1677,13 +1708,15 @@ async function resumePaymentAwaiting(flow: LoadedFlow, node: FlowNode, io: FlowI
  * `review` del flujo y DEJA el nodo esperando para que la aprobación/rechazo
  * desde el panel continúe por `approved`/`rejected` (hook resumeFlowOnPaymentOutcome).
  */
-async function goPaymentReview(flow: LoadedFlow, node: FlowNode, io: FlowIO): Promise<void> {
+async function goPaymentReview(flow: LoadedFlow, node: FlowNode, io: FlowIO, opts?: { ownerReview?: boolean }): Promise<void> {
   const fs = flowStateOf(io.state);
   const data = node.data as ValidatePaymentData;
   const review = data.reviewMessage?.trim() || PAYMENT_REVIEW_DEFAULT;
   await io.emit({ kind: "text", text: renderTemplate(review, io) });
   await io.notifyOwner(
-    `🧾 Pago por revisar de ${io.customerPhone}: no pude validarlo automáticamente. ` +
+    (opts?.ownerReview
+      ? `🧾 Pago por confirmar de ${io.customerPhone}. `
+      : `🧾 Pago por revisar de ${io.customerPhone}: no pude validarlo automáticamente. `) +
       `Apruébalo o recházalo desde Comprobantes; el flujo continuará solo.`,
   );
   io.state.status = "ESPERANDO_VALIDACION";

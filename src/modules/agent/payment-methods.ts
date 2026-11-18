@@ -44,6 +44,21 @@ export interface PaymentConfigLike {
   chargeMessage?: string | null;
   /** Mensaje propio del cobro de adelanto de un pedido (null = el de fábrica). */
   advanceChargeMessage?: string | null;
+  /** "AUTO" (default) = el agente valida los pagos; "OWNER" = el dueño revisa cada pago. */
+  receiptReviewMode?: string | null;
+  /** Respuesta al cliente cuando el dueño revisa el pago (null = la de fábrica). */
+  receiptReviewMessage?: string | null;
+}
+
+export const RECEIPT_REVIEW_MESSAGE_MAX = 300;
+/** Respuesta de fábrica al cliente cuando el dueño revisa los pagos a mano. */
+export const DEFAULT_RECEIPT_REVIEW_MESSAGE = "¡Gracias! Ya lo reviso y te confirmo en un ratito 🙌";
+/** Motivo de la derivación cuando el pago queda a la espera del dueño. */
+export const OWNER_REVIEW_HANDOFF = "HUMAN[PAGO_POR_CONFIRMAR]";
+
+/** ¿El dueño revisa cada pago? (Pagos → Validación de comprobantes: «La reviso yo»). */
+export function ownerReviewsPayments(payment: { receiptReviewMode?: string | null } | null | undefined): boolean {
+  return payment?.receiptReviewMode === "OWNER";
 }
 
 /** Datos del cobro para el mensaje propio del negocio (no cambian el mensaje de fábrica). */

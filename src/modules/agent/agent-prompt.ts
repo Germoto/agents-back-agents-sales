@@ -14,7 +14,7 @@ import { HUMAN_AGENT_TAG } from "./conversation.service";
 import { emailDeliveryAvailable, crmToolAvailable, groupToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
 import { describeShippingConfig, type ShippingConfig } from "../shipping/shipping-config";
 import { activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
-import { mpChatOn, mpLinkOnRequest } from "./payment-methods";
+import { mpChatOn, mpLinkOnRequest, ownerReviewsPayments } from "./payment-methods";
 import { deliveryDriveRefs, driveSearchEnabled } from "../../lib/google-drive";
 import { symbolFor } from "../../lib/currency";
 
@@ -508,6 +508,36 @@ function recentlyResumed(state: ConversationState): boolean {
   return Number.isFinite(at) && Date.now() - at < 24 * 60 * 60_000;
 }
 
+/** Reglas del prompt base que ordenan validar el pago: no aplican cuando el dueño revisa cada pago. */
+const AUTO_VALIDATION_RULES = [
+  "- SECUENCIA DE PAGO (obligatoria)",
+  "- IMÁGENES DEL CLIENTE:",
+  "- VALIDACIÓN DE PAGO (delicado",
+  "- VALIDAR EL PAGO:",
+  "- OJO con el nombre del titular:",
+  "- OJO mientras esperas el pago:",
+  "- Si en el estado hay 'comprobanteLeido'",
+];
+
+const OWNER_REVIEW_RULE =
+  "- PAGOS REVISADOS POR EL DUEÑO (este negocio NO valida pagos automáticamente): cuando el cliente confirme que quiere comprar, usa enviar_metodos_pago (esa herramienta ya le envía el monto y los datos de pago). Cuando el cliente AFIRME que ya pagó (ya pagué, ya te yapeé, ya hice la transferencia) o mande su comprobante, llama a reportar_pago UNA sola vez: la herramienta le responde al cliente, avisa al dueño y pasa el chat a un asesor; deja tu texto final VACÍO. NUNCA pidas el nombre del titular, un código ni otra captura, y NUNCA digas que el pago está validado, aprobado o confirmado: eso lo confirma el dueño. La herramienta validar_pago NO existe en este negocio: donde otra regla diga validar_pago o 'valida el pago', usa reportar_pago. Que el cliente diga que pagará MÁS TARDE o suelte un ok/listo de simple acuse NO es un pago: no llames a reportar_pago; respóndele en una línea y queda atento. Entrega (entregar_producto) solo cuando el estado sea PAGADO.";
+
+/** «La reviso yo»: cambia las reglas de validación automática por la de reportar el pago al dueño. */
+function ownerReviewPrompt(prompt: string): string {
+  let placed = false;
+  const out: string[] = [];
+  for (const line of prompt.split("\n")) {
+    if (AUTO_VALIDATION_RULES.some((prefix) => line.startsWith(prefix))) {
+      if (!placed) out.push(OWNER_REVIEW_RULE);
+      placed = true;
+      continue;
+    }
+    out.push(line);
+  }
+  if (!placed) out.push(OWNER_REVIEW_RULE);
+  return out.join("\n");
+}
+
 export function buildSystemPrompt(config: BotConfig, state: ConversationState, extra?: PromptExtras): string {
   const flowVarsText = extra?.flowVars
     ? Object.entries(extra.flowVars)
@@ -579,7 +609,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     nowLine = `Fecha y hora actual (UTC): ${new Date().toISOString()}.`;
   }
 
-  return [
+  const prompt = [
     config.agent.basePrompt,
     "",
     `Negocio: ${config.business.name}. Estilo comercial: ${config.agent.salesStyle}.`,
@@ -821,4 +851,5 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     "",
     "Tu respuesta final (texto sin herramientas) es lo que el cliente leerá como cierre del turno. IMPORTANTE: las herramientas que ENVÍAN contenido al cliente (enviar_catalogo, enviar_multimedia, enviar_metodos_pago) ya se lo mostraron — NO repitas ese contenido en tu texto final. Tras usarlas, escribe a lo sumo UNA frase breve de cierre o una pregunta; si la herramienta ya dijo todo, deja el texto final vacío. Solo si NO usaste ninguna herramienta que envíe contenido, responde con un mensaje claro y completo.",
   ].join("\n");
+  return ownerReviewsPayments(config.payment) ? ownerReviewPrompt(prompt) : prompt;
 }

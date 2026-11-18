@@ -1834,15 +1834,20 @@ export async function notifyAdmin(
         ? `❓ Consulta sin respuesta: el cliente (${customerPhone}) preguntó algo que el agente no pudo responder.`
         : motivo === "RECLAMO"
           ? `⚠️ Reclamo del cliente (${customerPhone}).`
-          : motivo === "PAGO"
-            ? `💳 Problema de pago del cliente (${customerPhone}).`
+          : motivo === "PAGO_POR_CONFIRMAR"
+            ? `🧾 Pago por confirmar del cliente (${customerPhone}).`
+            : motivo === "PAGO"
+              ? `💳 Problema de pago del cliente (${customerPhone}).`
             : `🔔 Un cliente (${customerPhone}) necesita atención humana.`;
   try {
     await sendText(
       sender,
       to,
       `${header}\n` +
-        `Motivo: ${reasonText.replace(/^HUMAN(\[[A-Z_]+\])?:\s*/, "")}\n\n` +
+        `${motivo === "PAGO_POR_CONFIRMAR" ? "Detalle" : "Motivo"}: ${reasonText.replace(/^HUMAN(\[[A-Z_]+\])?:\s*/, "")}\n\n` +
+        (motivo === "PAGO_POR_CONFIRMAR"
+          ? `Apruébalo en Comprobantes o registra el pago en Pedidos: el bot se reactiva solo y el cliente recibe la confirmación.\n\n`
+          : "") +
         `El bot quedó pausado para este cliente. Para atenderlo tú:\n` +
         `• Responder: *${num} tu mensaje*\n` +
         `• Reactivar el bot: *BOT ${num}*\n` +

@@ -11,7 +11,7 @@ import { clearMpLinkState } from "../agent/payment-methods";
 import { resumeFlowOnPaymentOutcome } from "../flows/flow-engine";
 import { reportCtwaConversion } from "../meta-capi/meta-capi.service";
 import { singleOpenOrderFor, applyOrderPayment } from "../orders/order-money";
-import { afterOrderPaymentOutsideChat } from "../orders/order-notify.service";
+import { afterOrderPaymentOutsideChat, resumeChatAfterOwnerReview } from "../orders/order-notify.service";
 
 export interface ReceiptFilters {
   status?: string | null;
@@ -266,9 +266,15 @@ export async function approveReceipt(
 
   // Pedido con «Envíos»: si el cliente tiene UN solo pedido con saldo, el comprobante
   // aprobado se le acredita (adelanto o saldo). No-op para los pedidos de siempre.
-  await creditReceiptToOpenOrder(companyId, updated).catch((err) => {
+  const credited = await creditReceiptToOpenOrder(companyId, updated).catch((err) => {
     console.warn("[receipts] no se pudo acreditar el comprobante al pedido:", err instanceof Error ? err.message : err);
+    return null;
   });
+  // «La reviso yo» sin pedido que acreditar: el bot vuelve al chat con el pago confirmado
+  // (con pedido ya lo hizo afterOrderPaymentOutsideChat). No-op si el chat no esperaba al dueño.
+  if ((!credited || credited.already) && updated.customerId) {
+    await resumeChatAfterOwnerReview(companyId, updated.customerId).catch(() => undefined);
+  }
 
   // Emitir evento Socket.IO para que el frontend actualice en tiempo real
   socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {

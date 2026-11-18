@@ -7,12 +7,12 @@
 import { chatCompletion, type ChatMessage } from "../../lib/openai";
 import { buildSystemPrompt } from "./agent-prompt";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
-import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, shippingOf, postponeAvailable, type TurnContext } from "./agent-tools";
+import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, shippingOf, postponeAvailable, reportPaymentForReview, type TurnContext } from "./agent-tools";
 import { currentOrderFor } from "../orders/order-money";
 import { agentStoreLinks } from "../storefront/storefront-public-url";
 import type { PromptExtras } from "./agent-prompt";
 import { summarizeCart } from "./cart.service";
-import { mpChatOn } from "./payment-methods";
+import { mpChatOn, ownerReviewsPayments } from "./payment-methods";
 import { promisesPaymentLink, pastesMpLink, maskMpLinks } from "./mp-link-guard";
 import { promisesFollowupDate, parsePromisedDate } from "./postpone-guard";
 import { normalizeSmartFollowup, activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
@@ -337,6 +337,13 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   // (pasó en prod: comprobante perfecto en el estado y el modelo respondió un
   // genérico sin validar). Se fuerza validar_pago en la primera iteración; el
   // resto del turno sigue normal con el resultado del tool.
+  // «La reviso yo»: la captura no se valida ni pasa por el modelo. Se responde al
+  // cliente, se avisa al dueño y el turno termina aquí (el cierre del turno pausa el bot).
+  if (shouldReportReceipt(ctx)) {
+    console.log(`[agent] pago reportado al dueño (revisión manual) convo=${ctx.conversationId}`);
+    await reportPaymentForReview(ctx);
+    return "";
+  }
   const forceValidation = shouldForceValidation(ctx);
   if (forceValidation) {
     ctx.state.receiptAutoHandledAt = ctx.state.lastReceipt?.at ?? new Date().toISOString();
@@ -611,7 +618,22 @@ function shouldForcePresentation(ctx: TurnContext, history: ChatMessage[]): bool
   return true;
 }
 
+/**
+ * «La reviso yo»: ¿hay una captura de pago fresca (<10 min) que aún no se reportó
+ * al dueño? No exige código: cualquier comprobante leído se deriva.
+ */
+function shouldReportReceipt(ctx: TurnContext): boolean {
+  if (!ownerReviewsPayments(ctx.config.payment)) return false;
+  const r = ctx.state.lastReceipt;
+  if (!r?.at) return false;
+  if (Date.now() - new Date(r.at).getTime() > 10 * 60 * 1000) return false;
+  if (ctx.state.receiptAutoHandledAt === r.at) return false;
+  const status = ctx.state.status ?? "";
+  return !(status === "PAGADO" || status === "ENTREGADO" || status === "ASESOR_HUMANO");
+}
+
 function shouldForceValidation(ctx: TurnContext): boolean {
+  if (ownerReviewsPayments(ctx.config.payment)) return false;
   const r = ctx.state.lastReceipt;
   if (!r?.securityCode || !r.at) return false;
   if (Date.now() - new Date(r.at).getTime() > 10 * 60 * 1000) return false;

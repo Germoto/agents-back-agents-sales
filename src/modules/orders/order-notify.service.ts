@@ -14,6 +14,7 @@ import { prisma } from "../../lib/prisma";
 import { symbolFor } from "../../lib/currency";
 import { applySpintax } from "../agent/reminder-templates";
 import { checkManualSendGate } from "../agent/manual-send-gate";
+import { OWNER_REVIEW_HANDOFF } from "../agent/payment-methods";
 import { loadWhatsappSender } from "../agent/outbound";
 import {
   recordMessage,
@@ -251,12 +252,23 @@ export async function afterOrderPaymentOutsideChat(
   opts: { fullyPaid: boolean },
 ): Promise<OrderNoticeResult> {
   const event: NotifyEvent = opts.fullyPaid ? "PAGO_COMPLETO" : "ADELANTO_RECIBIDO";
+  // «La reviso yo»: el chat esperaba al dueño por este pago.
+  let ownerReviewCustomerId: string | null = null;
   try {
     const order = await prisma.order.findFirst({ where: { id: orderId, companyId }, select: { customerId: true } });
     const convo = order?.customerId ? await chatOf(companyId, order.customerId) : null;
     if (convo) {
       const state = ((convo.state as ConversationState | null) ?? {}) as ConversationState;
-      const pausedByPayment = typeof state.pendingAction === "string" && state.pendingAction.startsWith("HUMAN[PAGO]");
+      const ownerReview = pausedByOwnerReview(state);
+      const pausedByPayment =
+        ownerReview || (typeof state.pendingAction === "string" && state.pendingAction.startsWith("HUMAN[PAGO]"));
+      if (ownerReview) {
+        ownerReviewCustomerId = order!.customerId;
+        // Al reactivar, el chat retoma con el pago ya confirmado (no «esperando pago»).
+        state.statusBeforeHandoff = opts.fullyPaid ? "PAGADO" : "PEDIDO_REGISTRADO";
+        state.paymentReview = null;
+        state.lastPaymentPromptAt = null;
+      }
       state.pendingRecheckAt = null;
       state.paymentAttempts = 0;
       state.lastReceipt = null;
@@ -268,5 +280,68 @@ export async function afterOrderPaymentOutsideChat(
   } catch (err) {
     console.warn("[order-notify] no se pudo actualizar la conversación tras el pago:", err instanceof Error ? err.message : err);
   }
-  return notifyOrderEvent(companyId, orderId, event);
+  const notice = await notifyOrderEvent(companyId, orderId, event);
+  // Sin aviso del pedido (apagado o no enviado), el cliente igual recibe la confirmación.
+  if (ownerReviewCustomerId && !notice.sent) await sendPaymentConfirmed(companyId, ownerReviewCustomerId);
+  return notice;
+}
+
+/** ¿El chat está en manos del dueño porque revisa un pago? («La reviso yo»). */
+function pausedByOwnerReview(state: ConversationState): boolean {
+  return typeof state.pendingAction === "string" && state.pendingAction.startsWith(OWNER_REVIEW_HANDOFF);
+}
+
+const PAYMENT_CONFIRMED_TEXT = "Pago confirmado ✅ ¡Gracias!";
+
+/** Confirmación corta al cliente (respeta «no contactar» y la ventana de 24 h). Nunca lanza. */
+async function sendPaymentConfirmed(companyId: string, customerId: string): Promise<boolean> {
+  try {
+    const convo = await chatOf(companyId, customerId);
+    if (!convo) return false;
+    const provider = convo.channel === "web" ? "WEB" : ((await loadWhatsappSender(companyId))?.provider ?? null);
+    if (!provider) return false;
+    const gate = await checkManualSendGate({ companyId, customerId, provider, optOutAt: convo.customer.optOutAt, skipPacing: true });
+    if (!gate.ok) return false;
+    await sendHumanReply(companyId, convo.id, PAYMENT_CONFIRMED_TEXT, { source: "payment-confirmed" });
+    return true;
+  } catch (err) {
+    console.warn("[order-notify] confirmación de pago no enviada:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/**
+ * «La reviso yo», venta sin pedido con montos: el dueño aprobó el comprobante. El bot
+ * vuelve al chat con el pago confirmado; la confirmación al cliente queda pendiente
+ * hasta saber si la entrega digital ya le escribió (confirmOwnerReviewedPayment).
+ */
+export async function resumeChatAfterOwnerReview(companyId: string, customerId: string): Promise<boolean> {
+  const convo = await chatOf(companyId, customerId);
+  if (!convo) return false;
+  const state = ((convo.state as ConversationState | null) ?? {}) as ConversationState;
+  if (!pausedByOwnerReview(state)) return false;
+  state.pendingRecheckAt = null;
+  state.paymentAttempts = 0;
+  state.lastReceipt = null;
+  state.paymentReview = null;
+  state.lastPaymentPromptAt = null;
+  state.statusBeforeHandoff = "PAGADO";
+  state.ownerReviewConfirmPending = true;
+  await saveState(convo.id, state);
+  await setBotPaused(companyId, convo.id, false);
+  return true;
+}
+
+/** Cierra la aprobación de «La reviso yo»: confirma al cliente si la entrega no le escribió. */
+export async function confirmOwnerReviewedPayment(companyId: string, customerId: string, delivered: boolean): Promise<void> {
+  try {
+    const convo = await chatOf(companyId, customerId);
+    const state = ((convo?.state as ConversationState | null) ?? {}) as ConversationState;
+    if (!convo || !state.ownerReviewConfirmPending) return;
+    delete state.ownerReviewConfirmPending;
+    await saveState(convo.id, state);
+    if (!delivered) await sendPaymentConfirmed(companyId, customerId);
+  } catch (err) {
+    console.warn("[order-notify] no se pudo cerrar la revisión del pago:", err instanceof Error ? err.message : err);
+  }
 }

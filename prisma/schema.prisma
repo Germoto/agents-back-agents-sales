@@ -537,6 +537,10 @@ model PaymentConfig {
   // de adelanto (pedido con saldo). Variables: {nombre} {monto} {total} {saldo} {metodos} {pedido}.
   chargeMessage        String?
   advanceChargeMessage String?
+  // Validación de comprobantes: "AUTO" (el agente valida) | "OWNER" (el dueño revisa cada pago).
+  receiptReviewMode    String  @default("AUTO")
+  // Respuesta al cliente cuando el dueño revisa el pago (null = la de fábrica).
+  receiptReviewMessage String?
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
   company              Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)

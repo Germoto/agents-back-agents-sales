@@ -17,6 +17,7 @@ import { getConversationRuntime, recordMessage, saveState, type ConversationStat
 import { cancelPendingReminders } from "../scheduler/scheduler.service";
 import { markFollowupReset } from "../scheduler/smart-followup";
 import { clearMpLinkState } from "../agent/payment-methods";
+import { confirmOwnerReviewedPayment } from "../orders/order-notify.service";
 
 export type ApprovedReceiptDelivery = {
   /** true = se enviaron mensajes de entrega por el chat. */
@@ -32,6 +33,22 @@ export type ApprovedReceiptDelivery = {
 const skip = (reason: string): ApprovedReceiptDelivery => ({ delivered: false, sent: 0, reason, manualNeeded: [], outOfStock: [] });
 
 export async function deliverApprovedReceipt(companyId: string, receiptId: string): Promise<ApprovedReceiptDelivery> {
+  let result: ApprovedReceiptDelivery | null = null;
+  try {
+    result = await deliverReceipt(companyId, receiptId);
+    return result;
+  } finally {
+    // «La reviso yo»: si la entrega no le escribió al cliente, sale la confirmación corta.
+    const r = await prisma.paymentReceipt
+      .findFirst({ where: { id: receiptId, companyId }, select: { source: true, status: true, customerId: true } })
+      .catch(() => null);
+    if (r?.source === "chat" && r.status === "APROBADO" && r.customerId) {
+      await confirmOwnerReviewedPayment(companyId, r.customerId, result?.delivered === true);
+    }
+  }
+}
+
+async function deliverReceipt(companyId: string, receiptId: string): Promise<ApprovedReceiptDelivery> {
   const receipt = await prisma.paymentReceipt.findFirst({
     where: { id: receiptId, companyId },
     select: { id: true, status: true, productId: true, customerId: true, digitalSaleId: true, customer: { select: { phone: true } } },

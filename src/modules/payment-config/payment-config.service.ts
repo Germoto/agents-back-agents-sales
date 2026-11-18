@@ -5,6 +5,7 @@ import { mpGetMe } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
 import {
   DEFAULT_ADVANCE_CHARGE_MESSAGE,
+  DEFAULT_RECEIPT_REVIEW_MESSAGE,
   DEFAULT_CHARGE_MESSAGE,
   DEFAULT_MP_LINK_MESSAGE,
   DEFAULT_MP_LINK_MESSAGE_WITH_FEE,
@@ -115,6 +116,7 @@ function mapPaymentConfig(config: {
     // Textos de fábrica del mensaje de cobro, escritos con variables (referencia para el panel).
     defaultChargeMessage: DEFAULT_CHARGE_MESSAGE,
     defaultAdvanceChargeMessage: DEFAULT_ADVANCE_CHARGE_MESSAGE,
+    defaultReceiptReviewMessage: DEFAULT_RECEIPT_REVIEW_MESSAGE,
   };
 }
 
@@ -232,9 +234,16 @@ export async function upsertPaymentConfig(companyId: string, data: {
   /** Mensaje de cobro propio: undefined = no cambia; null o vacío = el de fábrica. */
   chargeMessage?: string | null;
   advanceChargeMessage?: string | null;
+  /** Validación de comprobantes: undefined = no cambia. */
+  receiptReviewMode?: "AUTO" | "OWNER";
+  receiptReviewMessage?: string | null;
 }) {
   // Solo se tocan si vienen en la petición (un panel viejo en caché no los borra).
   const chargeTexts = {
+    ...(data.receiptReviewMode !== undefined ? { receiptReviewMode: data.receiptReviewMode } : {}),
+    ...(data.receiptReviewMessage !== undefined
+      ? { receiptReviewMessage: data.receiptReviewMessage?.trim() || null }
+      : {}),
     ...(data.chargeMessage !== undefined ? { chargeMessage: data.chargeMessage?.trim() || null } : {}),
     ...(data.advanceChargeMessage !== undefined
       ? { advanceChargeMessage: data.advanceChargeMessage?.trim() || null }

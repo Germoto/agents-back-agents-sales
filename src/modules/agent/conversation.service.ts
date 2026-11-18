@@ -74,6 +74,10 @@ export interface ConversationState {
   } | null;
   /** Si hay un reintento de validación de pago agendado (evita duplicar el PAYMENT_RECHECK). */
   pendingRecheckAt?: string | null;
+  /** «La reviso yo»: pago ya reportado al dueño (hora del aviso y de la captura que lo originó). */
+  paymentReview?: { at: string; receiptAt?: string | null } | null;
+  /** «La reviso yo»: el dueño aprobó y falta confirmar al cliente si la entrega no le escribe. */
+  ownerReviewConfirmPending?: boolean;
   /** La auto-validación (al llegar la imagen) ya gestionó el pago; el turno del modelo no debe re-hacerlo. */
   receiptAutoHandledAt?: string | null;
   /** Intentos fallidos de validación por falta de dato (Plin sin nombre): tras 3 se deriva a un asesor. */

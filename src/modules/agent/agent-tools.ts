@@ -56,7 +56,15 @@ import { drivePurchased, blockedFolderIds, allowedFolderIds } from "../drive/dri
 import { needsMediaProbe, probeDriveMedia } from "../../lib/drive-media-probe";
 import { fallbackLinkText } from "./delivery";
 import { decryptCredential } from "../../lib/credentials-crypto";
-import { composePaymentMethodsMessage, mpChatOn, clearMpLinkState, type ChargeInfo } from "./payment-methods";
+import {
+  composePaymentMethodsMessage,
+  mpChatOn,
+  clearMpLinkState,
+  ownerReviewsPayments,
+  DEFAULT_RECEIPT_REVIEW_MESSAGE,
+  OWNER_REVIEW_HANDOFF,
+  type ChargeInfo,
+} from "./payment-methods";
 import { mpCreatePreference, mpLinkAmount } from "../../lib/mercadopago-client";
 import { getEntitlements } from "../billing/entitlements";
 import { publicStoreUrlIfLive } from "../storefront/storefront-public-url";
@@ -262,6 +270,8 @@ export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
   if (!crmToolAvailable(config)) hidden.add("actualizar_crm");
   if (!groupToolAvailable(config)) hidden.add("agregar_a_grupo");
   if (!postponeAvailable(config)) hidden.add("posponer_seguimiento");
+  // El dueño revisa cada pago: el agente no valida, solo reporta el pago (y al revés en automático).
+  hidden.add(ownerReviewsPayments(config.payment) ? "validar_pago" : "reportar_pago");
   if (!driveSearchAvailable(config)) {
     hidden.add("buscar_en_drive");
     hidden.add("enviar_archivo_drive");
@@ -911,6 +921,145 @@ async function orderDueOf(ctx: TurnContext): Promise<OrderDue | null> {
     return { ...m, orderId: "sim", orderCode: sim.orderCode, status: sim.status as OrderDue["status"] };
   }
   return orderDueFor(ctx.companyId, ctx.customerId).catch(() => null);
+}
+
+/**
+ * Comprobante EN_REVISION de un pago que el dueño revisa a mano: es lo que aprueba
+ * o rechaza en Comprobantes. `key` evita duplicarlo (misma captura). Nunca lanza.
+ */
+export async function createReviewReceipt(opts: {
+  companyId: string;
+  customerId: string;
+  conversationId: string;
+  customerPhone: string;
+  currency?: string | null;
+  productIds: string[];
+  amount?: number;
+  receipt?: { mediaUrl?: string | null; operationNumber?: string | null; securityCode?: string | null } | null;
+  key: string;
+  meta?: Record<string, unknown>;
+}): Promise<void> {
+  const amount = String(opts.amount ?? 0);
+  try {
+    await prisma.paymentReceipt.create({
+      data: {
+        companyId: opts.companyId,
+        customerId: opts.customerId,
+        productId: opts.productIds[0] ?? null,
+        productIds: opts.productIds,
+        mediaUrl: opts.receipt?.mediaUrl ?? null,
+        amountExpected: amount,
+        amountPaid: amount,
+        currency: opts.currency ?? "PEN",
+        status: "EN_REVISION",
+        source: "chat",
+        externalId: `${opts.conversationId}:${opts.key}`,
+        payerPhone: opts.customerPhone.replace(/\D/g, "") || null,
+        operationCode: opts.receipt?.operationNumber ?? opts.receipt?.securityCode ?? null,
+        occurredAt: new Date(),
+        validationMode: "MANUAL",
+        metadata: { conversationId: opts.conversationId, ownerReview: true, ...(opts.meta ?? {}) } as Prisma.InputJsonValue,
+      },
+    });
+  } catch (err) {
+    // Duplicado (misma captura) u otro fallo: el aviso al dueño sale igual.
+    console.warn("[agent] no se creó el comprobante en revisión:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * «La reviso yo» (Pagos → Validación de comprobantes): el agente NO valida. Le
+ * responde al cliente una sola vez, deja un comprobante EN_REVISION para que el
+ * dueño lo apruebe desde Comprobantes y deriva el chat con el motivo «Pago por
+ * confirmar». Lo usan la tool reportar_pago y el paso determinista del runtime
+ * (cuando llega la captura). Idempotente por pago.
+ */
+export async function reportPaymentForReview(ctx: TurnContext): Promise<{ reported: boolean; note: string }> {
+  const status = ctx.state.status ?? "";
+  if (status === "PAGADO" || status === "ENTREGADO") {
+    return { reported: false, note: "El pago de este cliente ya está confirmado: no hay nada que reportar." };
+  }
+  const now = Date.now();
+  const receipt = ctx.state.lastReceipt;
+  const receiptFresh = !!receipt?.at && now - new Date(receipt.at).getTime() < 30 * 60_000;
+  const receiptAt = receiptFresh ? (receipt?.at ?? null) : null;
+  const prev = ctx.state.paymentReview;
+  const prevFresh = !!prev?.at && now - new Date(prev.at).getTime() < 24 * 60 * 60_000;
+  // Mismo pago ya reportado (misma captura, o un «ya pagué» repetido sin captura nueva).
+  if (prev && prevFresh && (!receiptAt || prev.receiptAt === receiptAt)) {
+    return { reported: false, note: "Ya avisaste al dueño de este pago y el cliente ya tiene la respuesta: no repitas el aviso. Deja tu texto final vacío." };
+  }
+
+  // Qué se está pagando: pedido con saldo («Envíos»), carrito o producto en foco.
+  const sym = symbolFor(ctx.config.business.currency);
+  const money = (n: number) => `${sym} ${n.toFixed(2)}`;
+  const due = await orderDueOf(ctx);
+  const cart = await summarizeCart(ctx.companyId, ctx.customerId).catch(() => null);
+  let expected: number | undefined = cart && cart.total > 0 ? cart.total : undefined;
+  if (expected === undefined && ctx.state.selectedProductId) {
+    const p = findProductById(ctx, ctx.state.selectedProductId);
+    const offer = activeOfferFor(ctx.state, ctx.state.selectedProductId);
+    const n = offer?.num ?? Number(String(p?.price ?? "").replace(/[^0-9.]/g, ""));
+    if (Number.isFinite(n) && n > 0) expected = n;
+  }
+  if (due) expected = due.now;
+  const read = receiptAt ? parseAmountNumber(receipt?.amountText) : undefined;
+  const productIds = cart?.items.length
+    ? [...new Set(cart.items.map((it) => it.productId))]
+    : ctx.state.selectedProductId
+      ? [ctx.state.selectedProductId]
+      : [];
+  const concept = due
+    ? `pedido ${due.orderCode}`
+    : productIds.map((id) => findProductById(ctx, id)?.name).filter(Boolean).join(", ") || "compra";
+  const detail = [
+    concept,
+    expected !== undefined ? `monto esperado ${money(expected)}` : null,
+    read !== undefined ? `monto leído en la captura ${money(read)}` : receiptAt ? "captura recibida" : "sin captura (el cliente dice que pagó)",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const reviewAt = new Date(now).toISOString();
+  let customerName = "";
+  if (!ctx.simulate) {
+    customerName =
+      (await prisma.customer
+        .findUnique({ where: { id: ctx.customerId }, select: { name: true } })
+        .catch(() => null))?.name?.trim() ?? "";
+    await createReviewReceipt({
+      companyId: ctx.companyId,
+      customerId: ctx.customerId,
+      conversationId: ctx.conversationId,
+      customerPhone: ctx.customerPhone,
+      currency: ctx.config.business.currency,
+      productIds,
+      amount: read ?? expected,
+      receipt: receiptAt ? receipt : null,
+      key: receiptAt ?? reviewAt,
+      meta: { orderCode: due?.orderCode ?? null, expectedAmount: expected ?? null, readAmount: read ?? null },
+    });
+  }
+
+  const template = (ctx.config.payment as { receiptReviewMessage?: string | null }).receiptReviewMessage?.trim() || DEFAULT_RECEIPT_REVIEW_MESSAGE;
+  const text = (customerName
+    ? applySpintax(template).replace(/\{nombre\}/gi, () => customerName)
+    : applySpintax(template).replace(/[^\S\n]*\{nombre\}/gi, "")
+  )
+    .replace(/[^\S\n]{2,}/g, " ")
+    .trim();
+  ctx.outbox.push({ kind: "text", text: text || DEFAULT_RECEIPT_REVIEW_MESSAGE });
+
+  ctx.state.paymentReview = { at: reviewAt, receiptAt };
+  if (receipt?.at) ctx.state.receiptAutoHandledAt = receipt.at;
+  ctx.state.pendingRecheckAt = null;
+  markHandoff(ctx, `${OWNER_REVIEW_HANDOFF}: ${detail}`);
+  return {
+    reported: true,
+    note: ctx.simulate
+      ? "(simulación) Pago reportado al dueño: en real el chat pasa a un asesor y el dueño lo confirma. Deja tu texto final vacío."
+      : "Listo: el cliente ya recibió la respuesta y el dueño el aviso para confirmar el pago. NO agregues texto ni digas que el pago está aprobado; deja tu texto final vacío.",
+  };
 }
 
 /** Cabecera del mensaje de cobro de un pedido: concepto, código y montos. */
@@ -2476,6 +2625,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "reportar_pago",
+      description:
+        "Este negocio revisa los pagos A MANO (el dueño confirma cada uno). Úsala UNA vez cuando el cliente AFIRME que ya pagó o mande su comprobante: le responde al cliente, avisa al dueño con el detalle y pasa el chat a un asesor. NO valida ni aprueba nada. Si el cliente dice que pagará más tarde o responde un simple ok/listo, NO la llames. Después de llamarla deja tu texto final vacío.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "entregar_producto",
       description:
         "Entrega el/los producto(s) digital(es) comprados (envía enlace e instrucciones). Solo funciona si hay un pago APROBADO para este cliente.",
@@ -3581,7 +3739,18 @@ export async function executeTool(
       });
     }
 
+    case "reportar_pago": {
+      if (!ownerReviewsPayments(ctx.config.payment)) {
+        return JSON.stringify({ ok: false, error: "Este negocio valida los pagos automáticamente: usa validar_pago." });
+      }
+      const res = await reportPaymentForReview(ctx);
+      return JSON.stringify({ ok: true, reportado: res.reported, note: res.note });
+    }
+
     case "validar_pago": {
+      if (ownerReviewsPayments(ctx.config.payment)) {
+        return JSON.stringify({ ok: false, error: "Este negocio revisa los pagos a mano: no valides. Si el cliente afirma que pagó o mandó su comprobante, llama a reportar_pago." });
+      }
       // ¿Hay un comprobante con datos leídos por visión? (monto/op/código). Se usa
       // en la guarda de secuencia y en la de "nada con qué validar".
       const lastReceipt = ctx.state.lastReceipt;

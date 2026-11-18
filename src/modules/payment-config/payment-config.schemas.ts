@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CHARGE_MESSAGE_MAX, chargeTemplateError } from "../agent/payment-methods";
+import { CHARGE_MESSAGE_MAX, RECEIPT_REVIEW_MESSAGE_MAX, chargeTemplateError } from "../agent/payment-methods";
 
 // Mensaje de cobro propio (omitido = no cambia; null o vacío = el de fábrica).
 // Con texto, debe llevar {monto} y {metodos}.
@@ -29,6 +29,9 @@ export const upsertPaymentConfigSchema = z
     paymentMode: z.enum(["BEFORE_DELIVERY", "CASH_ON_DELIVERY", "MANUAL", "CUSTOMER_CHOICE"]),
     chargeMessage: chargeMessageField,
     advanceChargeMessage: chargeMessageField,
+    // Validación de comprobantes (omitidos = no cambian): AUTO = el agente valida; OWNER = el dueño revisa.
+    receiptReviewMode: z.enum(["AUTO", "OWNER"]).optional(),
+    receiptReviewMessage: z.string().trim().max(RECEIPT_REVIEW_MESSAGE_MAX).nullable().optional(),
   })
   // Contra entrega puede no tener medios digitales (se cobra al recibir); el resto exige al menos uno.
   .refine((v) => v.methods.length > 0 || v.paymentMode === "CASH_ON_DELIVERY", {
