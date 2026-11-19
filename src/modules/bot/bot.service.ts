@@ -7,7 +7,7 @@ import { symbolFor } from "../../lib/currency";
 import { isPlatformSalesCompanyId, getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 import { listCrmStructure } from "../crm/crm.service";
 import { getEntitlements } from "../billing/entitlements";
-import { LEGACY_UNKNOWN_HANDOFF_RULE, type CrmToolConfig, type GroupToolConfig } from "../agent-config/agent-config.schemas";
+import { LEGACY_UNKNOWN_HANDOFF_RULE, type CrmToolConfig, type GroupToolConfig, type StickerToolConfig } from "../agent-config/agent-config.schemas";
 import { normalizeShippingConfig } from "../shipping/shipping-config";
 
 /** Herramienta de CRM del agente resuelta con NOMBRES (lo que lee el prompt y la tool). */
@@ -91,6 +91,33 @@ async function resolveAgentGroupTool(companyId: string, provider: string, raw: u
     .filter((x): x is NonNullable<typeof x> => !!x);
   if (!groups.length) return null;
   return { enabled: true, groups, notifyOwner: cfg.notifyOwner !== false };
+}
+
+/** Herramienta de stickers del agente resuelta con las URLs de la galería. */
+export interface AgentStickerTool {
+  enabled: boolean;
+  stickers: Array<{ id: string; url: string; when: string }>;
+}
+
+/**
+ * Resuelve stickerToolConfig (ids) → stickers de la galería. null si está apagada
+ * o ya no queda ningún sticker permitido (la tool no se expone y el prompt no cambia).
+ */
+async function resolveAgentStickerTool(companyId: string, raw: unknown): Promise<AgentStickerTool | null> {
+  const cfg = raw && typeof raw === "object" ? (raw as Partial<StickerToolConfig>) : null;
+  if (!cfg?.enabled || !cfg.stickers?.length) return null;
+  const saved = await prisma.stickerAsset.findMany({
+    where: { companyId, id: { in: cfg.stickers.map((s) => s.stickerId) } },
+    select: { id: true, url: true },
+  });
+  const stickers = cfg.stickers
+    .map((s) => {
+      const row = saved.find((x) => x.id === s.stickerId);
+      return row ? { id: row.id, url: row.url, when: s.when } : null;
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x);
+  if (!stickers.length) return null;
+  return { enabled: true, stickers };
 }
 
 function normalizePhone(value: string) {
@@ -324,6 +351,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
       crmTool: await resolveAgentCrmTool(whatsappConfig.companyId, agentConfig.crmToolConfig),
       // Herramienta de grupos de WhatsApp del agente (null = apagada: cero consultas extra).
       groupTool: await resolveAgentGroupTool(whatsappConfig.companyId, whatsappConfig.provider, agentConfig.groupToolConfig),
+      // Herramienta de stickers del agente (null = apagada: cero consultas extra).
+      stickerTool: await resolveAgentStickerTool(whatsappConfig.companyId, agentConfig.stickerToolConfig),
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
     httpActions,

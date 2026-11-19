@@ -11,7 +11,7 @@ import { planOptions } from "../products/product-plans";
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
-import { emailDeliveryAvailable, crmToolAvailable, groupToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
+import { emailDeliveryAvailable, crmToolAvailable, groupToolAvailable, stickerToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
 import { describeShippingConfig, type ShippingConfig } from "../shipping/shipping-config";
 import { activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
 import { mpChatOn, mpLinkOnRequest, ownerReviewsPayments } from "./payment-methods";
@@ -753,6 +753,12 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     ...(groupToolAvailable(config) && config.agent.groupTool
       ? [
           `- GRUPOS DE WHATSAPP (herramienta agregar_a_grupo): puedes agregar al cliente a un grupo del negocio SOLO cuando se cumpla la condición indicada; como máximo una vez por turno. GRUPOS PERMITIDOS (cuándo): ${config.agent.groupTool.groups.map((g) => `«${g.name}» → ${g.when}`).join("; ")}.`,
+        ]
+      : []),
+    // Herramienta de stickers: SOLO si el dueño la activó con lista blanca. El cuándo lo escribe el dueño.
+    ...(stickerToolAvailable(config) && config.agent.stickerTool
+      ? [
+          `- STICKERS (herramienta enviar_sticker): puedes enviar UN sticker del negocio SOLO cuando se cumpla la condición indicada; como máximo uno por turno y siempre además de tu respuesta de texto. STICKERS PERMITIDOS (cuándo): ${config.agent.stickerTool.stickers.map((s, i) => `${i + 1} → ${s.when}`).join("; ")}.`,
         ]
       : []),
     "",

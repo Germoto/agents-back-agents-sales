@@ -777,7 +777,9 @@ function shouldForceValidation(ctx: TurnContext): boolean {
  */
 function suppressFallback(ctx: TurnContext, history: ChatMessage[]): boolean {
   if (ctx.outbox.length) return true;
-  const recent = (iso?: string | null) => (iso ? Date.now() - new Date(iso).getTime() < 90 * 1000 : false);
+  // Un sticker solo ya es una respuesta (p. ej. al «gracias» del cliente).
+  if (ctx.stickerSentThisTurn) return true;
+  const recent =(iso?: string | null) => (iso ? Date.now() - new Date(iso).getTime() < 90 * 1000 : false);
   if (recent(ctx.state.receiptAutoHandledAt) || recent(ctx.state.lastReceipt?.at)) return true;
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   return typeof lastUser?.content === "string" && lastUser.content.includes("[el cliente envió una imagen");

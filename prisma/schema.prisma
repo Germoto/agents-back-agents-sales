@@ -391,6 +391,9 @@ model AgentConfig {
   // Herramienta de grupos del agente (agregar_a_grupo): lista blanca de grupos
   // guardados con su regla "cuándo". null = APAGADA (default).
   groupToolConfig      Json?
+  // Herramienta de stickers del agente (enviar_sticker): lista blanca de stickers
+  // de la galería con su regla "cuándo". null = APAGADA (default).
+  stickerToolConfig    Json?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
   company              Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

@@ -137,6 +137,24 @@ export const groupToolConfigSchema = z
   });
 export type GroupToolConfig = z.infer<typeof groupToolConfigSchema>;
 
+// Herramienta de stickers del agente (enviar_sticker). Lista blanca de stickers de
+// la galería del negocio, cada uno con su regla "cuándo" obligatoria.
+export const stickerToolConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    stickers: z.array(z.object({ stickerId: z.string().uuid(), when: whenRule })).max(12).default([]),
+  })
+  .superRefine((v, ctx) => {
+    if (v.enabled && !v.stickers.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["stickers"], message: "Permite al menos un sticker" });
+    }
+    const ids = v.stickers.map((s) => s.stickerId);
+    if (new Set(ids).size !== ids.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["stickers"], message: "Hay un sticker repetido" });
+    }
+  });
+export type StickerToolConfig = z.infer<typeof stickerToolConfigSchema>;
+
 // Núcleo de Agente IA (modelo + prompt). Recordatorios y modo de respuesta se
 // guardan por separado (módulos Recordatorios y Pruebas) para no pisarlos.
 /** Frase que el panel guardaba en `rules` para el viejo toggle «Derivar si no sabe responder» (compat). */
@@ -175,6 +193,8 @@ export const coreAgentConfigSchema = z.object({
   crmToolConfig: crmToolConfigSchema.nullable().optional(),
   // Herramienta de grupos del agente: undefined = no tocar; null = apagar.
   groupToolConfig: groupToolConfigSchema.nullable().optional(),
+  // Herramienta de stickers del agente: undefined = no tocar; null = apagar.
+  stickerToolConfig: stickerToolConfigSchema.nullable().optional(),
 });
 
 // PUT /agent-config/reminders — solo followupConfig.

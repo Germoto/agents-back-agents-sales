@@ -173,6 +173,12 @@ export function groupToolAvailable(config: BotConfig): boolean {
   return !!t?.enabled && t.groups.length > 0;
 }
 
+/** Herramienta de stickers del agente: solo con lista blanca activa (bot.service la resuelve contra la galería). */
+export function stickerToolAvailable(config: BotConfig): boolean {
+  const t = config.agent.stickerTool;
+  return !!t?.enabled && t.stickers.length > 0;
+}
+
 /** Productos digitales cuya entrega contiene links de Google Drive (carpetas/archivos públicos). */
 export function productsWithDrive(config: BotConfig): BotProduct[] {
   return config.products.filter((p) => p.productType === "digital" && deliveryDriveRefs(p.digitalDelivery).length > 0);
@@ -280,6 +286,7 @@ export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
   if (!emailDeliveryAvailable(config)) hidden.add("entregar_por_correo");
   if (!crmToolAvailable(config)) hidden.add("actualizar_crm");
   if (!groupToolAvailable(config)) hidden.add("agregar_a_grupo");
+  if (!stickerToolAvailable(config)) hidden.add("enviar_sticker");
   if (!postponeAvailable(config)) hidden.add("posponer_seguimiento");
   // El dueño revisa cada pago: el agente no valida, solo reporta el pago (y al revés en automático).
   hidden.add(ownerReviewsPayments(config.payment) ? "validar_pago" : "reportar_pago");
@@ -523,6 +530,8 @@ export interface TurnContext {
   crmNoticeIndex?: number;
   /** agregar_a_grupo ya se usó en ESTE turno (una sola vez por turno). */
   groupAddThisTurn?: boolean;
+  /** enviar_sticker ya se usó en ESTE turno (un sticker por turno). */
+  stickerSentThisTurn?: boolean;
   /** Resultados que devolvió Drive (buscar_en_drive / obtener_muestra) en ESTE turno: con
    *  resultados, derivar_humano por CONSULTA se rechaza (el agente sí puede responder). */
   driveHitsThisTurn?: number;
@@ -2971,6 +2980,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "enviar_sticker",
+      description:
+        "Envía al cliente UN sticker PERMITIDO del negocio (sección STICKERS del prompt). Úsala SOLO cuando se cumpla la condición configurada para ese sticker; si dudas, NO la uses. Un sticker por turno; sale después de tu mensaje de texto. No reemplaza tu respuesta: escribe igual lo que corresponda.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["numero"],
+        properties: {
+          numero: { type: "integer", description: "Número del sticker permitido, tal como aparece en la sección STICKERS" },
+        },
+      },
+    },
+  },
 ];
 
 // --------------------------------------------------------------------------
@@ -4943,6 +4968,24 @@ export async function executeTool(
       return JSON.stringify({
         ok: true,
         note: `Listo: el alta al grupo «${target.name}» quedó en curso. Si su privacidad no permite agregarlo directo, WhatsApp le envía una invitación para unirse. Puedes decírselo en UNA línea.`,
+      });
+    }
+
+    case "enviar_sticker": {
+      // Salvaguardas en servidor: lista blanca estricta y un sticker por turno.
+      const tool = ctx.config.agent.stickerTool;
+      if (!tool || !stickerToolAvailable(ctx.config)) return JSON.stringify({ ok: false, error: "La herramienta de stickers no está activada para este negocio." });
+      const n = Math.floor(Number(args.numero));
+      const target = Number.isFinite(n) ? tool.stickers[n - 1] : undefined;
+      if (!target) return JSON.stringify({ ok: false, error: `Ese sticker NO está permitido. Usa un número del 1 al ${tool.stickers.length}.` });
+      if (ctx.stickerSentThisTurn) return JSON.stringify({ ok: false, error: "Ya enviaste un sticker en este turno; no envíes otro." });
+      ctx.stickerSentThisTurn = true;
+      // Va después del texto final del turno, como lo haría una persona.
+      (ctx.outboxAfter ??= []).push({ kind: "media", mediaUrl: target.url, mediaKind: "sticker" });
+      return JSON.stringify({
+        ok: true,
+        ...(ctx.simulate ? { simulado: true } : {}),
+        note: `Listo: el sticker ${n} sale después de tu mensaje. No lo anuncies ni lo describas al cliente; escribe tu respuesta normal.`,
       });
     }
 
