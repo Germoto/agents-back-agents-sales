@@ -60,6 +60,7 @@ const NODE_LABEL: Record<string, string> = {
   "send-video": "Enviar Vídeo",
   "send-audio": "Enviar Audio",
   "send-document": "Enviar Documento",
+  "send-sticker": "Enviar Sticker",
   "answers": "Respuestas",
   "poll": "Encuesta",
   "list": "Enviar Lista",
@@ -193,7 +194,8 @@ export function validateFlow(
       case "send-image":
       case "send-video":
       case "send-audio":
-      case "send-document": {
+      case "send-document":
+      case "send-sticker": {
         const data = node.data as SendMediaData;
         if (!data.mediaUrl?.trim()) {
           errors.push({

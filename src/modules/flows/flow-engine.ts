@@ -955,11 +955,12 @@ async function runCrmNode(node: FlowNode, io: FlowIO): Promise<void> {
   pushTrace(io, node, `${node.type}:aplicado`);
 }
 
-const MEDIA_KIND_BY_NODE: Record<string, "image" | "video" | "audio" | "document"> = {
+const MEDIA_KIND_BY_NODE: Record<string, "image" | "video" | "audio" | "document" | "sticker"> = {
   "send-image": "image",
   "send-video": "video",
   "send-audio": "audio",
   "send-document": "document",
+  "send-sticker": "sticker",
 };
 
 async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Promise<void> {
@@ -998,7 +999,8 @@ async function runChain(flow: LoadedFlow, entryNodeId: string, io: FlowIO): Prom
       case "send-image":
       case "send-video":
       case "send-audio":
-      case "send-document": {
+      case "send-document":
+      case "send-sticker": {
         const data = node.data as SendMediaData;
         if (emitted > 0) await pause(io);
         await io.emit({

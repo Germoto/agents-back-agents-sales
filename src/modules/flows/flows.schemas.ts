@@ -241,6 +241,7 @@ export const flowNodeSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("send-video"), position: positionSchema, data: sendMediaData }),
   z.object({ id: z.string().min(1), type: z.literal("send-audio"), position: positionSchema, data: sendMediaData }),
   z.object({ id: z.string().min(1), type: z.literal("send-document"), position: positionSchema, data: sendMediaData }),
+  z.object({ id: z.string().min(1), type: z.literal("send-sticker"), position: positionSchema, data: sendMediaData }),
   z.object({ id: z.string().min(1), type: z.literal("answers"), position: positionSchema, data: answersData }),
   z.object({ id: z.string().min(1), type: z.literal("poll"), position: positionSchema, data: pollData }),
   z.object({ id: z.string().min(1), type: z.literal("list"), position: positionSchema, data: listData }),

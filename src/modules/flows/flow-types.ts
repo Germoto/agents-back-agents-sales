@@ -37,6 +37,7 @@ export type FlowNodeType =
   | "send-video"
   | "send-audio"
   | "send-document"
+  | "send-sticker"
   | "answers"
   | "poll"
   | "list"
@@ -359,6 +360,7 @@ export const SEND_NODE_TYPES: FlowNodeType[] = [
   "send-video",
   "send-audio",
   "send-document",
+  "send-sticker",
 ];
 
 export const TERMINAL_NODE_TYPES: FlowNodeType[] = ["flow-control", "handoff", "to-agent"];
@@ -377,6 +379,7 @@ export function outputHandlesFor(node: FlowNode): string[] {
     case "send-video":
     case "send-audio":
     case "send-document":
+    case "send-sticker":
       return ["next", "reply"];
     case "answers":
     case "poll": {
