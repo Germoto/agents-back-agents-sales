@@ -263,7 +263,7 @@ function orderToolWithShipping(tool: ToolDefinition, cfg: ShippingConfig): ToolD
       description:
         (cart
           ? "Registra UN pedido con todo el carrito y sus datos de envío. "
-          : "Registra el pedido de un producto FÍSICO con sus datos de envío (un solo producto; si el cliente armó un carrito usa registrar_pedido_carrito). ") +
+          : "Registra el pedido de un producto FÍSICO con sus datos de envío (un solo producto; si ya lo agregaste al carrito también sirve: se registra con lo que hay en el carrito. Con VARIOS productos distintos usa registrar_pedido_carrito). ") +
         "Úsalo cuando el cliente confirme la compra y tengas el nombre de quien recibe, el tipo de entrega y los datos de ese tipo" +
         (needsDocument ? " (en agencia o recojo también el documento de quien recoge)" : "") +
         ". Registra PRIMERO: el sistema calcula envío, total y adelanto y los devuelve. El cobro va DESPUÉS con enviar_metodos_pago, que toma el monto del pedido." +
@@ -793,6 +793,15 @@ function deliveryLabel(shipping: OrderShippingInput, address: string): string {
  * pedido (con envío, total y adelanto calculados aquí) y después el cobro. En el
  * simulador no se crea un pedido real: queda uno de muestra en el estado.
  */
+/**
+ * ¿El carrito tiene SOLO este producto? Pasa cuando el modelo usa agregar_carrito y
+ * después llama a registrar_pedido con ese mismo producto: no hay nada que rechazar,
+ * el pedido se registra con lo que hay en el carrito.
+ */
+export function cartOnlyHas(items: Array<{ productId: string }>, productId: string): boolean {
+  return items.length > 0 && items.every((it) => it.productId === productId);
+}
+
 async function registerOrderWithShipping(
   ctx: TurnContext,
   cfg: ShippingConfig,
@@ -808,18 +817,32 @@ async function registerOrderWithShipping(
     product = findProductById(ctx, String(args.productId ?? ""));
     if (!product) return fail("producto no encontrado");
     if (product.productType !== "physical") return fail("registrar_pedido es solo para productos físicos");
-    if (cart.items.length) {
-      return fail("Hay productos en el carrito: registra con registrar_pedido_carrito para que entre todo lo que pidió el cliente.");
-    }
-    const offer = activeOfferFor(ctx.state, product.id);
-    const priceText = product.priceText ?? product.price;
-    if (!offer && (planOptions(product.verticalData, priceText).length || !isPlainAmount(priceText))) {
+    if (cartOnlyHas(cart.items, product.id)) {
+      // El modelo ya puso este mismo producto en el carrito (pasó en prod: cuatro rechazos
+      // seguidos que terminó leyendo la clienta). Se registra con el carrito, que trae la
+      // cantidad, la opción y el precio elegidos, y se vacía como en registrar_pedido_carrito.
+      source = "cart";
+      subtotal = cart.total;
+    } else if (cart.items.length) {
       return fail(
-        `El precio de «${product.name}» depende de la opción elegida: agrégalo al carrito con agregar_carrito (con la opción que eligió el cliente) y registra con registrar_pedido_carrito.`,
+        "ERROR INTERNO (no se lo menciones al cliente ni le pidas confirmar nada): el carrito tiene otros productos además de este. " +
+          "Vuelve a llamar AHORA a registrar_pedido_carrito con los mismos datos de envío para registrar todo junto. " +
+          "Si algo del carrito ya no va, corrígelo antes con las herramientas del carrito.",
+        { carrito: cart.items.map((it) => `${it.quantity}x ${it.name}`) },
       );
+    } else {
+      const offer = activeOfferFor(ctx.state, product.id);
+      const priceText = product.priceText ?? product.price;
+      if (!offer && (planOptions(product.verticalData, priceText).length || !isPlainAmount(priceText))) {
+        return fail(
+          `ERROR INTERNO (no se lo menciones al cliente): el precio de «${product.name}» depende de la opción elegida. ` +
+            "Agrégalo al carrito con agregar_carrito (con la opción que eligió el cliente) y registra con registrar_pedido_carrito. " +
+            "Si el cliente todavía no eligió, pregúntale solo qué opción quiere.",
+        );
+      }
+      qty = Math.max(1, Math.floor(Number(args.quantity ?? 1)) || 1);
+      subtotal = (offer?.num ?? parsePrice(priceText)) * qty;
     }
-    qty = Math.max(1, Math.floor(Number(args.quantity ?? 1)) || 1);
-    subtotal = (offer?.num ?? parsePrice(priceText)) * qty;
   } else {
     if (!cart.items.length) return fail("el carrito está vacío");
     subtotal = cart.total;
@@ -853,7 +876,7 @@ async function registerOrderWithShipping(
       if (!sameProducts(open.productIds, incoming)) {
         return fail("el cliente YA tiene un pedido abierto; NO se creó otro", {
           pedidoVigente: { codigo: open.orderCode, total: open.total, entrega: open.address },
-          note: "Si el cliente quiere OTRO pedido aparte, repite la llamada con adicional:true. Si quiere cambiar o cancelar el pedido abierto, deriva a un asesor.",
+          note: "Dato interno: no le hables al cliente de errores ni de herramientas. Si el cliente quiere OTRO pedido aparte, repite la llamada con adicional:true. Si quiere cambiar o cancelar el pedido abierto, deriva a un asesor.",
         });
       }
       replaceOrderId = open.id;

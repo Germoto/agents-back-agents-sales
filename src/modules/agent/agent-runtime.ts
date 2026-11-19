@@ -198,6 +198,42 @@ export function isInternalNote(text: string | null | undefined): boolean {
   return INTERNAL_NOTE_RE.test(t);
 }
 
+const TOOL_WORD_RE = /[a-z][a-z0-9]*(?:_[a-z0-9]+)+/gi;
+
+/**
+ * Nombres internos de herramientas que aparecen en un texto para el cliente (pasó en
+ * prod: «debo registrar todo junto con registrar_pedido_carrito»). Solo cuentan las
+ * palabras con guion bajo que son EXACTAMENTE una herramienta del agente.
+ */
+export function leakedToolNames(text: string | null | undefined, toolNames: ReadonlySet<string>): string[] {
+  const found = new Set<string>();
+  for (const word of (text ?? "").match(TOOL_WORD_RE) ?? []) {
+    const name = word.toLowerCase();
+    if (toolNames.has(name)) found.add(name);
+  }
+  return [...found];
+}
+
+/** Quita las frases que nombran una herramienta; el resto del mensaje se conserva. */
+export function stripToolNameSentences(text: string, toolNames: ReadonlySet<string>): string {
+  // Con captura, split devuelve frase, separador, frase, separador…
+  const parts = text.split(/((?<=[.!?…])\s+|\n+)/);
+  let out = "";
+  for (let i = 0; i < parts.length; i += 2) {
+    if (leakedToolNames(parts[i], toolNames).length) continue;
+    out += parts[i] + (parts[i + 1] ?? "");
+  }
+  return out.trim();
+}
+
+function toolNameRetryNote(names: string[]): string {
+  return (
+    `Tu respuesta anterior NO se envió al cliente: nombraba una herramienta interna (${names.join(", ")}). ` +
+    "El cliente no sabe de herramientas ni de errores internos, y no hay que pedirle que confirme por ellos. " +
+    `Si corresponde usar una herramienta, llámala ahora; si no, escribe SOLO el mensaje que verá el cliente, sin nombres internos, o exactamente ${NO_REPLY_TOKEN} si no corresponde decir nada.`
+  );
+}
+
 const INTERNAL_NOTE_RETRY =
   `Tu respuesta anterior era un comentario interno y NO se envió al cliente. Escribe SOLO el mensaje que verá el cliente (natural, sin corchetes ni comentarios sobre la conversación), o exactamente ${NO_REPLY_TOKEN} si no corresponde decir nada.`;
 
@@ -470,6 +506,8 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   }
 
   let internalNoteRetried = false;
+  let toolNameRetried = false;
+  const toolNames = new Set(toolDefinitionsFor(ctx.config).map((t) => t.function.name.toLowerCase()));
   let mpLinkGuardTried = false;
   const postponeGuardOn = postponeAvailable(ctx.config);
   let postponeGuardTried = false;
@@ -517,7 +555,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     // cuando no se envió nada en todo el turno — y NUNCA si el comprobante del
     // cliente ya se gestionó por fuera (auto-validación), para no tapar ese
     // mensaje con el genérico "tuve un problema".
-    const final = finalReply(res.content);
+    let final = finalReply(res.content);
     // Freno del cierre repetido: en el turno que corre porque el cliente escribió durante
     // la respuesta, un texto igual a uno que el bot ya envió no sale otra vez.
     if (trailingAssistant && final && repeatsRecentBotText(final, history)) {
@@ -534,6 +572,23 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       }
       console.warn(`[agent] nota interna descartada tras reintento convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
       return "";
+    }
+    // Freno de nombres internos: un texto que nombra una herramienta no sale. Primero se
+    // le pide al modelo que lo reescriba (o que llame a la herramienta); si insiste, se
+    // quitan las frases que la nombran y el resto sigue por las demás guardias.
+    const leaked = final ? leakedToolNames(final, toolNames) : [];
+    if (leaked.length) {
+      if (!toolNameRetried) {
+        toolNameRetried = true;
+        (ctx.guardEvents ??= []).push(`nombre interno en el texto (${leaked.join(", ")}): se le pidió al modelo reescribirlo`);
+        console.warn(`[agent] nombre interno de herramienta en el texto (reintento) convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+        messages.push({ role: "assistant", content: final });
+        messages.push({ role: "user", content: toolNameRetryNote(leaked) });
+        continue;
+      }
+      (ctx.guardEvents ??= []).push(`nombre interno descartado (${leaked.join(", ")}): se quitó la frase`);
+      console.warn(`[agent] nombre interno de herramienta descartado tras reintento convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+      final = stripToolNameSentences(final, toolNames);
     }
     // Guardia del link pegado a mano: el texto trae un link de pago de Mercado Pago que
     // escribió el modelo (pasó en prod: copió el link viejo del chat en vez de llamar a
@@ -633,7 +688,13 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     ],
   }).catch(() => null);
 
-  const closingText = finalReply(closing?.content);
+  let closingText = finalReply(closing?.content);
+  const closingLeak = closingText ? leakedToolNames(closingText, toolNames) : [];
+  if (closingLeak.length) {
+    (ctx.guardEvents ??= []).push(`nombre interno descartado (${closingLeak.join(", ")}): se quitó la frase`);
+    console.warn(`[agent] nombre interno de herramienta descartado en el cierre convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
+    closingText = stripToolNameSentences(closingText, toolNames);
+  }
   if (trailingAssistant && closingText && repeatsRecentBotText(closingText, history)) {
     (ctx.guardEvents ??= []).push(REPEATED_CLOSING_EVENT);
     console.warn(`[agent] cierre repetido descartado en el cierre (cliente escribió durante la respuesta) convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
