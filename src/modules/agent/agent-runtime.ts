@@ -129,6 +129,60 @@ const TRAILING_ASSISTANT_NOTE =
   "[Sistema: el cliente escribió sus últimos mensajes MIENTRAS respondías, así que tu última respuesta no los tuvo en cuenta. " +
   `Responde ahora lo que haya quedado sin atender. Si tu última respuesta ya lo cubre todo, contesta exactamente ${NO_REPLY_TOKEN} (sin nada más).]`;
 
+/** Textos reales que el bot envió (sin los marcadores "[se envió una imagen…]"), del más reciente al más antiguo. */
+function recentBotTexts(history: ChatMessage[], max: number): string[] {
+  const out: string[] = [];
+  for (let i = history.length - 1; i >= 0 && out.length < max; i--) {
+    const m = history[i];
+    if (m.role !== "assistant" || typeof m.content !== "string") continue;
+    const t = m.content.trim();
+    if (!t || /^\[se envió [^\]]*\]$/i.test(t)) continue;
+    out.push(t);
+  }
+  return out;
+}
+
+/** Texto comparable: minúsculas, sin tildes, sin emojis ni signos, espacios colapsados. */
+function comparableText(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9ñ\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * ¿El texto es igual a uno de los últimos mensajes que el bot ya envió? Solo se usa en
+ * el turno que corre porque el cliente escribió MIENTRAS el bot respondía (pasó en prod:
+ * tras la ficha, el segundo turno repitió el mismo cierre «¿Deseas para Lima o para
+ * provincia?»). Igualdad del texto completo: una respuesta que agrega algo nuevo sí sale.
+ */
+export function repeatsRecentBotText(text: string, history: ChatMessage[]): boolean {
+  const mine = comparableText(text);
+  if (!mine) return false;
+  return recentBotTexts(history, 6).some((t) => comparableText(t) === mine);
+}
+
+/**
+ * Nota del turno que corre porque el cliente escribió mientras el bot respondía. Cita el
+ * último texto del bot para que el modelo no lo repita; sin texto (solo multimedia) queda
+ * la nota de siempre.
+ */
+export function trailingAssistantNote(history: ChatMessage[]): string {
+  const last = recentBotTexts(history, 1)[0];
+  if (!last) return TRAILING_ASSISTANT_NOTE;
+  const quoted = last.length > 300 ? `${last.slice(0, 300)}…` : last;
+  return (
+    "[Sistema: el cliente escribió sus últimos mensajes MIENTRAS respondías, así que tu última respuesta no los tuvo en cuenta. " +
+    `Tu último mensaje fue: «${quoted}». NO lo repitas ni lo digas con otras palabras. ` +
+    `Responde solo si el cliente preguntó algo que tus mensajes anteriores no cubren; si ya está cubierto, contesta exactamente ${NO_REPLY_TOKEN} (sin nada más).]`
+  );
+}
+
+const REPEATED_CLOSING_EVENT = "cierre repetido descartado: el cliente escribió durante la respuesta";
+
 /**
  * ¿El texto es un comentario INTERNO del modelo y no un mensaje para el cliente?
  * (notas entre corchetes, auto-correcciones, narración del tipo "el cliente envió…").
@@ -411,7 +465,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   // después de las notas de sistema, para que sea el último mensaje de la petición.
   const trailingAssistant = history.length > 0 && history[history.length - 1].role === "assistant";
   if (trailingAssistant) {
-    messages.push({ role: "user", content: TRAILING_ASSISTANT_NOTE });
+    messages.push({ role: "user", content: trailingAssistantNote(history) });
     console.log(`[agent] historial termina en el bot (cliente escribió durante la respuesta): nota de cierre convo=${ctx.conversationId}`);
   }
 
@@ -464,6 +518,13 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     // cliente ya se gestionó por fuera (auto-validación), para no tapar ese
     // mensaje con el genérico "tuve un problema".
     const final = finalReply(res.content);
+    // Freno del cierre repetido: en el turno que corre porque el cliente escribió durante
+    // la respuesta, un texto igual a uno que el bot ya envió no sale otra vez.
+    if (trailingAssistant && final && repeatsRecentBotText(final, history)) {
+      (ctx.guardEvents ??= []).push(REPEATED_CLOSING_EVENT);
+      console.warn(`[agent] cierre repetido descartado (cliente escribió durante la respuesta) convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+      return "";
+    }
     if (final && isInternalNote(final)) {
       if (!internalNoteRetried) {
         internalNoteRetried = true;
@@ -573,6 +634,11 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
   }).catch(() => null);
 
   const closingText = finalReply(closing?.content);
+  if (trailingAssistant && closingText && repeatsRecentBotText(closingText, history)) {
+    (ctx.guardEvents ??= []).push(REPEATED_CLOSING_EVENT);
+    console.warn(`[agent] cierre repetido descartado en el cierre (cliente escribió durante la respuesta) convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
+    return "";
+  }
   if (closingText && isInternalNote(closingText)) {
     console.warn(`[agent] nota interna descartada en el cierre convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
     return "";
