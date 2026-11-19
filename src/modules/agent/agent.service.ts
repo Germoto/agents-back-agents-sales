@@ -39,6 +39,7 @@ import { loadWhatsappSender, sendText, sendMedia, sendTyping, webSender, type Wh
 import { readReceiptImage } from "./receipt-vision";
 import { describeSticker } from "./sticker-vision";
 import { fulfillPendingDeliveryEmail } from "./email-delivery";
+import { NO_RETRY_SOURCES } from "./delivery-policy";
 import { runAgentTurn, isInternalNote, recordTurnLog } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
 import { alertAiProviderFailure, notifyAiProviderRecovered } from "./ai-alerts";
@@ -1102,6 +1103,7 @@ export async function recheckPayment(msg: {
     const sender = runtime.channel === "web" ? webSender(conversationId) : waSender;
     if (!sender) return;
     const to = (md.customerPhone ?? "").replace(/\D/g, "");
+    const noticeIds = { companyId: msg.companyId, customerId: msg.customerId, conversationId };
 
     // Llave = código de seguridad (Yape→Yape). El N° de operación no lo guarda ValidPay.
     const codes = [state.lastReceipt?.securityCode, md.operationCode]
@@ -1131,7 +1133,7 @@ export async function recheckPayment(msg: {
       // Pago acreditado a un pedido: confirmar al cliente y avisar al dueño.
       if (result.customerMessage && to) {
         try {
-          await sendText(sender, to, result.customerMessage);
+          await sendCustomerNotice(sender, to, result.customerMessage, noticeIds);
         } catch {
           /* best-effort */
         }
@@ -1160,7 +1162,7 @@ export async function recheckPayment(msg: {
     if (result.approved && result.deliveryOutbox?.length) {
       if (result.customerMessage && to) {
         try {
-          await sendText(sender, to, result.customerMessage);
+          await sendCustomerNotice(sender, to, result.customerMessage, noticeIds);
         } catch {
           /* best-effort */
         }
@@ -1177,7 +1179,7 @@ export async function recheckPayment(msg: {
         gapMsFor(config.business),
       );
       // Correo pendiente (el cliente lo dejó junto al comprobante): cumplirlo ahora.
-      const emailNote = await fulfillPendingEmailAndNotify(sender, to, { companyId: msg.companyId, customerId: msg.customerId, state });
+      const emailNote = await fulfillPendingEmailAndNotify(sender, to, { companyId: msg.companyId, customerId: msg.customerId, conversationId, state });
       // Invitación a la tienda: SIEMPRE el último mensaje de la entrega.
       if (result.deliveryStoreInvite) {
         await flushOutbox(sender, to, [result.deliveryStoreInvite], { companyId: msg.companyId, customerId: msg.customerId, conversationId }, gapMsFor(config.business));
@@ -1316,6 +1318,7 @@ export async function handleExternalPaymentApproved(opts: {
     // El sender WEB ignora `to`; el placeholder evita que un visitante anónimo
     // (phone sintético sin dígitos) se salte los guards `if (to)`.
     const to = isWeb ? "web" : convo.customer.phone.replace(/\D/g, "");
+    const noticeIds = { companyId: opts.companyId, customerId: convo.customerId, conversationId: opts.conversationId };
 
     // Pedido con «Envíos»: el pago se acredita al pedido (adelanto o saldo). No hay
     // entrega digital ni cierre de carrito; con saldo pendiente el chat sigue abierto.
@@ -1340,7 +1343,7 @@ export async function handleExternalPaymentApproved(opts: {
       await saveState(opts.conversationId, state as ConversationState);
       if (to) {
         try {
-          await sendText(sender, to, credited.customerMessage);
+          await sendCustomerNotice(sender, to, credited.customerMessage, noticeIds);
         } catch {
           /* best-effort */
         }
@@ -1387,7 +1390,7 @@ export async function handleExternalPaymentApproved(opts: {
 
     if (result.customerMessage && to) {
       try {
-        await sendText(sender, to, result.customerMessage);
+        await sendCustomerNotice(sender, to, result.customerMessage, noticeIds);
       } catch {
         /* best-effort */
       }
@@ -1404,7 +1407,7 @@ export async function handleExternalPaymentApproved(opts: {
     }
     const delivered = "delivered" in result ? result.delivered : undefined;
     const emailNote = delivered?.length
-      ? await fulfillPendingEmailAndNotify(sender, to, { companyId: opts.companyId, customerId: convo.customerId, state })
+      ? await fulfillPendingEmailAndNotify(sender, to, { companyId: opts.companyId, customerId: convo.customerId, conversationId: opts.conversationId, state })
       : "";
     // Invitación a la tienda: SIEMPRE el último mensaje de la entrega.
     const storeInvite = "deliveryStoreInvite" in result ? result.deliveryStoreInvite : null;
@@ -1772,17 +1775,40 @@ async function scheduleAutoReminders(
  * un correo pendiente, se lo envía y le avisa por el chat. Devuelve una nota
  * corta para anexar al aviso del dueño ("" si no había correo pendiente).
  */
+/**
+ * Aviso al cliente que sale FUERA del turno del modelo (pago confirmado en segundo
+ * plano, acceso enviado al correo). Se envía el mismo texto de siempre y además queda
+ * en el chat con su número de seguimiento, así el panel lo muestra con aspas. El
+ * revisor de entrega lo sigue pero no lo reenvía.
+ */
+async function sendCustomerNotice(
+  sender: WhatsappSender,
+  to: string,
+  text: string,
+  ids: { companyId: string; customerId: string; conversationId: string },
+): Promise<void> {
+  const r = await sendText(sender, to, text);
+  await recordMessage({
+    ...ids,
+    role: "ASSISTANT",
+    message: text,
+    gatewayId: r.gatewayId,
+    deliveryStatus: r.gatewayId ? "pending" : null,
+    rawPayload: { source: NO_RETRY_SOURCES.paymentNotice },
+  }).catch((err) => console.warn("[agent] no se pudo registrar el aviso al cliente:", err instanceof Error ? err.message : err));
+}
+
 async function fulfillPendingEmailAndNotify(
   sender: WhatsappSender,
   to: string,
-  opts: { companyId: string; customerId: string; state: ConversationState },
+  opts: { companyId: string; customerId: string; conversationId: string; state: ConversationState },
 ): Promise<string> {
   if (!opts.state.pendingDeliveryEmail) return "";
   const r = await fulfillPendingDeliveryEmail(opts);
   if (r.sent) {
     if (to) {
       try {
-        await sendText(sender, to, `También te envié el acceso a tu correo ${r.email} ✉️ Si no lo ves, revisa spam o promociones.`);
+        await sendCustomerNotice(sender, to, `También te envié el acceso a tu correo ${r.email} ✉️ Si no lo ves, revisa spam o promociones.`, opts);
       } catch {
         /* best-effort */
       }

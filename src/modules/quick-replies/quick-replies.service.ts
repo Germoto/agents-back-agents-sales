@@ -248,6 +248,7 @@ export async function sendQuickReply(
         mediaUrl: msg.type !== "text" ? msg.mediaUrl ?? null : null,
         mediaType: msg.type !== "text" ? msg.type : null,
         gatewayId: result.gatewayId,
+        deliveryStatus: result.gatewayId ? "pending" : null,
       });
       sentCount++;
     } catch (err) {

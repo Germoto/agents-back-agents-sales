@@ -21,7 +21,7 @@ import {
   type SmsToolsGroupInfo,
 } from "../../lib/smstools-client";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
-import { normalizeDeliveryStatus, notifyOwner } from "../agent/conversation.service";
+import { normalizeDeliveryStatus, notifyOwner, statusKeys } from "../agent/conversation.service";
 import { applyFirma } from "../agent/firma";
 import { loadWhatsappSender, sendMedia, sendPoll, sendText } from "../agent/outbound";
 import { loadGroupCreds, requireGroup, requireGroupCreds } from "./whatsapp-groups.service";
@@ -731,7 +731,7 @@ async function checkGroupAfterEvent(groupId: string, afterLeave: boolean): Promi
  */
 export async function applyGroupDeliveryStatus(ids: Array<string | null>, rawStatus: string): Promise<boolean> {
   const status = normalizeDeliveryStatus(rawStatus);
-  const keys = ids.filter((v): v is string => !!v && v.trim().length > 0);
+  const keys = statusKeys(ids);
   if (!status || !keys.length) return false;
   const msg = await prisma.whatsappGroupMessage.findFirst({
     where: { OR: [{ gatewayId: { in: keys } }, { wamid: { in: keys } }] },

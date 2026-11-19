@@ -17,6 +17,7 @@ import { loadWhatsappSender, sendText, sendMedia } from "./outbound";
 import { notifyOwner } from "./conversation.service";
 import { deliver, fallbackLinkText } from "./delivery";
 import { isStickerGalleryUrl } from "../stickers/sticker-url";
+import { retryPolicyFor } from "./delivery-policy";
 
 const BATCH = 200;
 const WINDOW_MIN = 30; // solo mensajes de los últimos 30 min
@@ -64,11 +65,12 @@ export async function reconcile(): Promise<void> {
   const now = Date.now();
   const since = new Date(now - WINDOW_MIN * 60_000);
   const pending = await prisma.conversationMessage.findMany({
-    where: { deliveryStatus: "pending", role: "ASSISTANT", createdAt: { gte: since } },
+    // También los mensajes del asesor: «failed» solo se ve aquí (no llega por webhook).
+    where: { deliveryStatus: "pending", role: { in: ["ASSISTANT", "ADMIN"] }, createdAt: { gte: since } },
     orderBy: { createdAt: "asc" },
     take: BATCH,
     select: {
-      id: true, companyId: true, customerId: true, gatewayId: true, deliveryRetries: true,
+      id: true, companyId: true, customerId: true, gatewayId: true, deliveryRetries: true, role: true,
       message: true, mediaUrl: true, createdAt: true, rawPayload: true,
       customer: { select: { phone: true } },
     },
@@ -92,7 +94,7 @@ export async function reconcile(): Promise<void> {
       // perdido), dejar de rastrear como "unknown".
       for (const m of msgs) {
         if (now - m.createdAt.getTime() > GIVEUP_MIN * 60_000) {
-          await prisma.conversationMessage.update({ where: { id: m.id }, data: { deliveryStatus: "unknown" } });
+          await prisma.conversationMessage.updateMany({ where: { id: m.id, deliveryStatus: "pending" }, data: { deliveryStatus: "unknown" } });
         }
       }
       continue;
@@ -112,11 +114,17 @@ export async function reconcile(): Promise<void> {
       const kind = status === undefined ? "missing" : classify(status);
 
       if (kind === "ok") {
-        await prisma.conversationMessage.update({ where: { id: m.id }, data: { deliveryStatus: "sent" } });
+        // Solo si sigue pendiente: el aviso de entregado o leído pudo llegar antes y no se pisa.
+        await prisma.conversationMessage.updateMany({ where: { id: m.id, deliveryStatus: "pending" }, data: { deliveryStatus: "sent" } });
         continue;
       }
 
       if (kind === "failed") {
+        // Asesor, recordatorios y avisos de pago: se marca el fallo y nada más (sin reenvío ni aviso).
+        if (retryPolicyFor(m.role, m.rawPayload) === "track") {
+          await markFailed(m);
+          continue;
+        }
         if (isDriveAttachment(m.rawPayload)) {
           // Reintentar el mismo adjunto fallaría igual: driveLinkFallback manda el link.
           await prisma.conversationMessage.update({ where: { id: m.id }, data: { deliveryStatus: "failed" } });
@@ -154,7 +162,7 @@ export async function reconcile(): Promise<void> {
 
       // No aparece en wa.sent todavía (en cola): si ya pasó el plazo, dejar de rastrear.
       if (now - m.createdAt.getTime() > GIVEUP_MIN * 60_000) {
-        await prisma.conversationMessage.update({ where: { id: m.id }, data: { deliveryStatus: "unknown" } });
+        await prisma.conversationMessage.updateMany({ where: { id: m.id, deliveryStatus: "pending" }, data: { deliveryStatus: "unknown" } });
       }
     }
   }
@@ -231,4 +239,9 @@ export async function driveLinkFallback(): Promise<void> {
       fallbackInFlight.delete(m.id);
     }
   }
+}
+
+/** Marca el mensaje como no entregado, salvo que ya haya llegado un aviso de entrega. */
+async function markFailed(m: { id: string }): Promise<void> {
+  await prisma.conversationMessage.updateMany({ where: { id: m.id, deliveryStatus: "pending" }, data: { deliveryStatus: "failed" } });
 }

@@ -23,6 +23,7 @@ import { chatLinkLine } from "../../lib/panel-url";
 import { applyCrmAndTagActions } from "../crm/crm.service";
 import { metaWa, META_WINDOW_REASON } from "../../lib/meta-wa-client";
 import { isWithin24hWindow, substituteTemplateParams } from "../agent/session-window";
+import { NO_RETRY_SOURCES } from "../agent/delivery-policy";
 import {
   parseActions,
   type CampaignAction,
@@ -154,7 +155,7 @@ export async function runRecipientActions(
         if (!tpl) throw new Error(META_WINDOW_REASON);
         if (!templateSent) {
           const params = substituteTemplateParams(tpl.params, { nombre: recipient.name });
-          await metaWa.sendTemplate(sender, to, tpl.name, tpl.language, params);
+          const tplSent = await metaWa.sendTemplate(sender, to, tpl.name, tpl.language, params);
           templateSent = true;
           if (conversationId) {
             await recordMessage({
@@ -163,6 +164,10 @@ export async function runRecipientActions(
               conversationId,
               role: "ASSISTANT",
               message: `📋 Plantilla de Meta "${tpl.name}" enviada (destinatario fuera de la ventana de 24h).`,
+              // Con el id de Meta, el webhook de estados le pone las aspas.
+              gatewayId: tplSent.wamid,
+              deliveryStatus: tplSent.wamid ? "pending" : null,
+              rawPayload: { source: NO_RETRY_SOURCES.metaTemplate },
             }).catch(() => undefined);
           }
         }

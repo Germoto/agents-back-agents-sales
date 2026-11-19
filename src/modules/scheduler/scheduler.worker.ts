@@ -11,6 +11,7 @@ import { setCartUnitPrice } from "../agent/cart.service";
 import { loadWhatsappSender, sendText, sendMedia, mediaKindFor } from "../agent/outbound";
 import { applyFirma } from "../agent/firma";
 import { recordMessage } from "../agent/conversation.service";
+import { NO_RETRY_SOURCES } from "../agent/delivery-policy";
 import { recheckPayment } from "../agent/agent.service";
 import { resumeFlowOnTimeout } from "../flows/flow-engine";
 import {
@@ -434,7 +435,7 @@ export async function processDue(): Promise<void> {
         const qc = await getQuietConfig(msg.companyId, quietCache);
         if (!qc.metaTemplate) throw new Error(META_WINDOW_REASON);
         const params = substituteTemplateParams(qc.metaTemplate.params, { nombre: msg.customer.name });
-        await metaWa.sendTemplate(sender, to, qc.metaTemplate.name, qc.metaTemplate.language, params);
+        const tplSent = await metaWa.sendTemplate(sender, to, qc.metaTemplate.name, qc.metaTemplate.language, params);
         if (msg.conversationId) {
           await recordMessage({
             companyId: msg.companyId,
@@ -442,6 +443,10 @@ export async function processDue(): Promise<void> {
             conversationId: msg.conversationId,
             role: "ASSISTANT",
             message: `📋 Plantilla de Meta "${qc.metaTemplate.name}" enviada (recordatorio fuera de la ventana de 24h).`,
+            // Con el id de Meta, el webhook de estados le pone las aspas.
+            gatewayId: tplSent.wamid,
+            deliveryStatus: tplSent.wamid ? "pending" : null,
+            rawPayload: { source: NO_RETRY_SOURCES.metaTemplate },
           });
         }
         sentToCustomer.add(custKey);
@@ -451,12 +456,14 @@ export async function processDue(): Promise<void> {
 
       // Spintax {a|b} resuelto AL ENVIAR: dos clientes no reciben el mismo texto.
       const body = (await applyFirma(msg.companyId, applySpintax(msg.body))) ?? applySpintax(msg.body);
+      // El número de seguimiento del envío se guarda con el mensaje: de ahí salen las aspas.
+      let sentResult: { gatewayId: string | null };
       if (msg.mediaUrl) {
         // El tipo de media va en metadata (image|video|audio|pdf); default image.
         const mediaType = (msg.metadata as { mediaType?: string } | null)?.mediaType || "image";
-        await sendMedia(sender, to, stickerSafeKind(mediaKindFor(mediaType), msg.mediaUrl), msg.mediaUrl, body);
+        sentResult = await sendMedia(sender, to, stickerSafeKind(mediaKindFor(mediaType), msg.mediaUrl), msg.mediaUrl, body);
       } else {
-        await sendText(sender, to, body);
+        sentResult = await sendText(sender, to, body);
       }
 
       // Registrar en la conversación para que aparezca en el panel
@@ -472,6 +479,10 @@ export async function processDue(): Promise<void> {
           ...(msg.mediaUrl && isStickerType((msg.metadata as { mediaType?: string } | null)?.mediaType) && isStickerGalleryUrl(msg.mediaUrl)
             ? { mediaType: "sticker" }
             : {}),
+          gatewayId: sentResult.gatewayId,
+          deliveryStatus: sentResult.gatewayId ? "pending" : null,
+          // Marca de recordatorio: el revisor de entrega le pone estado pero NO lo reenvía.
+          rawPayload: { source: NO_RETRY_SOURCES.reminder },
         });
       }
 

@@ -382,6 +382,15 @@ export async function recordMessage(opts: {
 /** Escalera de estados: solo se hace UPGRADE (nunca read→delivered). */
 const DELIVERY_RANK: Record<string, number> = { pending: 0, unknown: 0, sent: 1, delivered: 2, read: 3 };
 
+/**
+ * Llaves válidas de un aviso de estado (id del envío y/o wamid). SMS Tools manda
+ * id = 0 cuando el mensaje salió desde el celular o el aviso llegó antes de registrar
+ * el envío: ese «0» no identifica nada y se descarta (queda el wamid).
+ */
+export function statusKeys(ids: Array<string | null | undefined>): string[] {
+  return ids.map((v) => (v ?? "").trim()).filter((v) => v.length > 0 && !/^0+$/.test(v));
+}
+
 /** Normaliza el estado del gateway a la escalera (played cuenta como leído). */
 export function normalizeDeliveryStatus(status: string): string | null {
   const s = status.toLowerCase();
@@ -398,7 +407,7 @@ export function normalizeDeliveryStatus(status: string): string | null {
  */
 export async function applyDeliveryStatus(ids: Array<string | null>, rawStatus: string): Promise<boolean> {
   const status = normalizeDeliveryStatus(rawStatus);
-  const keys = ids.filter((v): v is string => !!v && v.trim().length > 0);
+  const keys = statusKeys(ids);
   if (!status || !keys.length) return false;
   const msg = await prisma.conversationMessage.findFirst({
     where: { OR: [{ gatewayId: { in: keys } }, { wamid: { in: keys } }] },
