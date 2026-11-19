@@ -483,7 +483,7 @@ function currentOrderLine(extra: PromptExtras | undefined, cfg: ShippingConfig |
         : ["DESPACHADO", "LISTO_PARA_RECOGER"].includes(o.status);
     parts.push(released ? `clave de recojo: ${o.pickupKey}` : "clave de recojo: aún no se entrega al cliente");
   }
-  return `PEDIDO VIGENTE DEL CLIENTE: ${parts.join(" · ")}. Si pregunta por su pedido, responde con estos datos sin consultar nada; no inventes guía, clave ni fechas que no estén aquí. Si hay saldo y quiere pagarlo, enviar_metodos_pago cobra lo que toca. No tienes herramienta para modificar un pedido ya registrado: no registres otro por lo mismo; si quiere cambiarlo o cancelarlo, deriva a un asesor.`;
+  return `PEDIDO VIGENTE DEL CLIENTE: ${parts.join(" · ")}. Si pregunta por su pedido, responde con estos datos sin consultar nada; no inventes guía, clave ni fechas que no estén aquí. Si hay saldo y quiere pagarlo, enviar_metodos_pago cobra lo que toca. Si el pedido aún no tiene pagos y el cliente corrige un dato (dirección, nombre, agencia), vuelve a registrarlo con los datos completos: el sistema corrige este mismo pedido, no crea otro. Para cancelarlo o cambiarlo después de un pago, deriva a un asesor.`;
 }
 
 /** Capacidad, no regla: cuándo compartir la tienda lo decide el prompt del negocio. */

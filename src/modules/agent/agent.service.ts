@@ -1836,6 +1836,8 @@ export async function notifyAdmin(
           ? `⚠️ Reclamo del cliente (${customerPhone}).`
           : motivo === "PAGO_POR_CONFIRMAR"
             ? `🧾 Pago por confirmar del cliente (${customerPhone}).`
+            : motivo === "PEDIDO"
+              ? `🛒 Pedido por coordinar del cliente (${customerPhone}).`
             : motivo === "PAGO"
               ? `💳 Problema de pago del cliente (${customerPhone}).`
             : `🔔 Un cliente (${customerPhone}) necesita atención humana.`;
@@ -1844,7 +1846,7 @@ export async function notifyAdmin(
       sender,
       to,
       `${header}\n` +
-        `${motivo === "PAGO_POR_CONFIRMAR" ? "Detalle" : "Motivo"}: ${reasonText.replace(/^HUMAN(\[[A-Z_]+\])?:\s*/, "")}\n\n` +
+        `${motivo === "PAGO_POR_CONFIRMAR" || motivo === "PEDIDO" ? "Detalle" : "Motivo"}: ${reasonText.replace(/^HUMAN(\[[A-Z_]+\])?:\s*/, "")}\n\n` +
         (motivo === "PAGO_POR_CONFIRMAR"
           ? `Apruébalo en Comprobantes o registra el pago en Pedidos: el bot se reactiva solo y el cliente recibe la confirmación.\n\n`
           : "") +

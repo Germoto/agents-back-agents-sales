@@ -73,7 +73,7 @@ import {
   claimPayment,
   updatePaymentStatus,
 } from "../public-payments/public-payments.service";
-import { createAgentOrder, createOrderFromCart, type OrderShippingInput } from "./order.service";
+import { createAgentOrder, createOrderFromCart, findOpenChatOrder, sameProducts, type OrderShippingInput } from "./order.service";
 import { markOrderPaid, findPendingOrderForCustomer } from "../orders/orders.service";
 import {
   createBooking,
@@ -96,6 +96,7 @@ import {
   shippingOn,
   enabledDeliveryTypes,
   type ShippingConfig,
+  handoffOnOrderFor,
 } from "../shipping/shipping-config";
 import { searchAgencies, courierLabel } from "../shipping/agency-search";
 import { resolveOrderShipping, resolvePaymentModeChoice, type OrderPayMode } from "../shipping/order-shipping-resolver";
@@ -216,7 +217,16 @@ function orderToolWithShipping(tool: ToolDefinition, cfg: ShippingConfig): ToolD
   const needsDocument = cfg.askDocument && (agencia.enabled || cfg.types.recojo.enabled);
   const properties: Record<string, unknown> = {
     ...params.properties,
-    address: { type: "string", description: "Dirección completa de entrega. Solo en entrega a domicilio; en agencia o recojo se omite." },
+    address: {
+      type: "string",
+      description:
+        "Dirección exacta de entrega, con calle y número (un distrito o una ciudad sola no basta). Solo en entrega a domicilio; en agencia o recojo se omite.",
+    },
+    adicional: {
+      type: "boolean",
+      description:
+        "Solo true si el cliente ya tiene un pedido abierto y pide OTRO pedido aparte. Sin esto, registrar de nuevo los mismos productos corrige el pedido abierto (no crea otro).",
+    },
     tipoEntrega: {
       type: "string",
       enum: enabledDeliveryTypes(cfg).map((t) => t.toLowerCase()),
@@ -256,7 +266,8 @@ function orderToolWithShipping(tool: ToolDefinition, cfg: ShippingConfig): ToolD
           : "Registra el pedido de un producto FÍSICO con sus datos de envío (un solo producto; si el cliente armó un carrito usa registrar_pedido_carrito). ") +
         "Úsalo cuando el cliente confirme la compra y tengas el nombre de quien recibe, el tipo de entrega y los datos de ese tipo" +
         (needsDocument ? " (en agencia o recojo también el documento de quien recoge)" : "") +
-        ". Registra PRIMERO: el sistema calcula envío, total y adelanto y los devuelve. El cobro va DESPUÉS con enviar_metodos_pago, que toma el monto del pedido.",
+        ". Registra PRIMERO: el sistema calcula envío, total y adelanto y los devuelve. El cobro va DESPUÉS con enviar_metodos_pago, que toma el monto del pedido." +
+        " Si el cliente ya tiene un pedido abierto con los mismos productos, esta herramienta lo corrige con los datos nuevos y conserva su código.",
       parameters: { ...params, required, properties },
     },
   };
@@ -830,7 +841,28 @@ async function registerOrderWithShipping(
           .map((it) => `${it.quantity}x ${it.name}${it.modifiers.length ? ` (${it.modifiers.map((m) => m.option).join(", ")})` : ""}`)
           .join(", ");
 
+  // No duplicar: si el cliente ya tiene un pedido abierto del chat (sin pagos) con los
+  // mismos productos, se corrige ese pedido; con otros productos no se crea nada salvo
+  // que el modelo indique que es un pedido aparte (adicional: true).
+  let replaceOrderId: string | undefined;
+  let previousDelivery = "";
+  if (!ctx.simulate && args.adicional !== true) {
+    const open = await findOpenChatOrder(ctx.companyId, ctx.customerId);
+    if (open) {
+      const incoming = source === "single" ? [product!.id] : cart.items.map((it) => it.productId);
+      if (!sameProducts(open.productIds, incoming)) {
+        return fail("el cliente YA tiene un pedido abierto; NO se creó otro", {
+          pedidoVigente: { codigo: open.orderCode, total: open.total, entrega: open.address },
+          note: "Si el cliente quiere OTRO pedido aparte, repite la llamada con adicional:true. Si quiere cambiar o cancelar el pedido abierto, deriva a un asesor.",
+        });
+      }
+      replaceOrderId = open.id;
+      previousDelivery = `${open.deliveryType ?? ""}|${open.address}`;
+    }
+  }
+
   let orderCode = "SIM-0001";
+  let updated = false;
   if (ctx.simulate) {
     if (source === "cart") await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
     ctx.state.simOrder = {
@@ -854,6 +886,7 @@ async function registerOrderWithShipping(
         reference: String(args.reference ?? "").trim(),
         paymentMode: resolved.paymentMode,
         shipping,
+        replaceOrderId,
       };
       const order =
         source === "single"
@@ -868,12 +901,16 @@ async function registerOrderWithShipping(
       if (source === "cart") await checkoutCart(ctx.companyId, ctx.customerId, cart.totalText);
       orderCode = order.orderCode;
       ctx.state.pendingOrderId = order.id;
-      ctx.adminNotices.push(
-        `🛒 Nuevo pedido ${order.orderCode} (${ctx.customerPhone}): ${resumen} para ${customerName}. ` +
-          `Entrega: ${deliveryLabel(shipping, address)}. Total ${money(a.total)}` +
-          (a.advance > 0 && a.advance < a.total ? ` · adelanto ${money(a.advance)}` : "") +
-          ".",
-      );
+      updated = !!replaceOrderId && order.id === replaceOrderId;
+      // Pedido corregido: solo se avisa al dueño si cambió la entrega (no es un pedido nuevo).
+      if (!updated || previousDelivery !== `${order.deliveryType ?? ""}|${order.address}`) {
+        ctx.adminNotices.push(
+          `${updated ? "✏️ Pedido actualizado" : "🛒 Nuevo pedido"} ${order.orderCode} (${ctx.customerPhone}): ${resumen} para ${customerName}. ` +
+            `Entrega: ${deliveryLabel(shipping, address)}. Total ${money(a.total)}` +
+            (a.advance > 0 && a.advance < a.total ? ` · adelanto ${money(a.advance)}` : "") +
+            ".",
+        );
+      }
     } catch (err) {
       return fail(err instanceof Error ? err.message : "no se pudo registrar el pedido");
     }
@@ -894,8 +931,21 @@ async function registerOrderWithShipping(
   }
   if (a.shippingPaidAtDestination) note += " El flete NO está en el total: el cliente lo paga a la courier al recoger.";
   note += " Confirma al cliente el código, la entrega y los montos tal como vienen aquí (no los recalcules).";
+  if (updated) note = `Se CORRIGIÓ el pedido abierto ${orderCode} con estos datos (no se creó otro). ${note.replace(/^Pedido registrado\.\s*/, "")}`;
+  // El dueño pidió atender él los pedidos de este tipo de entrega: el sistema pasa el chat.
+  if (handoffOnOrderFor(cfg, shipping.deliveryType)) {
+    if (ctx.simulate) {
+      ctx.adminNotices.push("🔇 (Simulación) Aquí el chat pasaría a atención humana: el negocio pidió atender los pedidos de este tipo de entrega.");
+    } else {
+      markHandoff(ctx, `HUMAN[PEDIDO]: Pedido ${orderCode} · ${deliveryLabel(shipping, address)} · ${customerName}`);
+      note =
+        `${updated ? `Se CORRIGIÓ el pedido abierto ${orderCode} (no se creó otro)` : "Pedido registrado"}. ` +
+        "El chat pasa ahora a un asesor del negocio, que coordina lo que sigue: confirma al cliente el pedido con estos datos en un mensaje corto, sin hacer preguntas y sin enviar métodos de pago.";
+    }
+  }
   return JSON.stringify({
     ok: true,
+    ...(updated ? { actualizado: true } : {}),
     orderCode,
     entrega: deliveryLabel(shipping, address),
     subtotal: money(a.subtotal),

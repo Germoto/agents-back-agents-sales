@@ -119,6 +119,15 @@ export const shippingConfigSchema = z.object({
     })
     .prefault({}),
   pickupKeyRelease: z.enum(PICKUP_KEY_RELEASES).default("AL_PAGAR_SALDO"),
+  // Al registrar un pedido de ese tipo de entrega, el chat pasa a un asesor (lo hace el
+  // sistema, no el modelo). Apagado = el agente sigue atendiendo como siempre.
+  handoffOnOrder: z
+    .object({
+      domicilio: z.boolean().default(false),
+      agencia: z.boolean().default(false),
+      recojo: z.boolean().default(false),
+    })
+    .prefault({}),
   notifications: z.object(notificationsShape).prefault({}),
 });
 
@@ -157,6 +166,11 @@ const TYPE_KEY: Record<DeliveryType, "domicilio" | "agencia" | "recojo"> = {
   AGENCIA: "agencia",
   RECOJO: "recojo",
 };
+
+/** ¿El negocio pidió pasar el chat a un asesor al registrar un pedido de este tipo? */
+export function handoffOnOrderFor(cfg: ShippingConfig, type: DeliveryType): boolean {
+  return !!cfg.handoffOnOrder?.[TYPE_KEY[type]];
+}
 
 /** Tipos de entrega que el negocio ofrece. */
 export function enabledDeliveryTypes(cfg: ShippingConfig): DeliveryType[] {
@@ -276,6 +290,18 @@ export function describeShippingConfig(cfg: ShippingConfig | null, symbol: strin
         ? "La clave de recojo se entrega al cliente solo cuando el pedido está pagado por completo."
         : "La clave de recojo se entrega al cliente apenas se despacha el pedido.",
     );
+  }
+  const handoff = (
+    [
+      ["domicilio", "a domicilio"],
+      ["agencia", "por agencia"],
+      ["recojo", "con recojo en tienda"],
+    ] as const
+  )
+    .filter(([key]) => t[key].enabled && cfg.handoffOnOrder?.[key])
+    .map(([, label]) => label);
+  if (handoff.length) {
+    out.push(`Al registrar un pedido ${handoff.join(" o ")}, el chat pasa a un asesor y el bot deja de responder a ese cliente hasta que lo reactives.`);
   }
   const on = NOTIFY_EVENTS.filter((e) => cfg.notifications[e].enabled).map((e) => NOTIFY_EVENT_LABELS[e]);
   out.push(on.length ? `Avisos automáticos al cliente: ${on.join(", ")}.` : "Avisos automáticos al cliente: ninguno encendido.");
