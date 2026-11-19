@@ -15,6 +15,7 @@ import { recordMessage, setBotPaused, saveState, type ConversationState } from "
 import { applyCrmAndTagActions } from "../crm/crm.service";
 import { autoGroupAddForProducts } from "../whatsapp-groups/whatsapp-groups.service";
 import type { QuickReplyMessageInput, QuickReplyActionsInput } from "./quick-replies.schemas";
+import { stickerSafeKind } from "../stickers/sticker-url";
 
 const quickReplySelect = {
   id: true,
@@ -237,7 +238,7 @@ export async function sendQuickReply(
       const result =
         msg.type === "text"
           ? await sendText(sender, to, text ?? "")
-          : await sendMedia(sender, to, msg.type, msg.mediaUrl ?? "", text ?? undefined, msg.fileName);
+          : await sendMedia(sender, to, stickerSafeKind(msg.type, msg.mediaUrl), msg.mediaUrl ?? "", text ?? undefined, msg.fileName);
       await recordMessage({
         companyId,
         customerId: convo.customerId,

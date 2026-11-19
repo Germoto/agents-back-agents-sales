@@ -34,6 +34,7 @@ import {
 import { symbolFor } from "../../lib/currency";
 import { normalizeSmartFollowup, type SmartFollowup } from "./smart-followup";
 import { reviewReminderBeforeSend } from "./reminder-ai-review";
+import { stickerSafeKind, isStickerType, isStickerGalleryUrl } from "../stickers/sticker-url";
 
 // La mayoría de filas vencidas de una pasada solo se REPROGRAMAN (pacing), así
 // que el lote puede ser amplio sin que una empresa con muchos vencidos deje sin
@@ -453,7 +454,7 @@ export async function processDue(): Promise<void> {
       if (msg.mediaUrl) {
         // El tipo de media va en metadata (image|video|audio|pdf); default image.
         const mediaType = (msg.metadata as { mediaType?: string } | null)?.mediaType || "image";
-        await sendMedia(sender, to, mediaKindFor(mediaType), msg.mediaUrl, body);
+        await sendMedia(sender, to, stickerSafeKind(mediaKindFor(mediaType), msg.mediaUrl), msg.mediaUrl, body);
       } else {
         await sendText(sender, to, body);
       }
@@ -467,6 +468,10 @@ export async function processDue(): Promise<void> {
           role: "ASSISTANT",
           message: body,
           mediaUrl: msg.mediaUrl,
+          // Sticker de la galería: se guarda con su tipo para que el panel lo pinte como sticker.
+          ...(msg.mediaUrl && isStickerType((msg.metadata as { mediaType?: string } | null)?.mediaType) && isStickerGalleryUrl(msg.mediaUrl)
+            ? { mediaType: "sticker" }
+            : {}),
         });
       }
 

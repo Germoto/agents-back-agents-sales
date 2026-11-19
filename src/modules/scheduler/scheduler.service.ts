@@ -7,6 +7,7 @@ import { Prisma, ScheduledMessageType, ScheduledMessageStatus } from "@prisma/cl
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { clampToBusinessHours, normalizeQuietHours, type QuietHours } from "./quiet-hours";
+import { isStickerGalleryUrl } from "../stickers/sticker-url";
 
 export async function scheduleReminder(opts: {
   companyId: string;
@@ -449,6 +450,7 @@ export async function updateScheduledReminder(
 
 /** Tipo de adjunto por extensión (image|video|audio|pdf|document), como lo espera el worker. */
 export function guessMediaType(url: string): string {
+  if (isStickerGalleryUrl(url)) return "sticker";
   const ext = (url.split("?")[0].split("#")[0].match(/\.([a-z0-9]+)$/i)?.[1] ?? "").toLowerCase();
   if (["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) return "image";
   if (["mp4", "mov", "webm", "3gp", "m4v"].includes(ext)) return "video";

@@ -16,6 +16,7 @@ import { smsTools } from "../../lib/smstools-client";
 import { loadWhatsappSender, sendText, sendMedia } from "./outbound";
 import { notifyOwner } from "./conversation.service";
 import { deliver, fallbackLinkText } from "./delivery";
+import { isStickerGalleryUrl } from "../stickers/sticker-url";
 
 const BATCH = 200;
 const WINDOW_MIN = 30; // solo mensajes de los últimos 30 min
@@ -43,7 +44,8 @@ export function startDeliveryStatusWorker(): void {
 }
 
 /** image|video|audio|document según la extensión del URL (para reintentar media). */
-function guessKindFromUrl(url: string): "image" | "video" | "audio" | "document" {
+function guessKindFromUrl(url: string): "image" | "video" | "audio" | "document" | "sticker" {
+  if (isStickerGalleryUrl(url)) return "sticker";
   const ext = (url.split("?")[0].split(".").pop() ?? "").toLowerCase();
   if (["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) return "image";
   if (["mp4", "mov", "3gp", "mkv", "webm"].includes(ext)) return "video";

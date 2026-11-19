@@ -10,6 +10,7 @@ import { applyFirma } from "./firma";
 import { applySpintax } from "./reminder-templates";
 import { decodeEntities } from "../../lib/html-entities";
 import type { OutboxMessage } from "./agent-tools";
+import { stickerSafeKind } from "../stickers/sticker-url";
 
 /**
  * Pausa entre envíos para preservar el ORDEN en WhatsApp (sin esto, mensajes y
@@ -77,11 +78,20 @@ export async function deliver(
   ids: DeliveryIds,
 ): Promise<boolean> {
   try {
+    // Un sticker no lleva texto pegado: sale el sticker y después el texto, como dos
+    // mensajes (así quedan también en el panel).
+    if (msg.kind === "media" && msg.mediaUrl && msg.caption?.trim() && stickerSafeKind(msg.mediaKind ?? "image", msg.mediaUrl) === "sticker") {
+      const stickerOk = await deliver(sender, to, { ...msg, caption: undefined }, ids);
+      const textOk = await deliver(sender, to, { kind: "text", text: msg.caption }, ids);
+      return stickerOk && textOk;
+    }
     if (msg.kind === "media" && msg.mediaUrl) {
       // Spintax {a|b|c} resuelto al enviar (cada cliente recibe una variante);
       // la firma se aplica solo cuando el media trae caption con texto.
       const caption = await applyFirma(ids.companyId, msg.caption ? decodeEntities(applySpintax(msg.caption)) : msg.caption);
-      const r = await sendMedia(sender, to, msg.mediaKind ?? "image", msg.mediaUrl, caption ?? undefined, msg.fileName);
+      // Un «sticker» solo sale como sticker si viene de la galería; si no, como imagen.
+      const kind = stickerSafeKind(msg.mediaKind ?? "image", msg.mediaUrl);
+      const r = await sendMedia(sender, to, kind, msg.mediaUrl, caption ?? undefined, msg.fileName);
       await recordMessage({
         companyId: ids.companyId,
         customerId: ids.customerId,
@@ -89,7 +99,7 @@ export async function deliver(
         role: "ASSISTANT",
         message: caption ?? null,
         mediaUrl: msg.mediaUrl,
-        mediaType: msg.mediaKind ?? "image",
+        mediaType: kind,
         fileName: msg.mediaKind === "document" ? (msg.fileName ?? null) : null,
         gatewayId: r.gatewayId,
         deliveryStatus: r.gatewayId ? "pending" : null,

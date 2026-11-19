@@ -13,9 +13,10 @@ import { prisma } from "../../lib/prisma";
 import { normalizeFollowupList, normalizeFollowups } from "../../lib/product";
 import { listProducts } from "./products.service";
 import { stepsFrom } from "../agent/reminder-templates";
+import { isStickerGalleryUrl } from "../stickers/sticker-url";
 
-export type ResourceType = "IMAGE" | "VIDEO" | "AUDIO" | "PDF" | "OTHER";
-export type ResourceOrigin = "archivo" | "recordatorio" | "presentacion" | "postventa";
+export type ResourceType = "IMAGE" | "VIDEO" | "AUDIO" | "PDF" | "OTHER" | "STICKER";
+export type ResourceOrigin = "archivo" | "recordatorio" | "presentacion" | "postventa" | "sticker";
 
 export interface ResourceEntry {
   url: string;
@@ -49,6 +50,8 @@ const AUDIO_EXT = /\.(mp3|ogg|oga|wav|m4a|aac|opus)(\?|$)/i;
 /** Acepta "IMAGE"/"image"/"document"… y cae a la extensión de la URL. */
 export function normalizeResourceType(mediaType: string | null | undefined, url: string): ResourceType {
   const upper = (mediaType ?? "").trim().toUpperCase();
+  // Sticker: tipo explícito o archivo de la galería (un .webp cualquiera sigue siendo imagen).
+  if (upper === "STICKER" || isStickerGalleryUrl(url)) return "STICKER";
   if (upper === "IMAGE" || upper === "VIDEO" || upper === "AUDIO" || upper === "PDF" || upper === "OTHER") return upper;
   if (upper === "DOCUMENT") return /\.pdf(\?|$)/i.test(url) ? "PDF" : "OTHER";
   if (IMAGE_EXT.test(url)) return "IMAGE";
@@ -203,6 +206,27 @@ export async function listResourceLibrary(companyId: string, filter: ResourceFil
   }
 
   col.reminders(config?.followupConfig, null, GENERAL_REMINDERS_LABEL);
+
+  // Galería de stickers del negocio: se listan todos, se usen o no en algún mensaje.
+  if (!filter.productId) {
+    const stickers = await prisma.stickerAsset.findMany({
+      where: { companyId },
+      orderBy: [{ lastUsedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
+      select: { url: true, source: true },
+    });
+    stickers.forEach((s, i) => {
+      col.push({
+        url: s.url,
+        tipo: "STICKER",
+        nombre: `Sticker ${i + 1}`,
+        descripcion: "",
+        origen: "sticker",
+        detalle: s.source === "RECEIVED" ? "Galería de stickers (recibido de un cliente)" : "Galería de stickers",
+        productoId: null,
+        producto: "Galería de stickers",
+      });
+    });
+  }
 
   return col.entries.filter(
     (e) => (!filter.productId || e.productoId === filter.productId) && (!filter.tipo || e.tipo === filter.tipo),

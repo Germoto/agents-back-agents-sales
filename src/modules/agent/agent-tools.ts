@@ -462,7 +462,7 @@ export interface OutboxMessage {
   kind: "text" | "media" | "poll";
   text?: string;
   mediaUrl?: string;
-  mediaKind?: "image" | "document" | "video" | "audio";
+  mediaKind?: "image" | "document" | "video" | "audio" | "sticker";
   caption?: string;
   /** nombre original del archivo (documentos): se usa como document_name en SMS Tools. */
   fileName?: string;

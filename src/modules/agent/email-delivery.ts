@@ -23,6 +23,7 @@ import { normalizeFollowups } from "../../lib/product";
 import { applySpintax } from "./reminder-templates";
 import { digitalDeliveryEmail, type DeliveryEmailSection } from "./delivery.emails";
 import { notifyOwner } from "./conversation.service";
+import { isStickerType } from "../stickers/sticker-url";
 
 const MAX_ATTACHMENTS_BYTES = 15 * 1024 * 1024;
 const MAX_SENDS_PER_RECEIPT_24H = 3;
@@ -221,7 +222,8 @@ export async function sendDigitalDeliveryEmail(input: SendDigitalDeliveryEmailIn
       followupCount += 1;
       if (f.message?.trim()) extras.push(f.message.trim());
       const url = f.mediaUrl?.trim();
-      if (url) {
+      // Un sticker es un adorno del chat: no se adjunta al correo.
+      if (url && !isStickerType(f.mediaType)) {
         const known = p.files.find((x) => x.url === url);
         await attachOrLink(url, known?.storagePath || storagePathFromUrl(url), known?.originalName || "", known?.mimeType);
       }

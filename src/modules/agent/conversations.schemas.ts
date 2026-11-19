@@ -30,7 +30,7 @@ export const updateReminderSchema = z
   .object({
     body: z.string().max(4000).optional(),
     mediaUrl: z.string().trim().max(2048).nullable().optional(),
-    mediaType: z.enum(["image", "video", "audio", "pdf", "document"]).nullable().optional(),
+    mediaType: z.enum(["image", "video", "audio", "pdf", "document", "sticker"]).nullable().optional(),
     sendAt: z.string().datetime({ offset: true }).optional(),
   })
   .strict();

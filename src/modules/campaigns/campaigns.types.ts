@@ -6,7 +6,7 @@
  * parsers tolerantes que normalizan el JSON al leerlo.
  */
 
-export type CampaignMessageType = "text" | "image" | "video" | "audio" | "document";
+export type CampaignMessageType = "text" | "image" | "video" | "audio" | "document" | "sticker";
 
 /** Un mensaje de la acción "send-message": texto puro o multimedia con caption. */
 export interface CampaignMessageItem {

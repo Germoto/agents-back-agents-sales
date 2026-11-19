@@ -51,8 +51,10 @@ export async function loadWhatsappSender(companyId: string): Promise<WhatsappSen
 }
 
 /** Tipo de adjunto WhatsApp segun el tipo de ProductFile / media. */
-export function mediaKindFor(type: string): "image" | "document" | "video" | "audio" {
+export function mediaKindFor(type: string): "image" | "document" | "video" | "audio" | "sticker" {
   const t = type.toLowerCase();
+  // Sticker de la galería del negocio (tipo explícito; un .webp cualquiera sigue siendo imagen).
+  if (t === "sticker") return "sticker";
   if (t === "image") return "image";
   if (t === "video") return "video";
   if (t === "audio") return "audio";

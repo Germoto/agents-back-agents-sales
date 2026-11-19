@@ -178,6 +178,7 @@ import {
 } from "./copilot-permissions";
 import { onboardingScript, onboardingSuggestions, type OnboardingStep } from "./onboarding-script";
 import { getOnboarding } from "../onboarding/onboarding.service";
+import { isStickerGalleryUrl, isCompanyStickerUrl, STICKER_URL_ERROR } from "../stickers/sticker-url";
 
 const MAX_ITERATIONS = 8;
 const HISTORY_LIMIT = 16;
@@ -3035,8 +3036,10 @@ async function takeControlByCopilot(companyId: string, convo: { id: string; botP
   return true;
 }
 
-function mediaKindFromUrl(url: string, explicit?: unknown): "image" | "video" | "audio" | "document" {
+function mediaKindFromUrl(url: string, explicit?: unknown): "image" | "video" | "audio" | "document" | "sticker" {
   const e = String(explicit ?? "").toLowerCase();
+  // Sticker: solo los de la galería del negocio (listar_recursos tipo STICKER da las URLs).
+  if (isStickerGalleryUrl(url) && (e === "sticker" || !e)) return "sticker";
   if (e === "image" || e === "video" || e === "audio" || e === "document") return e;
   const ext = (url.split("?")[0].split("#")[0].match(/\.([a-z0-9]{2,5})$/i)?.[1] ?? "").toLowerCase();
   if (["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) return "image";
