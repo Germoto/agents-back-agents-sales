@@ -5,6 +5,8 @@
  * runtime vacía en orden por WhatsApp; el resto sólo devuelven datos al modelo.
  */
 
+import { VoiceError, cleanSpokenText, generateVoiceNote, voiceNotesToday, voiceTextProblem } from "../voice/voice-tts";
+import { loadVoiceApiKey } from "../agent-config/agent-config.service";
 import { matchProductFile } from "../../lib/product";
 import { isPlainAmount, planOptions } from "../products/product-plans";
 import { baseVars, executeAction } from "../http-actions/http-actions.service";
@@ -173,10 +175,25 @@ export function groupToolAvailable(config: BotConfig): boolean {
   return !!t?.enabled && t.groups.length > 0;
 }
 
+/** Aviso al dueño cuando la voz falla por su cuenta de ElevenLabs: uno cada 6 h por negocio. */
+const voiceWarnedAt = new Map<string, number>();
+function warnVoiceFailure(ctx: TurnContext, reason: string): void {
+  const last = voiceWarnedAt.get(ctx.companyId) ?? 0;
+  if (Date.now() - last < 6 * 60 * 60_000) return;
+  voiceWarnedAt.set(ctx.companyId, Date.now());
+  ctx.adminNotices.push(`⚠️ Notas de voz: el agente no pudo generar un audio y respondió por texto.\nMotivo: ${reason}\nRevísalo en Agente IA → Voz.`);
+}
+
 /** Herramienta de stickers del agente: solo con lista blanca activa (bot.service la resuelve contra la galería). */
 export function stickerToolAvailable(config: BotConfig): boolean {
   const t = config.agent.stickerTool;
   return !!t?.enabled && t.stickers.length > 0;
+}
+
+/** Notas de voz del agente: solo si el dueño las activó con voz, clave y regla «cuándo» (bot.service la resuelve). */
+export function voiceToolAvailable(config: BotConfig): boolean {
+  const t = config.agent.voiceTool;
+  return !!t?.enabled && !!t.voiceId;
 }
 
 /** Productos digitales cuya entrega contiene links de Google Drive (carpetas/archivos públicos). */
@@ -287,6 +304,7 @@ export function toolDefinitionsFor(config: BotConfig): ToolDefinition[] {
   if (!crmToolAvailable(config)) hidden.add("actualizar_crm");
   if (!groupToolAvailable(config)) hidden.add("agregar_a_grupo");
   if (!stickerToolAvailable(config)) hidden.add("enviar_sticker");
+  if (!voiceToolAvailable(config)) hidden.add("enviar_nota_de_voz");
   if (!postponeAvailable(config)) hidden.add("posponer_seguimiento");
   // El dueño revisa cada pago: el agente no valida, solo reporta el pago (y al revés en automático).
   hidden.add(ownerReviewsPayments(config.payment) ? "validar_pago" : "reportar_pago");
@@ -475,6 +493,8 @@ export interface OutboxMessage {
   fileName?: string;
   /** Adjunto de Drive: link /file/d/… que el sistema manda solo si el adjunto no llega (delivery-status.worker). */
   fallbackLink?: string;
+  /** Nota de voz generada (enviar_nota_de_voz): sale como PTT y el panel guarda el texto dicho. */
+  voice?: { seconds: number; transcript: string };
   /** Encuesta: pregunta (≤255), opciones (2-12, ≤100 c/u), selección (1 = única). */
   pollQuestion?: string;
   pollOptions?: string[];
@@ -532,6 +552,14 @@ export interface TurnContext {
   groupAddThisTurn?: boolean;
   /** enviar_sticker ya se usó en ESTE turno (un sticker por turno). */
   stickerSentThisTurn?: boolean;
+  /** enviar_nota_de_voz ya se usó en ESTE turno (una nota de voz por turno). */
+  voiceSentThisTurn?: boolean;
+  /** true si lo último que mandó el cliente fue un audio (solo se calcula con las notas de voz activas). */
+  lastInboundWasAudio?: boolean;
+  /** Indicador que ve el cliente mientras el agente trabaja: «grabando audio…» al preparar una nota de voz. */
+  typingState?: "composing" | "recording";
+  /** Refresca ya el indicador (lo pone agent.service; no existe en el simulador). */
+  refreshTyping?: () => void;
   /** Resultados que devolvió Drive (buscar_en_drive / obtener_muestra) en ESTE turno: con
    *  resultados, derivar_humano por CONSULTA se rechaza (el agente sí puede responder). */
   driveHitsThisTurn?: number;
@@ -2996,6 +3024,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "enviar_nota_de_voz",
+      description:
+        "Envía al cliente UNA nota de voz con la voz del negocio (sección NOTAS DE VOZ del prompt). Úsala SOLO cuando se cumpla la condición configurada; si dudas, responde por texto. Una por turno; sale ANTES de tu mensaje de texto. Escribe `texto` tal como se DICE en voz alta: frases cortas y naturales, cifras y precios en palabras, sin emojis, listas, formato ni links. Todo dato que el cliente deba copiar o conservar (precio, link, número de cuenta, código, dirección) va ADEMÁS en tu mensaje de texto; no repitas en el texto lo demás que ya dijiste en la nota. Si devuelve error, responde por texto sin mencionarlo.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["texto"],
+        properties: {
+          texto: { type: "string", description: "Lo que se dirá en la nota de voz, escrito para ser hablado" },
+        },
+      },
+    },
+  },
 ];
 
 // --------------------------------------------------------------------------
@@ -4987,6 +5031,47 @@ export async function executeTool(
         ...(ctx.simulate ? { simulado: true } : {}),
         note: `Listo: el sticker ${n} sale después de tu mensaje. No lo anuncies ni lo describas al cliente; escribe tu respuesta normal.`,
       });
+    }
+
+    case "enviar_nota_de_voz": {
+      // Salvaguardas en servidor: una por turno, sin links, tope de largo y tope del día.
+      const tool = ctx.config.agent.voiceTool;
+      const internal = "ERROR INTERNO (no se lo menciones al cliente): ";
+      if (!tool || !voiceToolAvailable(ctx.config)) return JSON.stringify({ ok: false, error: `${internal}las notas de voz no están activadas. Responde por texto.` });
+      if (ctx.voiceSentThisTurn) return JSON.stringify({ ok: false, error: `${internal}ya enviaste una nota de voz en este turno; sigue por texto.` });
+      const spoken = cleanSpokenText(String(args.texto ?? ""));
+      const problem = voiceTextProblem(spoken, tool.maxChars);
+      if (problem) return JSON.stringify({ ok: false, error: `${internal}${problem}` });
+      const okNote = "Listo: la nota de voz sale antes de tu mensaje. No la anuncies. En tu texto pon solo los datos que el cliente deba copiar (precio, link, cuenta, código); si no hay ninguno, no escribas nada más.";
+      if (ctx.simulate) {
+        // Pruebas: no se gasta voz; se muestra lo que diría.
+        ctx.voiceSentThisTurn = true;
+        ctx.outbox.push({ kind: "text", text: `🎙️ (nota de voz) ${spoken}` });
+        return JSON.stringify({ ok: true, simulado: true, note: okNote });
+      }
+      try {
+        const usedToday = await voiceNotesToday(ctx.companyId, ctx.config.business.timezone ?? null);
+        if (usedToday >= tool.perDay) {
+          return JSON.stringify({ ok: false, error: `${internal}se alcanzó el máximo de notas de voz de hoy. Responde por texto.` });
+        }
+        const apiKey = await loadVoiceApiKey(ctx.companyId);
+        if (!apiKey) return JSON.stringify({ ok: false, error: `${internal}falta la clave de voz. Responde por texto.` });
+        // El cliente ve «grabando audio…» mientras se genera.
+        ctx.typingState = "recording";
+        ctx.refreshTyping?.();
+        const note = await generateVoiceNote(ctx.companyId, apiKey, tool, spoken);
+        ctx.voiceSentThisTurn = true;
+        ctx.outbox.push({ kind: "media", mediaUrl: note.url, mediaKind: "audio", voice: { seconds: note.seconds, transcript: spoken } });
+        return JSON.stringify({ ok: true, note: okNote });
+      } catch (err) {
+        ctx.typingState = "composing";
+        ctx.refreshTyping?.();
+        const reason = err instanceof Error ? err.message : String(err);
+        console.warn(`[agent] nota de voz falló (company=${ctx.companyId}): ${reason}`);
+        // Falla de la cuenta de voz (clave, créditos, voz borrada): el dueño debe saberlo.
+        if (err instanceof VoiceError) warnVoiceFailure(ctx, reason);
+        return JSON.stringify({ ok: false, error: `${internal}no se pudo generar la nota de voz. Responde por texto.` });
+      }
     }
 
     default:

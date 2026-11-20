@@ -5,12 +5,13 @@
  */
 
 import { recordMessage, notifyOwner } from "./conversation.service";
-import { sendText, sendMedia, sendPoll, supportsPolls, type WhatsappSender } from "./outbound";
+import { sendText, sendMedia, sendPoll, sendTyping, supportsPolls, type WhatsappSender } from "./outbound";
 import { applyFirma } from "./firma";
 import { applySpintax } from "./reminder-templates";
 import { decodeEntities } from "../../lib/html-entities";
 import type { OutboxMessage } from "./agent-tools";
 import { stickerSafeKind } from "../stickers/sticker-url";
+import { VOICE_SOURCE } from "../voice/voice-limits";
 
 /**
  * Pausa entre envíos para preservar el ORDEN en WhatsApp (sin esto, mensajes y
@@ -85,7 +86,25 @@ export async function deliver(
       const textOk = await deliver(sender, to, { kind: "text", text: msg.caption }, ids);
       return stickerOk && textOk;
     }
-    if (msg.kind === "media" && msg.mediaUrl) {
+    if (msg.kind === "media" && msg.mediaUrl && msg.voice) {
+      // Nota de voz del agente: viaja sin texto (un audio no admite firma ni caption) y
+      // en el panel queda el texto dicho, que también es lo que el agente ve en su historial.
+      // «Grabando audio…» justo antes de que llegue (WhatsApp lo apaga al recibir el mensaje).
+      await sendTyping(sender, to, "recording").catch(() => undefined);
+      const r = await sendMedia(sender, to, "audio", msg.mediaUrl, undefined, undefined, { ptt: true, seconds: msg.voice.seconds });
+      await recordMessage({
+        companyId: ids.companyId,
+        customerId: ids.customerId,
+        conversationId: ids.conversationId,
+        role: "ASSISTANT",
+        message: msg.voice.transcript,
+        mediaUrl: msg.mediaUrl,
+        mediaType: "audio",
+        gatewayId: r.gatewayId,
+        deliveryStatus: r.gatewayId ? "pending" : null,
+        rawPayload: { source: VOICE_SOURCE, seconds: msg.voice.seconds },
+      });
+    } else if (msg.kind === "media" && msg.mediaUrl) {
       // Spintax {a|b|c} resuelto al enviar (cada cliente recibe una variante);
       // la firma se aplica solo cuando el media trae caption con texto.
       const caption = await applyFirma(ids.companyId, msg.caption ? decodeEntities(applySpintax(msg.caption)) : msg.caption);
@@ -148,6 +167,15 @@ export async function deliver(
         ids.companyId,
         `⚠️ No se pudo enviar un archivo al cliente por WhatsApp (Meta).\nMotivo: ${reason}`,
       ).catch(() => undefined);
+    }
+    // Nota de voz rechazada en el acto: lo que se iba a decir sale como texto.
+    if (msg.kind === "media" && msg.voice?.transcript) {
+      try {
+        await deliverText(sender, to, msg.voice.transcript, ids);
+        return true;
+      } catch (e) {
+        console.error("[agent] tampoco se pudo enviar el texto de la nota de voz:", e instanceof Error ? e.message : e);
+      }
     }
     // Adjunto de Drive rechazado en el acto: el cliente recibe el link en su lugar.
     if (msg.kind === "media" && msg.fallbackLink) {

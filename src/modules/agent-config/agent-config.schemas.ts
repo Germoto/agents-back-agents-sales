@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { VOICE_LIMITS, VOICE_MODELS } from "../voice/voice-limits";
 
 // Un mensaje (step) de la secuencia: demora (seg) + texto + multimedia.
 const reminderStepSchema = z.object({
@@ -155,6 +156,40 @@ export const stickerToolConfigSchema = z
   });
 export type StickerToolConfig = z.infer<typeof stickerToolConfigSchema>;
 
+// Notas de voz del agente (enviar_nota_de_voz): voz de ElevenLabs del negocio, ajustes,
+// regla "cuándo" obligatoria y topes. La clave NO vive aquí (voiceApiKey, cifrada).
+export const voiceToolConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    voiceId: z.string().trim().max(80).default(""),
+    voiceName: z.string().trim().max(120).default(""),
+    model: z.enum(VOICE_MODELS).default(VOICE_MODELS[0]),
+    speed: z.coerce.number().min(VOICE_LIMITS.speed.min).max(VOICE_LIMITS.speed.max).default(VOICE_LIMITS.speed.def),
+    stability: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.stability.def),
+    similarity: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.similarity.def),
+    when: z.string().trim().max(300).default(""),
+    maxChars: z.coerce.number().int().min(VOICE_LIMITS.maxChars.min).max(VOICE_LIMITS.maxChars.max).default(VOICE_LIMITS.maxChars.def),
+    perDay: z.coerce.number().int().min(VOICE_LIMITS.perDay.min).max(VOICE_LIMITS.perDay.max).default(VOICE_LIMITS.perDay.def),
+  })
+  .superRefine((v, ctx) => {
+    if (!v.enabled) return;
+    if (!v.voiceId) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["voiceId"], message: "Elige una voz" });
+    if (v.when.length < 10) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["when"], message: "Escribe cuándo debe enviar una nota de voz (mínimo 10 caracteres)" });
+    }
+  });
+export type VoiceToolConfig = z.infer<typeof voiceToolConfigSchema>;
+
+// POST /agent-config/voice/test — audio de prueba con los ajustes en pantalla.
+export const voiceTestSchema = z.object({
+  text: z.string().trim().min(3).max(VOICE_LIMITS.maxChars.max),
+  voiceId: z.string().trim().min(1).max(80),
+  model: z.enum(VOICE_MODELS).default(VOICE_MODELS[0]),
+  speed: z.coerce.number().min(VOICE_LIMITS.speed.min).max(VOICE_LIMITS.speed.max).default(VOICE_LIMITS.speed.def),
+  stability: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.stability.def),
+  similarity: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.similarity.def),
+});
+
 // Núcleo de Agente IA (modelo + prompt). Recordatorios y modo de respuesta se
 // guardan por separado (módulos Recordatorios y Pruebas) para no pisarlos.
 /** Frase que el panel guardaba en `rules` para el viejo toggle «Derivar si no sabe responder» (compat). */
@@ -195,6 +230,10 @@ export const coreAgentConfigSchema = z.object({
   groupToolConfig: groupToolConfigSchema.nullable().optional(),
   // Herramienta de stickers del agente: undefined = no tocar; null = apagar.
   stickerToolConfig: stickerToolConfigSchema.nullable().optional(),
+  // Notas de voz del agente: undefined = no tocar; null = apagar.
+  voiceToolConfig: voiceToolConfigSchema.nullable().optional(),
+  // Clave de ElevenLabs: solo se escribe si el dueño tipeó una nueva.
+  voiceApiKey: z.string().trim().max(200).optional(),
 });
 
 // PUT /agent-config/reminders — solo followupConfig.

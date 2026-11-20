@@ -380,7 +380,7 @@ export async function recordMessage(opts: {
 // Checks de entrega (webhook whatsapp_status / statuses de Meta) y reacciones
 // ---------------------------------------------------------------------------
 /** Escalera de estados: solo se hace UPGRADE (nunca read→delivered). */
-const DELIVERY_RANK: Record<string, number> = { pending: 0, unknown: 0, sent: 1, delivered: 2, read: 3 };
+const DELIVERY_RANK: Record<string, number> = { pending: 0, unknown: 0, sent: 1, delivered: 2, read: 3, played: 4 };
 
 /**
  * Llaves válidas de un aviso de estado (id del envío y/o wamid). SMS Tools manda
@@ -391,10 +391,13 @@ export function statusKeys(ids: Array<string | null | undefined>): string[] {
   return ids.map((v) => (v ?? "").trim()).filter((v) => v.length > 0 && !/^0+$/.test(v));
 }
 
-/** Normaliza el estado del gateway a la escalera (played cuenta como leído). */
-export function normalizeDeliveryStatus(status: string): string | null {
+/**
+ * Normaliza el estado del gateway a la escalera. «played» (el cliente escuchó el audio)
+ * cuenta como leído, salvo con `keepPlayed`: los chats 1 a 1 lo guardan como un escalón más.
+ */
+export function normalizeDeliveryStatus(status: string, opts?: { keepPlayed?: boolean }): string | null {
   const s = status.toLowerCase();
-  if (s === "played") return "read";
+  if (s === "played") return opts?.keepPlayed ? "played" : "read";
   if (["sent", "delivered", "read"].includes(s)) return s;
   if (["failed", "error", "rejected", "undelivered"].includes(s)) return "failed";
   return null;
@@ -406,7 +409,7 @@ export function normalizeDeliveryStatus(status: string): string | null {
  * Emite MESSAGE_UPDATED para refrescar los checks del panel en vivo.
  */
 export async function applyDeliveryStatus(ids: Array<string | null>, rawStatus: string): Promise<boolean> {
-  const status = normalizeDeliveryStatus(rawStatus);
+  const status = normalizeDeliveryStatus(rawStatus, { keepPlayed: true });
   const keys = statusKeys(ids);
   if (!status || !keys.length) return false;
   const msg = await prisma.conversationMessage.findFirst({
@@ -423,7 +426,7 @@ export async function applyDeliveryStatus(ids: Array<string | null>, rawStatus: 
   const current = msg.deliveryStatus ?? "pending";
   const isUpgrade =
     status === "failed"
-      ? !["delivered", "read", "failed"].includes(current) // ya llegó o ya avisado
+      ? !["delivered", "read", "played", "failed"].includes(current) // ya llegó o ya avisado
       : (DELIVERY_RANK[status] ?? 0) > (DELIVERY_RANK[current] ?? -1); // no degradar ni repetir
   if (!isUpgrade && !learnedWamid) return false;
   await prisma.conversationMessage.update({

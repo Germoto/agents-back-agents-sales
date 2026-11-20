@@ -8,12 +8,15 @@ import {
   updateRemindersController,
   updateMutedNumbersController,
   updateReplyModeController,
+  listAgentVoicesController,
+  testAgentVoiceController,
 } from "./agent-config.controller";
 import {
   coreAgentConfigSchema,
   mutedNumbersConfigSchema,
   remindersConfigSchema,
   replyModeConfigSchema,
+  voiceTestSchema,
 } from "./agent-config.schemas";
 
 const router = Router();
@@ -24,5 +27,7 @@ router.put("/", validate({ body: coreAgentConfigSchema }), asyncHandler(upsertAg
 router.put("/reminders", validate({ body: remindersConfigSchema }), asyncHandler(updateRemindersController));
 router.put("/reply-mode", validate({ body: replyModeConfigSchema }), asyncHandler(updateReplyModeController));
 router.put("/muted-numbers", validate({ body: mutedNumbersConfigSchema }), asyncHandler(updateMutedNumbersController));
+router.get("/voice/voices", asyncHandler(listAgentVoicesController));
+router.post("/voice/test", validate({ body: voiceTestSchema }), asyncHandler(testAgentVoiceController));
 
 export default router;

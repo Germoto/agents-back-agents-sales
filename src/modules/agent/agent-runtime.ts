@@ -387,6 +387,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     upcomingBooking,
     currentOrder,
     storeLinks,
+    lastInboundWasAudio: ctx.lastInboundWasAudio,
   });
   // Con Mercado Pago en el chat, el modelo no ve la URL de los links de pago ya
   // enviados (queda un marcador): así no puede copiar un link viejo en vez de llamar a

@@ -57,7 +57,7 @@ import {
   getCustomerFlowVars,
   type FlowTurnResult,
 } from "../flows/flow-engine";
-import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, shippingOf, creditOrderPayment, type TurnContext } from "./agent-tools";
+import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, shippingOf, creditOrderPayment, voiceToolAvailable, type TurnContext } from "./agent-tools";
 import { orderDueFor } from "../orders/order-money";
 import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-guard";
 import { summarizeCart } from "./cart.service";
@@ -226,11 +226,13 @@ async function resolveCompany(inbound: InboundMessage): Promise<string | null> {
  * piensa. Devuelve el stop; no-op total fuera de SMS Tools. Fire-and-forget:
  * un fallo del gateway jamás afecta el turno.
  */
-function startTypingKeepalive(sender: WhatsappSender, phone: string): () => void {
+function startTypingKeepalive(sender: WhatsappSender, phone: string, ctx?: TurnContext): () => void {
   if (sender.provider !== "SMSTOOLS") return () => undefined;
+  // Con una nota de voz en preparación el cliente ve «grabando audio…».
   const fire = () => {
-    void sendTyping(sender, phone, "composing").catch(() => undefined);
+    void sendTyping(sender, phone, ctx?.typingState ?? "composing").catch(() => undefined);
   };
+  if (ctx) ctx.refreshTyping = fire;
   fire();
   const timer = setInterval(fire, 8_000);
   return () => clearInterval(timer);
@@ -870,7 +872,15 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     return;
   }
 
-  const stopTyping = startTypingKeepalive(sender, customerPhone);
+  // Notas de voz activas: el agente sabe si lo último del cliente fue un audio.
+  if (voiceToolAvailable(config)) {
+    const lastUser = await prisma.conversationMessage
+      .findFirst({ where: { conversationId, role: "USER" }, orderBy: { createdAt: "desc" }, select: { mediaType: true } })
+      .catch(() => null);
+    ctx.lastInboundWasAudio = lastUser?.mediaType === "audio";
+  }
+
+  const stopTyping = startTypingKeepalive(sender, customerPhone, ctx);
   let finalText: string;
   try {
     finalText = await runAgentTurn(ctx, history);

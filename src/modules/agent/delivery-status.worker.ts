@@ -56,7 +56,7 @@ function guessKindFromUrl(url: string): "image" | "video" | "audio" | "document"
 
 function classify(status: unknown): "ok" | "failed" | "other" {
   const s = String(status ?? "").toLowerCase();
-  if (s === "sent" || s === "delivered" || s === "read") return "ok";
+  if (s === "sent" || s === "delivered" || s === "read" || s === "played") return "ok";
   if (s === "failed" || s === "error" || s === "rejected" || s === "undelivered") return "failed";
   return "other";
 }
@@ -189,7 +189,7 @@ export async function driveLinkFallback(): Promise<void> {
       role: "ASSISTANT",
       createdAt: { gte: new Date(now - DRIVE_FALLBACK_WINDOW_MIN * 60_000), lte: new Date(now - DRIVE_FALLBACK_AFTER_MIN * 60_000) },
       rawPayload: { path: ["source"], equals: "drive" },
-      deliveryStatus: { notIn: ["delivered", "read"] },
+      deliveryStatus: { notIn: ["delivered", "read", "played"] },
     },
     orderBy: { createdAt: "asc" },
     take: 50,
@@ -212,7 +212,7 @@ export async function driveLinkFallback(): Promise<void> {
           conversationId,
           role: "ASSISTANT",
           createdAt: { gt: m.createdAt },
-          deliveryStatus: { in: ["delivered", "read"] },
+          deliveryStatus: { in: ["delivered", "read", "played"] },
         },
         select: { id: true },
       });

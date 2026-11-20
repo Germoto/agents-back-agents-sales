@@ -241,7 +241,20 @@ export type SmsToolsSendOpts = {
   quoteFrom?: string;
   /** Números mencionados (solo dígitos). El texto debe incluir @<número>. */
   mentions?: string[];
+  /** Audio como NOTA DE VOZ (burbuja con micrófono). Exige OGG/Opus mono. */
+  ptt?: boolean;
+  /** Duración en segundos que muestra la burbuja de la nota de voz. */
+  seconds?: number;
 };
+
+/**
+ * Un audio OGG/Opus solo llega como nota de voz: sin `ptt=1` el gateway no lo entrega
+ * (respuesta de SMS Tools, 20-nov-2026). El resto de audios (mp3, m4a…) va como archivo.
+ */
+export function isVoiceNoteUrl(url: string | null | undefined): boolean {
+  const path = (url ?? "").split(/[?#]/)[0].toLowerCase();
+  return /\.(ogg|oga|opus)$/.test(path);
+}
 
 export const smsTools = {
   /** Grupos de la cuenta de WhatsApp (`unique`). Lanza si el gateway falla. */
@@ -702,6 +715,12 @@ export const smsTools = {
     } else {
       fields.media_type = kind; // image | video | audio | sticker (.webp 512×512)
       fields.media_url = mediaUrl;
+      // Nota de voz: la pide quien envía (voz del agente) o el propio archivo (OGG/Opus).
+      if (kind === "audio" && (opts?.ptt || isVoiceNoteUrl(mediaUrl))) {
+        fields.ptt = "1";
+        const seconds = Math.round(Number(opts?.seconds));
+        if (Number.isFinite(seconds) && seconds > 0) fields.seconds = String(seconds);
+      }
     }
 
     const { body, contentType } = buildMultipart(fields);

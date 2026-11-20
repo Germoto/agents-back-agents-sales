@@ -7,7 +7,8 @@ import { symbolFor } from "../../lib/currency";
 import { isPlatformSalesCompanyId, getLivePlansPromptSection } from "../admin-console/sales-agent.service";
 import { listCrmStructure } from "../crm/crm.service";
 import { getEntitlements } from "../billing/entitlements";
-import { LEGACY_UNKNOWN_HANDOFF_RULE, type CrmToolConfig, type GroupToolConfig, type StickerToolConfig } from "../agent-config/agent-config.schemas";
+import type { VOICE_MODELS } from "../voice/voice-limits";
+import { LEGACY_UNKNOWN_HANDOFF_RULE, type CrmToolConfig, type GroupToolConfig, type StickerToolConfig, voiceToolConfigSchema } from "../agent-config/agent-config.schemas";
 import { normalizeShippingConfig } from "../shipping/shipping-config";
 
 /** Herramienta de CRM del agente resuelta con NOMBRES (lo que lee el prompt y la tool). */
@@ -118,6 +119,28 @@ async function resolveAgentStickerTool(companyId: string, raw: unknown): Promise
     .filter((x): x is NonNullable<typeof x> => !!x);
   if (!stickers.length) return null;
   return { enabled: true, stickers };
+}
+
+/** Notas de voz del agente ya validadas. La clave NO viaja aquí: se lee al generar. */
+export interface AgentVoiceTool {
+  enabled: boolean;
+  voiceId: string;
+  model: (typeof VOICE_MODELS)[number];
+  speed: number;
+  stability: number;
+  similarity: number;
+  when: string;
+  maxChars: number;
+  perDay: number;
+}
+
+/** null si está apagada, incompleta o sin clave (la tool no se expone y el prompt no cambia). */
+function resolveAgentVoiceTool(raw: unknown, hasKey: boolean): AgentVoiceTool | null {
+  if (!hasKey || !raw || typeof raw !== "object") return null;
+  const parsed = voiceToolConfigSchema.safeParse(raw);
+  if (!parsed.success || !parsed.data.enabled) return null;
+  const { voiceId, model, speed, stability, similarity, when, maxChars, perDay } = parsed.data;
+  return { enabled: true, voiceId, model, speed, stability, similarity, when, maxChars, perDay };
 }
 
 function normalizePhone(value: string) {
@@ -353,6 +376,8 @@ export async function buildBotConfig(companyId: string, account?: string) {
       groupTool: await resolveAgentGroupTool(whatsappConfig.companyId, whatsappConfig.provider, agentConfig.groupToolConfig),
       // Herramienta de stickers del agente (null = apagada: cero consultas extra).
       stickerTool: await resolveAgentStickerTool(whatsappConfig.companyId, agentConfig.stickerToolConfig),
+      // Notas de voz del agente (null = apagada, sin voz elegida o sin clave).
+      voiceTool: resolveAgentVoiceTool(agentConfig.voiceToolConfig, !!agentConfig.voiceApiKey),
       promptPreview: `${agentConfig.basePrompt}\n\nEstilo comercial: ${agentConfig.salesStyle}\nTemperatura: ${Number(agentConfig.temperature)}\nReglas:\n${Array.isArray(agentConfig.rules) ? agentConfig.rules.map((rule, index) => `${index + 1}. ${String(rule)}`).join("\n") : ""}`,
     },
     httpActions,

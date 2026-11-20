@@ -4,6 +4,8 @@ import { AppError } from "../../lib/app-error";
 import { decryptCredential, encryptCredential } from "../../lib/credentials-crypto";
 import { providerOf } from "../../lib/ai-providers";
 import { getPlatformAiQuota } from "../agent/platform-ai-quota";
+import { VoiceError, cleanSpokenText, generateVoiceNote, listVoices, voiceTextProblem, type VoiceSettings } from "../voice/voice-tts";
+import { VOICE_LIMITS } from "../voice/voice-limits";
 
 /** Máscara para el panel: la key completa NUNCA sale del backend. */
 function maskApiKey(stored: string | null): string | null {
@@ -35,6 +37,8 @@ function mapAgentConfig(config: {
   crmToolConfig?: unknown;
   groupToolConfig?: unknown;
   stickerToolConfig?: unknown;
+  voiceToolConfig?: unknown;
+  voiceApiKey?: string | null;
   createdAt: Date;
   updatedAt: Date;
 } | null) {
@@ -42,7 +46,7 @@ function mapAgentConfig(config: {
     return null;
   }
 
-  const { openaiApiKey, transcriptionApiKey, ...rest } = config;
+  const { openaiApiKey, transcriptionApiKey, voiceApiKey, ...rest } = config;
   return {
     ...rest,
     aiProvider: config.aiProvider ?? "OPENAI",
@@ -69,6 +73,10 @@ function mapAgentConfig(config: {
     crmToolConfig: config.crmToolConfig ?? null,
     groupToolConfig: config.groupToolConfig ?? null,
     stickerToolConfig: config.stickerToolConfig ?? null,
+    voiceToolConfig: config.voiceToolConfig ?? null,
+    // La clave de ElevenLabs tampoco sale del backend.
+    voiceKeySet: !!voiceApiKey,
+    voiceApiKeyMasked: maskApiKey(voiceApiKey ?? null),
   };
 }
 
@@ -111,6 +119,10 @@ export async function upsertAgentConfig(companyId: string, data: {
   groupToolConfig?: Record<string, unknown> | null;
   /** undefined = no tocar; null = apagar la herramienta de stickers del agente. */
   stickerToolConfig?: Record<string, unknown> | null;
+  /** undefined = no tocar; null = apagar las notas de voz del agente. */
+  voiceToolConfig?: Record<string, unknown> | null;
+  /** Clave de ElevenLabs: solo se guarda si viene escrita. */
+  voiceApiKey?: string;
 }) {
   const aiProvider = data.aiProvider ?? "OPENAI";
   const typedKey = Boolean(data.openaiApiKey && data.openaiApiKey.trim());
@@ -118,8 +130,13 @@ export async function upsertAgentConfig(companyId: string, data: {
   // proveedor hay que ingresar la key nueva (la anterior no sirve).
   const existing = await prisma.agentConfig.findUnique({
     where: { companyId },
-    select: { aiProvider: true, openaiApiKey: true },
+    select: { aiProvider: true, openaiApiKey: true, voiceApiKey: true },
   });
+  const typedVoiceKey = data.voiceApiKey?.trim() ?? "";
+  const voiceOn = (data.voiceToolConfig as { enabled?: boolean } | null | undefined)?.enabled === true;
+  if (voiceOn && !typedVoiceKey && !existing?.voiceApiKey) {
+    throw new AppError("Para activar las notas de voz ingresa la clave de ElevenLabs.", 422);
+  }
   if (existing?.openaiApiKey && (existing.aiProvider ?? "OPENAI") !== aiProvider && !typedKey) {
     throw new AppError(
       `Cambiaste el proveedor de IA a ${providerOf(aiProvider).label}: ingresa la API key de ese proveedor.`,
@@ -163,6 +180,10 @@ export async function upsertAgentConfig(companyId: string, data: {
     ...(data.stickerToolConfig !== undefined
       ? { stickerToolConfig: data.stickerToolConfig === null ? Prisma.JsonNull : (data.stickerToolConfig as Prisma.InputJsonValue) }
       : {}),
+    ...(data.voiceToolConfig !== undefined
+      ? { voiceToolConfig: data.voiceToolConfig === null ? Prisma.JsonNull : (data.voiceToolConfig as Prisma.InputJsonValue) }
+      : {}),
+    ...(typedVoiceKey ? { voiceApiKey: encryptCredential(typedVoiceKey) } : {}),
   };
   const config = await prisma.agentConfig.upsert({
     where: { companyId },
@@ -217,4 +238,53 @@ export async function updateAgentReplyMode(
     },
   });
   return mapAgentConfig(config);
+}
+
+// ---------------------------------------------------------------------------
+// Notas de voz: voces de la cuenta y audio de prueba
+// ---------------------------------------------------------------------------
+
+/** Clave de ElevenLabs del negocio, descifrada. "" si no hay. */
+export async function loadVoiceApiKey(companyId: string): Promise<string> {
+  const row = await prisma.agentConfig.findUnique({ where: { companyId }, select: { voiceApiKey: true } });
+  return decryptCredential(row?.voiceApiKey ?? null);
+}
+
+async function requireVoiceKey(companyId: string, typed?: string): Promise<string> {
+  const key = typed?.trim() || (await loadVoiceApiKey(companyId));
+  if (!key) throw new AppError("Ingresa la clave de ElevenLabs.", 400);
+  return key;
+}
+
+function asVoiceAppError(err: unknown): never {
+  if (err instanceof VoiceError) throw new AppError(err.message, 400);
+  throw err;
+}
+
+/** Voces de la cuenta de ElevenLabs (con la clave guardada, o la recién escrita aún sin guardar). */
+export async function listAgentVoices(companyId: string, typedKey?: string) {
+  const key = await requireVoiceKey(companyId, typedKey);
+  try {
+    return { voices: await listVoices(key) };
+  } catch (err) {
+    return asVoiceAppError(err);
+  }
+}
+
+/** Genera un audio de prueba con los ajustes en pantalla. No lo envía a nadie. */
+export async function testAgentVoice(
+  companyId: string,
+  input: VoiceSettings & { text: string },
+  typedKey?: string,
+) {
+  const key = await requireVoiceKey(companyId, typedKey);
+  const text = cleanSpokenText(input.text);
+  const problem = voiceTextProblem(text, VOICE_LIMITS.maxChars.max);
+  if (problem) throw new AppError(problem, 400);
+  try {
+    const note = await generateVoiceNote(companyId, key, input, text);
+    return { url: note.url, seconds: note.seconds };
+  } catch (err) {
+    return asVoiceAppError(err);
+  }
 }

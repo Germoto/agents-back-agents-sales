@@ -394,6 +394,10 @@ model AgentConfig {
   // Herramienta de stickers del agente (enviar_sticker): lista blanca de stickers
   // de la galería con su regla "cuándo". null = APAGADA (default).
   stickerToolConfig    Json?
+  // Notas de voz del agente (enviar_nota_de_voz): voz de ElevenLabs, ajustes, regla
+  // "cuándo" y topes. null = APAGADA (default). La clave va aparte, cifrada.
+  voiceToolConfig      Json?
+  voiceApiKey          String?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
   company              Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

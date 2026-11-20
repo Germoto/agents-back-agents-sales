@@ -11,7 +11,7 @@ import { planOptions } from "../products/product-plans";
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
-import { emailDeliveryAvailable, crmToolAvailable, groupToolAvailable, stickerToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
+import { emailDeliveryAvailable, crmToolAvailable, groupToolAvailable, stickerToolAvailable, voiceToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
 import { describeShippingConfig, type ShippingConfig } from "../shipping/shipping-config";
 import { activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
 import { mpChatOn, mpLinkOnRequest, ownerReviewsPayments } from "./payment-methods";
@@ -424,6 +424,8 @@ function verticalGuidance(
 }
 
 export interface PromptExtras {
+  /** true si lo último que envió el cliente fue un audio (solo con notas de voz activas). */
+  lastInboundWasAudio?: boolean;
   /** Variables del chatbot de flujos (respuestas del cliente): modo HYBRID. */
   flowVars?: Record<string, string> | null;
   /** Instrucción del bloque «Pasar al agente IA» para este cliente. */
@@ -759,6 +761,12 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     ...(stickerToolAvailable(config) && config.agent.stickerTool
       ? [
           `- STICKERS (herramienta enviar_sticker): puedes enviar UN sticker del negocio SOLO cuando se cumpla la condición indicada; como máximo uno por turno y siempre además de tu respuesta de texto. STICKERS PERMITIDOS (cuándo): ${config.agent.stickerTool.stickers.map((s, i) => `${i + 1} → ${s.when}`).join("; ")}.`,
+        ]
+      : []),
+    // Notas de voz: SOLO si el dueño las activó. El cuándo lo escribe el dueño.
+    ...(voiceToolAvailable(config) && config.agent.voiceTool
+      ? [
+          `- NOTAS DE VOZ (herramienta enviar_nota_de_voz): puedes responder con UNA nota de voz con la voz del negocio SOLO cuando se cumpla esta condición: ${config.agent.voiceTool.when} Máximo una por turno y hasta ${config.agent.voiceTool.maxChars} caracteres (breve, como hablaría una persona). Escríbela para ser dicha: sin emojis, listas ni links, con cifras en palabras. Precios, links, cuentas y códigos van además en tu mensaje de texto. En el historial, tus notas de voz anteriores aparecen como texto.${extra?.lastInboundWasAudio ? " DATO: lo último que envió el cliente fue un audio." : ""}`,
         ]
       : []),
     "",
