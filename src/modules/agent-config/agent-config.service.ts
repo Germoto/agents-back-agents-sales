@@ -2,10 +2,11 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { decryptCredential, encryptCredential } from "../../lib/credentials-crypto";
-import { providerOf } from "../../lib/ai-providers";
+import { providerOf, resolveAiSettings } from "../../lib/ai-providers";
 import { getPlatformAiQuota } from "../agent/platform-ai-quota";
 import { VoiceError, cleanSpokenText, generateVoiceNote, listVoices, voiceModelHasTags, voiceTextProblem, type VoiceSettings } from "../voice/voice-tts";
 import { VOICE_LIMITS } from "../voice/voice-limits";
+import { applyPronunciations, rewriteForSpeech } from "../voice/voice-speech";
 
 /** Máscara para el panel: la key completa NUNCA sale del backend. */
 function maskApiKey(stored: string | null): string | null {
@@ -271,19 +272,36 @@ export async function listAgentVoices(companyId: string, typedKey?: string) {
   }
 }
 
-/** Genera un audio de prueba con los ajustes en pantalla. No lo envía a nadie. */
+/**
+ * Genera un audio de prueba con los ajustes en pantalla. No lo envía a nadie.
+ * Igual que en un chat real, la IA del negocio reescribe antes el texto «como se dice»;
+ * si no hay IA o falla, se lee el texto tal cual (`rewritten: false`).
+ */
 export async function testAgentVoice(
   companyId: string,
-  input: VoiceSettings & { text: string },
+  input: VoiceSettings & { text: string; speechStyle?: string; pronunciations?: string },
   typedKey?: string,
 ) {
   const key = await requireVoiceKey(companyId, typedKey);
-  const text = cleanSpokenText(input.text, { keepTags: voiceModelHasTags(input.model) });
-  const problem = voiceTextProblem(text, VOICE_LIMITS.maxChars.max);
-  if (problem) throw new AppError(problem, 400);
+  const keepTags = voiceModelHasTags(input.model);
+  const clean = (t: string) => applyPronunciations(cleanSpokenText(t, { keepTags }), input.pronunciations);
+  const literal = clean(input.text);
+  const firstProblem = voiceTextProblem(literal, VOICE_LIMITS.maxChars.max);
+  if (firstProblem) throw new AppError(firstProblem, 400);
+  const row = await prisma.agentConfig.findUnique({
+    where: { companyId },
+    select: { aiProvider: true, openaiModel: true, openaiApiKey: true, temperature: true },
+  });
+  const rewrittenRaw = row
+    ? await rewriteForSpeech({ ai: resolveAiSettings(row), text: literal, speechStyle: input.speechStyle, pronunciations: input.pronunciations, allowTags: keepTags })
+    : null;
+  const candidate = rewrittenRaw ? clean(rewrittenRaw) : "";
+  // La reescritura solo se usa si quedó válida (sin links y dentro del tope con holgura).
+  const rewritten = !!candidate && !voiceTextProblem(candidate, Math.round(VOICE_LIMITS.maxChars.max * 1.5));
+  const text = rewritten ? candidate : literal;
   try {
     const note = await generateVoiceNote(companyId, key, input, text);
-    return { url: note.url, seconds: note.seconds };
+    return { url: note.url, seconds: note.seconds, spokenText: text, rewritten };
   } catch (err) {
     return asVoiceAppError(err);
   }

@@ -12,6 +12,7 @@ import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
 import { voiceModelHasTags } from "../voice/voice-limits";
+import { SPOKEN_RULE, pronunciationsLine } from "../voice/voice-speech";
 import { emailDeliveryAvailable, crmToolAvailable, groupToolAvailable, stickerToolAvailable, voiceToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
 import { describeShippingConfig, type ShippingConfig } from "../shipping/shipping-config";
 import { activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
@@ -542,9 +543,12 @@ function ownerReviewPrompt(prompt: string): string {
 }
 
 /** Parte de la línea NOTAS DE VOZ que depende de la configuración: forma de hablar del dueño y marcas del modelo. */
-function voiceSpeechLine(tool: { speechStyle?: string; model: string }): string {
+function voiceSpeechLine(tool: { speechStyle?: string; pronunciations?: string; model: string }): string {
   const style = (tool.speechStyle ?? "").trim();
+  const said = pronunciationsLine(tool.pronunciations);
   return (
+    ` ${SPOKEN_RULE}` +
+    (said ? ` PRONUNCIACIÓN del negocio (úsala siempre en la nota): ${said}.` : "") +
     (style ? ` ASÍ HABLA el dueño cuando manda un audio (úsalo en la nota, con naturalidad y sin exagerar): «${style}»` : "") +
     (voiceModelHasTags(tool.model)
       ? " Si ayuda a que suene natural, puedes poner como mucho una o dos marcas de entonación en inglés entre corchetes, por ejemplo [laughs], [sighs] o [excited]; no se leen en voz alta."

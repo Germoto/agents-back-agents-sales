@@ -18,6 +18,8 @@ export const VOICE_LIMITS = {
   style: { min: 0, max: 1, def: 0 },
   /** «Cómo hablas»: forma de hablar del dueño, en sus palabras. */
   speechStyleMax: 600,
+  /** «Pronunciación»: una regla por línea, «GB = gigas». */
+  pronunciationsMax: 400,
   maxChars: { min: 100, max: 800, def: 400 },
   perDay: { min: 1, max: 2000, def: 100 },
 } as const;

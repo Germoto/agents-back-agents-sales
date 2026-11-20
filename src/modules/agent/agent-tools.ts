@@ -6,6 +6,7 @@
  */
 
 import { repeatsVoiceNote } from "./voice-guard";
+import { applyPronunciations } from "../voice/voice-speech";
 import { VoiceError, cleanSpokenText, generateVoiceNote, voiceModelHasTags, voiceNotesToday, voiceTextProblem } from "../voice/voice-tts";
 import { loadVoiceApiKey } from "../agent-config/agent-config.service";
 import { matchProductFile } from "../../lib/product";
@@ -3047,7 +3048,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "enviar_nota_de_voz",
       description:
-        "Responde al cliente con UNA nota de voz con la voz del negocio. Llámala por tu cuenta cada vez que el mensaje del cliente cumpla la condición de la sección NOTAS DE VOZ del prompt (no esperes a que pida un audio). Una por turno; sale ANTES de tu mensaje de texto. En `texto` escribe lo que DIRÍAS en un audio, no lo que escribirías: con tu MISMO estilo, trato y palabras de siempre (nada formal, sin saludar otra vez), frases cortas como al hablar, pausas con comas y puntos suspensivos, sin emojis, listas, formato ni links, y cifras en palabras. Sigue la forma de hablar indicada en la sección NOTAS DE VOZ del prompt. Tu texto final después de la nota es SOLO para datos que el cliente deba copiar (precio, link, número de cuenta, código); si no hay, responde SIN_RESPUESTA. Nunca anuncies la nota. Si devuelve error, responde por texto sin mencionarlo.",
+        "Responde al cliente con UNA nota de voz con la voz del negocio. Llámala por tu cuenta cada vez que el mensaje del cliente cumpla la condición de la sección NOTAS DE VOZ del prompt (no esperes a que pida un audio). Una por turno; sale ANTES de tu mensaje de texto. En `texto` escribe lo que DIRÍAS en un audio, no lo que escribirías: con tu MISMO estilo, trato y palabras de siempre (nada formal, sin saludar otra vez), frases cortas como al hablar, pausas con comas y puntos suspensivos, sin emojis, listas, formato ni links. Todo va como se pronuncia: cifras, unidades, monedas, porcentajes, horas y siglas en palabras («150 GB» es «ciento cincuenta gigas»). Sigue la forma de hablar y la pronunciación indicada en la sección NOTAS DE VOZ del prompt. Tu texto final después de la nota es SOLO para datos que el cliente deba copiar (precio, link, número de cuenta, código); si no hay, responde SIN_RESPUESTA. Nunca anuncies la nota. Si devuelve error, responde por texto sin mencionarlo.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -5057,7 +5058,8 @@ export async function executeTool(
       const internal = "ERROR INTERNO (no se lo menciones al cliente): ";
       if (!tool || !voiceToolAvailable(ctx.config)) return JSON.stringify({ ok: false, error: `${internal}las notas de voz no están activadas. Responde por texto.` });
       if (ctx.voiceSentThisTurn) return JSON.stringify({ ok: false, error: `${internal}ya enviaste una nota de voz en este turno; sigue por texto.` });
-      const spoken = cleanSpokenText(String(args.texto ?? ""), { keepTags: voiceModelHasTags(tool.model) });
+      // La lista de pronunciación del dueño se aplica aquí también, por si el modelo escribió la sigla.
+      const spoken = applyPronunciations(cleanSpokenText(String(args.texto ?? ""), { keepTags: voiceModelHasTags(tool.model) }), tool.pronunciations);
       // Tolerancia del 25 % sobre el tope: una nota un poco más larga vale más que quedarse sin voz.
       const problem = voiceTextProblem(spoken, Math.round(tool.maxChars * 1.25));
       if (problem) {

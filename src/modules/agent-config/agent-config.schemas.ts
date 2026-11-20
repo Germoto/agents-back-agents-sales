@@ -171,6 +171,8 @@ export const voiceToolConfigSchema = z
     when: z.string().trim().max(300).default(""),
     // «Cómo hablas»: muletillas, trato y ritmo del dueño al mandar un audio (opcional).
     speechStyle: z.string().trim().max(VOICE_LIMITS.speechStyleMax).default(""),
+    // «Pronunciación»: cómo se dicen siglas y términos del negocio, una regla por línea («GB = gigas»).
+    pronunciations: z.string().trim().max(VOICE_LIMITS.pronunciationsMax).default(""),
     maxChars: z.coerce.number().int().min(VOICE_LIMITS.maxChars.min).max(VOICE_LIMITS.maxChars.max).default(VOICE_LIMITS.maxChars.def),
     perDay: z.coerce.number().int().min(VOICE_LIMITS.perDay.min).max(VOICE_LIMITS.perDay.max).default(VOICE_LIMITS.perDay.def),
   })
@@ -192,6 +194,9 @@ export const voiceTestSchema = z.object({
   stability: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.stability.def),
   similarity: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.similarity.def),
   style: z.coerce.number().min(VOICE_LIMITS.style.min).max(VOICE_LIMITS.style.max).default(VOICE_LIMITS.style.def),
+  // Lo que hay en pantalla (aunque no esté guardado), para que la prueba suene como un chat real.
+  speechStyle: z.string().trim().max(VOICE_LIMITS.speechStyleMax).default(""),
+  pronunciations: z.string().trim().max(VOICE_LIMITS.pronunciationsMax).default(""),
 });
 
 // Núcleo de Agente IA (modelo + prompt). Recordatorios y modo de respuesta se
