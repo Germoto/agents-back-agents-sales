@@ -175,6 +175,18 @@ export function groupToolAvailable(config: BotConfig): boolean {
   return !!t?.enabled && t.groups.length > 0;
 }
 
+/**
+ * Tras una nota de voz, el texto final solo sirve para datos que el cliente deba copiar.
+ * Un texto que solo la anuncia («aquí te envié la nota de voz») delata al bot: se descarta.
+ * No se toca si trae cifras, links o una pregunta.
+ */
+export function shouldDropFinalTextAfterVoice(ctx: TurnContext, finalText: string): boolean {
+  const t = finalText.trim();
+  if (!t || !ctx.voiceSentThisTurn) return false;
+  if (/\d|https?:\/\/|[?¿]/.test(t)) return false;
+  return t.length <= 160 && /\b(nota de voz|audio|mensaje de voz|te lo (dije|explique|expliqué)|escuchal[oa]|esc[uú]chal[oa])\b/i.test(t);
+}
+
 /** Aviso al dueño cuando la voz falla por su cuenta de ElevenLabs: uno cada 6 h por negocio. */
 const voiceWarnedAt = new Map<string, number>();
 function warnVoiceFailure(ctx: TurnContext, reason: string): void {
@@ -3029,7 +3041,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "enviar_nota_de_voz",
       description:
-        "Envía al cliente UNA nota de voz con la voz del negocio (sección NOTAS DE VOZ del prompt). Úsala SOLO cuando se cumpla la condición configurada; si dudas, responde por texto. Una por turno; sale ANTES de tu mensaje de texto. Escribe `texto` tal como se DICE en voz alta: frases cortas y naturales, cifras y precios en palabras, sin emojis, listas, formato ni links. Todo dato que el cliente deba copiar o conservar (precio, link, número de cuenta, código, dirección) va ADEMÁS en tu mensaje de texto; no repitas en el texto lo demás que ya dijiste en la nota. Si devuelve error, responde por texto sin mencionarlo.",
+        "Responde al cliente con UNA nota de voz con la voz del negocio. Llámala por tu cuenta cada vez que el mensaje del cliente cumpla la condición de la sección NOTAS DE VOZ del prompt (no esperes a que pida un audio). Una por turno; sale ANTES de tu mensaje de texto. En `texto` escribe lo que dirías, con tu MISMO estilo, trato y palabras de siempre (nada formal, sin saludar otra vez), solo adaptado a ser hablado: sin emojis, listas, formato ni links, y cifras en palabras. Tu texto final después de la nota es SOLO para datos que el cliente deba copiar (precio, link, número de cuenta, código); si no hay, responde SIN_RESPUESTA. Nunca anuncies la nota. Si devuelve error, responde por texto sin mencionarlo.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -5042,7 +5054,7 @@ export async function executeTool(
       const spoken = cleanSpokenText(String(args.texto ?? ""));
       const problem = voiceTextProblem(spoken, tool.maxChars);
       if (problem) return JSON.stringify({ ok: false, error: `${internal}${problem}` });
-      const okNote = "Listo: la nota de voz sale antes de tu mensaje. No la anuncies. En tu texto pon solo los datos que el cliente deba copiar (precio, link, cuenta, código); si no hay ninguno, no escribas nada más.";
+      const okNote = "Listo: la nota de voz ya responde este turno. NO la anuncies ni la comentes. Si hay datos que el cliente deba copiar (precio, link, cuenta, código) escribe SOLO esos datos; si no hay ninguno responde exactamente SIN_RESPUESTA.";
       if (ctx.simulate) {
         // Pruebas: no se gasta voz; se muestra lo que diría.
         ctx.voiceSentThisTurn = true;

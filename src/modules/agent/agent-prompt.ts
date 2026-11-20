@@ -766,7 +766,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     // Notas de voz: SOLO si el dueño las activó. El cuándo lo escribe el dueño.
     ...(voiceToolAvailable(config) && config.agent.voiceTool
       ? [
-          `- NOTAS DE VOZ (herramienta enviar_nota_de_voz): puedes responder con UNA nota de voz con la voz del negocio SOLO cuando se cumpla esta condición: ${config.agent.voiceTool.when} Máximo una por turno y hasta ${config.agent.voiceTool.maxChars} caracteres (breve, como hablaría una persona). Escríbela para ser dicha: sin emojis, listas ni links, con cifras en palabras. Precios, links, cuentas y códigos van además en tu mensaje de texto. En el historial, tus notas de voz anteriores aparecen como texto.${extra?.lastInboundWasAudio ? " DATO: lo último que envió el cliente fue un audio." : ""}`,
+          `- NOTAS DE VOZ (herramienta enviar_nota_de_voz): el negocio quiere que respondas con una NOTA DE VOZ cuando pase esto: ${config.agent.voiceTool.when} Si el mensaje del cliente cumple esa condición, en ese turno tu respuesta ES la nota de voz: llama a enviar_nota_de_voz por tu cuenta, sin esperar a que el cliente pida un audio. Si no la cumple, responde por texto. Una por turno y hasta ${config.agent.voiceTool.maxChars} caracteres. Habla EXACTAMENTE con tu mismo estilo, trato y palabras de siempre (los de tus instrucciones), como si le mandaras un audio desde tu celular: no te pongas formal, no vuelvas a saludar si ya saludaste. Solo cambia lo necesario para que se pueda decir: sin emojis, listas ni links, y las cifras en palabras. Tras la nota, tu texto final es SOLO para datos que el cliente deba copiar (precio, link, cuenta, código); si no hay ninguno responde exactamente SIN_RESPUESTA. NUNCA anuncies ni comentes la nota («te envié un audio», «ahí va la nota de voz»). En el historial, tus notas de voz anteriores aparecen como texto.${extra?.lastInboundWasAudio ? " DATO DE ESTE TURNO: lo último que envió el cliente fue un AUDIO." : ""}`,
         ]
       : []),
     "",
@@ -864,6 +864,13 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     "- Si en el estado hay 'offeredCrossSell', significa que YA ofreciste ese producto relacionado tras la entrega. Si el cliente acepta o pregunta por él (ej. 'sí', 'cuéntame', '¿qué incluye?'), preséntalo con enviar_ficha y sigue el flujo normal (resuelve dudas, cobra con enviar_metodos_pago, etc.). Habla con secuencia respecto a esa oferta y mantente abierto.",
     "",
     "Tu respuesta final (texto sin herramientas) es lo que el cliente leerá como cierre del turno. IMPORTANTE: las herramientas que ENVÍAN contenido al cliente (enviar_catalogo, enviar_multimedia, enviar_metodos_pago) ya se lo mostraron — NO repitas ese contenido en tu texto final. Tras usarlas, escribe a lo sumo UNA frase breve de cierre o una pregunta; si la herramienta ya dijo todo, deja el texto final vacío. Solo si NO usaste ninguna herramienta que envíe contenido, responde con un mensaje claro y completo.",
+    // Recordatorio al cierre del prompt: las instrucciones largas del dueño tapan la línea de capacidad.
+    ...(voiceToolAvailable(config) && config.agent.voiceTool
+      ? [
+          "",
+          `ANTES DE RESPONDER, revisa si este mensaje cumple la condición de NOTA DE VOZ («${config.agent.voiceTool.when}»${extra?.lastInboundWasAudio ? "; el cliente acaba de enviar un AUDIO" : ""}). Si la cumple, llama a enviar_nota_de_voz en este turno.`,
+        ]
+      : []),
   ].join("\n");
   return ownerReviewsPayments(config.payment) ? ownerReviewPrompt(prompt) : prompt;
 }

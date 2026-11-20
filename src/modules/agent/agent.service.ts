@@ -57,7 +57,7 @@ import {
   getCustomerFlowVars,
   type FlowTurnResult,
 } from "../flows/flow-engine";
-import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, shippingOf, creditOrderPayment, voiceToolAvailable, type TurnContext } from "./agent-tools";
+import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, shouldDropFinalTextAfterVoice, shippingOf, creditOrderPayment, voiceToolAvailable, type TurnContext } from "./agent-tools";
 import { orderDueFor } from "../orders/order-money";
 import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-guard";
 import { summarizeCart } from "./cart.service";
@@ -897,6 +897,10 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
     void alertAiProviderFailure(companyId, err).catch(() => undefined);
   } finally {
     stopTyping();
+  }
+  if (shouldDropFinalTextAfterVoice(ctx, finalText)) {
+    console.log(`[agent] texto final descartado tras la nota de voz (solo la anunciaba) convo=${ctx.conversationId}`);
+    finalText = "";
   }
   if (shouldDropFinalTextAfterPayment(ctx, finalText, trailingUserText(history))) {
     console.log(`[agent] texto final descartado tras enviar_metodos_pago (redundante) convo=${ctx.conversationId}`);

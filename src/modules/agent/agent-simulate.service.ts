@@ -11,7 +11,7 @@ import { buildBotConfig } from "../bot/bot.service";
 import { runAgentTurn, recordTurnLog } from "./agent-runtime";
 import { buildHistory, saveState, resetConversation, type ConversationState } from "./conversation.service";
 import { runFlowTurn, trailingUserText, getCustomerFlowVars, type FlowIO, type FlowTraceEntry, type FlowTurnResult } from "../flows/flow-engine";
-import { shouldDropFinalTextAfterPayment, type TurnContext, type OutboxMessage } from "./agent-tools";
+import { shouldDropFinalTextAfterPayment, shouldDropFinalTextAfterVoice, type TurnContext, type OutboxMessage } from "./agent-tools";
 import { pollRecordText } from "./delivery";
 import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-guard";
 import { summarizeCart } from "./cart.service";
@@ -258,6 +258,7 @@ export async function simulateTurn(
     console.error("[simulate] runAgentTurn falló:", err instanceof Error ? err.message : err);
   }
   if (shouldDropFinalTextAfterPayment(ctx, finalText, trailingUserText(history))) finalText = "";
+  if (shouldDropFinalTextAfterVoice(ctx, finalText)) finalText = "";
   finalText = applySpintax(finalText);
   // Guarda de sistema (igual que en producción): sin links de carpetas de la entrega a quien no compró.
   const blockedFolders = blockedFolderIdsFor(config.products, ctx.state);
