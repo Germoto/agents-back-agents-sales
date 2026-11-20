@@ -60,6 +60,8 @@ export const DEFAULT_KNOWLEDGE: SalesAgentKnowledge = {
     "- Venta completa en el chat: presenta fichas con fotos/PDF, arma el carrito, envía métodos de pago y cierra la venta.\n" +
     "- Validación AUTOMÁTICA de pagos: lee la constancia de Yape/Plin con visión artificial y aprueba el pago solo; también genera links de Mercado Pago (tarjeta, banco, Yape) con entrega automática al confirmar.\n" +
     "- Entrega automática de productos digitales (cursos, ebooks, accesos, cuentas de streaming) apenas se confirma el pago.\n" +
+    "- Notas de voz con la voz del dueño: el agente puede responder con un audio (voz clonada con ElevenLabs, usando la cuenta de ElevenLabs del propio negocio) cuando se cumple la regla que el dueño escribe, por ejemplo si el cliente manda un audio o desconfía. También puede enviar stickers del negocio.\n" +
+    "- Grupos de WhatsApp: agrega a los compradores a los grupos del negocio con una cola espaciada (de a uno, con horario y tope diario) para reducir el riesgo de bloqueo; a quien no se puede agregar le llega la invitación.\n" +
     "- CRM kanban en vivo: cada chat avanza solo por el embudo (nuevo → interesado → pagado); tableros múltiples, etiquetas y valor de negocio.\n" +
     "- Campañas masivas de WhatsApp con protección anti-bloqueo (pausas inteligentes, horarios, límite diario), importación desde Excel y resultados detallados.\n" +
     "- Flujos de chatbot guiados (menús con botones) como alternativa o complemento del agente IA, con editor visual.\n" +
@@ -76,6 +78,8 @@ export const DEFAULT_KNOWLEDGE: SalesAgentKnowledge = {
     "P: ¿Cómo valida los pagos por Yape o Plin?\nR: El cliente envía la captura de su constancia y la IA la lee (monto, código de seguridad); el sistema la cruza con las notificaciones de pago y aprueba automáticamente. Si algo no cuadra, deriva a una persona.\n\n" +
     "P: ¿Sirve para mi rubro?\nR: Sí: infoproductos, productos físicos con delivery, restaurantes, servicios con reserva de citas, inmobiliarias que agendan visitas, venta de cuentas de streaming y otros. El agente se adapta al rubro configurado.\n\n" +
     "P: ¿Puedo probarlo antes de pagar?\nR: Sí, puedes crear tu cuenta y probar el agente con el simulador y este mismo chat es un ejemplo del agente funcionando.\n\n" +
+    "P: ¿El agente puede mandar audios con mi voz?\nR: Sí. Conectas tu cuenta de ElevenLabs, eliges tu voz clonada y escribes cuándo debe usarla. Precios, links y cuentas llegan además por texto. La función viene incluida en todos los planes de FlowApp; el consumo de voz se paga aparte, en tu plan de ElevenLabs.\n\n" +
+    "P: ¿Puede agregar a mis clientes a un grupo de WhatsApp?\nR: Sí. Al comprar entran a una cola que los agrega de a uno, con minutos de espera, horario y tope diario, para reducir el riesgo de que WhatsApp bloquee el número. Está incluido en todos los planes.\n\n" +
     "P: ¿Puedo atender yo mismo algunas conversaciones?\nR: Sí. Puedes pausar el bot en cualquier chat y responder tú desde el panel (atención humana), y reactivarlo cuando quieras.",
   contacto:
     "Para hablar con una persona del equipo de FlowApp, deriva la conversación a un asesor humano. También pueden escribirnos por WhatsApp (el número del equipo se comparte al derivar).",
