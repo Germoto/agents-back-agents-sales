@@ -58,6 +58,9 @@ export function isReadCall(name: string, args: Args): boolean {
     }
     case "configurar_mensaje_invitacion_grupo":
       return args.apagar !== true && !(typeof args.mensaje === "string" && args.mensaje.trim());
+    case "configurar_voz_agente":
+      // Sin argumentos solo muestra la configuración y las voces.
+      return !Object.values(args).some((v) => v !== undefined && v !== null);
     case "configurar_ritmo_grupos":
       return args.restablecer !== true && args.porMinuto === undefined && args.porHora === undefined && args.porDia === undefined;
     case "ver_miembros_grupo":
