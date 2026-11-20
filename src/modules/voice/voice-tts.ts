@@ -13,9 +13,9 @@ import path from "path";
 import { env } from "../../config/env";
 import { prisma } from "../../lib/prisma";
 import { zonedParts, zonedTimeToUtc } from "../scheduler/quiet-hours";
-import { VOICE_LIMITS, VOICE_MODELS, VOICE_SOURCE, type VoiceModel } from "./voice-limits";
+import { VOICE_LIMITS, VOICE_MODELS, VOICE_SOURCE, voiceModelHasTags, type VoiceModel } from "./voice-limits";
 
-export { VOICE_LIMITS, VOICE_MODELS, type VoiceModel };
+export { VOICE_LIMITS, VOICE_MODELS, voiceModelHasTags, type VoiceModel };
 
 const execFileAsync = promisify(execFile);
 const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
@@ -30,6 +30,8 @@ export type VoiceSettings = {
   speed: number;
   stability: number;
   similarity: number;
+  /** Expresividad (0 = neutra). Opcional: las configuraciones anteriores no la traen. */
+  style?: number;
 };
 
 /** Error con mensaje para el dueño (clave inválida, sin saldo…). Nunca se le muestra al cliente. */
@@ -41,9 +43,13 @@ export class VoiceError extends Error {}
 
 const LINK_RE = /(https?:\/\/|www\.)\S+|\b[\w-]+\.(com|pe|net|org|io|app|co|mx|cl|ar|es|me|link|ly)\b(\/\S*)?/i;
 
-/** Quita lo que no se pronuncia: formato de WhatsApp, emojis, viñetas y saltos de línea. */
-export function cleanSpokenText(raw: string): string {
+/**
+ * Quita lo que no se pronuncia: formato de WhatsApp, emojis, viñetas y saltos de línea.
+ * Las marcas entre corchetes ([laughs]) solo se conservan si el modelo las interpreta.
+ */
+export function cleanSpokenText(raw: string, opts: { keepTags?: boolean } = {}): string {
   return (raw ?? "")
+    .replace(/\[[^\]\n]{0,40}\]/g, (tag) => (opts.keepTags ? tag : " "))
     .replace(/[*_~`]/g, "")
     .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, "")
     .replace(/^\s*(?:[-•▪▢]|\d+[.)])\s+/gm, "")
@@ -99,17 +105,42 @@ export async function listVoices(apiKey: string): Promise<VoiceOption[]> {
     .sort((a, b) => Number(a.category === "premade") - Number(b.category === "premade") || a.name.localeCompare(b.name));
 }
 
+/** Ajustes completos que se le envían a ElevenLabs. */
+export function elevenVoiceSettings(settings: VoiceSettings): Record<string, number | boolean> {
+  return {
+    stability: settings.stability,
+    similarity_boost: settings.similarity,
+    style: settings.style ?? VOICE_LIMITS.style.def,
+    use_speaker_boost: true,
+    speed: settings.speed,
+  };
+}
+
+/**
+ * Ajustes mínimos para los modelos expresivos (v4/v3) cuando rechazan los completos:
+ * solo estabilidad, llevada a uno de los tres puntos que esos modelos admiten seguro.
+ */
+export function elevenFallbackSettings(settings: VoiceSettings): Record<string, number> {
+  return { stability: settings.stability < 0.25 ? 0 : settings.stability > 0.75 ? 1 : 0.5 };
+}
+
 /** Texto → MP3 con la voz y ajustes del negocio. */
 export async function synthesize(apiKey: string, settings: VoiceSettings, text: string): Promise<Buffer> {
-  const res = await elevenFetch(apiKey, `/text-to-speech/${encodeURIComponent(settings.voiceId)}?output_format=mp3_44100_128`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "audio/mpeg" },
-    body: JSON.stringify({
-      text,
-      model_id: settings.model,
-      voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, speed: settings.speed },
-    }),
-  });
+  const call = (voiceSettings: Record<string, number | boolean>) =>
+    elevenFetch(apiKey, `/text-to-speech/${encodeURIComponent(settings.voiceId)}?output_format=mp3_44100_128`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "audio/mpeg" },
+      body: JSON.stringify({ text, model_id: settings.model, voice_settings: voiceSettings }),
+    });
+  let res: Response;
+  try {
+    res = await call(elevenVoiceSettings(settings));
+  } catch (err) {
+    // Los modelos expresivos pueden no aceptar todos los ajustes: un reintento con lo mínimo.
+    const rejected = err instanceof VoiceError && /devolvió (400|422)/.test(err.message);
+    if (!rejected || !voiceModelHasTags(settings.model)) throw err;
+    res = await call(elevenFallbackSettings(settings));
+  }
   const buffer = Buffer.from(await res.arrayBuffer());
   if (buffer.length < 200) throw new VoiceError("ElevenLabs no devolvió audio.");
   return buffer;

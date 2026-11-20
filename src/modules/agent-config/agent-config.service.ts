@@ -4,7 +4,7 @@ import { AppError } from "../../lib/app-error";
 import { decryptCredential, encryptCredential } from "../../lib/credentials-crypto";
 import { providerOf } from "../../lib/ai-providers";
 import { getPlatformAiQuota } from "../agent/platform-ai-quota";
-import { VoiceError, cleanSpokenText, generateVoiceNote, listVoices, voiceTextProblem, type VoiceSettings } from "../voice/voice-tts";
+import { VoiceError, cleanSpokenText, generateVoiceNote, listVoices, voiceModelHasTags, voiceTextProblem, type VoiceSettings } from "../voice/voice-tts";
 import { VOICE_LIMITS } from "../voice/voice-limits";
 
 /** Máscara para el panel: la key completa NUNCA sale del backend. */
@@ -278,7 +278,7 @@ export async function testAgentVoice(
   typedKey?: string,
 ) {
   const key = await requireVoiceKey(companyId, typedKey);
-  const text = cleanSpokenText(input.text);
+  const text = cleanSpokenText(input.text, { keepTags: voiceModelHasTags(input.model) });
   const problem = voiceTextProblem(text, VOICE_LIMITS.maxChars.max);
   if (problem) throw new AppError(problem, 400);
   try {

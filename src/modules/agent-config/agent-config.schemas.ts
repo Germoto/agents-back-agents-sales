@@ -167,7 +167,10 @@ export const voiceToolConfigSchema = z
     speed: z.coerce.number().min(VOICE_LIMITS.speed.min).max(VOICE_LIMITS.speed.max).default(VOICE_LIMITS.speed.def),
     stability: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.stability.def),
     similarity: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.similarity.def),
+    style: z.coerce.number().min(VOICE_LIMITS.style.min).max(VOICE_LIMITS.style.max).default(VOICE_LIMITS.style.def),
     when: z.string().trim().max(300).default(""),
+    // «Cómo hablas»: muletillas, trato y ritmo del dueño al mandar un audio (opcional).
+    speechStyle: z.string().trim().max(VOICE_LIMITS.speechStyleMax).default(""),
     maxChars: z.coerce.number().int().min(VOICE_LIMITS.maxChars.min).max(VOICE_LIMITS.maxChars.max).default(VOICE_LIMITS.maxChars.def),
     perDay: z.coerce.number().int().min(VOICE_LIMITS.perDay.min).max(VOICE_LIMITS.perDay.max).default(VOICE_LIMITS.perDay.def),
   })
@@ -188,6 +191,7 @@ export const voiceTestSchema = z.object({
   speed: z.coerce.number().min(VOICE_LIMITS.speed.min).max(VOICE_LIMITS.speed.max).default(VOICE_LIMITS.speed.def),
   stability: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.stability.def),
   similarity: z.coerce.number().min(0).max(1).default(VOICE_LIMITS.similarity.def),
+  style: z.coerce.number().min(VOICE_LIMITS.style.min).max(VOICE_LIMITS.style.max).default(VOICE_LIMITS.style.def),
 });
 
 // Núcleo de Agente IA (modelo + prompt). Recordatorios y modo de respuesta se

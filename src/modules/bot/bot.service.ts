@@ -129,7 +129,10 @@ export interface AgentVoiceTool {
   speed: number;
   stability: number;
   similarity: number;
+  style: number;
   when: string;
+  /** Forma de hablar del dueño («Cómo hablas»); vacío = sin indicación extra. */
+  speechStyle: string;
   maxChars: number;
   perDay: number;
 }
@@ -139,8 +142,8 @@ function resolveAgentVoiceTool(raw: unknown, hasKey: boolean): AgentVoiceTool | 
   if (!hasKey || !raw || typeof raw !== "object") return null;
   const parsed = voiceToolConfigSchema.safeParse(raw);
   if (!parsed.success || !parsed.data.enabled) return null;
-  const { voiceId, model, speed, stability, similarity, when, maxChars, perDay } = parsed.data;
-  return { enabled: true, voiceId, model, speed, stability, similarity, when, maxChars, perDay };
+  const { voiceId, model, speed, stability, similarity, style, when, speechStyle, maxChars, perDay } = parsed.data;
+  return { enabled: true, voiceId, model, speed, stability, similarity, style, when, speechStyle, maxChars, perDay };
 }
 
 function normalizePhone(value: string) {

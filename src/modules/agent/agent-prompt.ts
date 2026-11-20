@@ -11,6 +11,7 @@ import { planOptions } from "../products/product-plans";
 import type { getBotConfig } from "../bot/bot.service";
 import type { ConversationState } from "./conversation.service";
 import { HUMAN_AGENT_TAG } from "./conversation.service";
+import { voiceModelHasTags } from "../voice/voice-limits";
 import { emailDeliveryAvailable, crmToolAvailable, groupToolAvailable, stickerToolAvailable, voiceToolAvailable, driveSearchAvailable, productsWithDrive, agentHttpActionsOf, postponeAvailable, shippingOf, agencySearchAvailable } from "./agent-tools";
 import { describeShippingConfig, type ShippingConfig } from "../shipping/shipping-config";
 import { activePostpone, formatPostponeDate } from "../scheduler/smart-followup";
@@ -540,6 +541,17 @@ function ownerReviewPrompt(prompt: string): string {
   return out.join("\n");
 }
 
+/** Parte de la línea NOTAS DE VOZ que depende de la configuración: forma de hablar del dueño y marcas del modelo. */
+function voiceSpeechLine(tool: { speechStyle?: string; model: string }): string {
+  const style = (tool.speechStyle ?? "").trim();
+  return (
+    (style ? ` ASÍ HABLA el dueño cuando manda un audio (úsalo en la nota, con naturalidad y sin exagerar): «${style}»` : "") +
+    (voiceModelHasTags(tool.model)
+      ? " Si ayuda a que suene natural, puedes poner como mucho una o dos marcas de entonación en inglés entre corchetes, por ejemplo [laughs], [sighs] o [excited]; no se leen en voz alta."
+      : " No uses corchetes ni acotaciones.")
+  );
+}
+
 export function buildSystemPrompt(config: BotConfig, state: ConversationState, extra?: PromptExtras): string {
   const flowVarsText = extra?.flowVars
     ? Object.entries(extra.flowVars)
@@ -766,7 +778,7 @@ export function buildSystemPrompt(config: BotConfig, state: ConversationState, e
     // Notas de voz: SOLO si el dueño las activó. El cuándo lo escribe el dueño.
     ...(voiceToolAvailable(config) && config.agent.voiceTool
       ? [
-          `- NOTAS DE VOZ (herramienta enviar_nota_de_voz): el negocio quiere que respondas con una NOTA DE VOZ cuando pase esto: ${config.agent.voiceTool.when} Si el mensaje del cliente cumple esa condición, en ese turno tu respuesta ES la nota de voz: llama a enviar_nota_de_voz por tu cuenta, sin esperar a que el cliente pida un audio. Si no la cumple, responde por texto. Una por turno y hasta ${config.agent.voiceTool.maxChars} caracteres. Habla EXACTAMENTE con tu mismo estilo, trato y palabras de siempre (los de tus instrucciones), como si le mandaras un audio desde tu celular: no te pongas formal, no vuelvas a saludar si ya saludaste. Solo cambia lo necesario para que se pueda decir: sin emojis, listas ni links, y las cifras en palabras. Tras la nota, tu texto final es SOLO para datos que el cliente deba copiar (precio, link, cuenta, código); si no hay ninguno responde exactamente SIN_RESPUESTA. NUNCA anuncies ni comentes la nota («te envié un audio», «ahí va la nota de voz»). En el historial, tus notas de voz anteriores aparecen como texto.${extra?.lastInboundWasAudio ? " DATO DE ESTE TURNO: lo último que envió el cliente fue un AUDIO." : ""}`,
+          `- NOTAS DE VOZ (herramienta enviar_nota_de_voz): el negocio quiere que respondas con una NOTA DE VOZ cuando pase esto: ${config.agent.voiceTool.when} Si el mensaje del cliente cumple esa condición, en ese turno tu respuesta ES la nota de voz: llama a enviar_nota_de_voz por tu cuenta, sin esperar a que el cliente pida un audio. Si no la cumple, responde por texto. Una por turno y hasta ${config.agent.voiceTool.maxChars} caracteres. Habla EXACTAMENTE con tu mismo estilo, trato y palabras de siempre (los de tus instrucciones), como si le mandaras un audio desde tu celular: no te pongas formal, no vuelvas a saludar si ya saludaste. Escribe la nota para ser DICHA, no leída: frases cortas como salen al hablar, arranca directo, marca las pausas con comas y puntos suspensivos, y nada de listas ni frases de catálogo; sin emojis ni links, y las cifras en palabras.${voiceSpeechLine(config.agent.voiceTool)} Tras la nota, tu texto final es SOLO para datos que el cliente deba copiar (precio, link, cuenta, código); si no hay ninguno responde exactamente SIN_RESPUESTA. NUNCA anuncies ni comentes la nota («te envié un audio», «ahí va la nota de voz»). En el historial, tus notas de voz anteriores aparecen como texto.${extra?.lastInboundWasAudio ? " DATO DE ESTE TURNO: lo último que envió el cliente fue un AUDIO." : ""}`,
         ]
       : []),
     "",
