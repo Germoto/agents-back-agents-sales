@@ -10,6 +10,8 @@ import {
   getPacingController,
   savePacingController,
   saveInviteMessageController,
+  saveInviteLinkController,
+  resumeAccountController,
   groupReadController,
   groupSendController,
   groupStarController,
@@ -35,6 +37,7 @@ import {
   groupMessagesQuery,
   groupPacingSchema,
   groupInviteMessageSchema,
+  groupInviteLinkSchema,
   groupSendSchema,
   groupStarSchema,
   listMembersQuery,
@@ -51,15 +54,22 @@ router.use(requireAuth);
 router.get("/", asyncHandler(listGroupsController));
 router.get("/available", asyncHandler(listAvailableGroupsController));
 router.post("/", validate({ body: saveGroupSchema }), asyncHandler(saveGroupController));
-// Ritmo de altas del negocio (por minuto, por hora y por día).
+// Ritmo de altas del negocio (minutos entre altas, tope diario y horario).
 router.get("/pacing", asyncHandler(getPacingController));
 router.put("/pacing", validate({ body: groupPacingSchema }), asyncHandler(savePacingController));
+// «Reanudar ahora»: quita la pausa de la cuenta (bloqueo de 24 h o WhatsApp desconectado).
+router.post("/pacing/resume", asyncHandler(resumeAccountController));
 router.get("/customer/:customerId", validate({ params: customerIdParams }), asyncHandler(listCustomerGroupsController));
 router.delete("/:id", validate({ params: groupIdParams }), asyncHandler(removeGroupController));
 router.put(
   "/:id/invite-message",
   validate({ params: groupIdParams, body: groupInviteMessageSchema }),
   asyncHandler(saveInviteMessageController),
+);
+router.put(
+  "/:id/invite-link",
+  validate({ params: groupIdParams, body: groupInviteLinkSchema }),
+  asyncHandler(saveInviteLinkController),
 );
 router.post("/:id/resume", validate({ params: groupIdParams }), asyncHandler(resumeGroupController));
 

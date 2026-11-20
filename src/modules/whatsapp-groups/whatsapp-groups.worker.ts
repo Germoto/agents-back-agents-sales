@@ -1,6 +1,6 @@
 /**
  * Worker de grupos de WhatsApp: cada minuto despacha la cola de cada negocio, de a
- * un número por llamada y al ritmo que el negocio configuró (por minuto, hora y día).
+ * un número por llamada y al ritmo que el negocio configuró (minutos entre altas, tope diario y horario).
  * El estado vive en la base, así que sobrevive a reinicios.
  */
 

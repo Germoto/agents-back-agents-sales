@@ -6,6 +6,9 @@ import {
   loadGroupPacing,
   saveGroupPacing,
   saveInviteMessage,
+  saveInviteLink,
+  loadGroupPause,
+  resumeAccount,
   DEFAULT_GROUP_PACING,
   GROUP_PACING_LIMITS,
   listAvailableGroups,
@@ -65,26 +68,32 @@ export async function listMembersController(req: Request, res: Response) {
 export async function addToGroupController(req: Request, res: Response) {
   const companyId = req.user!.companyId;
   const { customerIds: ids, dryRun } = req.body as { customerIds: string[]; dryRun?: boolean };
-  // Siempre un contacto elegido a mano (el esquema no admite más): va primero en la cola.
+  // Un contacto elegido a mano entra como MANUAL; varios (selección del CRM) como LOTE,
+  // al final de la cola. Ninguno se salta el ritmo: encolar no envía nada.
+  const single = ids.length === 1;
   const result = await enqueueGroupAdd({
     companyId,
     groupId: String(req.params.id),
     customerIds: ids,
-    source: "MANUAL",
-    immediate: true,
-    force: true,
+    source: single ? "MANUAL" : "LOTE",
+    immediate: single,
     dryRun,
   });
   return res.json(result);
 }
 
 async function pacingPayload(companyId: string, pacing?: Awaited<ReturnType<typeof loadGroupPacing>>) {
-  const [current, usage] = await Promise.all([pacing ?? loadGroupPacing(companyId), groupAddUsage(companyId)]);
+  const [current, usage, pause] = await Promise.all([
+    pacing ?? loadGroupPacing(companyId),
+    groupAddUsage(companyId),
+    loadGroupPause(companyId),
+  ]);
   return {
     pacing: current,
     defaults: DEFAULT_GROUP_PACING,
     limits: GROUP_PACING_LIMITS,
-    usage: { lastHour: usage.lastHour, lastDay: usage.lastDay },
+    usage: { lastHour: usage.lastHour, lastDay: usage.lastDay, lastAt: usage.lastAt },
+    pause: pause ? { until: pause.until, kind: pause.kind, reason: pause.reason } : null,
   };
 }
 
@@ -95,6 +104,16 @@ export async function getPacingController(req: Request, res: Response) {
 export async function savePacingController(req: Request, res: Response) {
   const companyId = req.user!.companyId;
   return res.json(await pacingPayload(companyId, await saveGroupPacing(companyId, req.body)));
+}
+
+export async function resumeAccountController(req: Request, res: Response) {
+  const companyId = req.user!.companyId;
+  await resumeAccount(companyId);
+  return res.json(await pacingPayload(companyId));
+}
+
+export async function saveInviteLinkController(req: Request, res: Response) {
+  return res.json(await saveInviteLink(req.user!.companyId, String(req.params.id), req.body.link));
 }
 
 export async function saveInviteMessageController(req: Request, res: Response) {

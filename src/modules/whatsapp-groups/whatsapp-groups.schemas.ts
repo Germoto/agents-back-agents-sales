@@ -53,12 +53,17 @@ export const listMembersQuery = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(25),
 });
 
+/** Tope de clientes por acción desde el CRM. Encolar no envía nada: la cola los suelta espaciados. */
+export const GROUP_ADD_BATCH_MAX = 100;
+
 // Agregar: siempre por clientes elegidos (uno o varios). dryRun solo cuenta.
 // strict: un productId (lote de compradores, retirado) responde 400 en vez de ignorarse.
 export const addToGroupSchema = z
   .object({
-    // De a un cliente por petición: no existe el alta en lote desde el panel.
-    customerIds: z.array(z.string().uuid()).length(1, "Se agrega de a un cliente por vez"),
+    customerIds: z
+      .array(z.string().uuid())
+      .min(1, "Elige al menos un cliente")
+      .max(GROUP_ADD_BATCH_MAX, `Máximo ${GROUP_ADD_BATCH_MAX} clientes por vez`),
     dryRun: z.boolean().optional(),
   })
   .strict();
@@ -68,14 +73,22 @@ export const groupInviteMessageSchema = z.object({
   message: z.string().max(1000).nullable(),
 });
 
+// Link de invitación del grupo ("" o null = quitarlo). El formato lo valida el servicio.
+export const groupInviteLinkSchema = z.object({
+  link: z.string().trim().max(200).nullable(),
+});
+
 // Ritmo de altas del negocio (mismos límites que GROUP_PACING_LIMITS).
 export const groupPacingSchema = z
   .object({
-    perMinute: z.number().int().min(1).max(5).optional(),
-    perHour: z.number().int().min(1).max(120).optional(),
-    perDay: z.number().int().min(1).max(1000).optional(),
+    gapMinutes: z.number().int().min(15, "El mínimo es 15 minutos entre altas").max(240).optional(),
+    perDay: z.number().int().min(1).max(60).optional(),
+    hours: z
+      .object({ from: z.number().int().min(0).max(23), to: z.number().int().min(1).max(24) })
+      .refine((h) => h.to > h.from, { message: "La hora de cierre debe ser posterior a la de apertura." })
+      .optional(),
   })
-  .refine((v) => v.perMinute !== undefined || v.perHour !== undefined || v.perDay !== undefined, {
+  .refine((v) => v.gapMinutes !== undefined || v.perDay !== undefined || v.hours !== undefined, {
     message: "Indica al menos un valor del ritmo.",
   });
 

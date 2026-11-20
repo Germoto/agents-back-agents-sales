@@ -3,14 +3,18 @@
  * de «agregar al cliente X al grupo Y». Nadie llama al gateway directo: todo pedido
  * (venta, botón, lote, flujo, agente, Copiloto) es una fila de WhatsappGroupMember.
  *
- * - Hay UNA cola por negocio y sale de a un número por llamada, con tres topes
- *   configurables (por minuto, por hora y por día). Agregar varios de golpe hace que
- *   WhatsApp bloquee el número, así que ningún camino se salta la cola.
- * - Un contacto suelto (immediate) tiene prioridad y sale al momento si hay cupo.
+ * - Hay UNA cola por negocio y sale de a un número, nunca dos seguidos: minutos entre
+ *   altas (30 de fábrica, mínimo 15), tope diario y horario (reglas en group-pacing.ts).
+ *   Con un alta por minuto WhatsApp bloqueó el número; ningún camino se salta la cola.
+ * - Prioridad por niveles: venta y cobro, luego presentación/agente/flujo, luego las
+ *   altas a mano y al final el lote del CRM. `immediate` solo intenta salir ya si el
+ *   hueco está cumplido.
  * - Antes de cada alta se consulta el grupo (groupinfo): suspendido o sin admin pausa
- *   la cola; quien ya es participante se marca sin llamar al gateway.
- * - Un error de llamada (desconectada, gid inválido) pausa la cola del grupo y avisa
- *   al dueño una sola vez; no se queman reintentos.
+ *   ese grupo; quien ya es participante se marca sin llamar al gateway.
+ * - Un 500 del gateway (bloqueo o cuenta desconectada) pausa las altas de TODO el
+ *   negocio (24 h, o 30 min si está desconectada); 401/403/404 pausan el grupo.
+ * - Número oculto: no va a groupadd; se le envía el link del grupo por mensaje.
+ * - No hay reintentos automáticos, y quien salió del grupo no se vuelve a agregar.
  */
 
 import { Prisma, WhatsappGroupAddSource, WhatsappGroupMemberStatus } from "@prisma/client";
@@ -21,9 +25,27 @@ import { smsTools, type SmsToolsGroupAddResult, type SmsToolsGroupInfo } from ".
 import { SOCKET_EVENTS, socketService } from "../../lib/socket";
 import { notifyOwner, recordMessage, sendHumanReply } from "../agent/conversation.service";
 import { applySpintax } from "../agent/reminder-templates";
+import {
+  BLOCK_PAUSE_MS,
+  DEFAULT_GROUP_PACING,
+  DISCONNECTED_RECHECK_MS,
+  GROUP_PACING_LIMITS,
+  SOURCE_TIERS,
+  buildLinkMessage,
+  estimateMinutes,
+  isHiddenNumber,
+  isInviteLink,
+  nextAddWaitMs,
+  tierOf,
+  normalizePacing,
+  pauseKindFor,
+  pauseOf,
+  type GroupHours,
+  type GroupPacing,
+  type GroupPause,
+  type GroupPauseKind,
+} from "./group-pacing";
 
-const RETRY_DELAY_MS = 24 * 60 * 60_000;
-const MAX_ATTEMPTS = 2;
 const TRANSIENT_RETRY_MS = 5 * 60_000;
 const STALE_CLAIM_MS = 10 * 60_000;
 
@@ -68,41 +90,85 @@ export async function requireGroup(companyId: string, groupId: string) {
 // Ritmo de altas (por negocio)
 // ---------------------------------------------------------------------------
 
-export type GroupPacing = { perMinute: number; perHour: number; perDay: number };
+export { DEFAULT_GROUP_PACING, GROUP_PACING_LIMITS, estimateMinutes, normalizePacing, type GroupPacing };
 
-export const DEFAULT_GROUP_PACING: GroupPacing = { perMinute: 1, perHour: 30, perDay: 200 };
-export const GROUP_PACING_LIMITS = {
-  perMinute: { min: 1, max: 5 },
-  perHour: { min: 1, max: 120 },
-  perDay: { min: 1, max: 1000 },
-} as const;
-
-function clampPacing(key: keyof GroupPacing, value: unknown): number {
-  const n = Math.round(Number(value));
-  if (!Number.isFinite(n)) return DEFAULT_GROUP_PACING[key];
-  const { min, max } = GROUP_PACING_LIMITS[key];
-  return Math.min(max, Math.max(min, n));
+function rawPacingObj(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : {};
 }
 
-export function normalizePacing(raw: unknown): GroupPacing {
-  const r = (raw && typeof raw === "object" ? raw : {}) as Partial<Record<keyof GroupPacing, unknown>>;
+/** Ritmo, pausa de la cuenta y zona horaria del negocio en una sola lectura. */
+async function loadQueueSettings(companyId: string, now = new Date()) {
+  const [wa, company] = await Promise.all([
+    prisma.whatsappConfig.findUnique({ where: { companyId }, select: { groupAddPacing: true } }),
+    prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } }),
+  ]);
   return {
-    perMinute: clampPacing("perMinute", r.perMinute ?? DEFAULT_GROUP_PACING.perMinute),
-    perHour: clampPacing("perHour", r.perHour ?? DEFAULT_GROUP_PACING.perHour),
-    perDay: clampPacing("perDay", r.perDay ?? DEFAULT_GROUP_PACING.perDay),
+    raw: wa?.groupAddPacing ?? null,
+    pacing: normalizePacing(wa?.groupAddPacing),
+    pause: pauseOf(wa?.groupAddPacing, now),
+    timeZone: company?.timezone || "America/Lima",
   };
 }
 
 export async function loadGroupPacing(companyId: string): Promise<GroupPacing> {
-  const wa = await prisma.whatsappConfig.findUnique({ where: { companyId }, select: { groupAddPacing: true } });
-  return normalizePacing(wa?.groupAddPacing);
+  return (await loadQueueSettings(companyId)).pacing;
 }
 
-export async function saveGroupPacing(companyId: string, patch: Partial<GroupPacing>): Promise<GroupPacing> {
+/** Pausa vigente de las altas del negocio (bloqueo de 24 h o cuenta desconectada). */
+export async function loadGroupPause(companyId: string): Promise<GroupPause | null> {
+  return (await loadQueueSettings(companyId)).pause;
+}
+
+export async function saveGroupPacing(
+  companyId: string,
+  patch: { gapMinutes?: number; perDay?: number; hours?: Partial<GroupHours> },
+): Promise<GroupPacing> {
   await requireGroupCreds(companyId);
-  const next = normalizePacing({ ...(await loadGroupPacing(companyId)), ...patch });
-  await prisma.whatsappConfig.update({ where: { companyId }, data: { groupAddPacing: next } });
+  const { raw, pacing } = await loadQueueSettings(companyId);
+  const next = normalizePacing({ ...pacing, ...patch, hours: { ...pacing.hours, ...(patch.hours ?? {}) } });
+  // La pausa de la cuenta vive en el mismo JSON: guardar el ritmo no la borra.
+  const keep = rawPacingObj(raw);
+  const stored = {
+    ...next,
+    ...(typeof keep.pausedUntil === "string" ? { pausedUntil: keep.pausedUntil, pauseKind: keep.pauseKind, pauseReason: keep.pauseReason } : {}),
+  };
+  await prisma.whatsappConfig.update({ where: { companyId }, data: { groupAddPacing: stored as Prisma.InputJsonValue } });
   return next;
+}
+
+/**
+ * Detiene las altas de TODO el negocio (no de un grupo). Un 500 del gateway es señal de
+ * bloqueo de WhatsApp: se espera 24 h. La cola sigue aceptando pedidos y al terminar
+ * retoma con el mismo espaciado. Avisa al dueño una sola vez por pausa.
+ */
+async function pauseAccount(companyId: string, kind: GroupPauseKind, reason: string): Promise<void> {
+  const now = new Date();
+  const { raw, pacing } = await loadQueueSettings(companyId, now);
+  const prev = rawPacingObj(raw);
+  // Reaviso solo si es una pausa nueva (la de «desconectado» se renueva cada 30 min en silencio).
+  const prevUntil = typeof prev.pausedUntil === "string" ? new Date(prev.pausedUntil).getTime() : 0;
+  const renewing = prev.pauseKind === kind && now.getTime() - prevUntil < 2 * DISCONNECTED_RECHECK_MS;
+  const until = new Date(now.getTime() + (kind === "desconectado" ? DISCONNECTED_RECHECK_MS : BLOCK_PAUSE_MS));
+  await prisma.whatsappConfig.update({
+    where: { companyId },
+    data: { groupAddPacing: { ...pacing, pausedUntil: until.toISOString(), pauseKind: kind, pauseReason: reason } as Prisma.InputJsonValue },
+  });
+  socketService.emitToCompany(companyId, SOCKET_EVENTS.GROUP_UPDATED, { members: true });
+  if (renewing) return;
+  void notifyOwner(
+    companyId,
+    kind === "desconectado"
+      ? `⚠️ *Altas a grupos en espera*\nTu WhatsApp está desconectado. Vuelve a conectarlo en Canales → WhatsApp: las altas pendientes se retoman solas, espaciadas.`
+      : `⚠️ *Altas a grupos en pausa por 24 horas*\nWhatsApp rechazó un alta. ${reason}\nPara cuidar tu número no se agrega a nadie hasta mañana. Los pedidos nuevos quedan en cola y saldrán espaciados.`,
+  ).catch(() => undefined);
+}
+
+/** «Reanudar ahora»: quita la pausa de la cuenta. El hueco entre altas se sigue respetando. */
+export async function resumeAccount(companyId: string): Promise<{ pacing: GroupPacing; pause: null }> {
+  await requireGroupCreds(companyId);
+  const { pacing } = await loadQueueSettings(companyId);
+  await prisma.whatsappConfig.update({ where: { companyId }, data: { groupAddPacing: pacing as Prisma.InputJsonValue } });
+  return { pacing, pause: null };
 }
 
 /** Altas enviadas al gateway por el negocio en la última hora y en las últimas 24 h. */
@@ -117,10 +183,6 @@ export async function groupAddUsage(companyId: string, now = new Date()) {
     }),
   ]);
   return { lastHour, lastDay, lastAt: last?.claimedAt ?? null };
-}
-
-function minGapMs(pacing: GroupPacing): number {
-  return Math.round(60_000 / pacing.perMinute);
 }
 
 // ---------------------------------------------------------------------------
@@ -141,23 +203,15 @@ function addCount(c: Counters, status: WhatsappGroupMemberStatus, n: number) {
   else if (status === "FALLIDO") c.fallidos += n;
 }
 
-/** Minutos aproximados para vaciar una cola de `pending` números al ritmo del negocio. */
-export function estimateMinutes(pending: number, pacing: GroupPacing = DEFAULT_GROUP_PACING): number {
-  if (pending <= 0) return 0;
-  const perHour = Math.max(1, Math.min(pacing.perMinute * 60, pacing.perHour));
-  const fullDays = Math.floor((pending - 1) / pacing.perDay);
-  const rest = pending - fullDays * pacing.perDay;
-  return Math.round(fullDays * 24 * 60 + (rest / perHour) * 60);
-}
-
 export async function listSavedGroups(companyId: string) {
-  const [supported, groups, counts, pacing, usage] = await Promise.all([
+  const [supported, groups, counts, settings, usage] = await Promise.all([
     groupsSupported(companyId),
     prisma.whatsappGroup.findMany({ where: { companyId }, orderBy: { createdAt: "asc" } }),
     prisma.whatsappGroupMember.groupBy({ by: ["groupId", "status"], where: { companyId }, _count: { _all: true } }),
-    loadGroupPacing(companyId),
+    loadQueueSettings(companyId),
     groupAddUsage(companyId),
   ]);
+  const pacing = settings.pacing;
   const byGroup = new Map<string, Counters>();
   for (const row of counts) {
     const c = byGroup.get(row.groupId) ?? emptyCounters();
@@ -187,7 +241,9 @@ export async function listSavedGroups(companyId: string) {
   return {
     supported,
     pacing,
-    usage: { lastHour: usage.lastHour, lastDay: usage.lastDay },
+    usage: { lastHour: usage.lastHour, lastDay: usage.lastDay, lastAt: usage.lastAt },
+    // Pausa de la cuenta (bloqueo de 24 h o WhatsApp desconectado): la cola acepta pero no envía.
+    pause: settings.pause ? { until: settings.pause.until, kind: settings.pause.kind, reason: settings.pause.reason } : null,
     queue: { pending: totalPending, etaMinutes: estimateMinutes(totalPending, pacing) },
     groups: groups.map((g) => {
       const counters = byGroup.get(g.id) ?? emptyCounters();
@@ -201,6 +257,7 @@ export async function listSavedGroups(companyId: string) {
         counters,
         etaMinutes: estimateMinutes(counters.pendientes, pacing),
         inviteMessage: g.inviteMessage,
+        inviteLink: g.inviteLink,
         chatEnabled: g.chatEnabled,
         isAdmin: g.isAdmin,
         announce: g.announce,
@@ -262,9 +319,26 @@ export async function saveInviteMessage(companyId: string, groupId: string, mess
   const saved = await prisma.whatsappGroup.update({
     where: { id: groupId },
     data: { inviteMessage: text || null },
-    select: { id: true, name: true, inviteMessage: true },
+    select: { id: true, name: true, inviteMessage: true, inviteLink: true },
   });
   return saved;
+}
+
+/**
+ * Guarda (o quita, con vacío) el link de invitación del grupo. Lo copia el dueño desde
+ * WhatsApp; se usa para invitar por mensaje a los clientes con número oculto.
+ */
+export async function saveInviteLink(companyId: string, groupId: string, link: string | null) {
+  await requireGroup(companyId, groupId);
+  const value = (link ?? "").trim();
+  if (value && !isInviteLink(value)) {
+    throw new AppError("El link debe ser el de invitación del grupo (empieza con https://chat.whatsapp.com/).", 400);
+  }
+  return prisma.whatsappGroup.update({
+    where: { id: groupId },
+    data: { inviteLink: value || null },
+    select: { id: true, name: true, inviteMessage: true, inviteLink: true },
+  });
 }
 
 /**
@@ -377,8 +451,13 @@ export async function retryMembers(companyId: string, groupId: string, memberIds
     where: {
       companyId,
       groupId,
-      status: { in: ["FALLIDO", "EN_ESPERA", "CANCELADO"] },
+      // Quien salió del grupo (EN_ESPERA) no se vuelve a agregar: WhatsApp lo castiga.
+      status: { in: ["FALLIDO", "CANCELADO"] },
       ...(memberIds?.length ? { id: { in: memberIds } } : { status: "FALLIDO" }),
+      // Un número que WhatsApp ya rechazó («failed») no se vuelve a enviar: insistir es lo
+      // que termina en bloqueo. Sí se reintenta lo que falló por nuestro lado (p. ej.
+      // faltaba el link de invitación del grupo).
+      OR: [{ lastResult: null }, { lastResult: { notIn: ["failed", HIDDEN_NUMBER] } }, { status: "CANCELADO" }],
     },
     data: { status: "PENDIENTE", attempts: 0, nextAttemptAt: new Date(), immediate: false, recheck: false },
   });
@@ -436,7 +515,7 @@ export async function enqueueGroupAdd(opts: {
   source: WhatsappGroupAddSource;
   immediate?: boolean;
   dryRun?: boolean;
-  /** Pedido explícito del dueño sobre un contacto: reintenta aunque haya salido del grupo. */
+  /** Se conserva por compatibilidad de los llamadores; ya no fuerza a quien salió del grupo. */
   force?: boolean;
 }): Promise<EnqueueResult> {
   const { companyId, groupId, source } = opts;
@@ -467,7 +546,8 @@ export async function enqueueGroupAdd(opts: {
     const prev = existingBy.get(c.id);
     if (prev && SETTLED.includes(prev)) { skipped.yaEnGrupo += 1; continue; }
     if (prev && IN_QUEUE.includes(prev)) { skipped.enCola += 1; continue; }
-    if (prev === "EN_ESPERA" && !opts.force) { skipped.salioDelGrupo += 1; continue; }
+    // Salió del grupo: no se vuelve a agregar por ninguna vía, tampoco a pedido del dueño.
+    if (prev === "EN_ESPERA") { skipped.salioDelGrupo += 1; continue; }
     if (prev) toRequeue.push(c.id);
     else toCreate.push({ companyId, groupId, customerId: c.id, phone: digits, source, immediate });
   }
@@ -477,23 +557,23 @@ export async function enqueueGroupAdd(opts: {
     if (toCreate.length) await prisma.whatsappGroupMember.createMany({ data: toCreate, skipDuplicates: true });
     if (toRequeue.length) {
       await prisma.whatsappGroupMember.updateMany({
-        where: { groupId, customerId: { in: toRequeue }, status: { in: ["FALLIDO", "CANCELADO", "EN_ESPERA"] } },
+        where: { groupId, customerId: { in: toRequeue }, status: { in: ["FALLIDO", "CANCELADO"] } },
         data: { status: "PENDIENTE", source, attempts: 0, nextAttemptAt: new Date(), immediate, recheck: false, resolvedAt: null },
       });
     }
   }
   let etaMinutes = 0;
   if (queued > 0) {
-    // Un alta suelta solo espera detrás de las otras sueltas (van primero en la cola).
+    // Solo espera detrás de lo que tiene igual o más prioridad (ventas primero, lote al final).
+    const tier = tierOf(source);
+    const aheadSources = SOURCE_TIERS.slice(0, tier + 1).flat() as WhatsappGroupAddSource[];
     const [pacing, ahead] = await Promise.all([
       loadGroupPacing(companyId),
-      prisma.whatsappGroupMember.count({
-        where: { companyId, status: { in: IN_QUEUE }, ...(immediate ? { immediate: true } : {}) },
-      }),
+      prisma.whatsappGroupMember.count({ where: { companyId, status: { in: IN_QUEUE }, source: { in: aheadSources } } }),
     ]);
     const pending = opts.dryRun ? ahead + queued : ahead;
-    // Sola y con cupo libre: sale ya (0). Si hay otras delante o el ritmo aún no deja, se estima la espera.
-    const goesNow = immediate && pending <= 1 && (await quotaWaitMs(companyId, pacing)) === 0;
+    // Sola y con el hueco ya cumplido: sale ya (0). Si no, se estima la espera.
+    const goesNow = immediate && pending <= 1 && (await quotaWaitMs(companyId)) === 0;
     etaMinutes = goesNow ? 0 : estimateMinutes(pending, pacing);
   }
   if (!opts.dryRun && queued > 0 && immediate) {
@@ -579,10 +659,10 @@ const RESULT_STATUS: Record<string, WhatsappGroupMemberStatus> = {
 /** Resultado propio: el gateway devolvió failed con código 400 (cliente con número oculto). */
 const HIDDEN_NUMBER = "hidden_number";
 
-/** Espera máxima dentro de una pasada del worker para completar el intervalo entre altas. */
-const MAX_INLINE_WAIT_MS = 50_000;
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Resultados propios del camino «número oculto»: invitación por mensaje con el link del grupo. */
+const LINK_SENT = "link_sent";
+const NO_INVITE_LINK = "no_invite_link";
+const LINK_FAILED = "link_failed";
 
 /** Estado del gateway dentro del AppError (envelope.status), si lo hay. */
 function gatewayStatusOf(err: unknown): number | null {
@@ -673,6 +753,37 @@ async function sendInviteMessage(
   }
 }
 
+/**
+ * Invitación por mensaje con el link del grupo, para quien no se puede agregar por la
+ * API (número oculto, o el gateway no pudo ni agregar ni mandar la tarjeta). Devuelve
+ * el resultado para la fila de la cola. Nunca lanza.
+ */
+async function sendInviteLink(
+  companyId: string,
+  customerId: string,
+  group: { name: string; inviteMessage: string | null; inviteLink: string | null },
+): Promise<typeof LINK_SENT | typeof NO_INVITE_LINK | typeof LINK_FAILED> {
+  const link = (group.inviteLink ?? "").trim();
+  if (!isInviteLink(link)) return NO_INVITE_LINK;
+  try {
+    const customer = await prisma.customer.findFirst({ where: { id: customerId, companyId }, select: { name: true, optOutAt: true } });
+    if (!customer || customer.optOutAt) return LINK_FAILED;
+    const conv = await prisma.conversation.findFirst({
+      where: { companyId, customerId, channel: "whatsapp" },
+      orderBy: { lastMessageAt: "desc" },
+      select: { id: true },
+    });
+    if (!conv) return LINK_FAILED;
+    const nombre = (customer.name ?? "").trim().split(/\s+/)[0] ?? "";
+    const text = buildLinkMessage(applySpintax(group.inviteMessage ?? ""), { nombre, grupo: group.name, link });
+    await sendHumanReply(companyId, conv.id, text, { source: INVITE_SOURCE });
+    return LINK_SENT;
+  } catch (err) {
+    console.warn(`[wa-groups] invitación por link falló (cliente ${customerId}): ${err instanceof Error ? err.message : err}`);
+    return LINK_FAILED;
+  }
+}
+
 function emitMembersChanged(companyId: string, groupId: string) {
   socketService.emitToCompany(companyId, SOCKET_EVENTS.GROUP_UPDATED, { groupId, members: true });
 }
@@ -750,8 +861,12 @@ async function precheckGroup(
   } catch (err) {
     const status = gatewayStatusOf(err);
     const message = err instanceof Error ? err.message : "Error del proveedor";
-    if (status !== null && [401, 403, 404, 500].includes(status)) {
-      await pauseGroup(group, pauseReasonFor(status, message, gatewayErrorOf(err)));
+    const detail = gatewayErrorOf(err);
+    if (status === 500) {
+      // Señal de bloqueo (o cuenta desconectada): se detiene TODO el negocio, no solo el grupo.
+      await pauseAccount(group.companyId, pauseKindFor(detail), pauseReasonFor(status, message, detail));
+    } else if (status !== null && [401, 403, 404].includes(status)) {
+      await pauseGroup(group, pauseReasonFor(status, message, detail));
     } else {
       await backoffGroup(group.id);
     }
@@ -784,19 +899,44 @@ async function precheckGroup(
 async function dispatchNext(companyId: string, creds: Creds, checked: Set<string>): Promise<boolean> {
   for (let guard = 0; guard < 10; guard += 1) {
     const now = new Date();
-    const next = await prisma.whatsappGroupMember.findFirst({
-      where: {
-        companyId,
-        status: "PENDIENTE",
-        nextAttemptAt: { lte: now },
-        group: { pausedReason: null, OR: [{ nextBatchAt: null }, { nextBatchAt: { lte: now } }] },
-      },
-      orderBy: [{ immediate: "desc" }, { createdAt: "asc" }],
-      include: { group: { select: { id: true, companyId: true, name: true, gid: true, inviteMessage: true } } },
-    });
+    const next = await nextInQueue(companyId, now);
     if (!next) return false;
     const group = next.group;
-    if (!(await precheckGroup(group, creds, checked))) continue;
+
+    // Número oculto: WhatsApp rechaza agregarlo por la API. Se le invita por mensaje con
+    // el link del grupo, sin llamar al gateway de grupos. Ocupa su turno como un alta.
+    if (isHiddenNumber(next.phone, next.customer.waIsLid)) {
+      // Sin link guardado no hay nada que enviar: queda fallido con el motivo y NO gasta turno.
+      if (!isInviteLink(group.inviteLink)) {
+        const failed = await prisma.whatsappGroupMember.updateMany({
+          where: { id: next.id, status: "PENDIENTE" },
+          data: { status: "FALLIDO", lastResult: NO_INVITE_LINK, resolvedAt: now, immediate: false, recheck: false },
+        });
+        if (failed.count > 0) {
+          emitMembersChanged(companyId, group.id);
+          await noteInChat(
+            companyId,
+            next.customerId,
+            `👥 No se pudo invitar al grupo «${group.name}»: su número está oculto y el grupo no tiene guardado el link de invitación (Canales → WhatsApp → Grupos).`,
+            true,
+          );
+        }
+        continue;
+      }
+      const claimHidden = await prisma.whatsappGroupMember.updateMany({
+        where: { id: next.id, status: "PENDIENTE" },
+        data: { status: "PROCESANDO", claimedAt: now },
+      });
+      if (claimHidden.count === 0) continue;
+      await settleByLink(companyId, next, group);
+      return true;
+    }
+
+    if (!(await precheckGroup(group, creds, checked))) {
+      // Si la consulta previa detuvo la cuenta entera, no se sigue con otro grupo.
+      if (await loadGroupPause(companyId)) return false;
+      continue;
+    }
 
     // Reclamo atómico: si la consulta previa ya lo resolvió (o alguien lo canceló), sigue otro.
     const claim = await prisma.whatsappGroupMember.updateMany({
@@ -812,12 +952,15 @@ async function dispatchNext(companyId: string, creds: Creds, checked: Set<string
       const status = gatewayStatusOf(err);
       const message = err instanceof Error ? err.message : "Error del proveedor";
       const detail = gatewayErrorOf(err);
-      const hard = status !== null && [401, 403, 404, 500].includes(status);
+      const blocked = status === 500;
+      const hard = status !== null && [401, 403, 404].includes(status);
       await prisma.whatsappGroupMember.update({
         where: { id: next.id },
-        data: { status: "PENDIENTE", ...(hard ? {} : { nextAttemptAt: new Date(Date.now() + TRANSIENT_RETRY_MS) }) },
+        data: { status: "PENDIENTE", ...(hard || blocked ? {} : { nextAttemptAt: new Date(Date.now() + TRANSIENT_RETRY_MS) }) },
       });
-      if (hard) await pauseGroup(group, pauseReasonFor(status!, message, detail));
+      // 500 = WhatsApp rechazó (bloqueo) o cuenta desconectada: se detienen las altas del negocio.
+      if (blocked) await pauseAccount(companyId, pauseKindFor(detail), pauseReasonFor(500, message, detail));
+      else if (hard) await pauseGroup(group, pauseReasonFor(status!, message, detail));
       // Caída o timeout: reintentar es seguro (quien ya entró responde already_in).
       else await backoffGroup(group.id);
       console.warn(`[wa-groups] llamada falló (grupo ${group.id}, estado ${status ?? "red"}): ${message}${detail ? ` (${detail})` : ""}`);
@@ -828,6 +971,12 @@ async function dispatchNext(companyId: string, creds: Creds, checked: Set<string
     const code = typeof r?.code === "number" ? r.code : null;
     const hidden = r?.status === "failed" && code === 400;
     const raw = hidden ? HIDDEN_NUMBER : r?.status ?? "failed";
+    // No se pudo agregar ni mandar la tarjeta (o resultó ser un número oculto): la
+    // invitación sale por mensaje con el link del grupo.
+    if (hidden || raw === "invite_failed") {
+      await settleByLink(companyId, next, group, code);
+      return true;
+    }
     const status = RESULT_STATUS[raw] ?? null;
     const resolvedAt = new Date();
     const data: Prisma.WhatsappGroupMemberUpdateInput = {
@@ -840,11 +989,8 @@ async function dispatchNext(companyId: string, creds: Creds, checked: Set<string
     if (status) {
       data.status = status;
       data.resolvedAt = resolvedAt;
-    } else if (!hidden && next.attempts + 1 < MAX_ATTEMPTS) {
-      data.status = "PENDIENTE";
-      data.nextAttemptAt = new Date(Date.now() + RETRY_DELAY_MS);
     } else {
-      // Un número oculto no se puede agregar nunca: no se reintenta.
+      // Un «failed» no se reintenta: insistir con el mismo número es lo que WhatsApp castiga.
       data.status = "FALLIDO";
       data.resolvedAt = resolvedAt;
     }
@@ -863,9 +1009,7 @@ async function dispatchNext(companyId: string, creds: Creds, checked: Set<string
               ? null
               : status === "EN_ESPERA"
                 ? `👥 No se pudo agregar al grupo «${group.name}»: salió del grupo hace poco.`
-                : hidden
-                  ? `👥 No se pudo agregar al grupo «${group.name}»: su número está oculto.`
-                  : `👥 No se pudo agregar al grupo «${group.name}» (${raw}).`;
+                : `👥 No se pudo agregar al grupo «${group.name}» (${raw}).`;
       if (text) await noteInChat(companyId, next.customerId, text, !next.immediate);
     }
     // Mensaje propio del negocio: una sola vez por persona y grupo (no en reintentos
@@ -882,18 +1026,80 @@ async function dispatchNext(companyId: string, creds: Creds, checked: Set<string
  * Cuánto falta para que el ritmo del negocio permita otra alta: 0 = ya, null = tope
  * de la hora o del día alcanzado (se retoma solo cuando la ventana avanza).
  */
-async function quotaWaitMs(companyId: string, pacing: GroupPacing): Promise<number | null> {
+async function quotaWaitMs(companyId: string): Promise<number | null> {
   const now = new Date();
-  const usage = await groupAddUsage(companyId, now);
-  if (usage.lastDay >= pacing.perDay || usage.lastHour >= pacing.perHour) return null;
-  if (!usage.lastAt) return 0;
-  return Math.max(0, minGapMs(pacing) - (now.getTime() - usage.lastAt.getTime()));
+  const [settings, usage] = await Promise.all([loadQueueSettings(companyId, now), groupAddUsage(companyId, now)]);
+  return nextAddWaitMs({
+    pacing: settings.pacing,
+    now,
+    timeZone: settings.timeZone,
+    lastAt: usage.lastAt,
+    lastDay: usage.lastDay,
+    paused: settings.pause !== null,
+  });
+}
+
+type QueueRow = Prisma.WhatsappGroupMemberGetPayload<{
+  include: {
+    group: { select: { id: true; companyId: true; name: true; gid: true; inviteMessage: true; inviteLink: true } };
+    customer: { select: { waIsLid: true } };
+  };
+}>;
+
+/**
+ * Siguiente pendiente del negocio por NIVELES: primero lo que se va vendiendo (venta y
+ * cobro), luego presentación, agente y flujos, luego las altas a mano y al final el
+ * lote del CRM. Dentro de cada nivel, el más antiguo.
+ */
+async function nextInQueue(companyId: string, now: Date): Promise<QueueRow | null> {
+  for (const tier of SOURCE_TIERS) {
+    const row = await prisma.whatsappGroupMember.findFirst({
+      where: {
+        companyId,
+        status: "PENDIENTE",
+        source: { in: [...tier] as WhatsappGroupAddSource[] },
+        nextAttemptAt: { lte: now },
+        group: { pausedReason: null, OR: [{ nextBatchAt: null }, { nextBatchAt: { lte: now } }] },
+      },
+      orderBy: { createdAt: "asc" },
+      include: {
+        group: { select: { id: true, companyId: true, name: true, gid: true, inviteMessage: true, inviteLink: true } },
+        customer: { select: { waIsLid: true } },
+      },
+    });
+    if (row) return row;
+  }
+  return null;
+}
+
+/** Resuelve una fila por el camino del link (número oculto o invitación fallida). */
+async function settleByLink(companyId: string, next: QueueRow, group: QueueRow["group"], code: number | null = null): Promise<void> {
+  const result = await sendInviteLink(companyId, next.customerId, group);
+  const sent = result === LINK_SENT;
+  await prisma.whatsappGroupMember.update({
+    where: { id: next.id },
+    data: {
+      status: sent ? "INVITADO" : "FALLIDO",
+      lastResult: result,
+      lastCode: code,
+      recheck: false,
+      immediate: false,
+      attempts: next.attempts + 1,
+      resolvedAt: new Date(),
+    },
+  });
+  emitMembersChanged(companyId, group.id);
+  const text = sent
+    ? `👥 Invitación al grupo «${group.name}» enviada por mensaje con el link (su número está oculto y no se puede agregar directo).`
+    : result === NO_INVITE_LINK
+      ? `👥 No se pudo invitar al grupo «${group.name}»: su número está oculto y el grupo no tiene guardado el link de invitación (Canales → WhatsApp → Grupos).`
+      : `👥 No se pudo enviar la invitación al grupo «${group.name}».`;
+  await noteInChat(companyId, next.customerId, text, true);
 }
 
 /**
- * Despacha la cola de un negocio respetando su ritmo: de a un número por llamada,
- * hasta `perMinute` altas por pasada, repartidas dentro del minuto (nunca seguidas).
- * `single` (alta al momento) intenta una sola. Devuelve cuántas altas salieron.
+ * Despacha la cola de un negocio respetando su ritmo: como máximo UNA alta por pasada
+ * y solo si ya se cumplieron los minutos de espera. Devuelve cuántas altas salieron.
  */
 export async function processCompanyQueue(companyId: string, opts?: { single?: boolean }): Promise<number> {
   if (processing.has(companyId)) return 0;
@@ -901,23 +1107,12 @@ export async function processCompanyQueue(companyId: string, opts?: { single?: b
   try {
     const creds = await loadGroupCreds(companyId);
     if (!creds) return 0;
-    const pacing = await loadGroupPacing(companyId);
-    const rounds = opts?.single ? 1 : pacing.perMinute;
-    const checked = new Set<string>();
-    let sent = 0;
-    for (let i = 0; i < rounds; i += 1) {
-      const wait = await quotaWaitMs(companyId, pacing);
-      if (wait === null) break;
-      if (wait > 0) {
-        // El alta al momento no espera: queda primera en la cola y la toma el worker.
-        if (opts?.single || wait > MAX_INLINE_WAIT_MS) break;
-        // Pausa irregular: nunca dos altas seguidas ni a intervalos exactos.
-        await sleep(wait + Math.round(Math.random() * 4_000));
-      }
-      if (!(await dispatchNext(companyId, creds, checked))) break;
-      sent += 1;
-    }
-    return sent;
+    // UNA sola alta por pasada y solo si ya se cumplió el hueco, hay cupo del día, es
+    // horario de altas y la cuenta no está en pausa. Nunca se espera dentro de la pasada.
+    void opts;
+    const wait = await quotaWaitMs(companyId);
+    if (wait !== 0) return 0;
+    return (await dispatchNext(companyId, creds, new Set<string>())) ? 1 : 0;
   } finally {
     processing.delete(companyId);
   }
