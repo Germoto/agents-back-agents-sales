@@ -5,6 +5,7 @@
  * runtime vacía en orden por WhatsApp; el resto sólo devuelven datos al modelo.
  */
 
+import { repeatsVoiceNote } from "./voice-guard";
 import { VoiceError, cleanSpokenText, generateVoiceNote, voiceNotesToday, voiceTextProblem } from "../voice/voice-tts";
 import { loadVoiceApiKey } from "../agent-config/agent-config.service";
 import { matchProductFile } from "../../lib/product";
@@ -183,6 +184,9 @@ export function groupToolAvailable(config: BotConfig): boolean {
 export function shouldDropFinalTextAfterVoice(ctx: TurnContext, finalText: string): boolean {
   const t = finalText.trim();
   if (!t || !ctx.voiceSentThisTurn) return false;
+  // Repite lo que ya dijo en la nota (sin links que copiar): sobra.
+  const transcript = (ctx.outbox ?? []).find((m) => m.voice)?.voice?.transcript ?? "";
+  if (transcript && !/https?:\/\//.test(t) && repeatsVoiceNote(t, transcript)) return true;
   if (/\d|https?:\/\/|[?¿]/.test(t)) return false;
   return t.length <= 160 && /\b(nota de voz|audio|mensaje de voz|te lo (dije|explique|expliqué)|escuchal[oa]|esc[uú]chal[oa])\b/i.test(t);
 }
@@ -566,6 +570,8 @@ export interface TurnContext {
   stickerSentThisTurn?: boolean;
   /** enviar_nota_de_voz ya se usó en ESTE turno (una nota de voz por turno). */
   voiceSentThisTurn?: boolean;
+  /** La voz no está disponible en ESTE turno (clave, créditos, tope del día): se responde por texto. */
+  voiceUnavailableThisTurn?: boolean;
   /** true si lo último que mandó el cliente fue un audio (solo se calcula con las notas de voz activas). */
   lastInboundWasAudio?: boolean;
   /** Indicador que ve el cliente mientras el agente trabaja: «grabando audio…» al preparar una nota de voz. */
@@ -5052,8 +5058,11 @@ export async function executeTool(
       if (!tool || !voiceToolAvailable(ctx.config)) return JSON.stringify({ ok: false, error: `${internal}las notas de voz no están activadas. Responde por texto.` });
       if (ctx.voiceSentThisTurn) return JSON.stringify({ ok: false, error: `${internal}ya enviaste una nota de voz en este turno; sigue por texto.` });
       const spoken = cleanSpokenText(String(args.texto ?? ""));
-      const problem = voiceTextProblem(spoken, tool.maxChars);
-      if (problem) return JSON.stringify({ ok: false, error: `${internal}${problem}` });
+      // Tolerancia del 25 % sobre el tope: una nota un poco más larga vale más que quedarse sin voz.
+      const problem = voiceTextProblem(spoken, Math.round(tool.maxChars * 1.25));
+      if (problem) {
+        return JSON.stringify({ ok: false, error: `${internal}${problem} Corrige el texto y vuelve a llamar a enviar_nota_de_voz AHORA; no le digas al cliente que le enviaste o enviarás un audio si no lo hiciste.` });
+      }
       const okNote = "Listo: la nota de voz ya responde este turno. NO la anuncies ni la comentes. Si hay datos que el cliente deba copiar (precio, link, cuenta, código) escribe SOLO esos datos; si no hay ninguno responde exactamente SIN_RESPUESTA.";
       if (ctx.simulate) {
         // Pruebas: no se gasta voz; se muestra lo que diría.
@@ -5064,10 +5073,14 @@ export async function executeTool(
       try {
         const usedToday = await voiceNotesToday(ctx.companyId, ctx.config.business.timezone ?? null);
         if (usedToday >= tool.perDay) {
+          ctx.voiceUnavailableThisTurn = true;
           return JSON.stringify({ ok: false, error: `${internal}se alcanzó el máximo de notas de voz de hoy. Responde por texto.` });
         }
         const apiKey = await loadVoiceApiKey(ctx.companyId);
-        if (!apiKey) return JSON.stringify({ ok: false, error: `${internal}falta la clave de voz. Responde por texto.` });
+        if (!apiKey) {
+          ctx.voiceUnavailableThisTurn = true;
+          return JSON.stringify({ ok: false, error: `${internal}falta la clave de voz. Responde por texto.` });
+        }
         // El cliente ve «grabando audio…» mientras se genera.
         ctx.typingState = "recording";
         ctx.refreshTyping?.();
@@ -5076,6 +5089,7 @@ export async function executeTool(
         ctx.outbox.push({ kind: "media", mediaUrl: note.url, mediaKind: "audio", voice: { seconds: note.seconds, transcript: spoken } });
         return JSON.stringify({ ok: true, note: okNote });
       } catch (err) {
+        ctx.voiceUnavailableThisTurn = true;
         ctx.typingState = "composing";
         ctx.refreshTyping?.();
         const reason = err instanceof Error ? err.message : String(err);

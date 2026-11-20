@@ -21,6 +21,8 @@ import { findUpcomingBookingForCustomer } from "../bookings/bookings.service";
 import { formatSlotLabel } from "../bookings/availability.service";
 import { extractEmail } from "../../lib/email";
 import { prisma } from "../../lib/prisma";
+import { voiceRuleApplies, VOICE_DUE_NOTE, voiceRetryNote } from "./voice-guard";
+import { voiceToolAvailable } from "./agent-tools";
 
 const MAX_ITERATIONS = 6;
 /** Frases típicas de "no me escribas más" (sin acentos obligatorios). */
@@ -498,6 +500,17 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     }
   }
 
+  // Notas de voz: un revisor decide si este mensaje cumple la regla «cuándo» del dueño.
+  // Si cumple, se le indica al modelo y más abajo se exige la nota (no queda a su criterio).
+  const voiceDue =
+    voiceToolAvailable(ctx.config) && !forceValidation && !forcePresentation && !forceEmailDelivery && (await voiceRuleApplies(ctx, history));
+  if (voiceDue) {
+    messages.push({ role: "user", content: VOICE_DUE_NOTE });
+    (ctx.guardEvents ??= []).push("nota de voz: el mensaje cumple la regla del dueño");
+  }
+  let voiceRetried = false;
+  let forceVoiceNext = false;
+
   // El historial debe terminar en el cliente (ver TRAILING_ASSISTANT_NOTE). Va al final,
   // después de las notas de sistema, para que sea el último mensaje de la petición.
   const trailingAssistant = history.length > 0 && history[history.length - 1].role === "assistant";
@@ -528,8 +541,11 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
             ? { type: "function", function: { name: "enviar_ficha" } }
             : i === 0 && forceEmailDelivery
               ? { type: "function", function: { name: "entregar_por_correo" } }
-              : "auto",
+              : forceVoiceNext
+                ? { type: "function", function: { name: "enviar_nota_de_voz" } }
+                : "auto",
     });
+    forceVoiceNext = false;
 
     if (res.toolCalls.length) {
       messages.push({ role: "assistant", content: res.content, tool_calls: res.toolCalls });
@@ -563,6 +579,18 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       (ctx.guardEvents ??= []).push(REPEATED_CLOSING_EVENT);
       console.warn(`[agent] cierre repetido descartado (cliente escribió durante la respuesta) convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
       return "";
+    }
+    // Guardia de la nota de voz: la regla del dueño se cumplía y el modelo contestó por
+    // texto. Ese texto no sale: se le obliga a decirlo en una nota de voz (un intento).
+    // No aplica si la voz falló por la cuenta o el tope del día (ahí sí va el texto).
+    if (final && voiceDue && !voiceRetried && !ctx.voiceSentThisTurn && !ctx.voiceUnavailableThisTurn) {
+      voiceRetried = true;
+      forceVoiceNext = true;
+      (ctx.guardEvents ??= []).push("nota de voz: el modelo respondió por texto, el sistema exigió la nota");
+      console.warn(`[agent] regla de voz cumplida y respuesta por texto (se exige la nota) convo=${ctx.conversationId}`);
+      messages.push({ role: "assistant", content: final });
+      messages.push({ role: "user", content: voiceRetryNote(ctx.config.agent.voiceTool?.maxChars ?? 400) });
+      continue;
     }
     if (final && isInternalNote(final)) {
       if (!internalNoteRetried) {
