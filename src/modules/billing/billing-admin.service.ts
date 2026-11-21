@@ -3,7 +3,14 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { generateVoucherCode } from "../../lib/codes";
 import { addMonthsUtc } from "./billing.service";
-import { deriveBillingState, invalidateEntitlements } from "./entitlements";
+import {
+  activeBonusLeads,
+  dayInTz,
+  deriveBillingState,
+  endOfDayUtc,
+  invalidateEntitlements,
+  nextMonthStartUtc,
+} from "./entitlements";
 
 // ============================================================
 // Administración de la monetización SaaS (consola superadmin):
@@ -115,6 +122,7 @@ const SUB_INCLUDE = {
       id: true,
       name: true,
       slug: true,
+      timezone: true,
       users: {
         where: { role: "ADMIN" as const, isActive: true },
         select: { name: true, phone: true },
@@ -147,8 +155,13 @@ function mapSubscription(sub: SubRow, balancePen: number) {
     planMonthlyLeadLimit: sub.plan.monthlyLeadLimit,
     planExtraLeadPricePen:
       sub.plan.extraLeadPricePen === null ? null : Number(sub.plan.extraLeadPricePen),
+    // Leads de regalo vigentes este mes (0 si no hay o ya vencieron).
+    bonusLeads: activeBonusLeads(sub),
+    bonusLeadsUntil: sub.bonusLeadsUntil,
     startsAt: sub.startsAt,
     expiresAt: sub.expiresAt,
+    // Día de vencimiento en la zona horaria del negocio (para el campo «Vence el»).
+    expiresOn: dayInTz(sub.expiresAt, sub.company.timezone || "America/Lima"),
     graceEndsAt,
     months: sub.months,
     source: sub.source,
@@ -431,6 +444,111 @@ export async function extendSubscription(
   invalidateEntitlements(sub.companyId);
   const balances = await walletBalances([sub.companyId]);
   return mapSubscription(sub, balances.get(sub.companyId) ?? 0);
+}
+
+export type AdjustSubscriptionInput = {
+  /** Día exacto de vencimiento (YYYY-MM-DD, zona horaria del negocio). */
+  expiresOn?: string;
+  /** Total de leads de regalo del mes en curso (0 = quitar). */
+  bonusLeads?: number;
+  plan?: {
+    pricePen: number;
+    priceUsd?: number;
+    modules: PlanModule[];
+    monthlyLeadLimit?: number | null;
+    extraLeadPricePen?: number | null;
+  };
+};
+
+/**
+ * Ajuste flexible (todo es negociable): fecha exacta de vencimiento, leads de
+ * regalo del mes y condiciones del plan, sin reiniciar el periodo. Un plan del
+ * catálogo solo se convierte en copia personal si de verdad cambió algo.
+ */
+export async function adjustSubscription(id: string, input: AdjustSubscriptionInput) {
+  const current = await prisma.companySubscription.findUnique({
+    where: { id },
+    include: { plan: true, company: { select: { timezone: true } } },
+  });
+  if (!current) throw new AppError("Suscripción no encontrada", 404);
+  const timeZone = current.company.timezone || "America/Lima";
+
+  const subData: Prisma.CompanySubscriptionUncheckedUpdateInput = {};
+
+  // Fecha: solo si el día cambió (guardar sin tocarla no mueve la hora).
+  if (input.expiresOn && input.expiresOn !== dayInTz(current.expiresAt, timeZone)) {
+    subData.expiresAt = endOfDayUtc(input.expiresOn, timeZone);
+  }
+
+  // Leads de regalo: total del mes; vale hasta el inicio del mes siguiente.
+  if (input.bonusLeads !== undefined && input.bonusLeads !== activeBonusLeads(current)) {
+    subData.bonusLeads = input.bonusLeads;
+    subData.bonusLeadsUntil = input.bonusLeads > 0 ? nextMonthStartUtc(timeZone) : null;
+  }
+
+  // Condiciones del plan: solo si difieren de las actuales.
+  let planPatch: {
+    pricePen: number;
+    priceUsd: number;
+    modules: PlanModule[];
+    monthlyLeadLimit: number | null;
+    extraLeadPricePen: number | null;
+  } | null = null;
+  if (input.plan) {
+    const p = input.plan;
+    const next = {
+      pricePen: p.pricePen,
+      priceUsd: p.priceUsd ?? 0,
+      modules: p.modules,
+      monthlyLeadLimit: p.monthlyLeadLimit ?? null,
+      extraLeadPricePen: p.extraLeadPricePen ?? null,
+    };
+    const cur = current.plan;
+    const sameModules =
+      cur.modules.length === next.modules.length && next.modules.every((m) => cur.modules.includes(m));
+    const changed =
+      !sameModules ||
+      Number(cur.pricePen) !== next.pricePen ||
+      Number(cur.priceUsd) !== next.priceUsd ||
+      cur.monthlyLeadLimit !== next.monthlyLeadLimit ||
+      (cur.extraLeadPricePen === null ? null : Number(cur.extraLeadPricePen)) !== next.extraLeadPricePen;
+    if (changed) planPatch = next;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    if (planPatch) {
+      if (current.plan.isCustom) {
+        // Conserva nombre, descripción, rubros y beneficios del snapshot.
+        await tx.platformPlan.update({ where: { id: current.planId }, data: planPatch });
+      } else {
+        // Copia personal del plan del catálogo: el catálogo no se toca.
+        const copy = await tx.platformPlan.create({
+          data: {
+            name: current.plan.name,
+            description: current.plan.description,
+            verticals: current.plan.verticals,
+            perks: current.plan.perks,
+            ...planPatch,
+            isPublic: false,
+            isHighlighted: false,
+            isCustom: true,
+            sortOrder: 9999,
+            isActive: true,
+          },
+          select: { id: true },
+        });
+        subData.planId = copy.id;
+      }
+    }
+    if (Object.keys(subData).length > 0) {
+      await tx.companySubscription.update({ where: { id }, data: subData });
+    }
+  });
+
+  invalidateEntitlements(current.companyId);
+  const fresh = await prisma.companySubscription.findUnique({ where: { id }, include: SUB_INCLUDE });
+  const balances = await walletBalances([current.companyId]);
+  return mapSubscription(fresh!, balances.get(current.companyId) ?? 0);
 }
 
 export async function cancelSubscription(id: string) {

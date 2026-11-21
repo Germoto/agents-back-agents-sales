@@ -7096,7 +7096,12 @@ export async function runCopilotTool(
             precio: `S/ ${me.plan.pricePen}/mes (USD ${me.plan.priceUsd})`,
             estado: me.status,
             vence: me.expiresAt,
-            leadsDelMes: { usados: me.leadUsage.used, limite: me.leadUsage.limit ?? "ilimitados" },
+            leadsDelMes: {
+              usados: me.leadUsage.used,
+              limite: me.leadUsage.limit ?? "ilimitados",
+              // Regalo del mes dado por FlowApp (ya incluido en el límite).
+              ...(me.leadUsage.bonus > 0 ? { leadsDeRegaloEsteMes: me.leadUsage.bonus } : {}),
+            },
             modulosIncluidos: me.plan.modules,
             beneficios: me.plan.perks,
             creditosPen: me.wallet.balancePen,

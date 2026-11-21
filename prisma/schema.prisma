@@ -1826,6 +1826,10 @@ model CompanySubscription {
   voucherId    String?      @db.Uuid // último vale de paquete aplicado
   canceledAt   DateTime?
   lastNoticeAt DateTime? // dedupe de avisos de vencimiento
+  // Leads de regalo (superadmin): se suman al límite mensual del plan solo
+  // hasta bonusLeadsUntil (inicio del mes siguiente en la TZ del negocio).
+  bonusLeads      Int       @default(0)
+  bonusLeadsUntil DateTime?
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
   company      Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)

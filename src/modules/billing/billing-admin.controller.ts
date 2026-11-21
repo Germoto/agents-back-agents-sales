@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import {
   adjustCredits,
+  adjustSubscription,
   assignSubscription,
   assignCustomSubscription,
   updateCustomSubscriptionPlan,
@@ -63,6 +64,10 @@ export async function assignSubscriptionController(req: Request, res: Response) 
 
 export async function extendSubscriptionController(req: Request, res: Response) {
   return res.json(await extendSubscription(paramId(req), req.body));
+}
+
+export async function adjustSubscriptionController(req: Request, res: Response) {
+  return res.json(await adjustSubscription(paramId(req), req.body));
 }
 
 export async function cancelSubscriptionController(req: Request, res: Response) {

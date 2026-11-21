@@ -105,6 +105,23 @@ export function deriveBillingState(
   return { status: "EXPIRED", blocked: true, graceEndsAt };
 }
 
+type BonusFields = Pick<CompanySubscription, "bonusLeads" | "bonusLeadsUntil">;
+
+/** Leads de regalo vigentes (0 si no hay o si ya pasó el mes en que se dieron). */
+export function activeBonusLeads(sub: BonusFields, now = new Date()): number {
+  if (!sub.bonusLeads || sub.bonusLeads <= 0 || !sub.bonusLeadsUntil) return 0;
+  return now.getTime() < sub.bonusLeadsUntil.getTime() ? sub.bonusLeads : 0;
+}
+
+/** Límite mensual efectivo = el del plan + el regalo vigente. Ilimitado sigue ilimitado. */
+export function effectiveLeadLimit(
+  sub: BonusFields & { plan: Pick<PlatformPlan, "monthlyLeadLimit"> },
+  now = new Date(),
+): number | null {
+  if (sub.plan.monthlyLeadLimit === null) return null;
+  return sub.plan.monthlyLeadLimit + activeBonusLeads(sub, now);
+}
+
 function toEntitlements(sub: SubWithPlan, balancePen: number): Entitlements {
   const { status, blocked, graceEndsAt } = deriveBillingState(sub, balancePen);
   return {
@@ -113,7 +130,7 @@ function toEntitlements(sub: SubWithPlan, balancePen: number): Entitlements {
     blocked,
     modules: sub.plan.modules,
     verticals: sub.plan.verticals,
-    monthlyLeadLimit: sub.plan.monthlyLeadLimit,
+    monthlyLeadLimit: effectiveLeadLimit(sub),
     extraLeadPricePen: sub.plan.extraLeadPricePen === null ? null : Number(sub.plan.extraLeadPricePen),
     planId: sub.planId,
     planName: sub.plan.name,
@@ -154,7 +171,7 @@ export async function getEntitlements(companyId: string): Promise<Entitlements> 
 // (Helpers de TZ replicados de dashboard.service.ts.)
 // ---------------------------------------------------------------
 
-function tzOffsetMs(date: Date, timeZone: string): number {
+export function tzOffsetMs(date: Date, timeZone: string): number {
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone,
     hourCycle: "h23",
@@ -175,6 +192,24 @@ export function monthStartUtc(timeZone: string, now = new Date()): Date {
   const fmt = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit" });
   const p = Object.fromEntries(fmt.formatToParts(now).map((x) => [x.type, x.value])) as Record<string, string>;
   const base = new Date(`${p.year}-${p.month}-01T00:00:00.000Z`);
+  return new Date(base.getTime() - tzOffsetMs(base, timeZone));
+}
+
+/** Instante UTC de las 00:00 del día 1 del mes SIGUIENTE en la TZ del tenant. */
+export function nextMonthStartUtc(timeZone: string, now = new Date()): Date {
+  const start = monthStartUtc(timeZone, now);
+  // +35 días cae siempre dentro del mes siguiente.
+  return monthStartUtc(timeZone, new Date(start.getTime() + 35 * DAY_MS));
+}
+
+/** Día calendario (YYYY-MM-DD) de un instante en la TZ dada. */
+export function dayInTz(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+
+/** Instante UTC de las 23:59:59 del día YYYY-MM-DD en la TZ dada. */
+export function endOfDayUtc(day: string, timeZone: string): Date {
+  const base = new Date(`${day}T23:59:59.000Z`);
   return new Date(base.getTime() - tzOffsetMs(base, timeZone));
 }
 

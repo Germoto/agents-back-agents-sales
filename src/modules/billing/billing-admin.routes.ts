@@ -5,6 +5,7 @@ import { requireRole } from "../../middlewares/role.middleware";
 import { validate } from "../../middlewares/validate";
 import {
   adjustCreditsController,
+  adjustSubscriptionController,
   assignSubscriptionController,
   assignCustomSubscriptionController,
   updateCustomSubscriptionController,
@@ -23,6 +24,7 @@ import {
 } from "./billing-admin.controller";
 import {
   adjustCreditsSchema,
+  adjustSubscriptionSchema,
   assignSubscriptionSchema,
   customSubscriptionSchema,
   updateCustomSubscriptionSchema,
@@ -70,6 +72,12 @@ router.put(
   "/subscriptions/:id/extend",
   validate({ params: billingIdParamsSchema, body: extendSubscriptionSchema }),
   asyncHandler(extendSubscriptionController),
+);
+// Ajuste flexible: fecha exacta, leads de regalo y condiciones del plan.
+router.put(
+  "/subscriptions/:id/adjust",
+  validate({ params: billingIdParamsSchema, body: adjustSubscriptionSchema }),
+  asyncHandler(adjustSubscriptionController),
 );
 router.put(
   "/subscriptions/:id/cancel",

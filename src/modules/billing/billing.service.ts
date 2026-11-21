@@ -3,7 +3,9 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { getPlatformMpBilling } from "../platform-config/platform-config.service";
 import {
+  activeBonusLeads,
   countMonthlyLeads,
+  effectiveLeadLimit,
   deriveBillingState,
   getEntitlements,
   invalidateEntitlements,
@@ -90,7 +92,12 @@ export async function getBillingMe(companyId: string) {
     expiresAt: sub?.expiresAt ?? null,
     graceEndsAt: sub ? deriveBillingState(sub, balancePen).graceEndsAt : null,
     canceledAt: sub?.canceledAt ?? null,
-    leadUsage: { used: leadsUsed, limit: sub?.plan.monthlyLeadLimit ?? null },
+    // limit ya incluye los leads de regalo vigentes; bonus los informa aparte.
+    leadUsage: {
+      used: leadsUsed,
+      limit: sub ? effectiveLeadLimit(sub) : null,
+      bonus: sub ? activeBonusLeads(sub) : 0,
+    },
     wallet: {
       balancePen,
       extraLeadPricePen:

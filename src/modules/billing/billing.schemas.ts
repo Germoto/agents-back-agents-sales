@@ -93,6 +93,30 @@ export const updateCustomSubscriptionSchema = customSubscriptionSchema.omit({
   months: true,
 });
 
+// Ajuste flexible de la suscripción (superadmin): fecha exacta de vencimiento,
+// leads de regalo del mes y condiciones del plan. Todo opcional.
+export const adjustSubscriptionSchema = z
+  .object({
+    expiresOn: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha inválida")
+      .refine((v) => !Number.isNaN(new Date(`${v}T00:00:00Z`).getTime()), "Fecha inválida")
+      .optional(),
+    bonusLeads: z.coerce.number().int().min(0).max(1_000_000).optional(),
+    plan: z
+      .object({
+        pricePen: moneySchema,
+        priceUsd: moneySchema.default(0),
+        modules: z.array(planModuleSchema).default([]),
+        monthlyLeadLimit: nullableNumber(z.number().int().min(1)).default(null),
+        extraLeadPricePen: nullableNumber(z.number().min(0.01).transform(round2)).default(null),
+      })
+      .optional(),
+  })
+  .refine((d) => d.expiresOn !== undefined || d.bonusLeads !== undefined || d.plan !== undefined, {
+    message: "No hay nada que ajustar",
+  });
+
 // ---------------- Vales ----------------
 
 export const voucherBatchSchema = z
