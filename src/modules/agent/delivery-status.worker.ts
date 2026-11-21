@@ -18,6 +18,7 @@ import { notifyOwner } from "./conversation.service";
 import { deliver, fallbackLinkText } from "./delivery";
 import { isStickerGalleryUrl } from "../stickers/sticker-url";
 import { retryPolicyFor } from "./delivery-policy";
+import { onMessageDeliveryFailed } from "./invite-delivery";
 
 const BATCH = 200;
 const WINDOW_MIN = 30; // solo mensajes de los últimos 30 min
@@ -242,6 +243,8 @@ export async function driveLinkFallback(): Promise<void> {
 }
 
 /** Marca el mensaje como no entregado, salvo que ya haya llegado un aviso de entrega. */
-async function markFailed(m: { id: string }): Promise<void> {
-  await prisma.conversationMessage.updateMany({ where: { id: m.id, deliveryStatus: "pending" }, data: { deliveryStatus: "failed" } });
+async function markFailed(m: { id: string; companyId: string; customerId: string; rawPayload: unknown }): Promise<void> {
+  const res = await prisma.conversationMessage.updateMany({ where: { id: m.id, deliveryStatus: "pending" }, data: { deliveryStatus: "failed" } });
+  // Invitación a un grupo que no llegó: el miembro deja de figurar como invitado.
+  if (res.count > 0) await onMessageDeliveryFailed(m);
 }

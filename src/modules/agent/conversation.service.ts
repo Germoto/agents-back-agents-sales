@@ -21,6 +21,7 @@ import { normalizePhoneDigits } from "../../lib/identifier";
 import { decodeEntities } from "../../lib/html-entities";
 import { resolveAiSettings } from "../../lib/ai-providers";
 import { transcribeAudio } from "./audio-transcribe";
+import { onMessageDeliveryFailed } from "./invite-delivery";
 import type { ChatMessage } from "../../lib/openai";
 
 /** Estado conversacional persistido en Conversation.state (equivalente al customer.* de n8n). */
@@ -414,7 +415,7 @@ export async function applyDeliveryStatus(ids: Array<string | null>, rawStatus: 
   if (!status || !keys.length) return false;
   const msg = await prisma.conversationMessage.findFirst({
     where: { OR: [{ gatewayId: { in: keys } }, { wamid: { in: keys } }] },
-    select: { id: true, companyId: true, conversationId: true, customerId: true, deliveryStatus: true, wamid: true },
+    select: { id: true, companyId: true, conversationId: true, customerId: true, deliveryStatus: true, wamid: true, rawPayload: true },
   });
   if (!msg) return false;
   // PUENTE id↔wamid: el evento trae el par (id numérico del gateway + wamid de
@@ -443,6 +444,8 @@ export async function applyDeliveryStatus(ids: Array<string | null>, rawStatus: 
     id: msg.id,
     deliveryStatus: status,
   });
+  // Invitación a un grupo que no llegó: el miembro deja de figurar como invitado.
+  if (status === "failed") void onMessageDeliveryFailed(msg);
   return true;
 }
 
@@ -874,7 +877,7 @@ export async function sendHumanReply(
   companyId: string,
   conversationId: string,
   message: string,
-  opts?: { quoteMessageId?: string | null; source?: string | null },
+  opts?: { quoteMessageId?: string | null; source?: string | null; sourceData?: Record<string, string> },
 ): Promise<{ messageId: string; text: string }> {
   const convo = await prisma.conversation.findFirst({
     where: { id: conversationId, companyId },
@@ -927,7 +930,8 @@ export async function sendHumanReply(
     quotedPreview: quote?.preview ?? null,
     // Origen del envío (p. ej. "copilot"): el ritmo anti-bloqueo del copiloto
     // cuenta sus propios mensajes por este campo. El panel no lo manda.
-    ...(opts?.source ? { rawPayload: { source: opts.source } } : {}),
+    // sourceData: datos del origen (p. ej. el grupo de una invitación) para el seguimiento.
+    ...(opts?.source ? { rawPayload: { ...(opts.sourceData ?? {}), source: opts.source } } : {}),
   });
   return { messageId, text };
 }

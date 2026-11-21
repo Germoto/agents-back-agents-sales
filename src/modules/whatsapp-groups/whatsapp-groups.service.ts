@@ -24,6 +24,7 @@ import type { ProductGroupConfig } from "../../lib/product";
 import { smsTools, type SmsToolsGroupAddResult, type SmsToolsGroupInfo } from "../../lib/smstools-client";
 import { SOCKET_EVENTS, socketService } from "../../lib/socket";
 import { notifyOwner, recordMessage, sendHumanReply } from "../agent/conversation.service";
+import { GROUP_INVITE_SOURCE, inviteGroupOf } from "../agent/invite-delivery";
 import { applySpintax } from "../agent/reminder-templates";
 import {
   BLOCK_PAUSE_MS,
@@ -484,12 +485,14 @@ export async function cancelPending(companyId: string, groupId: string) {
  */
 export async function refreshInvited(companyId: string, groupId: string) {
   const group = await requireGroup(companyId, groupId);
+  // Primero lo que no depende del gateway: invitaciones por link que no se entregaron.
+  const failed = await settleFailedInviteLinks(companyId, groupId).catch(() => 0);
   const creds = await requireGroupCreds(companyId);
   const info = await smsTools.getGroupInfo(creds, creds.account, group.gid);
   if (!info) throw new AppError("El proveedor no devolvió los datos del grupo.", 502);
   await prisma.whatsappGroup.update({ where: { id: groupId }, data: groupInfoData(info) });
   const updated = await settleParticipants(groupId, info);
-  return { queued: 0, updated: updated.joined, etaMinutes: 0 };
+  return { queued: 0, updated: updated.joined, failed, etaMinutes: 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -712,7 +715,7 @@ async function noteInChat(companyId: string, customerId: string, text: string, s
 }
 
 /** Origen de los mensajes de invitación (rawPayload.source). */
-const INVITE_SOURCE = "wa-group-invite";
+const INVITE_SOURCE = GROUP_INVITE_SOURCE;
 
 /**
  * Envía el mensaje propio del negocio tras la invitación de WhatsApp. Variables:
@@ -746,7 +749,8 @@ async function sendInviteMessage(
       .replace(/[^\S\n]+([,.!?])/g, "$1")
       .trim();
     if (!text) return;
-    await sendHumanReply(companyId, conv.id, text, { source: INVITE_SOURCE });
+    // «companion»: acompaña a la tarjeta de WhatsApp; su fallo no cambia el estado del miembro.
+    await sendHumanReply(companyId, conv.id, text, { source: INVITE_SOURCE, sourceData: { companion: "1" } });
   } catch (err) {
     console.warn(`[wa-groups] mensaje de invitación falló (cliente ${customerId}): ${err instanceof Error ? err.message : err}`);
     void noteInChat(companyId, customerId, `👥 No se pudo enviar tu mensaje de invitación al grupo «${group.name}».`, true);
@@ -761,7 +765,7 @@ async function sendInviteMessage(
 async function sendInviteLink(
   companyId: string,
   customerId: string,
-  group: { name: string; inviteMessage: string | null; inviteLink: string | null },
+  group: { id: string; name: string; inviteMessage: string | null; inviteLink: string | null },
 ): Promise<typeof LINK_SENT | typeof NO_INVITE_LINK | typeof LINK_FAILED> {
   const link = (group.inviteLink ?? "").trim();
   if (!isInviteLink(link)) return NO_INVITE_LINK;
@@ -776,12 +780,75 @@ async function sendInviteLink(
     if (!conv) return LINK_FAILED;
     const nombre = (customer.name ?? "").trim().split(/\s+/)[0] ?? "";
     const text = buildLinkMessage(applySpintax(group.inviteMessage ?? ""), { nombre, grupo: group.name, link });
-    await sendHumanReply(companyId, conv.id, text, { source: INVITE_SOURCE });
+    // Guarda el grupo: si el gateway luego lo marca fallido, se sabe qué invitación fue.
+    await sendHumanReply(companyId, conv.id, text, { source: INVITE_SOURCE, sourceData: { groupId: group.id } });
     return LINK_SENT;
   } catch (err) {
     console.warn(`[wa-groups] invitación por link falló (cliente ${customerId}): ${err instanceof Error ? err.message : err}`);
     return LINK_FAILED;
   }
+}
+
+/**
+ * El gateway marcó como fallido el mensaje con el link: el miembro pasa de «invitado» a
+ * «fallido» (reintentable a mano). Sin grupo (mensajes antiguos) aplica a todas sus
+ * invitaciones por link. No reenvía nada. Devuelve cuántos cambió.
+ */
+export async function markInviteLinkFailed(companyId: string, customerId: string, groupId?: string | null): Promise<number> {
+  const rows = await prisma.whatsappGroupMember.findMany({
+    where: { companyId, customerId, status: "INVITADO", lastResult: LINK_SENT, ...(groupId ? { groupId } : {}) },
+    select: { id: true, groupId: true, group: { select: { name: true } } },
+  });
+  let changed = 0;
+  for (const row of rows) {
+    const res = await prisma.whatsappGroupMember.updateMany({
+      where: { id: row.id, status: "INVITADO", lastResult: LINK_SENT },
+      data: { status: "FALLIDO", lastResult: LINK_FAILED, resolvedAt: new Date(), recheck: false, immediate: false },
+    });
+    if (res.count === 0) continue;
+    changed += 1;
+    emitMembersChanged(companyId, row.groupId);
+    await noteInChat(
+      companyId,
+      customerId,
+      `👥 No se pudo entregar la invitación al grupo «${row.group.name}». Puedes reintentarla en Canales → WhatsApp → Grupos.`,
+      true,
+    );
+  }
+  return changed;
+}
+
+/**
+ * Invitados por link cuyo último mensaje de invitación quedó fallido antes de que el
+ * seguimiento lo avisara: se pasan a «fallido» para poder reintentarlos.
+ */
+async function settleFailedInviteLinks(companyId: string, groupId: string): Promise<number> {
+  const invited = await prisma.whatsappGroupMember.findMany({
+    where: { companyId, groupId, status: "INVITADO", lastResult: LINK_SENT },
+    select: { customerId: true },
+    take: 500,
+  });
+  if (invited.length === 0) return 0;
+  const messages = await prisma.conversationMessage.findMany({
+    where: {
+      companyId,
+      customerId: { in: invited.map((m) => m.customerId) },
+      rawPayload: { path: ["source"], equals: INVITE_SOURCE },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { customerId: true, deliveryStatus: true, rawPayload: true },
+  });
+  const seen = new Set<string>();
+  let changed = 0;
+  for (const msg of messages) {
+    // Solo cuenta la invitación más reciente de este grupo (o sin grupo: mensajes antiguos).
+    const of = inviteGroupOf(msg.rawPayload);
+    if (of !== null && of !== groupId) continue;
+    if (seen.has(msg.customerId)) continue;
+    seen.add(msg.customerId);
+    if (msg.deliveryStatus === "failed") changed += await markInviteLinkFailed(companyId, msg.customerId, groupId);
+  }
+  return changed;
 }
 
 function emitMembersChanged(companyId: string, groupId: string) {
