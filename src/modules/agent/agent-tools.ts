@@ -591,6 +591,10 @@ export interface TurnContext {
   guardEvents?: string[];
   /** Notas internas para el dueño que quedan en el chat al cerrar el turno (el cliente no las ve). */
   systemNotes?: string[];
+  /** Una herramienta ya dejó la respuesta para el cliente y el turno termina ahí: el
+   *  runtime NO vuelve a consultar al modelo (pasó en prod: en vez de callar, el modelo
+   *  escribió «Dejo el texto final vacío, el sistema ya le pidió el dato»). Guarda el motivo. */
+  turnClosed?: string;
 }
 
 /**
@@ -1116,6 +1120,7 @@ export async function reportPaymentForReview(ctx: TurnContext): Promise<{ report
   const prevFresh = !!prev?.at && now - new Date(prev.at).getTime() < 24 * 60 * 60_000;
   // Mismo pago ya reportado (misma captura, o un «ya pagué» repetido sin captura nueva).
   if (prev && prevFresh && (!receiptAt || prev.receiptAt === receiptAt)) {
+    ctx.turnClosed = "el pago ya estaba reportado al dueño";
     return { reported: false, note: "Ya avisaste al dueño de este pago y el cliente ya tiene la respuesta: no repitas el aviso. Deja tu texto final vacío." };
   }
 
@@ -1183,6 +1188,7 @@ export async function reportPaymentForReview(ctx: TurnContext): Promise<{ report
   if (receipt?.at) ctx.state.receiptAutoHandledAt = receipt.at;
   ctx.state.pendingRecheckAt = null;
   markHandoff(ctx, `${OWNER_REVIEW_HANDOFF}: ${detail}`);
+  ctx.turnClosed = "pago reportado al dueño, el cliente ya tiene la respuesta";
   return {
     reported: true,
     note: ctx.simulate
@@ -4092,6 +4098,7 @@ export async function executeTool(
       if (result.approved) {
         if (result.kind === "already") {
           if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
+          ctx.turnClosed = "el pago ya estaba confirmado, el cliente ya tiene el aviso";
           return JSON.stringify({ ok: true, approved: true, note: "El pago ya estaba confirmado. NO vuelvas a entregar ni a validar. Ya le avisé al cliente; deja tu texto final vacío." });
         }
         return JSON.stringify({
@@ -4131,6 +4138,7 @@ export async function executeTool(
           });
           ctx.state.pendingRecheckAt = new Date().toISOString();
         }
+        ctx.turnClosed = "pago en validación, el cliente ya tiene la respuesta";
         return JSON.stringify({ ok: true, approved: false, kind: "timing", note: "Ya le respondí al cliente (estoy validando). NO agregues texto ni apruebes; deja tu texto final vacío." });
       }
 
@@ -4156,9 +4164,11 @@ export async function executeTool(
           kind: "text",
           text: "Voy a pasar tu caso a un asesor para validar tu pago cuanto antes 🙏 En un momentito te confirma. ¡Gracias por tu paciencia!",
         });
+        ctx.turnClosed = "pago derivado a un asesor, el cliente ya tiene el aviso";
         return JSON.stringify({ ok: true, approved: false, derived: true, note: "Derivado a un asesor: no se pudo validar el pago. Deja tu texto final vacío." });
       }
       if (result.customerMessage) ctx.outbox.push({ kind: "text", text: result.customerMessage });
+      ctx.turnClosed = "ya se le pidió al cliente el dato para validar el pago";
       return JSON.stringify({ ok: true, approved: false, kind: result.kind, note: "Ya le respondí al cliente pidiéndole el dato para validar. NO agregues texto ni apruebes; deja tu texto final vacío." });
     }
 
@@ -4167,7 +4177,7 @@ export async function executeTool(
       // Idempotencia: si ya se entregó (p.ej. la auto-validación de la imagen ya
       // entregó), no volver a enviar el acceso.
       if (!ctx.simulate && ctx.state.status === "ENTREGADO") {
-        return JSON.stringify({ ok: true, alreadyDelivered: true, note: "El acceso YA se entregó. NO lo reenvíes; deja tu texto final vacío y queda disponible para dudas." });
+        return JSON.stringify({ ok: true, alreadyDelivered: true, note: "El acceso YA se entregó. NO lo reenvíes. Si el cliente tiene una duda, respóndela con naturalidad." });
       }
       // En SIMULACIÓN no hay PaymentReceipt real: entregar según carrito/seleccionado.
       let ids: string[];

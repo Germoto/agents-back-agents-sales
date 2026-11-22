@@ -191,7 +191,7 @@ const REPEATED_CLOSING_EVENT = "cierre repetido descartado: el cliente escribió
  * Nunca deben llegar al cliente.
  */
 const INTERNAL_NOTE_RE =
-  /(respuesta vac[ií]a|mi respuesta anterior|respuesta anterior (tuvo|ten[ií]a|fue)|el cliente (solo |s[oó]lo )?(envi[oó]|escribi[oó]|mand[oó])|nota interna|no hay nada nuevo que|lo [uú]ltimo que me dijiste fue|\(sin respuesta\)|\bSIN_RESPUESTA\b.+|.+\bSIN_RESPUESTA\b)/i;
+  /(respuesta vac[ií]a|mi respuesta anterior|respuesta anterior (tuvo|ten[ií]a|fue)|el cliente (solo |s[oó]lo )?(envi[oó]|escribi[oó]|mand[oó])|nota interna|texto (final )?vac[ií]o|dej(o|ar[eé]|é) (el |mi )?(texto|mensaje|respuesta)( final)? (vac[ií]|en blanco)|el sistema ya (se )?le (respond|ped|pid|envi|avis|mand)|ya (le (respond[ií]|ped[ií]|envi[eé]|avis[eé]|mand[eé])|se le (respondi[oó]|pidi[oó]|envi[oó]|avis[oó]|mand[oó])) (el [a-záéíóú ]{0,25})?al cliente|no hay nada nuevo que|lo [uú]ltimo que me dijiste fue|\(sin respuesta\)|\bSIN_RESPUESTA\b.+|.+\bSIN_RESPUESTA\b)/i;
 export function isInternalNote(text: string | null | undefined): boolean {
   const t = (text ?? "").trim();
   if (!t) return false;
@@ -562,6 +562,14 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
         );
         logTool(ctx, call.function.name, result);
         messages.push({ role: "tool", tool_call_id: call.id, content: result });
+      }
+      // Turno cerrado por el sistema: una herramienta ya dejó la respuesta para el cliente
+      // (pidió el dato del pago, avisó que está validando, derivó a un asesor…). No se
+      // vuelve a consultar al modelo: callar no puede depender de que obedezca.
+      if (ctx.turnClosed) {
+        (ctx.guardEvents ??= []).push(`turno cerrado por el sistema: ${ctx.turnClosed}`);
+        console.log(`[agent] turno cerrado por el sistema (${ctx.turnClosed}) convo=${ctx.conversationId}`);
+        return "";
       }
       continue;
     }
