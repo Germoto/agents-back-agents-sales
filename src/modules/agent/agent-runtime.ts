@@ -775,7 +775,10 @@ function shouldForcePresentation(ctx: TurnContext, history: ChatMessage[]): bool
   const productId = ctx.state.selectedProductId;
   if (!productId) return false;
   if ((ctx.state.presentedProductIds ?? []).includes(productId)) return false;
-  if (history.some((m) => m.role === "assistant")) return false;
+  // Cliente que vuelve por OTRO anuncio: ese producto se presenta aunque el chat ya
+  // tenga historial (la marca la deja el turno al atender el clic y vive un solo turno).
+  const fromNewAdClick = ctx.adFocusProductId === productId;
+  if (!fromNewAdClick && history.some((m) => m.role === "assistant")) return false;
   // El producto debe existir en el catálogo activo del bot (si fue desactivado,
   // dejar que el modelo maneje el turno con normalidad).
   if (!ctx.config.products.some((p) => p.id === productId)) return false;

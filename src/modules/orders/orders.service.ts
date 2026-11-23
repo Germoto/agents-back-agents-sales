@@ -8,6 +8,7 @@ import { parseDeliveryType } from "../shipping/shipping-config";
 import { applyOrderPayment, mapOrder, moneyOf, toDec, type PaymentKind, type PaymentSource } from "./order-money";
 import { afterOrderPaymentOutsideChat, noticeEventForStatus, notifyOrderEvent, type OrderNoticeResult } from "./order-notify.service";
 import { schedulePostPurchaseOnDelivery } from "../storefront/storefront-email.service";
+import { cancelPendingOrderEvent, recordSaleForMeta } from "../meta-capi/meta-sales.service";
 
 const ORDER_INCLUDE = {
   customer: true,
@@ -122,6 +123,10 @@ export async function updateOrderStatus(
     status: updated.status,
     customerName: updated.customerName,
   });
+  // Meta Conversions API: pedido pagado o entregado = venta (cubre contraentrega,
+  // «marcar pagado» y pedidos sin comprobante). No-op si ese pedido ya se reportó.
+  if (status === "PAGADO" || status === "ENTREGADO") void recordSaleForMeta(companyId, { orderId });
+  else if (status === "CANCELADO") void cancelPendingOrderEvent(companyId, orderId);
   // Pedido de la tienda web ya entregado: programa su correo post-compra (si dejó correo).
   if (status === "ENTREGADO") void schedulePostPurchaseOnDelivery(companyId, orderId);
   // Aviso al cliente (solo si quien cambia el estado lo pidió y el evento está encendido).

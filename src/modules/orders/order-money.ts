@@ -10,6 +10,7 @@ import { OrderStatus, Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
+import { recordSaleForMeta } from "../meta-capi/meta-sales.service";
 
 const EPS = 0.005;
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -274,6 +275,10 @@ export async function applyOrderPayment(input: ApplyPaymentInput): Promise<Apply
     return { already: false, order, kind, amount, money, previousStatus: order.status, firstPayment: before.paid <= EPS };
   });
   if (!result) return null;
+
+  // Meta Conversions API: el primer pago confirma la venta. Una sola compra por
+  // pedido (con su total): el saldo posterior ya no genera otro evento.
+  if (!result.already) void recordSaleForMeta(input.companyId, { orderId: result.order.id });
 
   let status = result.order.status;
   if (!result.already && PRE_DISPATCH_STATUSES.includes(status)) {

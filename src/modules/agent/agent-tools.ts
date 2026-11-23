@@ -79,6 +79,7 @@ import {
 } from "../public-payments/public-payments.service";
 import { createAgentOrder, createOrderFromCart, findOpenChatOrder, sameProducts, type OrderShippingInput } from "./order.service";
 import { markOrderPaid, findPendingOrderForCustomer } from "../orders/orders.service";
+import { recordSaleForMeta } from "../meta-capi/meta-sales.service";
 import {
   createBooking,
   reasonMessage,
@@ -595,6 +596,9 @@ export interface TurnContext {
    *  runtime NO vuelve a consultar al modelo (pasó en prod: en vez de callar, el modelo
    *  escribió «Dejo el texto final vacío, el sistema ya le pidió el dato»). Guarda el motivo. */
   turnClosed?: string;
+  /** Producto del anuncio por el que el cliente acaba de entrar (clic nuevo atendido en
+   *  este turno): el agente lo presenta aunque el chat ya tenga historial. No se persiste. */
+  adFocusProductId?: string | null;
 }
 
 /**
@@ -1889,6 +1893,7 @@ export async function tryApprovePayment(opts: {
         matchStrategy: reasons.join("+") || "agent_auto",
         matchedPayerNameInput: payerName || (codes[0] ?? ""),
         customerPhone: opts.customerPhone,
+        customerId,
         productIds,
       } as any);
       await tagReceiptPlans(companyId, top.id, config, planByProductFromCart(cart));
@@ -2127,6 +2132,9 @@ async function approveOrderPayment(
         matchStrategy: reasons.join("+") || "agent_auto",
         matchedPayerNameInput: payerName || (codes[0] ?? ""),
         customerPhone: opts.customerPhone,
+        customerId,
+        // La venta la reporta el pedido (una sola compra por pedido, con su total).
+        reportToMeta: false,
         productIds,
       } as any);
       const credited = await creditOrderPayment({
@@ -2142,6 +2150,9 @@ async function approveOrderPayment(
       if (!credited) throw new Error("el pedido no admite pagos");
       return { approved: true, order: credited.order, customerMessage: orderPaymentMessage(credited.order, sym) };
     } catch (err) {
+      // Si el comprobante llegó a aprobarse pero no se pudo acreditar al pedido, la
+      // venta igual se reporta (no-op si no quedó aprobado o el pedido ya la reportó).
+      void recordSaleForMeta(companyId, { receiptId: top.id });
       console.warn("[agent] no se pudo acreditar el pago al pedido:", err instanceof Error ? err.message : err);
       return {
         approved: false,

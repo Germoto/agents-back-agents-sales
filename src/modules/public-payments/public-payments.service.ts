@@ -4,7 +4,7 @@ import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { validatePaymentInValidPay } from "../../lib/validpay-client";
 import type { MatchBody, UpdateStatusBody, ClaimBody } from "./public-payments.schemas";
-import { reportCtwaConversion } from "../meta-capi/meta-capi.service";
+import { recordSaleForMeta } from "../meta-capi/meta-sales.service";
 
 // -------------------------------------------------------------------------
 // Helpers de identificación de company por phone admin (estilo /bot/config)
@@ -410,7 +410,13 @@ function mergeMetadata(
 export async function updatePaymentStatus(
   companyId: string,
   id: string,
-  input: UpdateStatusBody,
+  input: UpdateStatusBody & {
+    /** Cliente exacto del chat (el agente lo conoce): evita buscarlo por teléfono y
+     *  crear un «Cliente ValidPay» duplicado sin anuncio si el formato no coincide. */
+    customerId?: string | null;
+    /** false = quien llama reporta la venta a Meta por su cuenta (pedidos, tienda web). */
+    reportToMeta?: boolean;
+  },
 ) {
   const receipt = await prisma.paymentReceipt.findFirst({
     where: { id, companyId },
@@ -503,7 +509,12 @@ export async function updatePaymentStatus(
 
   // -------- Upsert customer por phone --------
   let customerIdToSet: string | null | undefined;
-  if (input.customerPhone) {
+  const knownCustomer = input.customerId
+    ? await prisma.customer.findFirst({ where: { id: input.customerId, companyId }, select: { id: true } })
+    : null;
+  if (knownCustomer) {
+    customerIdToSet = knownCustomer.id;
+  } else if (input.customerPhone) {
     const phoneNorm = input.customerPhone.startsWith("+")
       ? input.customerPhone
       : `+${input.customerPhone.replace(/\D/g, "")}`;
@@ -578,8 +589,8 @@ export async function updatePaymentStatus(
 
   // Meta Conversions API: reportar la venta al anuncio de origen (ctwa_clid del
   // lead). Best-effort, no-op si el tenant no configuró CAPI.
-  if (input.status === "APROBADO") {
-    void reportCtwaConversion(companyId, updated.id).catch(() => undefined);
+  if (input.status === "APROBADO" && input.reportToMeta !== false) {
+    void recordSaleForMeta(companyId, { receiptId: updated.id });
   }
 
   const serialized = serializeReceipt(updated);

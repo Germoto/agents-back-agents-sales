@@ -197,6 +197,7 @@ model Company {
   webchatConfig        WebchatConfig?
   mcpConfig            McpConfig?
   metaCapiConfig       MetaCapiConfig?
+  metaConversionEvents MetaConversionEvent[]
   adCatalogEntries     AdCatalogEntry[]
   bookingWidget        BookingWidgetConfig?
   platformPayments     PlatformPayment[]
@@ -441,6 +442,9 @@ model MetaCapiConfig {
   // Píxel de Meta en la tienda web (usa datasetId como pixel id): PageView, ViewContent,
   // InitiateCheckout y Purchase en el navegador + Purchase por CAPI (dedupe por event_id).
   pixelEnabled  Boolean   @default(false)
+  // Reportar también las ventas de clientes SIN clic de anuncio guardado (solo
+  // teléfono cifrado + pageId; Meta atribuye si tocó un anuncio en los últimos 7 días).
+  reportWithoutClick Boolean @default(false)
   // Diagnóstico del último intento de envío (visible en la card del panel).
   lastAttemptAt DateTime?
   lastResult    String?
@@ -920,6 +924,13 @@ model Customer {
   adTitle            String?
   ctwaClid           String?
   adSourceUrl        String?
+  // ÚLTIMO clic de anuncio (las cuatro de arriba quedan como el PRIMERO, origen
+  // histórico). Cada clic vive además en AdTouch. La compra se reporta a Meta con
+  // el clic más reciente anterior a la venta.
+  lastAdSourceId     String?
+  lastAdTitle        String?
+  lastCtwaClid       String?
+  lastAdAt           DateTime?
   lastInteractionAt  DateTime
   metadata           Json
   createdAt          DateTime              @default(now())
@@ -941,11 +952,70 @@ model Customer {
   subscriptions      Subscription[]
   storeOrders        StoreOrder[]
   whatsappGroupLinks WhatsappGroupMember[]
+  adTouches          AdTouch[]
 
   @@unique([companyId, phone])
   @@index([companyId, lastInteractionAt])
   @@index([companyId, adSourceId])
   @@index([companyId, optOutAt])
+}
+
+// Cada clic de anuncio (CTWA) con el que un cliente escribe: el primero y todos los
+// siguientes. messageId único por empresa: un webhook repetido no duplica el toque.
+// flowConsumedAt vacío = el disparador «lead de anuncio» de los flujos aún no lo vio.
+model AdTouch {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String    @db.Uuid
+  customerId     String    @db.Uuid
+  conversationId String?   @db.Uuid
+  adSourceId     String
+  adTitle        String?
+  ctwaClid       String?
+  adSourceUrl    String?
+  sourceType     String?
+  messageId      String?
+  entryId        String?   @db.Uuid // AdCatalogEntry.id resuelto al llegar (sin FK)
+  flowConsumedAt DateTime?
+  createdAt      DateTime  @default(now())
+  customer       Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, messageId])
+  @@index([customerId, createdAt])
+  @@index([companyId, adSourceId, createdAt])
+}
+
+// Cola de compras reportadas a Meta (Conversions API). Una fila por VENTA: eventKey
+// es `receipt:<id>` (comprobante suelto), `order:<id>` (pedido: una sola compra con
+// el total) o `store:<id>` (tienda web). Único por empresa: es NUESTRO control de
+// duplicados (Meta no deduplica eventos de mensajería). payload = evento listo.
+model MetaConversionEvent {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId     String    @db.Uuid
+  eventKey      String
+  kind          String // 'CHAT' | 'STORE'
+  status        String    @default("PENDING") // 'PENDING' | 'SENT' | 'SKIPPED' | 'FAILED'
+  receiptId     String?   @db.Uuid
+  orderId       String?
+  customerId    String?   @db.Uuid
+  adSourceId    String?
+  adTitle       String?
+  hasClick      Boolean   @default(false)
+  value         Decimal?  @db.Decimal(12, 2)
+  currency      String?
+  eventTime     DateTime
+  payload       Json?
+  attempts      Int       @default(0)
+  lastError     String?
+  nextAttemptAt DateTime?
+  sentAt        DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, eventKey])
+  @@index([companyId, createdAt])
+  @@index([status, nextAttemptAt])
+  @@index([companyId, customerId, createdAt])
 }
 
 // Catálogo de anuncios del tenant: mapea uno o VARIOS identificadores del
@@ -1547,6 +1617,10 @@ model PaymentReceipt {
   matchStrategy         String? // ej: "amount_name_time"
   matchedPayerNameInput String? // nombre que envió el cliente vs el del comprobante
   metadata              Json? // extras: conversationKey, waPhone, cartTotal, expectedAmount, etc.
+  // Anuncio vigente del cliente al momento de la venta (foto: no cambia aunque el
+  // cliente luego llegue por otro anuncio). Lo usa «Rendimiento por anuncio».
+  adSourceId            String?
+  adTitle               String?
   claimedBy             String? // identificador de la ejecución n8n que reclamó el pago
   claimedUntil          DateTime? // timestamp hasta el cual el claim es válido
   createdAt             DateTime       @default(now())

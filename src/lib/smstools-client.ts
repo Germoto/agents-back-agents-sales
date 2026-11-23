@@ -815,6 +815,8 @@ export type InboundMessage = {
   ctwaClid: string | null;
   /** URL del anuncio (fb.me/…) */
   adSourceUrl: string | null;
+  /** Tipo de origen que informa Meta ("ad" | "post"); opcional, solo Cloud API. */
+  adSourceType?: string | null;
   /** wamid de WhatsApp del PROPIO mensaje entrante (ancla de reacciones/citas a mensajes del cliente) */
   wamid: string | null;
   /** Reacción emoji: wamid del mensaje al que reaccionó el cliente */

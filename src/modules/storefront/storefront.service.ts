@@ -1277,6 +1277,19 @@ async function createPhysicalCheckout(store: Awaited<ReturnType<typeof resolveSt
     void recordPurchaseEvent(order);
     void consumeCoupon(order);
     void announcePhysicalOrder(order.id);
+    // Meta CAPI: el pedido contra entrega cuenta como compra al confirmarse (sin
+    // comprobante). El pedido real (source WEB) no vuelve a reportarse al cobrarse.
+    void reportStorePurchase({
+      companyId,
+      orderId: order.id,
+      email: order.email,
+      phone: order.phone && !order.phone.startsWith("web:") ? order.phone : null,
+      customerId: order.customerId,
+      productIds: orderProductIds(order),
+      client: ((order.metadata ?? {}) as { web?: StoreWebClient }).web ?? null,
+      value: Number(order.orderTotal ?? 0),
+      currency: order.currency,
+    }).catch(() => undefined);
     console.log(`[storefront] pedido ${order.id} CONFIRMADO (contra entrega) pedido=${real.orderCode}`);
     return {
       ...common,
@@ -1589,6 +1602,9 @@ export async function fulfillStoreOrder(
     customerId: order.customerId,
     productIds: orderProductIds(order),
     client: ((order.metadata ?? {}) as { web?: StoreWebClient }).web ?? null,
+    // Tienda física: una sola compra por pedido con su TOTAL (no solo el adelanto).
+    value: Number(order.orderTotal ?? 0) || opts.paid,
+    currency: order.currency,
   }).catch(() => undefined);
 
   // Tienda física: no hay entrega digital. Nace el pedido real con lo pagado acreditado y
@@ -2160,6 +2176,9 @@ export async function tryMatchStoreOrder(orderId: string): Promise<boolean> {
       productIds: orderProductIds(order),
       note: "Pago Yape/Plin validado automáticamente desde la tienda web",
       metadata: { channel: "storefront", storeOrderId: order.id, email: order.email },
+      // La compra de la tienda se reporta como evento de sitio web (fulfillStoreOrder),
+      // nunca además como venta del chat.
+      reportToMeta: false,
     });
     await prisma.paymentReceipt.update({
       where: { id: top.id },

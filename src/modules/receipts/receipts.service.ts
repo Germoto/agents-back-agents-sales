@@ -9,7 +9,7 @@ import { ConversationState, saveState } from "../agent/conversation.service";
 import { markFollowupReset } from "../scheduler/smart-followup";
 import { clearMpLinkState } from "../agent/payment-methods";
 import { resumeFlowOnPaymentOutcome } from "../flows/flow-engine";
-import { reportCtwaConversion } from "../meta-capi/meta-capi.service";
+import { recordSaleForMeta } from "../meta-capi/meta-sales.service";
 import { singleOpenOrderFor, applyOrderPayment } from "../orders/order-money";
 import { afterOrderPaymentOutsideChat, resumeChatAfterOwnerReview } from "../orders/order-notify.service";
 
@@ -261,15 +261,16 @@ export async function approveReceipt(
     });
   }
 
-  // Meta Conversions API: reportar la venta al anuncio de origen (best-effort).
-  void reportCtwaConversion(companyId, receipt.id).catch(() => undefined);
-
   // Pedido con «Envíos»: si el cliente tiene UN solo pedido con saldo, el comprobante
   // aprobado se le acredita (adelanto o saldo). No-op para los pedidos de siempre.
   const credited = await creditReceiptToOpenOrder(companyId, updated).catch((err) => {
     console.warn("[receipts] no se pudo acreditar el comprobante al pedido:", err instanceof Error ? err.message : err);
     return null;
   });
+
+  // Meta Conversions API: reportar la venta (best-effort). DESPUÉS de acreditar al
+  // pedido: así un comprobante de pedido cuenta como UNA compra por pedido.
+  void recordSaleForMeta(companyId, { receiptId: receipt.id });
   // «La reviso yo» sin pedido que acreditar: el bot vuelve al chat con el pago confirmado
   // (con pedido ya lo hizo afterOrderPaymentOutsideChat). No-op si el chat no esperaba al dueño.
   if ((!credited || credited.already) && updated.customerId) {
@@ -374,7 +375,7 @@ export async function deliverReceiptManually(
   });
 
   // Meta Conversions API: reportar la venta al anuncio de origen (best-effort).
-  void reportCtwaConversion(companyId, receipt.id).catch(() => undefined);
+  void recordSaleForMeta(companyId, { receiptId: receipt.id });
 
   // Embudo del chat → ENTREGADO (best-effort, no rompe la aprobación).
   try {
@@ -465,6 +466,11 @@ export async function associateReceiptProduct(
       ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
     },
   });
+
+  // Comprobante ya APROBADO (p. ej. por el webhook de ValidPay, sin cliente) que
+  // recién ahora queda ligado a su cliente: es el momento de reportar la venta a
+  // Meta. No-op si aún no está aprobado, sigue sin cliente o ya se reportó.
+  if (updated.status === "APROBADO") void recordSaleForMeta(companyId, { receiptId: updated.id });
 
   // Refresco en vivo del panel
   socketService.emitToCompany(companyId, SOCKET_EVENTS.RECEIPT_UPDATED, {

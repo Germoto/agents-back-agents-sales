@@ -59,6 +59,7 @@ import {
 } from "../flows/flow-engine";
 import { tryApprovePayment, approveExternalPayment, muteCustomerToHuman, autoSaleNotice, shouldDropFinalTextAfterPayment, shouldDropFinalTextAfterVoice, shippingOf, creditOrderPayment, voiceToolAvailable, type TurnContext } from "./agent-tools";
 import { orderDueFor } from "../orders/order-money";
+import { recordSaleForMeta } from "../meta-capi/meta-sales.service";
 import { blockedFolderIdsFor, stripBlockedFolderLinks } from "../drive/drive-guard";
 import { summarizeCart } from "./cart.service";
 import { resolveCompanyIdByPhone } from "../public-payments/public-payments.service";
@@ -76,7 +77,7 @@ import { gateNewLead } from "../billing/billing.service";
 import { transcribeAudio } from "./audio-transcribe";
 import { extractInboundUsername } from "./inbound-username";
 import { enrichCustomerFromWhatsapp } from "../customers/lead-enrich.service";
-import { resolveAdCatalog, adCatalogEntryFor } from "../ad-catalog/ad-catalog.service";
+import { consumePendingAdTouch, recordAdTouch } from "../ad-catalog/ad-touch.service";
 import { applyCrmAndTagActions } from "../crm/crm.service";
 
 interface FollowupConfig {
@@ -435,75 +436,40 @@ export async function handleInbound(inbound: InboundMessage): Promise<void> {
       .catch(() => undefined);
   }
 
-  // Atribución de anuncios Meta CTWA: llega SOLO en el primer mensaje del lead
-  // que vino de un anuncio. PRIMERA GANA: se escribe únicamente si el lead aún
-  // no tiene atribución (adSourceId null); los mensajes posteriores llegan con
-  // los campos vacíos y no tocan nada. ctwaClid se guarda ÍNTEGRO (futura
-  // Meta Conversions API).
+  // Atribución de anuncios Meta CTWA: el anuncio llega en el mensaje con el que
+  // el cliente entra desde ese anuncio. CADA clic se registra (AdTouch): el primero
+  // queda como origen del lead y el último es el que se reporta a Meta al comprar,
+  // así un cliente que vuelve por OTRO anuncio queda bien atribuido. ctwaClid se
+  // guarda ÍNTEGRO. Aquí solo se escribe en la base; lo que cambia la conversación
+  // (disparador de flujos, producto en foco) lo aplica el turno (applyPendingAdTouch).
   if (inbound.adSourceId) {
-    // `count > 0` = la atribución se fijó AHORA (primer mensaje atribuido). Es la
-    // señal para las acciones por anuncio y para el disparador onAdLead de los
-    // flujos; un webhook repetido da count=0 y no duplica nada.
-    const { count } = await prisma.customer
-      .updateMany({
-        where: { id: convo.customerId, adSourceId: null },
-        data: {
-          adSourceId: inbound.adSourceId,
-          adTitle: inbound.adTitle,
-          ctwaClid: inbound.ctwaClid,
-          adSourceUrl: inbound.adSourceUrl,
-        },
-      })
-      .catch(() => ({ count: 0 }));
-    const firstAttribution = count > 0;
-    // Si el catálogo vincula este anuncio a un PRODUCTO, el lead entra con ese
-    // producto como interés (solo si aún no tiene uno — no pisa elecciones).
-    try {
-      const entry = adCatalogEntryFor(await resolveAdCatalog(companyId), inbound.adSourceId, inbound.adTitle);
-      let stateDirty = false;
-      if (firstAttribution) {
-        // Acciones CRM del anuncio (etiquetas / columna), solo con módulo CRM.
-        if (entry && (entry.tagIds.length || entry.crmColumnId)) {
-          const ent = await getEntitlements(companyId);
-          if (ent.legacy || ent.modules.includes("CRM")) {
-            try {
-              await applyCrmAndTagActions(companyId, convo.customerId, {
-                tagIds: entry.tagIds,
-                crmId: entry.crmId,
-                crmColumnId: entry.crmColumnId,
-              });
-            } catch (err) {
-              console.error("[ads] acciones CRM del anuncio fallaron:", err instanceof Error ? err.message : err);
-            }
-          }
+    const touch = await recordAdTouch({
+      companyId,
+      customerId: convo.customerId,
+      conversationId: convo.conversationId,
+      adSourceId: inbound.adSourceId,
+      adTitle: inbound.adTitle,
+      ctwaClid: inbound.ctwaClid,
+      adSourceUrl: inbound.adSourceUrl,
+      sourceType: inbound.adSourceType ?? null,
+      messageId: inbound.messageId,
+    });
+    // Clic NUEVO (no un webhook repetido): acciones CRM del anuncio (etiquetas /
+    // columna), solo con módulo CRM.
+    const entry = touch.entry;
+    if (touch.isNew && entry && (entry.tagIds.length || entry.crmColumnId)) {
+      try {
+        const ent = await getEntitlements(companyId);
+        if (ent.legacy || ent.modules.includes("CRM")) {
+          await applyCrmAndTagActions(companyId, convo.customerId, {
+            tagIds: entry.tagIds,
+            crmId: entry.crmId,
+            crmColumnId: entry.crmColumnId,
+          });
         }
-        // Señal para el disparador onAdLead (la consume el motor de flujos).
-        convo.state.adLead = {
-          adSourceId: inbound.adSourceId,
-          adTitle: inbound.adTitle ?? null,
-          entryId: entry?.id ?? null,
-          pending: true,
-          at: new Date().toISOString(),
-        };
-        stateDirty = true;
+      } catch (err) {
+        console.error("[ads] acciones CRM del anuncio fallaron:", err instanceof Error ? err.message : err);
       }
-      if (entry?.productId) {
-        await prisma.customer.updateMany({
-          where: { id: convo.customerId, selectedProductId: null },
-          data: { selectedProductId: entry.productId },
-        });
-        // Sembrar también el ESTADO de la conversación: es lo que lee el prompt
-        // (state.selectedProductId = producto EN FOCO) — así el bot presenta el
-        // producto del anuncio aunque el cliente abra con un "Hola" genérico,
-        // igual que hacen las campañas con contextProductId.
-        if (!convo.state.selectedProductId) {
-          convo.state.selectedProductId = entry.productId;
-          stateDirty = true;
-        }
-      }
-      if (stateDirty) await saveState(convo.conversationId, convo.state);
-    } catch {
-      /* best-effort */
     }
   }
 
@@ -782,6 +748,39 @@ async function fireTurn(key: string): Promise<void> {
 }
 
 /**
+ * Aplica al turno el clic de anuncio pendiente del cliente (una sola vez por clic):
+ *  - deja la señal `adLead` para el disparador «lead de anuncio» de los flujos;
+ *  - pone en foco el producto ligado a ese anuncio en el catálogo, aunque el cliente
+ *    ya tuviera otro (escribió desde ESE anuncio), salvo que haya un pago en curso;
+ *  - marca `adFocusProductId` para que el agente presente ese producto en este turno.
+ * Vive en el turno (no en el mensaje entrante) para no pisarse con el guardado del estado.
+ */
+async function applyPendingAdTouch(ctx: TurnContext): Promise<void> {
+  const touch = await consumePendingAdTouch(ctx.companyId, ctx.customerId);
+  if (!touch) return;
+  // `pending` solo donde hay motor de flujos que lo consuma: en modo IA quedaría
+  // colgado y se dispararía tarde si el negocio cambia de modo.
+  const mode = ctx.config.business.botMode;
+  ctx.state.adLead = {
+    adSourceId: touch.adSourceId,
+    adTitle: touch.adTitle,
+    entryId: touch.entryId,
+    pending: mode === "FLOW" || mode === "HYBRID",
+    at: touch.at,
+  };
+  const productId = touch.productId;
+  if (!productId) return;
+  const status = ctx.state.status ?? "";
+  const paying = status === "ESPERANDO_PAGO" || status === "ESPERANDO_VALIDACION";
+  if (paying && ctx.state.selectedProductId && ctx.state.selectedProductId !== productId) return;
+  ctx.state.selectedProductId = productId;
+  ctx.adFocusProductId = productId;
+  await prisma.customer
+    .updateMany({ where: { id: ctx.customerId, companyId: ctx.companyId }, data: { selectedProductId: productId } })
+    .catch(() => undefined);
+}
+
+/**
  * Corre un turno del agente para una conversación. Recarga config y estado
  * frescos (el turno está desfasado del inbound) y responde una sola vez con todo
  * el historial acumulado.
@@ -836,6 +835,10 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
   // cada turno y se inyecta al prompt para que el agente recuerde compras previas y
   // no se confunda con un catálogo de varios productos.
   ctx.state.purchasedProductIds = await getPurchasedProductIds(companyId, customerId);
+
+  // Clic de anuncio aún no atendido (primer mensaje del lead o cliente que vuelve
+  // por otro anuncio): señal para los flujos y producto del anuncio en foco.
+  await applyPendingAdTouch(ctx);
 
   // Modo FLOW: corre el motor de flujos guiados en lugar del agente IA. El motor
   // envía todo por su propio IO (deliver) y deja el estado en ctx.state.
@@ -1493,6 +1496,10 @@ export async function handleExternalPaymentApproved(opts: {
     });
   } catch (err) {
     console.warn("[agent] handleExternalPaymentApproved falló:", err instanceof Error ? err.message : err);
+  } finally {
+    // Meta Conversions API: el pago por pasarela también es una venta. Al final,
+    // cuando el comprobante ya quedó ligado a su pedido (una compra por pedido).
+    if (opts.receiptId) void recordSaleForMeta(opts.companyId, { receiptId: opts.receiptId });
   }
 }
 

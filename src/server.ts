@@ -6,6 +6,7 @@ import { startScheduler } from "./modules/scheduler/scheduler.worker";
 import { startDeliveryStatusWorker } from "./modules/agent/delivery-status.worker";
 import { startReportsWorker } from "./modules/reports/reports.worker";
 import { resumeRunningCampaigns } from "./modules/campaigns/campaign-driver";
+import { startMetaEventsWorker } from "./modules/meta-capi/meta-sales.service";
 import { startStorefrontWorker } from "./modules/storefront/storefront.worker";
 import { ensureSalesAgentBootTouchups } from "./modules/admin-console/sales-agent.service";
 import { startDriveIndexWorker } from "./modules/drive/drive-index.worker";
@@ -36,6 +37,8 @@ httpServer.listen(env.PORT, () => {
   startWhatsappProvisionWorker();
   // Grupos de WhatsApp: despacha la cola de altas a grupos a ritmo de lote.
   startWhatsappGroupsWorker();
+  // Meta Conversions API: reintenta las compras que no se pudieron enviar.
+  startMetaEventsWorker();
   // Reanuda las campañas masivas que quedaron en ejecución antes del reinicio
   void resumeRunningCampaigns();
   // Ajustes idempotentes del tenant de plataforma (agente de ventas del landing)

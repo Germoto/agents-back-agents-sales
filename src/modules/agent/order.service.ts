@@ -11,9 +11,20 @@ import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { renderCartForOrder, variantLabelFor, type CartSummary } from "./cart.service";
 import { toDec } from "../orders/order-money";
+import { recordSaleForMeta } from "../meta-capi/meta-sales.service";
 import type { DeliveryType, OrderAmounts } from "../shipping/shipping-config";
 
 type PaymentMode = "BEFORE_DELIVERY" | "CASH_ON_DELIVERY" | "MANUAL";
+
+/**
+ * Meta Conversions API: un pedido que nace CONFIRMADO sin nada que cobrar ahora
+ * (contraentrega → EN_COORDINACION) ya cuenta como venta al registrarse; así llega
+ * dentro de la ventana en que Meta lo atribuye al anuncio. Los que esperan un pago
+ * se reportan con su primer pago. Best-effort, no bloquea el registro.
+ */
+function reportConfirmedOrder(companyId: string, order: { id: string; status: string }): void {
+  if (order.status === "EN_COORDINACION") void recordSaleForMeta(companyId, { orderId: order.id });
+}
 
 // Código corto y legible: PED-<base36 del tiempo>. Se pasa el timestamp desde el
 // caller (Date.now en backend es válido) para mantenerlo puro.
@@ -280,6 +291,7 @@ export async function createAgentOrder(input: CreateOrderInput) {
       include: { product: { select: { name: true } } },
     });
     emitOrderNew(input.companyId, updated);
+  reportConfirmedOrder(input.companyId, updated);
     return updated;
   }
 
@@ -306,6 +318,7 @@ export async function createAgentOrder(input: CreateOrderInput) {
   }));
 
   emitOrderNew(input.companyId, order);
+  reportConfirmedOrder(input.companyId, order);
   return order;
 }
 
@@ -373,6 +386,7 @@ export async function createOrderFromCart(input: {
       include: { product: { select: { name: true } } },
     });
     emitOrderNew(input.companyId, updated);
+  reportConfirmedOrder(input.companyId, updated);
     return updated;
   }
 
@@ -402,5 +416,6 @@ export async function createOrderFromCart(input: {
   }));
 
   emitOrderNew(input.companyId, order);
+  reportConfirmedOrder(input.companyId, order);
   return order;
 }
