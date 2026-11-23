@@ -548,6 +548,8 @@ const conversationSummarySelect = {
       waUsername: true,
       adSourceId: true,
       adTitle: true,
+      lastAdSourceId: true,
+      lastAdTitle: true,
       optOutAt: true,
       tagLinks: { select: { tag: { select: { id: true, name: true, color: true } } } },
       whatsappGroupLinks: customerWaGroupsSelect,
@@ -622,7 +624,8 @@ function conversationListWhere(companyId: string, q: ConversationListQuery): Pri
     ];
   }
   if (q.tagId) customer.tagLinks = { some: { tagId: q.tagId } };
-  if (q.adSourceId) customer.adSourceId = q.adSourceId;
+  // Por anuncio: cualquier clic del cliente (no solo el primero).
+  if (q.adSourceId) customer.adTouches = { some: { adSourceId: q.adSourceId } };
   if (q.favorite) where.favoriteAt = { not: null };
   const status = (q.status ?? "").trim().toUpperCase();
   if (status === "HUMANO") where.botPaused = true;
@@ -803,19 +806,22 @@ function serializeCustomerWithTags(
     waUsername?: string | null;
     adSourceId?: string | null;
     adTitle?: string | null;
+    lastAdSourceId?: string | null;
+    lastAdTitle?: string | null;
     optOutAt?: Date | null;
     tagLinks: Array<{ tag: { id: string; name: string; color: string } }>;
     whatsappGroupLinks?: Parameters<typeof toCustomerWaGroups>[0];
   },
   adMap?: Map<string, string>,
 ) {
-  const { tagLinks, whatsappGroupLinks, adSourceId, adTitle, ...rest } = customer;
+  const { tagLinks, whatsappGroupLinks, adSourceId, adTitle, lastAdSourceId, lastAdTitle, ...rest } = customer;
   return {
     ...rest,
     tags: tagLinks.map((l) => l.tag),
     // Grupos de WhatsApp en los que está (o fue invitado): se ven en la lista y la cabecera.
     waGroups: toCustomerWaGroups(whatsappGroupLinks),
-    ad: adInfoFor(adMap ?? new Map(), adSourceId, adTitle),
+    // Insignia: el ÚLTIMO anuncio por el que escribió (si no hay, el de origen).
+    ad: adInfoFor(adMap ?? new Map(), lastAdSourceId ?? adSourceId, lastAdSourceId ? lastAdTitle : adTitle),
   };
 }
 

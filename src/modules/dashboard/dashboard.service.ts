@@ -108,6 +108,8 @@ export async function getDashboardStats(params: DashboardParams) {
       validatedAt: true,
       createdAt: true,
       metadata: true,
+      adSourceId: true,
+      adTitle: true,
     },
   });
 
@@ -285,25 +287,55 @@ export async function getDashboardStats(params: DashboardParams) {
     prev: newIdsPrev.filter((id) => salesCustPrev.has(id)).length,
   };
 
-  // ---- Rendimiento por anuncio (atribución CTWA): leads del periodo agrupados
-  // por anuncio de origen + ventas/ingresos del periodo atribuidos al anuncio
-  // del cliente (aunque el lead sea de antes). Fila "sin anuncio" para comparar. ----
+  // ---- Rendimiento por anuncio (atribución CTWA): personas que escribieron desde
+  // cada anuncio en el periodo (clics registrados en AdTouch: nuevas + clientes que
+  // regresan por otro anuncio) + ventas/ingresos por el anuncio VIGENTE al momento
+  // de la venta (guardado en el comprobante). Fila "sin anuncio" para comparar. ----
   const adCatalog = await resolveAdCatalog(companyId);
-  type AdAgg = { adSourceId: string | null; adTitle: string | null; leads: number; sales: number; revenue: number; buyers: Set<string> };
+  type AdAgg = {
+    adSourceId: string | null;
+    adTitle: string | null;
+    leads: number;
+    returning: number;
+    sales: number;
+    revenue: number;
+    buyers: Set<string>;
+    people: Set<string>;
+  };
   const adAgg = new Map<string, AdAgg>();
   const aggFor = (adSourceId: string | null, adTitle: string | null): AdAgg => {
     const key = adSourceId ?? "__sin_anuncio__";
     let a = adAgg.get(key);
     if (!a) {
-      a = { adSourceId, adTitle, leads: 0, sales: 0, revenue: 0, buyers: new Set() };
+      a = { adSourceId, adTitle, leads: 0, returning: 0, sales: 0, revenue: 0, buyers: new Set(), people: new Set() };
       adAgg.set(key, a);
     }
     if (!a.adTitle && adTitle) a.adTitle = adTitle;
     return a;
   };
+  // Sin anuncio: contactos nuevos del periodo que no llegaron desde ninguno.
   for (const c of customersWindow) {
     if (!inRange(c.createdAt, fromDate, toDate)) continue;
-    aggFor(c.adSourceId ?? null, c.adTitle ?? null).leads += 1;
+    if (!c.adSourceId) aggFor(null, null).leads += 1;
+  }
+  // Con anuncio: una persona cuenta una vez por anuncio en el periodo. «Regresa» =
+  // ya había escrito antes desde algún anuncio (su primer clic es anterior a este).
+  const periodTouches = await prisma.adTouch.findMany({
+    where: { companyId, createdAt: { gte: fromDate, lte: toDate } },
+    orderBy: { createdAt: "asc" },
+    select: { customerId: true, adSourceId: true, adTitle: true, createdAt: true },
+  });
+  const touchCustomerIds = [...new Set(periodTouches.map((t) => t.customerId))];
+  const firstTouches = touchCustomerIds.length
+    ? await prisma.adTouch.groupBy({ by: ["customerId"], where: { customerId: { in: touchCustomerIds } }, _min: { createdAt: true } })
+    : [];
+  const firstTouchAt = new Map(firstTouches.map((f) => [f.customerId, f._min.createdAt?.getTime() ?? 0]));
+  for (const t of periodTouches) {
+    const a = aggFor(t.adSourceId, t.adTitle ?? null);
+    if (a.people.has(t.customerId)) continue;
+    a.people.add(t.customerId);
+    a.leads += 1;
+    if (t.createdAt.getTime() > (firstTouchAt.get(t.customerId) ?? 0)) a.returning += 1;
   }
   const saleCustomerIds = [...new Set(curAll.map((r) => r.customerId).filter(Boolean) as string[])];
   const saleCustomers = saleCustomerIds.length
@@ -317,7 +349,10 @@ export async function getDashboardStats(params: DashboardParams) {
     const c = r.customerId ? adByCustomer.get(r.customerId) : undefined;
     // Ventas de la tienda web: fila propia "Tienda web" (no son del chat ni de un anuncio CTWA).
     const isStore = ((r.metadata ?? {}) as { channel?: string }).channel === "storefront";
-    const a = isStore ? aggFor("storefront", "Tienda web") : aggFor(c?.adSourceId ?? null, c?.adTitle ?? null);
+    // Anuncio guardado en la venta; las anteriores a ese dato caen al primer anuncio del cliente.
+    const a = isStore
+      ? aggFor("storefront", "Tienda web")
+      : aggFor(r.adSourceId ?? c?.adSourceId ?? null, (r.adSourceId ? r.adTitle : c?.adTitle) ?? null);
     a.sales += 1;
     if (r.customerId) a.buyers.add(r.customerId);
     const amount = Number(r.amountPaid ?? r.amountExpected);
@@ -332,6 +367,8 @@ export async function getDashboardStats(params: DashboardParams) {
         description: entry?.description ?? null,
         productName: entry?.productName ?? null,
         leads: a.leads,
+        // De esos leads, cuántos ya eran clientes y volvieron por este anuncio.
+        returningLeads: a.returning,
         sales: a.sales,
         revenue: r2(a.revenue),
         // Conversión: clientes ÚNICOS que compraron / leads llegados por ese anuncio.

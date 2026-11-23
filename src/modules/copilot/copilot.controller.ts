@@ -141,7 +141,7 @@ import { createFlow, getFlow, listFlows, toggleFlow, updateFlow } from "../flows
 import { AUTHORING_HINTS, AUTHORING_EXAMPLE, HARD_RULES, NODE_DOCS, buildBusinessContext, describeFlow, describeTrigger, normalizeFlowDraft } from "../flows/flow-authoring";
 import { getEntitlements } from "../billing/entitlements";
 import type { FlowEdge, FlowNode, FlowTrigger } from "../flows/flow-types";
-import { getMetaCapiConfig, updateMetaCapiConfig } from "../meta-capi/meta-capi.service";
+import { getMetaCapiConfig, listMetaEvents, updateMetaCapiConfig } from "../meta-capi/meta-capi.service";
 import {
   listPendingReminders,
   listReminderHistory,
@@ -1317,6 +1317,19 @@ export const TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "ver_eventos_meta",
+      description:
+        "COMPRAS REPORTADAS A META (Conversions API): las últimas ventas enviadas o intentadas, con su estado (SENT enviada, PENDING en cola, FAILED fallida, SKIPPED omitida), el motivo cuando no salió, el anuncio al que se atribuyó, si tenía clic de anuncio, el monto y el cliente. Incluye el resumen de los últimos 30 días. Solo lectura; úsala para responder '¿se está trackeando?', '¿por qué Meta no cuenta mis ventas?' o '¿se reportó la compra de X?'.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: { limite: { type: "number", description: "Cuántas mostrar (por defecto 20, máximo 100)" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "configurar_anuncio",
       description:
         "Crea/edita/elimina una entrada del CATÁLOGO DE ANUNCIOS. Crear: {description, matchers: [ids o títulos EXACTOS como llegan del anuncio], productId?|productName?, etiquetas?, tablero?, columna?}. Editar: {id, description?, matchers?, productId?|productName?, etiquetas?, tablero?, columna?}. Eliminar: {id, eliminar: true}. El producto vinculado hace que el lead que llegue por ese anuncio entre con ese producto como PRODUCTO EN FOCO. ACCIONES CRM AL LLEGAR (primer mensaje del lead desde ese anuncio): etiquetas (nombres o ids; [] o null las quita) y tablero+columna (nombres o ids; null quita) — p. ej. etiqueta 'Origen: Meta Ads' y columna 'Nuevo lead'. PREFIERE productId (de listar_productos, infalible); productName hace match tolerante (\"\" desvincula). Varios matchers pueden apuntar a la misma descripción. Llámala SOLO tras confirmación.",
@@ -1607,7 +1620,7 @@ export const TOOLS: ToolDefinition[] = [
         properties: {
           nombre: { type: "string", description: "Nombre único del flujo (máx 60)" },
           descripcion: { type: "string" },
-          trigger: { type: "object", description: "Disparador {onAnyMessage, keywords[], onFirstMessageOfDay, onFirstMessageEver, reactivationMinutes, onAdLead (lead que llega desde un anuncio de Meta: su primer mensaje), anuncios[] (descripciones o ids del catálogo para restringir; vacío = cualquier anuncio)}" },
+          trigger: { type: "object", description: "Disparador {onAnyMessage, keywords[], onFirstMessageOfDay, onFirstMessageEver, reactivationMinutes, onAdLead (alguien que escribe desde un anuncio de Meta: cada clic, lead nuevo o cliente que vuelve), anuncios[] (descripciones o ids del catálogo para restringir; vacío = cualquier anuncio)}" },
           nodes: { type: "array", items: { type: "object" }, description: "Nodos {id, type, data, position?} (ver ver_bloques_flujo)" },
           edges: { type: "array", items: { type: "object" }, description: "Aristas {id?, source, sourceHandle, target}" },
           soloValidar: { type: "boolean", description: "true = validar y resumir sin guardar" },
@@ -3055,7 +3068,8 @@ async function resolveCampaignAudience(
     const customerWhere = {
       companyId,
       NOT: { phone: { startsWith: "web:" } },
-      ...(adSourceId ? { adSourceId } : {}),
+      // Por anuncio: cualquiera que haya escrito desde ese anuncio (no solo su primer anuncio).
+      ...(adSourceId ? { adTouches: { some: { adSourceId } } } : {}),
       ...(tagIds.length ? { tagLinks: { some: { tagId: { in: tagIds } } } } : {}),
     };
     if (funnelStatus) {
@@ -4830,7 +4844,7 @@ export async function runCopilotTool(
           metodosPago: stats.paymentMethods,
           rendimientoPorAnuncio: stats.adPerformance,
           serie: stats.series,
-          nota: "Cada KPI trae {value, prev} = periodo actual vs anterior. rendimientoPorAnuncio agrupa leads/ventas/ingresos/conversión por anuncio Meta de origen (adSourceId null = sin anuncio).",
+          nota: "Cada KPI trae {value, prev} = periodo actual vs anterior. rendimientoPorAnuncio agrupa por anuncio de Meta: leads = personas que escribieron desde ese anuncio en el periodo, returningLeads = cuántas ya eran clientes y volvieron por él; ventas/ingresos por el anuncio vigente al momento de cada venta (adSourceId null = sin anuncio).",
         }),
         wrote: false,
       };
@@ -5546,6 +5560,35 @@ export async function runCopilotTool(
       return { result: JSON.stringify({ total: bookings.length, mostrados: rows.length, items: rows }), wrote: false };
     }
 
+    case "ver_eventos_meta": {
+      const cfg = await getMetaCapiConfig(companyId);
+      const data = await listMetaEvents(companyId, Number(args.limite) || 20);
+      return {
+        result: JSON.stringify({
+          conversionsApiActiva: cfg.enabled,
+          reportaVentasSinClic: cfg.reportWithoutClick,
+          ultimoResultado: cfg.lastResult,
+          ultimos30Dias: { enviadas: data.last30Days.SENT, pendientes: data.last30Days.PENDING, fallidas: data.last30Days.FAILED, omitidas: data.last30Days.SKIPPED },
+          eventos: data.events.map((e) => ({
+            fecha: e.createdAt,
+            canal: e.kind === "STORE" ? "tienda web" : "chat",
+            estado: e.status,
+            motivo: e.lastError,
+            anuncio: e.adTitle ?? e.adSourceId,
+            conClicDeAnuncio: e.hasClick,
+            monto: e.value,
+            moneda: e.currency,
+            intentos: e.attempts,
+            cliente: e.customer ? e.customer.name ?? e.customer.phone : null,
+          })),
+          nota: cfg.enabled
+            ? "SKIPPED casi siempre es un cliente que no llegó desde un anuncio. FAILED con reintento pendiente se reenvía solo."
+            : "Conversions API está apagada: no se envía nada a Meta. Se configura en Integraciones → Meta (el token solo se pega en el panel).",
+        }),
+        wrote: false,
+      };
+    }
+
     case "ver_catalogo_anuncios": {
       const entries = await listAdCatalog(companyId);
       const [tags, boards, columns] = await Promise.all([
@@ -5566,7 +5609,7 @@ export async function runCopilotTool(
             tablero: nameOf(boards, e.crmId),
             columna: nameOf(columns, e.crmColumnId),
           })),
-          nota: "etiquetas/tablero/columna se aplican al lead con su PRIMER mensaje desde ese anuncio; los flujos pueden dispararse con trigger onAdLead.",
+          nota: "etiquetas/tablero/columna se aplican cada vez que alguien escribe desde ese anuncio (lead nuevo o cliente que vuelve por él); los flujos pueden dispararse con trigger onAdLead.",
         }),
         wrote: false,
       };
@@ -7236,7 +7279,7 @@ export async function buildSystem(companyId: string, opts: { mode?: "panel" | "o
     "- Si el usuario envía una FOTO (carta, lista de precios, catálogo), LÉELA con cuidado: extrae nombres, precios, secciones y descripciones, y propón los productos completos (con aliases y 1-2 FAQs razonables por producto cuando ayuden a vender). No inventes lo que no se ve — pregunta lo que falte.",
     "- Las imágenes adjuntadas también puedes DEJARLAS como fotos del producto con adjuntar_foto_producto: usa la URL EXACTA que aparece en la línea [Adjuntos de este mensaje: …] del mensaje del usuario (NUNCA un data:URI ni una URL inventada). Si el usuario ya adjuntó la imagen, NO le pidas re-adjuntarla. Si el usuario manda la foto DE un producto específico, ofrécele adjuntarla como foto principal. OJO: la foto de una CARTA/lista de precios es del menú completo — NO la adjuntes a cada producto salvo que el usuario lo pida.",
     "- Además de productos, puedes configurar la EMPRESA (nombre, zona horaria, delivery, horario de atención; la firma y el modo del bot se ven en el panel en Agente IA → Bot y avisos), el AGENTE IA (prompt, estilo, reglas, comportamiento comercial; flags: negotiationHandoff = negociar una vez y derivar, unknownHandoff = derivar con motivo CONSULTA cuando no sabe responder en vez de inventar o prometer 'consultar', humanChatAlerts = avisar al dueño por WhatsApp cuando un cliente escribe en un chat en atención humana), los PAGOS manuales (Yape/Plin/cuentas, modo de cobro, WhatsApp de avisos), el CRM COMPLETO (crear, renombrar, cambiar colores, reordenar y eliminar tableros/columnas/etiquetas; mover o etiquetar clientes por teléfono), el CHAT WEB (bienvenida/color/dominios), los RECORDATORIOS automáticos (carrito abandonado, dejado en visto, horario permitido), los FLUJOS de chatbot (ver_bloques_flujo, ver_flujo, crear_flujo, editar_flujo, activar_flujo) y las RESPUESTAS RÁPIDAS del asesor (atajos /comando con secuencias de texto/multimedia que un humano envía desde Conversaciones — el bot no las usa solo; los adjuntos de esta conversación sirven como multimedia de la secuencia; si la respuesta tiene «Marcar la venta como entregada», al usarla en el panel el asesor elige el canal: solo por el chat, solo por correo o ambos — el correo solo sale para productos con entrega por correo activa y deja una nota 📧 en el chat). Usa ver_configuracion / ver_crm / ver_respuestas_rapidas antes de proponer cambios en esas áreas.",
-    "- ATRIBUCIÓN DE ANUNCIOS META: los leads que llegan desde un anuncio (CTWA) quedan marcados con el anuncio de origen; ver_metricas trae rendimientoPorAnuncio (leads, ventas, ingresos y conversión POR ANUNCIO — así se sabe qué anuncio cierra ventas de verdad). El catálogo de anuncios (ver_catalogo_anuncios/configurar_anuncio, o en Empresa → Anuncios) mapea IDs/títulos crudos a descripciones amigables; varios identificadores pueden apuntar a la misma descripción, y cada anuncio puede VINCULARSE A UN PRODUCTO: el lead que llega por ese anuncio entra con ese producto como PRODUCTO EN FOCO y el agente lo PRESENTA DE INMEDIATO en su primer mensaje (presentación forzada de forma determinista: aunque el lead solo diga 'Hola', recibe la ficha completa sin que se le pregunte qué busca). Además cada anuncio puede ETIQUETAR y MOVER al lead en el CRM al llegar (configurar_anuncio etiquetas/tablero/columna; p. ej. 'Origen: Meta Ads' → columna 'Nuevo lead'; funciona en modo AI y FLOW) y los flujos pueden dispararse SOLO para leads de anuncio con el trigger onAdLead (primer mensaje atribuido, prioridad sobre keywords; opcionalmente restringido a ciertos anuncios): es la forma recomendada de calificar leads de Meta aunque escriban 'Hola'.",
+    "- ATRIBUCIÓN DE ANUNCIOS META: CADA VEZ que alguien escribe desde un anuncio (CTWA) queda registrado ese clic, sea un lead nuevo o un cliente que ya compró y vuelve por OTRO anuncio. La ficha conserva el anuncio de ORIGEN (el primero) y muestra el ÚLTIMO; ver_cliente trae adHistory con todos. Cada venta guarda el anuncio vigente en ese momento, así una recompra por otro anuncio se acredita al anuncio correcto en el panel y en Meta. COMPRAS A META (Conversions API): cada venta confirmada se reporta UNA sola vez con el clic más reciente del cliente, por cualquier ruta (validación automática, aprobar o entregar un comprobante, asociar un comprobante, link de Mercado Pago, pedidos y tienda web); un pedido con adelanto y saldo cuenta como UNA compra con su total, y un pedido contra entrega se reporta al confirmarse. Si Meta falla se reintenta solo. ver_eventos_meta muestra el estado de las últimas compras (enviada, pendiente, fallida u omitida y por qué); 'omitida' casi siempre es un cliente que no llegó desde un anuncio (en Integraciones → Meta hay un interruptor, apagado por defecto, para reportar también esas ventas). El filtro por anuncio de Conversaciones y la audiencia de campañas por anuncio incluyen a quien haya escrito desde ese anuncio alguna vez. ver_metricas trae rendimientoPorAnuncio (leads = personas que escribieron desde el anuncio en el periodo, returningLeads = cuántas ya eran clientes; ventas, ingresos y conversión POR ANUNCIO — así se sabe qué anuncio cierra ventas de verdad). El catálogo de anuncios (ver_catalogo_anuncios/configurar_anuncio, o en Empresa → Anuncios) mapea IDs/títulos crudos a descripciones amigables; varios identificadores pueden apuntar a la misma descripción, y cada anuncio puede VINCULARSE A UN PRODUCTO: el lead que llega por ese anuncio entra con ese producto como PRODUCTO EN FOCO y el agente lo PRESENTA DE INMEDIATO en su primer mensaje (presentación forzada de forma determinista: aunque el lead solo diga 'Hola', recibe la ficha completa sin que se le pregunte qué busca). Además cada anuncio puede ETIQUETAR y MOVER al lead en el CRM al llegar (configurar_anuncio etiquetas/tablero/columna; p. ej. 'Origen: Meta Ads' → columna 'Nuevo lead'; funciona en modo AI y FLOW) y los flujos pueden dispararse SOLO para leads de anuncio con el trigger onAdLead (cada vez que escribe desde un anuncio, también un cliente que vuelve por otro anuncio; prioridad sobre keywords; opcionalmente restringido a ciertos anuncios): es la forma recomendada de calificar leads de Meta aunque escriban 'Hola'.",
     "- ANALISTA DEL NEGOCIO: puedes leer métricas, ventas, comprobantes, pedidos, conversaciones (incluidos los MENSAJES reales con leer_conversacion), citas, campañas, suscripciones y recordatorios con ver_metricas/listar_*. Para preguntas de números usa PRIMERO ver_metricas (trae el periodo comparado con el anterior) y detalla después con listar_*. TODO número que cites debe salir de un resultado de tool de ESTE turno — NUNCA estimes ni 'recuerdes' cifras. Con los datos puedes proponer mejoras accionables (FAQs/objeciones a partir de chats reales, ofertas escalonadas para carritos abandonados, ajustes de prompt o recordatorios) y, SOLO si el usuario confirma, aplicarlas con las tools de escritura. Con previsualizar_ficha ves EXACTAMENTE cómo el agente presenta un producto al cliente (secuencia real de mensajes, multimedia y modo de presentación, en cualquier rubro) — úsala antes de proponer mejoras de copy o de estructura de la ficha. BLOQUEOS DE WHATSAPP: si el usuario reporta un bloqueo o te pide revisar el riesgo, (1) lee ver_configuracion.recordatorios (dispersión, ritmo, tope efectivos), (2) analiza los envíos reales con listar_recordatorios_programados estado=SENT (resumen: envíos por hora y separación mínima entre consecutivos — < 20 s o decenas en la misma hora = ráfaga) y las campañas recientes con listar_campanas, y (3) propón valores concretos (tras un bloqueo: dispersión 120, pausa 60-120 s, tope 20-30/h; sin bloqueo: 90 · 25-70 · 60) y mensajes con spintax; aplícalos con configurar_recordatorios SOLO tras confirmación. RESPUESTAS QUE SUENAN A BOT: si el usuario reporta mensajes repetitivos o que ignoran lo que pidió el cliente, lee el chat con leer_conversacion, identifica el patrón (texto redundante tras una herramienta, duda sin responder, cierre repetido) y propón reglas concretas para el agente (configurar_agente rules) — el sistema ya descarta el texto redundante tras enviar los métodos de pago y espera 8 s para juntar mensajes seguidos del cliente.",
     "- DIAGNÓSTICO: si el dueño reporta que el bot responde a todos 'Disculpa, estoy teniendo un inconveniente', casi siempre es el PROVEEDOR DE IA fallando: sin créditos/saldo (recargar en la cuenta del proveedor, ej. OpenAI → Billing) o API key inválida — se revisa/corrige en el panel (Agente IA). El sistema avisa al dueño por WhatsApp al primer fallo accionable y de nuevo al recuperarse; el agente revive solo al corregir la causa, sin reiniciar nada.",
     "- DISEÑADOR: con generar_imagen creas banners de oferta, fotos de producto y creativos con IA (se guardan en el servidor y su URL sirve en cualquier configuración: banner de presentación, pasos de recordatorio, followups, respuestas rápidas, campañas, o como foto de producto vía adjuntar_foto_producto). Cuesta dinero al negocio (usa su key de OpenAI) → SOLO tras confirmación. Flujo OBLIGATORIO: generar → mostrar la URL al usuario → su aprobación → adjuntar → verificar (previsualizar_ficha). Textos del banner van LITERALES entre comillas en el prompt. Si el negocio no tiene key de OpenAI, deriva al panel (Agente IA); JAMÁS pidas ni recibas keys por chat.",

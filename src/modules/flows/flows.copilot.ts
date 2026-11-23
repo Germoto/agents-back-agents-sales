@@ -56,7 +56,7 @@ const PROPOSE_FLOW_TOOL: ToolDefinition = {
             onFirstMessageOfDay: { type: "boolean" },
             onFirstMessageEver: { type: "boolean" },
             reactivationMinutes: { type: "number" },
-            onAdLead: { type: "boolean", description: "Lead que llega desde un anuncio de Meta (su primer mensaje)" },
+            onAdLead: { type: "boolean", description: "Alguien que escribe desde un anuncio de Meta (cada clic: lead nuevo o cliente que vuelve por otro anuncio)" },
             adEntryIds: { type: "array", items: { type: "string" }, description: "Solo estos anuncios del catálogo (ids); vacío = cualquiera" },
           },
         },

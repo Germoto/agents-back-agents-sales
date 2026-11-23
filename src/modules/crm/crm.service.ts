@@ -236,6 +236,8 @@ const boardCustomerSelect = {
   avatarUrl: true,
   adSourceId: true,
   adTitle: true,
+  lastAdSourceId: true,
+  lastAdTitle: true,
   metadata: true,
 } satisfies Prisma.CustomerSelect;
 
@@ -366,7 +368,10 @@ async function buildBoardCards(
   function buildCard(customer: BoardCustomerRow, sortOrder: number | null): CrmBoardCard {
     const convo = convoByCustomer.get(customer.id) ?? null;
     const last = convo ? lastMessageByConvo.get(convo.id) ?? null : null;
-    const { adSourceId, adTitle, metadata, ...customerRest } = customer;
+    const { adSourceId: firstAdId, adTitle: firstAdTitle, lastAdSourceId, lastAdTitle, metadata, ...customerRest } = customer;
+    // Insignia: el último anuncio por el que escribió (si no hay, el de origen).
+    const adSourceId = lastAdSourceId ?? firstAdId;
+    const adTitle = lastAdSourceId ? lastAdTitle : firstAdTitle;
     const flowVars = flowVarsOf(metadata);
     return {
       customerId: customer.id,

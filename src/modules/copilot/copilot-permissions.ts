@@ -19,7 +19,7 @@ const READ_TOOLS = new Set([
   "listar_productos", "ver_producto", "previsualizar_ficha", "ver_configuracion", "ver_crm", "ver_respuestas_rapidas",
   "ver_tienda", "listar_campanas_correo", "previsualizar_audiencia_correo", "ver_cupones", "ver_metricas", "listar_ventas",
   "listar_comprobantes", "listar_pedidos", "listar_conversaciones", "leer_conversacion", "ver_cliente", "buscar_agencias",
-  "listar_citas", "ver_catalogo_anuncios", "listar_campanas", "previsualizar_audiencia_campana", "ver_campana",
+  "listar_citas", "ver_catalogo_anuncios", "ver_eventos_meta", "listar_campanas", "previsualizar_audiencia_campana", "ver_campana",
   "ver_inventario_streaming", "listar_flujos", "ver_bloques_flujo", "ver_flujo", "listar_suscripciones",
   "listar_recordatorios_programados", "buscar_en_drive", "obtener_muestra", "listar_recursos", "ver_mi_plan",
   "ver_grupos_whatsapp", "ver_info_grupo", "leer_chat_grupo", "listar_acciones_http",

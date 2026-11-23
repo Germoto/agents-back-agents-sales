@@ -65,7 +65,7 @@ export const NODE_DOCS = `BLOQUES DISPONIBLES (type → data → handles de sali
 
 VARIABLES: en cualquier texto puedes usar {{nombre}}, {{telefono}} y las guardadas con saveVariable (ej. {{correo}}).
 
-DISPARADOR (trigger): {onAnyMessage, keywords[], onFirstMessageOfDay, onFirstMessageEver, reactivationMinutes, onAdLead, adEntryIds[]}. onAdLead = lead que llega desde un ANUNCIO de Meta (se dispara con su primer mensaje atribuido, tiene prioridad sobre keywords); adEntryIds restringe a anuncios del catálogo (vacío = cualquiera). Prioridad al competir: anuncio > keywords > primer mensaje de la vida > primer mensaje del día > cualquier mensaje.`;
+DISPARADOR (trigger): {onAnyMessage, keywords[], onFirstMessageOfDay, onFirstMessageEver, reactivationMinutes, onAdLead, adEntryIds[]}. onAdLead = alguien que escribe desde un ANUNCIO de Meta (se dispara en cada clic de anuncio: lead nuevo o cliente que vuelve por otro anuncio; tiene prioridad sobre keywords); adEntryIds restringe a anuncios del catálogo (vacío = cualquiera). Prioridad al competir: anuncio > keywords > primer mensaje de la vida > primer mensaje del día > cualquier mensaje.`;
 
 export const HARD_RULES = `REGLAS OBLIGATORIAS al proponer un flujo:
 1. Exactamente UN nodo start (id "start", data {}); su edge sale por "next" hacia el primer bloque.
@@ -657,7 +657,7 @@ export function describeTrigger(trigger: unknown): string {
   if (t.keywords?.length) parts.push(`palabras clave: ${t.keywords.map((k) => `«${k}»`).join(", ")}`);
   if (t.onFirstMessageOfDay) parts.push("primer mensaje del día");
   if (t.onFirstMessageEver) parts.push("primer mensaje de un cliente nuevo");
-  if (t.onAdLead) parts.push(`lead que llega desde un anuncio de Meta (primer mensaje)${t.adEntryIds?.length ? ` · solo ${t.adEntryIds.length} anuncio(s) del catálogo` : ""}`);
+  if (t.onAdLead) parts.push(`alguien que escribe desde un anuncio de Meta (cada clic)${t.adEntryIds?.length ? ` · solo ${t.adEntryIds.length} anuncio(s) del catálogo` : ""}`);
   if (!parts.length) parts.push("SIN disparador (no se activará solo)");
   if (t.reactivationMinutes) parts.push(`no se repite antes de ${t.reactivationMinutes} min`);
   return parts.join(" · ");

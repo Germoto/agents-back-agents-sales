@@ -2,6 +2,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/app-error";
 import { socketService, SOCKET_EVENTS } from "../../lib/socket";
 import { resolveAdDescriptions, adInfoFor } from "../ad-catalog/ad-catalog.service";
+import { listAdTouches } from "../ad-catalog/ad-touch.service";
 
 /**
  * Elimina un lead/cliente POR COMPLETO. El cascade de Prisma borra sus CrmCards
@@ -67,6 +68,8 @@ export async function deleteCustomersBulk(
 export async function listCustomers(companyId: string) {
   return prisma.customer.findMany({
     where: { companyId },
+    // Los click-id de Meta son tokens internos: no salen del backend.
+    omit: { ctwaClid: true, lastCtwaClid: true },
     include: {
       selectedProduct: {
         select: {
@@ -91,12 +94,20 @@ export async function getCustomer(companyId: string, customerId: string) {
     },
   });
   if (!customer) throw new AppError("Cliente no encontrado", 404);
-  const { tagLinks, deals, ...rest } = customer;
+  // Los click-id de Meta son tokens internos: no salen del backend.
+  const { tagLinks, deals, ctwaClid: _firstClick, lastCtwaClid: _lastClick, ...rest } = customer;
   const adMap = await resolveAdDescriptions(companyId);
+  const touches = await listAdTouches(companyId, customerId);
   return {
     ...rest,
-    // Anuncio de origen (atribución CTWA) con la descripción del catálogo resuelta.
-    ad: adInfoFor(adMap, customer.adSourceId, customer.adTitle),
+    // Último anuncio por el que escribió (atribución CTWA) con la descripción del catálogo.
+    ad: adInfoFor(adMap, customer.lastAdSourceId ?? customer.adSourceId, customer.lastAdSourceId ? customer.lastAdTitle : customer.adTitle),
+    // Anuncio de origen (el primero) e historial de todos sus clics de anuncio.
+    firstAd: adInfoFor(adMap, customer.adSourceId, customer.adTitle),
+    adHistory: touches.map((t) => ({
+      at: t.createdAt,
+      ...(adInfoFor(adMap, t.adSourceId, t.adTitle) ?? { sourceId: t.adSourceId, title: t.adTitle, description: null }),
+    })),
     tags: tagLinks.map((l) => l.tag),
     deals: deals.map((d) => ({ ...d, amount: Number(d.amount) })),
   };
