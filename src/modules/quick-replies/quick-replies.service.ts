@@ -82,7 +82,15 @@ export async function updateCategory(companyId: string, id: string, name: string
 export async function deleteCategory(companyId: string, id: string) {
   const existing = await prisma.quickReplyCategory.findFirst({ where: { id, companyId } });
   if (!existing) throw new AppError("Categoría no encontrada", 404);
-  // onDelete: SetNull → las respuestas rápidas quedan "sin categoría".
+  // Solo se elimina una categoría VACÍA: si tiene respuestas rápidas, primero hay que
+  // moverlas o eliminarlas (así nadie pierde su orden sin darse cuenta).
+  const inUse = await prisma.quickReply.count({ where: { companyId, categoryId: id } });
+  if (inUse > 0) {
+    throw new AppError(
+      `No se puede eliminar «${existing.name}»: tiene ${inUse === 1 ? "1 respuesta rápida" : `${inUse} respuestas rápidas`}. Muévelas a otra categoría o elimínalas primero.`,
+      409,
+    );
+  }
   await prisma.quickReplyCategory.delete({ where: { id } });
 }
 
