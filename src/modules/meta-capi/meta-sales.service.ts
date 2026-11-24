@@ -17,6 +17,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { env } from "../../config/env";
 import { decryptCredential } from "../../lib/credentials-crypto";
+import { parseMoney } from "../../lib/money";
 
 const sha256 = (v: string) => crypto.createHash("sha256").update(v).digest("hex");
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -29,33 +30,8 @@ const MAX_EVENT_AGE_MS = 6 * DAY;
 /** Esperas entre reintentos (red caída, 5xx, límite de Meta). Luego queda como fallido. */
 const RETRY_DELAYS_MS = [5 * 60 * 1000, 30 * 60 * 1000, 2 * HOUR, 6 * HOUR, 12 * HOUR, DAY, DAY];
 
-/**
- * Monto en texto → número. Acepta "S/ 1,234.50", "1.234,50", "49,9", "10".
- * Con los dos separadores, el ÚLTIMO es el decimal; una coma sola seguida de 1-2
- * dígitos es decimal (si no, es separador de miles). Puro.
- */
-export function parseMoney(raw: unknown): number {
-  if (typeof raw === "number") return Number.isFinite(raw) && raw > 0 ? raw : 0;
-  const s = String(raw ?? "").replace(/[^0-9.,]/g, "");
-  if (!s) return 0;
-  const lastDot = s.lastIndexOf(".");
-  const lastComma = s.lastIndexOf(",");
-  let normalized: string;
-  if (lastDot >= 0 && lastComma >= 0) {
-    const dec = Math.max(lastDot, lastComma);
-    normalized = `${s.slice(0, dec).replace(/[.,]/g, "")}.${s.slice(dec + 1)}`;
-  } else if (lastComma >= 0) {
-    const decimals = s.length - lastComma - 1;
-    normalized = decimals >= 1 && decimals <= 2 && s.indexOf(",") === lastComma ? s.replace(",", ".") : s.replace(/,/g, "");
-  } else if (lastDot >= 0 && s.indexOf(".") !== lastDot) {
-    // Varios puntos: son miles ("1.234.567").
-    normalized = s.replace(/\./g, "");
-  } else {
-    normalized = s;
-  }
-  const n = Number(normalized);
-  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : 0;
-}
+// El lector de montos vive en lib/money.ts (lo comparte el dashboard).
+export { parseMoney };
 
 /** Fecha del evento para Meta: la del pago; si es muy antigua o futura, ahora. Puro. */
 export function eventTimeFor(paidAt: Date | null | undefined, now = new Date()): Date {

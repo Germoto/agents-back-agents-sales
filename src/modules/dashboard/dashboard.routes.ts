@@ -2,39 +2,34 @@ import { Router } from "express";
 import { Request, Response } from "express";
 import { asyncHandler } from "../../lib/async-handler";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { validate } from "../../middlewares/validate";
 import { getDashboardStats, getDashboardExportData } from "./dashboard.service";
+import { dashboardQuerySchema, type DashboardQueryInput } from "./dashboard.schemas";
 
 const router = Router();
 
 router.use(requireAuth);
 
+// `period` (hoy, esta semana, semana pasada…) se resuelve en la zona del negocio;
+// `from`/`to` solo se usan para un rango personalizado.
+const paramsOf = (req: Request) => {
+  const q = req.query as unknown as DashboardQueryInput;
+  return { companyId: req.user!.companyId, period: q.period, from: q.from, to: q.to, productId: q.productId };
+};
+
 router.get(
   "/stats",
+  validate({ query: dashboardQuerySchema }),
   asyncHandler(async (req: Request, res: Response) => {
-    const { from, to, productId } = req.query;
-    res.json(
-      await getDashboardStats({
-        companyId: req.user!.companyId,
-        from: typeof from === "string" && from ? from : undefined,
-        to: typeof to === "string" && to ? to : undefined,
-        productId: typeof productId === "string" && productId ? productId : undefined,
-      }),
-    );
+    res.json(await getDashboardStats(paramsOf(req)));
   }),
 );
 
 router.get(
   "/export",
+  validate({ query: dashboardQuerySchema }),
   asyncHandler(async (req: Request, res: Response) => {
-    const { from, to, productId } = req.query;
-    res.json(
-      await getDashboardExportData({
-        companyId: req.user!.companyId,
-        from: typeof from === "string" && from ? from : undefined,
-        to: typeof to === "string" && to ? to : undefined,
-        productId: typeof productId === "string" && productId ? productId : undefined,
-      }),
-    );
+    res.json(await getDashboardExportData(paramsOf(req)));
   }),
 );
 

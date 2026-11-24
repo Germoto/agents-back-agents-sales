@@ -929,14 +929,20 @@ export const TOOLS: ToolDefinition[] = [
     function: {
       name: "ver_metricas",
       description:
-        "MÉTRICAS del negocio en un rango (default: últimos 30 días) COMPARADAS con el periodo anterior: ingresos, ventas, ticket promedio, unidades, contactos nuevos, conversaciones, TASA DE CONVERSIÓN, embudo (contactos→conversaciones→ventas), top productos, métodos de pago y serie temporal. Es la PRIMERA tool para cualquier pregunta de números. La fuente 'Tienda web' refleja lo cobrado EN LÍNEA por la tienda (en tienda física: el adelanto o el total pagado en la web; un pedido contra entrega no suma ahí); el detalle de la tienda, con cobrado y por cobrar, está en ver_tienda → metricas.",
+        "MÉTRICAS del negocio en un rango (default: últimos 30 días) COMPARADAS con el periodo anterior: ingresos, ventas, ticket promedio, unidades, contactos nuevos, conversaciones, TASA DE CONVERSIÓN (contactos nuevos que ya compraron), embudo (contactos→conversaciones→ya compraron), top productos, métodos de pago, rendimiento por anuncio y serie temporal. Es la PRIMERA tool para cualquier pregunta de números. Usa `periodo` (p. ej. week = lunes a hoy, last_week = lunes a domingo pasados) en vez de calcular fechas. La fuente 'Tienda web' refleja lo cobrado EN LÍNEA por la tienda (en tienda física: el adelanto o el total pagado en la web; un pedido contra entrega no suma ahí); el detalle de la tienda, con cobrado y por cobrar, está en ver_tienda → metricas.",
       parameters: {
         type: "object",
         additionalProperties: false,
         properties: {
-          desde: { type: "string", description: "YYYY-MM-DD (opcional)" },
-          hasta: { type: "string", description: "YYYY-MM-DD (opcional)" },
-          productId: { type: "string", description: "Filtrar por un producto (opcional)" },
+          periodo: {
+            type: "string",
+            enum: ["today", "yesterday", "week", "last_week", "7d", "30d", "month", "last_month", "12m"],
+            description:
+              "Periodo con nombre, calculado en la zona horaria del negocio (PREFIERE esto a calcular fechas): today = hoy, yesterday = ayer, week = esta semana (lunes a hoy), last_week = semana pasada (lunes a domingo), 7d, 30d, month = este mes, last_month = mes pasado, 12m.",
+          },
+          desde: { type: "string", description: "YYYY-MM-DD (solo para un rango a medida; se ignora si mandas periodo)" },
+          hasta: { type: "string", description: "YYYY-MM-DD (solo para un rango a medida)" },
+          productId: { type: "string", description: "Filtrar por un producto (opcional). Aplica a ventas, ingresos, conversión y también a rendimientoPorAnuncio (solo anuncios de ese producto)." },
         },
       },
     },
@@ -4830,8 +4836,9 @@ export async function runCopilotTool(
     case "ver_metricas": {
       const stats = await getDashboardStats({
         companyId,
-        from: asStr(args.desde),
-        to: asStr(args.hasta),
+        period: asStr(args.periodo),
+        from: /^\d{4}-\d{2}-\d{2}$/.test(asStr(args.desde) ?? "") ? asStr(args.desde) : undefined,
+        to: /^\d{4}-\d{2}-\d{2}$/.test(asStr(args.hasta) ?? "") ? asStr(args.hasta) : undefined,
         productId: asStr(args.productId),
       });
       return {
@@ -4844,7 +4851,8 @@ export async function runCopilotTool(
           metodosPago: stats.paymentMethods,
           rendimientoPorAnuncio: stats.adPerformance,
           serie: stats.series,
-          nota: "Cada KPI trae {value, prev} = periodo actual vs anterior. rendimientoPorAnuncio agrupa por anuncio de Meta: leads = personas que escribieron desde ese anuncio en el periodo, returningLeads = cuántas ya eran clientes y volvieron por él; ventas/ingresos por el anuncio vigente al momento de cada venta (adSourceId null = sin anuncio).",
+          pedidosPorEstado: stats.ordersByStatus,
+          nota: "Cada KPI trae {value, prev} = periodo actual vs anterior (rango.prevFrom–prevTo; «esta semana» se compara con los mismos días de la semana pasada). VENTA = comprobante aprobado, o UN pedido con montos contado una vez con su total (adelanto + saldo no son dos ventas; contraentrega cuenta al confirmarse). conversionRate = % de los CONTACTOS NUEVOS del periodo que ya compraron (cohorte, nunca pasa de 100; su variación se lee en puntos); convertedLeads = cuántos son; embudo.sales = ese mismo número. rendimientoPorAnuncio agrupa por anuncio de Meta: leads = personas que escribieron desde ese anuncio en el periodo; returningLeads = cuántas ya eran contactos antes del periodo; buyers = cuántos de esos leads ya compraron después de escribir; conversionRate = buyers/leads; sales/revenue = ventas DEL PERIODO atribuidas al anuncio vigente al vender (pueden venir de leads de días anteriores, por eso sales puede ser mayor que buyers). adSourceId null = sin anuncio; 'storefront' = tienda web; 'unlinked' = pagos aprobados sin cliente asociado (se corrigen asociando el comprobante).",
         }),
         wrote: false,
       };

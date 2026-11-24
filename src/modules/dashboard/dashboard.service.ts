@@ -1,15 +1,18 @@
 /**
- * Métricas del dashboard del tenant (rubro INFOPRODUCT). Todo se calcula sobre un
- * RANGO de fechas [from, to] y, opcionalmente, filtrado por producto, comparando
- * contra el periodo anterior equivalente para mostrar la variación (delta).
+ * Métricas del dashboard del tenant. Todo se calcula sobre un RANGO de fechas (en la
+ * zona horaria del negocio) y, opcionalmente, filtrado por producto, comparando contra
+ * el periodo anterior equivalente para mostrar la variación (delta).
  *
- * Los montos de PaymentReceipt son String legacy → se suman en JS con Number().
- * Una venta = comprobante APROBADO asociado a un producto (productId o productIds).
- * Fecha de referencia de la venta: occurredAt ?? validatedAt ?? createdAt.
+ * Qué es una venta lo define dashboard-sales.ts (comprobante aprobado, o un pedido con
+ * montos contado UNA vez con su total). Las conversiones son de COHORTE: de quienes
+ * llegaron en el periodo, cuántos ya compraron (aunque paguen días después); así nunca
+ * superan el 100 %.
  */
 
 import { prisma } from "../../lib/prisma";
 import { resolveAdCatalog, adCatalogEntryFor } from "../ad-catalog/ad-catalog.service";
+import { loadSales, saleAmountFor, saleHasProduct, saleUnitsFor, type Sale } from "./dashboard-sales";
+import { daysBetween, resolveRange } from "./dashboard-periods";
 
 interface SeriesPoint {
   date: string; // "2026-06-12" (día) o "2026-06" (mes)
@@ -26,6 +29,8 @@ interface Delta {
 const MONTH_LABELS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const FOLLOWUP_TYPES = ["ABANDONED_CART", "LEFT_ON_READ", "OFFER_COUNTDOWN", "POST_SALE", "CUSTOM"];
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Holgura al cruzar «llegó» con «compró»: relojes de la pasarela y del chat no coinciden al segundo.
+const COHORT_SLACK_MS = 2 * 60 * 1000;
 
 function dayKeyFormatter(timezone: string) {
   const fmt = new Intl.DateTimeFormat("en-CA", {
@@ -41,8 +46,6 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 const pct = (n: number) => Math.round(n * 10000) / 100; // fracción → %
 
 const inRange = (d: Date, a: Date, b: Date) => d.getTime() >= a.getTime() && d.getTime() <= b.getTime();
-const refDate = (r: { occurredAt: Date | null; validatedAt: Date | null; createdAt: Date }) =>
-  r.occurredAt ?? r.validatedAt ?? r.createdAt;
 const receiptProductIds = (r: { productId: string | null; productIds: string[] }) => {
   const set = new Set<string>(r.productIds ?? []);
   if (r.productId) set.add(r.productId);
@@ -51,94 +54,50 @@ const receiptProductIds = (r: { productId: string | null; productIds: string[] }
 
 export interface DashboardParams {
   companyId: string;
+  period?: string; // today | yesterday | week | last_week | 7d | 30d | month | last_month | 12m
   from?: string; // YYYY-MM-DD
   to?: string; // YYYY-MM-DD
   productId?: string;
 }
 
+// Filas especiales de «Por anuncio» (no son anuncios).
+export const AD_ROW_STORE = "storefront";
+export const AD_ROW_UNLINKED = "unlinked";
+
 export async function getDashboardStats(params: DashboardParams) {
   const { companyId, productId } = params;
   const company = await prisma.company.findUnique({
     where: { id: companyId },
-    select: { timezone: true },
+    select: { timezone: true, currency: true },
   });
   const timezone = company?.timezone ?? "America/Lima";
+  const currency = (company?.currency ?? "PEN").toUpperCase();
   const toDayKey = dayKeyFormatter(timezone);
 
   // ---- Rango actual y periodo anterior equivalente (en la TZ del negocio) ----
   // Los límites se anclan a la medianoche/fin-de-día LOCAL del tenant (no UTC), si
   // no, en zonas UTC- se perdería el día de hoy y las ventas de la tarde/noche.
   const now = new Date();
-  const toYmd = params.to ?? toDayKey(now);
-  const fromYmd = params.from ?? toDayKey(new Date(now.getTime() - 29 * DAY_MS));
-  const toDate = zonedDayBoundary(toYmd, timezone, true);
-  const fromDate = zonedDayBoundary(fromYmd, timezone, false);
-  const lengthMs = Math.max(DAY_MS, toDate.getTime() - fromDate.getTime());
-  const prevTo = new Date(fromDate.getTime() - 1);
-  const prevFrom = new Date(prevTo.getTime() - lengthMs);
-  const days = Math.round(lengthMs / DAY_MS);
+  const range = resolveRange(params, timezone, now);
+  const fromDate = zonedDayBoundary(range.from, timezone, false);
+  const toDate = zonedDayBoundary(range.to, timezone, true);
+  const prevFrom = zonedDayBoundary(range.prevFrom, timezone, false);
+  const prevTo = zonedDayBoundary(range.prevTo, timezone, true);
+  const days = daysBetween(range.from, range.to);
   const granularity: "daily" | "monthly" = days <= 92 ? "daily" : "monthly";
 
-  // ---- Comprobantes APROBADOS con producto, en [prevFrom, toDate] (un solo fetch) ----
-  const receipts = await prisma.paymentReceipt.findMany({
-    where: {
-      companyId,
-      status: "APROBADO",
-      OR: [{ productId: { not: null } }, { productIds: { isEmpty: false } }],
-      AND: [
-        {
-          OR: [
-            { occurredAt: { gte: prevFrom, lte: toDate } },
-            { validatedAt: { gte: prevFrom, lte: toDate } },
-            { createdAt: { gte: prevFrom, lte: toDate } },
-          ],
-        },
-      ],
-    },
-    select: {
-      amountPaid: true,
-      amountExpected: true,
-      currency: true,
-      paymentSource: true,
-      validationMode: true,
-      customerId: true,
-      productId: true,
-      productIds: true,
-      occurredAt: true,
-      validatedAt: true,
-      createdAt: true,
-      metadata: true,
-      adSourceId: true,
-      adTitle: true,
-    },
-  });
-
-  let currency = "PEN";
-  const curAll: typeof receipts = [];
-  const prevAll: typeof receipts = [];
-  for (const r of receipts) {
-    if (r.currency) currency = r.currency;
-    const when = refDate(r);
-    if (inRange(when, fromDate, toDate)) curAll.push(r);
-    else if (inRange(when, prevFrom, prevTo)) prevAll.push(r);
-  }
-
-  const matchesProduct = (r: { productId: string | null; productIds: string[] }) =>
-    !productId || receiptProductIds(r).includes(productId);
-  const cur = curAll.filter(matchesProduct);
-  const prev = prevAll.filter(matchesProduct);
+  // ---- Ventas desde el periodo anterior hasta HOY (un solo fetch). Lo posterior al
+  // rango solo se usa para saber si quien llegó en el periodo terminó comprando. ----
+  const horizon = toDate.getTime() > now.getTime() ? toDate : now;
+  const allSales = await loadSales(companyId, prevFrom, horizon);
+  const curAll = allSales.filter((s) => inRange(s.at, fromDate, toDate));
+  const prevAll = allSales.filter((s) => inRange(s.at, prevFrom, prevTo));
+  const cur = curAll.filter((s) => saleHasProduct(s, productId));
+  const prev = prevAll.filter((s) => saleHasProduct(s, productId));
 
   // ---- KPIs de ventas (respetan el filtro de producto) ----
-  const sumRevenue = (rs: typeof receipts) =>
-    rs.reduce((acc, r) => {
-      const a = Number(r.amountPaid ?? r.amountExpected);
-      return acc + (Number.isFinite(a) && a > 0 ? a : 0);
-    }, 0);
-  const sumUnits = (rs: typeof receipts) =>
-    rs.reduce((acc, r) => {
-      const ids = receiptProductIds(r);
-      return acc + (productId ? (ids.includes(productId) ? 1 : 0) : ids.length);
-    }, 0);
+  const sumRevenue = (rs: Sale[]) => rs.reduce((acc, s) => acc + saleAmountFor(s, productId), 0);
+  const sumUnits = (rs: Sale[]) => rs.reduce((acc, s) => acc + saleUnitsFor(s, productId), 0);
 
   const revenue: Delta = { value: r2(sumRevenue(cur)), prev: r2(sumRevenue(prev)) };
   const sales: Delta = { value: cur.length, prev: prev.length };
@@ -152,26 +111,25 @@ export async function getDashboardStats(params: DashboardParams) {
   const methodMap = new Map<string, number>();
   let autoApprovals = 0;
   let manualApprovals = 0;
-  for (const r of cur) {
-    const m = (r.paymentSource ?? "otro").toLowerCase();
+  for (const s of cur) {
+    const m = (s.paymentSource ?? "otro").toLowerCase();
     methodMap.set(m, (methodMap.get(m) ?? 0) + 1);
-    if (r.validationMode === "AUTO") autoApprovals += 1;
-    else if (r.validationMode === "MANUAL") manualApprovals += 1;
+    if (s.validationMode === "AUTO") autoApprovals += 1;
+    else if (s.validationMode === "MANUAL") manualApprovals += 1;
   }
   const paymentMethods = [...methodMap.entries()]
     .map(([method, count]) => ({ method, count }))
     .sort((a, b) => b.count - a.count);
 
-  // Ranking de productos más vendidos (global del periodo, ignora el filtro)
+  // Ranking de productos más vendidos (global del periodo, ignora el filtro). Una
+  // venta con varios productos reparte su monto entre ellos: la suma cuadra con Ingresos.
   const prodAgg = new Map<string, { revenue: number; units: number }>();
-  for (const r of curAll) {
-    const a = Number(r.amountPaid ?? r.amountExpected);
-    const amount = Number.isFinite(a) && a > 0 ? a : 0;
-    for (const id of receiptProductIds(r)) {
-      const agg = prodAgg.get(id) ?? { revenue: 0, units: 0 };
-      agg.revenue += amount;
-      agg.units += 1;
-      prodAgg.set(id, agg);
+  for (const s of curAll) {
+    for (const share of s.shares) {
+      const agg = prodAgg.get(share.productId) ?? { revenue: 0, units: 0 };
+      agg.revenue += share.amount;
+      agg.units += share.units;
+      prodAgg.set(share.productId, agg);
     }
   }
   const prodNames = await prisma.product.findMany({
@@ -186,10 +144,10 @@ export async function getDashboardStats(params: DashboardParams) {
 
   // ---- Serie de ingresos en el tiempo (producto-filtrado) ----
   const bucket = new Map<string, { total: number; count: number }>();
-  for (const r of cur) {
-    const a = Number(r.amountPaid ?? r.amountExpected);
-    if (!Number.isFinite(a) || a <= 0) continue;
-    const dayKey = toDayKey(refDate(r));
+  for (const s of cur) {
+    const a = saleAmountFor(s, productId);
+    if (a <= 0) continue;
+    const dayKey = toDayKey(s.at);
     const key = granularity === "daily" ? dayKey : dayKey.slice(0, 7);
     const b = bucket.get(key) ?? { total: 0, count: 0 };
     b.total += a;
@@ -199,15 +157,16 @@ export async function getDashboardStats(params: DashboardParams) {
   const series: SeriesPoint[] = [];
   if (granularity === "daily") {
     for (let i = 0; i < days; i++) {
-      const d = new Date(fromDate.getTime() + i * DAY_MS);
+      // Mediodía local: sumar días en milisegundos no se sale del día aunque cambie la hora.
+      const d = new Date(fromDate.getTime() + i * DAY_MS + DAY_MS / 2);
       const key = toDayKey(d);
       const b = bucket.get(key) ?? { total: 0, count: 0 };
       const [, m, day] = key.split("-").map(Number);
       series.push({ date: key, label: `${day} ${MONTH_LABELS[(m ?? 1) - 1]}`, total: r2(b.total), count: b.count });
     }
   } else {
-    const startKey = toDayKey(fromDate).slice(0, 7);
-    const endKey = toDayKey(toDate).slice(0, 7);
+    const startKey = range.from.slice(0, 7);
+    const endKey = range.to.slice(0, 7);
     let [yy, mm] = startKey.split("-").map(Number);
     while (true) {
       const key = `${yy}-${String(mm).padStart(2, "0")}`;
@@ -220,11 +179,12 @@ export async function getDashboardStats(params: DashboardParams) {
     }
   }
 
-  // ---- Embudo / global (todo sensible al rango). Pending y leads convertidos
-  // respetan el filtro de producto; contactos y conversaciones quedan globales. ----
+  // ---- Embudo / global (todo sensible al rango). Por revisar, citas y conversiones
+  // respetan el producto; contactos, conversaciones y recordatorios no tienen producto. ----
   const productClause = productId
     ? { OR: [{ productId }, { productIds: { has: productId } }] }
     : {};
+  const bookingProduct = productId ? { productId } : {};
   const [
     customersWindow,
     conversationsCur,
@@ -237,11 +197,12 @@ export async function getDashboardStats(params: DashboardParams) {
     bookingsCur,
     bookingsPrev,
     bookingsUpcoming,
+    ordersGrouped,
   ] =
     await Promise.all([
       // Clientes creados en [prevFrom, toDate] (ids para separar actual/anterior y
       // cruzar con quienes cerraron venta).
-      prisma.customer.findMany({ where: { companyId, createdAt: { gte: prevFrom, lte: toDate } }, select: { id: true, createdAt: true, adSourceId: true, adTitle: true } }),
+      prisma.customer.findMany({ where: { companyId, createdAt: { gte: prevFrom, lte: toDate } }, select: { id: true, createdAt: true, adSourceId: true } }),
       prisma.conversation.count({ where: { companyId, channel: "whatsapp", createdAt: { gte: fromDate, lte: toDate } } }),
       prisma.conversation.count({ where: { companyId, channel: "whatsapp", createdAt: { gte: prevFrom, lte: prevTo } } }),
       prisma.paymentReceipt.count({ where: { companyId, status: { in: ["PENDIENTE", "EN_REVISION"] }, createdAt: { gte: fromDate, lte: toDate }, ...productClause } }),
@@ -251,134 +212,170 @@ export async function getDashboardStats(params: DashboardParams) {
       prisma.chatFlow.count({ where: { companyId, isActive: true } }),
       // Citas agendadas en el periodo (rubro servicios) y las que vienen en 24 h.
       prisma.serviceBooking.count({
-        where: { companyId, createdAt: { gte: fromDate, lte: toDate }, status: { not: "CANCELADA" } },
+        where: { companyId, createdAt: { gte: fromDate, lte: toDate }, status: { not: "CANCELADA" }, ...bookingProduct },
       }),
       prisma.serviceBooking.count({
-        where: { companyId, createdAt: { gte: prevFrom, lte: prevTo }, status: { not: "CANCELADA" } },
+        where: { companyId, createdAt: { gte: prevFrom, lte: prevTo }, status: { not: "CANCELADA" }, ...bookingProduct },
       }),
       prisma.serviceBooking.count({
         where: {
           companyId,
           startsAt: { gte: now, lte: new Date(now.getTime() + DAY_MS) },
           status: { in: ["SOLICITADA", "CONFIRMADA"] },
+          ...bookingProduct,
         },
+      }),
+      // Pedidos registrados en el periodo, por estado (pestaña «Pagos y entregas»).
+      prisma.order.groupBy({
+        by: ["status"],
+        where: { companyId, createdAt: { gte: fromDate, lte: toDate }, ...(productId ? { OR: [{ productId }, { items: { some: { productId } } }] } : {}) },
+        _count: { _all: true },
       }),
     ]);
 
-  const newIdsCur = customersWindow.filter((c) => inRange(c.createdAt, fromDate, toDate)).map((c) => c.id);
-  const newIdsPrev = customersWindow.filter((c) => inRange(c.createdAt, prevFrom, prevTo)).map((c) => c.id);
-  const newContacts: Delta = { value: newIdsCur.length, prev: newIdsPrev.length };
+  const newCur = customersWindow.filter((c) => inRange(c.createdAt, fromDate, toDate));
+  const newPrev = customersWindow.filter((c) => inRange(c.createdAt, prevFrom, prevTo));
+  const newContacts: Delta = { value: newCur.length, prev: newPrev.length };
   const conversations: Delta = { value: conversationsCur, prev: conversationsPrev };
 
-  // Conversión global del periodo: ventas (con producto, sin filtro) / conversaciones.
-  const globalSalesCur = curAll.length;
-  const globalSalesPrev = prevAll.length;
-  const conversionRate: Delta = {
-    value: conversationsCur > 0 ? pct(globalSalesCur / conversationsCur) : 0,
-    prev: conversationsPrev > 0 ? pct(globalSalesPrev / conversationsPrev) : 0,
-  };
+  // ---- Cohorte: ¿esta persona compró DESPUÉS de llegar? Se mira su última venta (del
+  // producto filtrado, si hay filtro) hasta hoy. ----
+  const lastSaleAt = new Map<string, number>();
+  for (const s of allSales) {
+    if (!s.customerId || !saleHasProduct(s, productId)) continue;
+    const t = s.at.getTime();
+    if (t > (lastSaleAt.get(s.customerId) ?? 0)) lastSaleAt.set(s.customerId, t);
+  }
+  const boughtSince = (customerId: string, since: Date) =>
+    (lastSaleAt.get(customerId) ?? 0) >= since.getTime() - COHORT_SLACK_MS;
 
-  // Leads convertidos: contactos NUEVOS del periodo que cerraron una venta (de los
-  // comprobantes producto-filtrados del periodo). Respeta rango y producto.
-  const salesCustCur = new Set(cur.map((r) => r.customerId).filter(Boolean) as string[]);
-  const salesCustPrev = new Set(prev.map((r) => r.customerId).filter(Boolean) as string[]);
+  // Leads que compraron: contactos NUEVOS del periodo que ya cerraron una venta.
   const convertedLeads: Delta = {
-    value: newIdsCur.filter((id) => salesCustCur.has(id)).length,
-    prev: newIdsPrev.filter((id) => salesCustPrev.has(id)).length,
+    value: newCur.filter((c) => boughtSince(c.id, c.createdAt)).length,
+    prev: newPrev.filter((c) => boughtSince(c.id, c.createdAt)).length,
+  };
+  // Tasa de conversión: de los contactos nuevos, qué porcentaje ya compró.
+  const conversionRate: Delta = {
+    value: newContacts.value > 0 ? pct(convertedLeads.value / newContacts.value) : 0,
+    prev: newContacts.prev > 0 ? pct(convertedLeads.prev / newContacts.prev) : 0,
   };
 
-  // ---- Rendimiento por anuncio (atribución CTWA): personas que escribieron desde
-  // cada anuncio en el periodo (clics registrados en AdTouch: nuevas + clientes que
-  // regresan por otro anuncio) + ventas/ingresos por el anuncio VIGENTE al momento
-  // de la venta (guardado en el comprobante). Fila "sin anuncio" para comparar. ----
+  // ---- Rendimiento por anuncio (atribución CTWA) ----
+  // Leads: personas que escribieron desde cada anuncio en el periodo (clics en AdTouch).
+  // Compraron: de esos leads, cuántos ya compraron después de su clic (cohorte).
+  // Ventas / ingresos: ventas DEL PERIODO por el anuncio vigente al momento de vender.
+  // Con filtro de producto: solo anuncios cuyo producto del catálogo es ese, y solo
+  // ventas de ese producto.
   const adCatalog = await resolveAdCatalog(companyId);
   type AdAgg = {
     adSourceId: string | null;
     adTitle: string | null;
-    leads: number;
+    people: Map<string, Date>; // persona → su primer clic del periodo en este anuncio
     returning: number;
     sales: number;
     revenue: number;
-    buyers: Set<string>;
-    people: Set<string>;
   };
   const adAgg = new Map<string, AdAgg>();
   const aggFor = (adSourceId: string | null, adTitle: string | null): AdAgg => {
     const key = adSourceId ?? "__sin_anuncio__";
     let a = adAgg.get(key);
     if (!a) {
-      a = { adSourceId, adTitle, leads: 0, returning: 0, sales: 0, revenue: 0, buyers: new Set(), people: new Set() };
+      a = { adSourceId, adTitle, people: new Map(), returning: 0, sales: 0, revenue: 0 };
       adAgg.set(key, a);
     }
     if (!a.adTitle && adTitle) a.adTitle = adTitle;
     return a;
   };
-  // Sin anuncio: contactos nuevos del periodo que no llegaron desde ninguno.
-  for (const c of customersWindow) {
-    if (!inRange(c.createdAt, fromDate, toDate)) continue;
-    if (!c.adSourceId) aggFor(null, null).leads += 1;
-  }
-  // Con anuncio: una persona cuenta una vez por anuncio en el periodo. «Regresa» =
-  // ya había escrito antes desde algún anuncio (su primer clic es anterior a este).
+
   const periodTouches = await prisma.adTouch.findMany({
     where: { companyId, createdAt: { gte: fromDate, lte: toDate } },
     orderBy: { createdAt: "asc" },
     select: { customerId: true, adSourceId: true, adTitle: true, createdAt: true },
   });
-  const touchCustomerIds = [...new Set(periodTouches.map((t) => t.customerId))];
-  const firstTouches = touchCustomerIds.length
-    ? await prisma.adTouch.groupBy({ by: ["customerId"], where: { customerId: { in: touchCustomerIds } }, _min: { createdAt: true } })
-    : [];
-  const firstTouchAt = new Map(firstTouches.map((f) => [f.customerId, f._min.createdAt?.getTime() ?? 0]));
+  // «Regresa» = ya era contacto antes del periodo (no un lead nuevo que toca dos anuncios).
+  const createdInPeriod = new Set(newCur.map((c) => c.id));
+  const touchedInPeriod = new Set<string>();
   for (const t of periodTouches) {
+    if (productId && adCatalogEntryFor(adCatalog, t.adSourceId, t.adTitle)?.productId !== productId) continue;
+    touchedInPeriod.add(t.customerId);
     const a = aggFor(t.adSourceId, t.adTitle ?? null);
     if (a.people.has(t.customerId)) continue;
-    a.people.add(t.customerId);
-    a.leads += 1;
-    if (t.createdAt.getTime() > (firstTouchAt.get(t.customerId) ?? 0)) a.returning += 1;
+    a.people.set(t.customerId, t.createdAt);
+    if (!createdInPeriod.has(t.customerId)) a.returning += 1;
   }
-  const saleCustomerIds = [...new Set(curAll.map((r) => r.customerId).filter(Boolean) as string[])];
-  const saleCustomers = saleCustomerIds.length
-    ? await prisma.customer.findMany({
-        where: { id: { in: saleCustomerIds } },
-        select: { id: true, adSourceId: true, adTitle: true },
+  // Sin anuncio: contactos nuevos del periodo que no llegaron desde ninguno.
+  for (const c of newCur) {
+    if (c.adSourceId || touchedInPeriod.has(c.id)) continue;
+    aggFor(null, null).people.set(c.id, c.createdAt);
+  }
+
+  // Anuncio de cada venta del periodo: el guardado en la venta; si no lo tiene, el
+  // último clic de esa persona anterior a la venta.
+  const saleCustomerIds = [...new Set(cur.filter((s) => !s.adSourceId && s.customerId).map((s) => s.customerId as string))];
+  const saleTouches = saleCustomerIds.length
+    ? await prisma.adTouch.findMany({
+        where: { companyId, customerId: { in: saleCustomerIds }, createdAt: { lte: toDate } },
+        orderBy: { createdAt: "asc" },
+        select: { customerId: true, adSourceId: true, adTitle: true, createdAt: true },
       })
     : [];
-  const adByCustomer = new Map(saleCustomers.map((c) => [c.id, c]));
-  for (const r of curAll) {
-    const c = r.customerId ? adByCustomer.get(r.customerId) : undefined;
-    // Ventas de la tienda web: fila propia "Tienda web" (no son del chat ni de un anuncio CTWA).
-    const isStore = ((r.metadata ?? {}) as { channel?: string }).channel === "storefront";
-    // Anuncio guardado en la venta; las anteriores a ese dato caen al primer anuncio del cliente.
-    const a = isStore
-      ? aggFor("storefront", "Tienda web")
-      : aggFor(r.adSourceId ?? c?.adSourceId ?? null, (r.adSourceId ? r.adTitle : c?.adTitle) ?? null);
+  const touchesByCustomer = new Map<string, typeof saleTouches>();
+  for (const t of saleTouches) {
+    const list = touchesByCustomer.get(t.customerId) ?? [];
+    list.push(t);
+    touchesByCustomer.set(t.customerId, list);
+  }
+  const adOfSale = (s: Sale): { adSourceId: string | null; adTitle: string | null } => {
+    if (s.adSourceId) return { adSourceId: s.adSourceId, adTitle: s.adTitle };
+    const list = s.customerId ? touchesByCustomer.get(s.customerId) : undefined;
+    if (!list) return { adSourceId: null, adTitle: null };
+    const limit = s.at.getTime() + COHORT_SLACK_MS;
+    let found: (typeof saleTouches)[number] | null = null;
+    for (const t of list) {
+      if (t.createdAt.getTime() > limit) break;
+      found = t;
+    }
+    return { adSourceId: found?.adSourceId ?? null, adTitle: found?.adTitle ?? null };
+  };
+  for (const s of cur) {
+    let a: AdAgg;
+    if (s.channel === "store") a = aggFor(AD_ROW_STORE, "Tienda web");
+    else {
+      const ad = adOfSale(s);
+      // Pago aprobado sin cliente asociado: fila propia (no es «orgánico»).
+      a = !ad.adSourceId && !s.customerId ? aggFor(AD_ROW_UNLINKED, "Pagos sin cliente") : aggFor(ad.adSourceId, ad.adTitle);
+    }
     a.sales += 1;
-    if (r.customerId) a.buyers.add(r.customerId);
-    const amount = Number(r.amountPaid ?? r.amountExpected);
-    if (Number.isFinite(amount) && amount > 0) a.revenue += amount;
+    a.revenue += saleAmountFor(s, productId);
   }
   const adPerformance = [...adAgg.values()]
     .map((a) => {
-      const entry = a.adSourceId ? adCatalogEntryFor(adCatalog, a.adSourceId, a.adTitle) : null;
+      const special = a.adSourceId === AD_ROW_STORE || a.adSourceId === AD_ROW_UNLINKED;
+      const entry = a.adSourceId && !special ? adCatalogEntryFor(adCatalog, a.adSourceId, a.adTitle) : null;
+      const leads = a.people.size;
+      let buyers = 0;
+      for (const [customerId, since] of a.people) if (boughtSince(customerId, since)) buyers += 1;
       return {
         adSourceId: a.adSourceId,
         adTitle: a.adTitle,
         description: entry?.description ?? null,
         productName: entry?.productName ?? null,
-        leads: a.leads,
-        // De esos leads, cuántos ya eran clientes y volvieron por este anuncio.
+        leads,
+        // De esos leads, cuántos ya eran contactos antes del periodo.
         returningLeads: a.returning,
+        // De esos leads, cuántos ya compraron (después de escribir).
+        buyers,
+        // Ventas e ingresos del periodo atribuidos a este anuncio.
         sales: a.sales,
         revenue: r2(a.revenue),
-        // Conversión: clientes ÚNICOS que compraron / leads llegados por ese anuncio.
-        conversionRate: a.leads > 0 ? pct(a.buyers.size / a.leads) : null,
+        // Conversión de cohorte: compraron / leads. Nunca pasa de 100 %.
+        conversionRate: leads > 0 ? pct(buyers / leads) : null,
       };
     })
     .sort((x, y) => y.revenue - x.revenue || y.leads - x.leads);
 
   return {
-    range: { from: toDayKey(fromDate), to: toDayKey(toDate), granularity },
+    range: { from: range.from, to: range.to, prevFrom: range.prevFrom, prevTo: range.prevTo, period: params.period ?? null, granularity },
     currency,
     productId: productId ?? null,
     kpis: {
@@ -401,8 +398,10 @@ export async function getDashboardStats(params: DashboardParams) {
     topProducts,
     paymentMethods,
     adPerformance,
-    funnel: { contacts: newContacts.value, conversations: conversationsCur, sales: globalSalesCur },
+    // Embudo de cohorte: contactos nuevos → conversaciones abiertas → cuántos ya compraron.
+    funnel: { contacts: newContacts.value, conversations: conversationsCur, sales: convertedLeads.value },
     flows: { total: flowsTotal, active: flowsActive },
+    ordersByStatus: ordersGrouped.map((g) => ({ status: g.status as string, count: g._count._all })),
   };
 }
 
@@ -449,6 +448,9 @@ export async function getDashboardExportData(params: DashboardParams) {
   const stats = await getDashboardStats(params);
   const fromDate = zonedDayBoundary(stats.range.from, timezone, false);
   const toDate = zonedDayBoundary(stats.range.to, timezone, true);
+  // Fechas ya resueltas: el detalle usa exactamente el mismo rango que las tarjetas.
+  const now = new Date();
+  const horizon = toDate.getTime() > now.getTime() ? toDate : now;
 
   const productClause = productId ? { OR: [{ productId }, { productIds: { has: productId } }] } : {};
   const toAmount = (paid: string | null, expected: string) => {
@@ -456,48 +458,11 @@ export async function getDashboardExportData(params: DashboardParams) {
     return Number.isFinite(a) && a > 0 ? r2(a) : 0;
   };
 
-  const [salesRaw, pendingRaw, customersRaw, remindersRaw, conversationsRaw, bookingsRaw, productName] =
+  const [salesAll, pendingRaw, customersRaw, remindersRaw, conversationsRaw, bookingsRaw, productName] =
     await Promise.all([
-    prisma.paymentReceipt.findMany({
-      where: {
-        companyId,
-        status: "APROBADO",
-        OR: [{ productId: { not: null } }, { productIds: { isEmpty: false } }],
-        AND: [
-          {
-            OR: [
-              { occurredAt: { gte: fromDate, lte: toDate } },
-              { validatedAt: { gte: fromDate, lte: toDate } },
-              { createdAt: { gte: fromDate, lte: toDate } },
-            ],
-          },
-          productClause,
-        ],
-      },
-      select: {
-        amountPaid: true,
-        amountExpected: true,
-        currency: true,
-        paymentSource: true,
-        payerName: true,
-        payerPhone: true,
-        operationCode: true,
-        reference: true,
-        source: true,
-        validationMode: true,
-        matchScore: true,
-        customerId: true,
-        productId: true,
-        productIds: true,
-        occurredAt: true,
-        validatedAt: true,
-        createdAt: true,
-        customer: { select: { name: true, phone: true } },
-        product: { select: { name: true } },
-      },
-      orderBy: { createdAt: "asc" },
-      take: EXPORT_ROW_CAP,
-    }),
+    // Mismo lector que las tarjetas (un pedido = una venta). Hasta hoy, para saber
+    // qué clientes nuevos terminaron comprando.
+    loadSales(companyId, fromDate, horizon),
     prisma.paymentReceipt.findMany({
       where: {
         companyId,
@@ -556,7 +521,7 @@ export async function getDashboardExportData(params: DashboardParams) {
     }),
     // Citas del periodo (rubro servicios): se exportan por fecha de creación.
     prisma.serviceBooking.findMany({
-      where: { companyId, createdAt: { gte: fromDate, lte: toDate } },
+      where: { companyId, createdAt: { gte: fromDate, lte: toDate }, ...(productId ? { productId } : {}) },
       select: {
         createdAt: true,
         startsAt: true,
@@ -578,42 +543,58 @@ export async function getDashboardExportData(params: DashboardParams) {
       : Promise.resolve(null),
   ]);
 
-  // Mismo criterio que el KPI de ventas: fecha de referencia dentro del rango.
-  const salesFiltered = salesRaw
-    .filter((r) => inRange(refDate(r), fromDate, toDate))
-    .sort((a, b) => refDate(a).getTime() - refDate(b).getTime());
+  // Mismo criterio que el KPI de ventas: fecha dentro del rango y producto filtrado.
+  const salesOfProduct = salesAll.filter((s) => saleHasProduct(s, productId));
+  const salesFiltered = salesOfProduct.filter((s) => inRange(s.at, fromDate, toDate)).slice(0, EXPORT_ROW_CAP);
 
-  // Nombres de TODOS los productos referenciados (sales + pending) en una query.
+  // Nombres de TODOS los productos referenciados (sales + pending) y clientes de las ventas.
   const allProductIds = new Set<string>();
-  for (const r of salesFiltered) for (const id of receiptProductIds(r)) allProductIds.add(id);
+  for (const s of salesFiltered) for (const share of s.shares) allProductIds.add(share.productId);
   for (const r of pendingRaw) for (const id of receiptProductIds(r)) allProductIds.add(id);
-  const prodNames = allProductIds.size
-    ? await prisma.product.findMany({ where: { companyId, id: { in: [...allProductIds] } }, select: { id: true, name: true } })
-    : [];
+  const saleCustomerIdList = [...new Set(salesFiltered.map((s) => s.customerId).filter(Boolean) as string[])];
+  const [prodNames, saleCustomers] = await Promise.all([
+    allProductIds.size
+      ? prisma.product.findMany({ where: { companyId, id: { in: [...allProductIds] } }, select: { id: true, name: true } })
+      : Promise.resolve([]),
+    saleCustomerIdList.length
+      ? prisma.customer.findMany({ where: { companyId, id: { in: saleCustomerIdList } }, select: { id: true, name: true, phone: true } })
+      : Promise.resolve([]),
+  ]);
   const nameById = new Map(prodNames.map((p) => [p.id, p.name.trim()]));
+  const customerById = new Map(saleCustomers.map((c) => [c.id, c]));
   const productsLabel = (r: { productId: string | null; productIds: string[] }) =>
     receiptProductIds(r)
       .map((id) => nameById.get(id) ?? "Producto")
       .join(", ");
 
-  const sales = salesFiltered.map((r) => ({
-    date: refDate(r),
-    customerName: r.customer?.name ?? null,
-    customerPhone: r.customer?.phone ?? null,
-    payerName: r.payerName,
-    payerPhone: r.payerPhone,
-    method: r.paymentSource,
-    amount: toAmount(r.amountPaid, r.amountExpected),
-    currency: r.currency,
-    products: productsLabel(r),
-    validationMode: r.validationMode,
-    operationCode: r.operationCode,
-    reference: r.reference,
-    source: r.source,
-    matchScore: r.matchScore,
-  }));
+  const sales = salesFiltered.map((s) => {
+    const customer = s.customerId ? customerById.get(s.customerId) : undefined;
+    return {
+      date: s.at,
+      customerName: customer?.name ?? null,
+      customerPhone: customer?.phone ?? null,
+      payerName: s.payerName,
+      payerPhone: s.payerPhone,
+      method: s.paymentSource,
+      amount: r2(saleAmountFor(s, productId)),
+      currency: stats.currency,
+      products: s.shares.map((share) => nameById.get(share.productId) ?? "Producto").join(", "),
+      validationMode: s.validationMode,
+      operationCode: s.operationCode,
+      // Un pedido se identifica por su código; un comprobante, por su referencia.
+      reference: s.orderCode ?? s.reference,
+      source: s.source,
+      matchScore: s.matchScore,
+    };
+  });
 
-  const salesCustomerIds = new Set(salesFiltered.map((r) => r.customerId).filter(Boolean) as string[]);
+  // Clientes nuevos que ya compraron (misma regla de cohorte que las tarjetas).
+  const lastSaleAt = new Map<string, number>();
+  for (const s of salesOfProduct) {
+    if (!s.customerId) continue;
+    const t = s.at.getTime();
+    if (t > (lastSaleAt.get(s.customerId) ?? 0)) lastSaleAt.set(s.customerId, t);
+  }
 
   const pending = pendingRaw.map((r) => ({
     date: r.createdAt,
@@ -635,7 +616,7 @@ export async function getDashboardExportData(params: DashboardParams) {
     email: c.email,
     leadSource: c.origenDeLead,
     interestedIn: c.selectedProduct?.name ?? null,
-    purchased: salesCustomerIds.has(c.id),
+    purchased: (lastSaleAt.get(c.id) ?? 0) >= c.createdAt.getTime() - COHORT_SLACK_MS,
   }));
 
   const reminders = remindersRaw.map((m) => ({

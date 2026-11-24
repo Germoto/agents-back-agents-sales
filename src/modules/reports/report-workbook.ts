@@ -53,6 +53,21 @@ function deltaLabel(d: Delta): string {
   return `${capped > 0 ? "+" : ""}${capped}%`;
 }
 
+/** Variación de una tasa, en puntos porcentuales. */
+function pointsLabel(d: Delta): string {
+  if (d.prev === 0 && d.value === 0) return "—";
+  const diff = Math.round((d.value - d.prev) * 10) / 10;
+  return `${diff > 0 ? "+" : ""}${diff} pts`;
+}
+
+/** Nombre visible de una fila de «Por anuncio». */
+function adRowName(a: { adSourceId: string | null; adTitle: string | null; description: string | null }): string {
+  if (a.adSourceId === null) return "Sin anuncio (orgánico)";
+  if (a.adSourceId === "storefront") return "Tienda web";
+  if (a.adSourceId === "unlinked") return "Pagos sin cliente asociado";
+  return a.description ?? a.adTitle ?? a.adSourceId;
+}
+
 function addTableSheet(wb: ExcelJS.Workbook, spec: SheetSpec) {
   const ws = wb.addWorksheet(spec.name.slice(0, 31));
   const cols = Math.max(spec.headers.length, 2);
@@ -167,7 +182,8 @@ export async function buildDashboardWorkbook(
       ["Unidades vendidas", k.units.value, k.units.prev, deltaLabel(k.units)],
       ["Contactos nuevos", k.newContacts.value, k.newContacts.prev, deltaLabel(k.newContacts)],
       ["Conversaciones", k.conversations.value, k.conversations.prev, deltaLabel(k.conversations)],
-      ["Tasa de conversión", `${k.conversionRate.value}%`, `${k.conversionRate.prev}%`, deltaLabel(k.conversionRate)],
+      // Es una tasa: la variación va en puntos porcentuales (10 % → 15 % = +5 pts).
+      ["Tasa de conversión (contactos nuevos que ya compraron)", `${k.conversionRate.value}%`, `${k.conversionRate.prev}%`, pointsLabel(k.conversionRate)],
       ["Comprobantes por revisar", k.pendingReceipts, "—", "—"],
       ["Aprobaciones automáticas", k.autoApprovals, "—", "—"],
       ["Aprobaciones manuales", k.manualApprovals, "—", "—"],
@@ -193,7 +209,7 @@ export async function buildDashboardWorkbook(
     const pctOf = (part: number, whole: number) => (whole > 0 ? `${Math.round((part / whole) * 100)}%` : "—");
     ws.addRow(["Contactos nuevos", stats.funnel.contacts, "—"]);
     ws.addRow(["Conversaciones", stats.funnel.conversations, pctOf(stats.funnel.conversations, stats.funnel.contacts)]);
-    ws.addRow(["Ventas", stats.funnel.sales, pctOf(stats.funnel.sales, stats.funnel.conversations)]);
+    ws.addRow(["Ya compraron (de los contactos nuevos)", stats.funnel.sales, pctOf(stats.funnel.sales, stats.funnel.contacts)]);
 
     styleHeaderRow(["Flujos de chatbot", "Valor", "", ""]);
     ws.addRow(["Totales", stats.flows.total]);
@@ -253,6 +269,28 @@ export async function buildDashboardWorkbook(
     widths: [36, 14, 12],
     moneyCols: [2],
   });
+
+  // ---- Por anuncio (solo si hubo leads o ventas de anuncios) ----
+  if (stats.adPerformance.some((a) => a.adSourceId)) {
+    addTableSheet(wb, {
+      name: "Por anuncio",
+      title: "Rendimiento por anuncio",
+      subtitle: `Leads = personas que escribieron por el anuncio en el período; Compraron = cuántas de ellas ya compraron · ${rangeLabel} · Producto: ${productLabel}`,
+      headers: ["Anuncio", "Producto", "Leads", "Regresan", "Compraron", "Conversión", "Ventas del período", "Ingresos"],
+      rows: stats.adPerformance.map((a) => [
+        adRowName(a),
+        a.productName ?? "—",
+        a.leads,
+        a.returningLeads,
+        a.buyers,
+        a.conversionRate === null ? "—" : `${a.conversionRate}%`,
+        a.sales,
+        a.revenue,
+      ]),
+      widths: [40, 28, 10, 10, 12, 12, 16, 14],
+      moneyCols: [8],
+    });
+  }
 
   // ---- 5. Métodos de pago ----
   const methodTotal = stats.paymentMethods.reduce((acc, m) => acc + m.count, 0);
