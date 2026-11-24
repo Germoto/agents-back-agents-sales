@@ -302,6 +302,8 @@ export type PendingReminderRow = {
   /** Paso de la secuencia (0 = primero) y total de pasos, si aplica. */
   stepIndex: number | null;
   stepCount: number | null;
+  /** Mensajes adicionales que salen seguidos tras este (mismo paso). */
+  extraCount: number;
   /** Tipo del adjunto (metadata.mediaType: image|video|audio|pdf|document), si hay mediaUrl. */
   mediaType: string | null;
   /** Pospuesto a pedido del cliente (tool posponer_seguimiento del agente). */
@@ -361,6 +363,7 @@ export async function listPendingReminders(
       dueAt: reminderDueAt({ sendAt: r.sendAt, metadata }),
       stepIndex: num(m.stepIndex),
       stepCount: num(m.stepCount),
+      extraCount: Array.isArray(m.extraMessages) ? m.extraMessages.length : 0,
       mediaType: r.mediaUrl && typeof m.mediaType === "string" ? m.mediaType : null,
       postponed: m.postponed === true,
     };
@@ -443,6 +446,7 @@ export async function updateScheduledReminder(
     dueAt: reminderDueAt({ sendAt: updated.sendAt, metadata }),
     stepIndex: num(m.stepIndex),
     stepCount: num(m.stepCount),
+    extraCount: Array.isArray(m.extraMessages) ? m.extraMessages.length : 0,
     mediaType: updated.mediaUrl && typeof m.mediaType === "string" ? m.mediaType : null,
     postponed: m.postponed === true,
   };

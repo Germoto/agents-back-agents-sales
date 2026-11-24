@@ -19,6 +19,34 @@ export interface ReminderStep {
   /** Oferta ESCALONADA: al enviarse este paso, el agente ofrece/cobra/valida
    *  este precio SOLO para ese cliente (se activa en su conversación). */
   offerPrice?: string | null;
+  /** Más mensajes del MISMO paso: salen seguidos tras el principal, en orden
+   *  (p. ej. texto + audio + texto). El paso sigue contando como uno en la cola. */
+  extraMessages?: ReminderExtraMessage[];
+}
+
+export interface ReminderExtraMessage {
+  message: string;
+  mediaUrl: string | null;
+  mediaType: string;
+}
+
+/** Tope de mensajes adicionales por paso. */
+export const MAX_STEP_EXTRA_MESSAGES = 5;
+
+/** Limpia la lista de mensajes adicionales de un paso (descarta vacíos, aplica el tope). */
+export function extraMessagesFrom(raw: unknown): ReminderExtraMessage[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ReminderExtraMessage[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    const message = typeof o.message === "string" ? o.message : "";
+    const mediaUrl = typeof o.mediaUrl === "string" && o.mediaUrl.trim() ? o.mediaUrl.trim() : null;
+    const mediaType = typeof o.mediaType === "string" ? o.mediaType : "";
+    if (message.trim() || mediaUrl) out.push({ message, mediaUrl, mediaType: mediaUrl ? mediaType : "" });
+    if (out.length >= MAX_STEP_EXTRA_MESSAGES) break;
+  }
+  return out;
 }
 
 export interface ReminderSequence {
@@ -123,8 +151,13 @@ export function stepsFrom(cfg: Record<string, unknown>): ReminderStep[] | null {
       const mediaUrl = typeof s.mediaUrl === "string" && s.mediaUrl.trim() ? s.mediaUrl : null;
       const mediaType = typeof s.mediaType === "string" ? s.mediaType : "";
       const offerPrice = typeof s.offerPrice === "string" && s.offerPrice.trim() ? s.offerPrice.trim() : null;
+      const extraMessages = extraMessagesFrom(s.extraMessages);
       if (message.trim() || mediaUrl) {
-        steps.push({ delaySeconds: Math.max(1, Math.round(delaySeconds)), message, mediaUrl, mediaType, offerPrice });
+        steps.push({ delaySeconds: Math.max(1, Math.round(delaySeconds)), message, mediaUrl, mediaType, offerPrice, extraMessages });
+      } else if (extraMessages.length) {
+        // Paso sin mensaje principal: el primer adicional ocupa su lugar.
+        const [first, ...rest] = extraMessages;
+        steps.push({ delaySeconds: Math.max(1, Math.round(delaySeconds)), message: first.message, mediaUrl: first.mediaUrl, mediaType: first.mediaType, offerPrice, extraMessages: rest });
       }
     }
     return steps.length ? steps : null;
@@ -171,9 +204,13 @@ export function resolveReminderSequence(
   return {
     enabled,
     // {oferta} se sustituye con el offerPrice del PROPIO paso (escalera de ofertas).
-    steps: steps.map((s) => ({
-      ...s,
-      message: substituteVars(s.message, { ...vars, oferta: s.offerPrice ?? vars.oferta ?? "" }),
-    })),
+    steps: steps.map((s) => {
+      const stepVars = { ...vars, oferta: s.offerPrice ?? vars.oferta ?? "" };
+      return {
+        ...s,
+        message: substituteVars(s.message, stepVars),
+        extraMessages: (s.extraMessages ?? []).map((m) => ({ ...m, message: substituteVars(m.message, stepVars) })),
+      };
+    }),
   };
 }

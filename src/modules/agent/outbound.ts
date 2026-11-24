@@ -282,15 +282,19 @@ export async function sendMedia(
     }
     return { gatewayId: res.wamid };
   }
+  // WhatsApp no muestra descripción en los audios: el texto que acompaña a un audio
+  // se perdía. Igual que en Meta, el audio va solo y el texto sale como mensaje aparte.
+  const audioText = kind === "audio" && caption && caption.trim() ? caption : null;
   const res = await smsTools.sendMedia(
     { apiUrl: sender.apiUrl, secret: sender.secret },
     sender.account,
     to,
     kind,
     mediaUrl,
-    caption,
+    audioText ? undefined : caption,
     fileName,
     opts,
   );
+  if (audioText) await sendText(sender, to, audioText).catch(() => undefined);
   return { gatewayId: gatewayIdOf(res) };
 }

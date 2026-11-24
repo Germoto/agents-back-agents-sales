@@ -22,7 +22,7 @@ import {
   type QuietHours,
   type ReminderPacing,
 } from "./quiet-hours";
-import { applySpintax } from "../agent/reminder-templates";
+import { applySpintax, extraMessagesFrom } from "../agent/reminder-templates";
 import { env } from "../../config/env";
 import type { WhatsappSender } from "../agent/outbound";
 import { metaWa, META_WINDOW_REASON } from "../../lib/meta-wa-client";
@@ -45,6 +45,24 @@ const BATCH = 300;
 const SEQUENCE_TYPES: ScheduledMessageType[] = [ScheduledMessageType.ABANDONED_CART, ScheduledMessageType.LEFT_ON_READ];
 const MAX_LATE_MS = env.REMINDER_MAX_LATE_HOURS * 60 * 60_000;
 const MAX_LATE_LAST_MS = env.REMINDER_MAX_LATE_LAST_HOURS * 60 * 60_000;
+// El colapso es para atrasos REALES (horario de silencio, tope por hora). Dos pasos
+// puestos juntos a propósito (a segundos o pocos minutos) no llevan ese atraso: salen
+// los dos, en orden. Por debajo de este margen no se colapsa.
+const COLLAPSE_MIN_LATE_MS = Number(process.env.REMINDER_COLLAPSE_MIN_LATE_MS) || 10 * 60_000;
+// Pausa estándar entre los mensajes de un mismo paso (si el negocio no definió la suya).
+const STEP_MESSAGE_GAP_MS = 1200;
+
+/** Pausa entre mensajes seguidos según «Ritmo de mensajes» del negocio (cache por pasada). */
+async function companyGapMs(companyId: string, cache: Map<string, number>): Promise<number> {
+  const cached = cache.get(companyId);
+  if (cached !== undefined) return cached;
+  const c = await prisma.company
+    .findUnique({ where: { id: companyId }, select: { messageGapEnabled: true, messageGapSeconds: true } })
+    .catch(() => null);
+  const ms = c?.messageGapEnabled && c.messageGapSeconds && c.messageGapSeconds > 0 ? c.messageGapSeconds * 1000 : STEP_MESSAGE_GAP_MS;
+  cache.set(companyId, ms);
+  return ms;
+}
 
 /** Inyectable en tests (reloj). */
 export const schedulerInternals = { now: () => new Date() };
@@ -211,6 +229,7 @@ export async function processDue(): Promise<void> {
 
   const senderCache = new Map<string, WhatsappSender | null>();
   const quietCache = new Map<string, QuietConfig>();
+  const gapCache = new Map<string, number>();
   const paceCache = new Map<string, CompanyPace>();
   // Clientes que ya recibieron un recordatorio VISIBLE en esta pasada: el resto de
   // sus recordatorios se reprograma para no encimarse.
@@ -486,6 +505,48 @@ export async function processDue(): Promise<void> {
         });
       }
 
+      // Más mensajes del MISMO paso (texto + audio + texto): salen seguidos, en orden,
+      // con la pausa entre mensajes del negocio. Si uno falla se sigue con el resto:
+      // el paso ya salió y no debe reintentarse entero.
+      const extras = extraMessagesFrom((msg.metadata as { extraMessages?: unknown } | null)?.extraMessages);
+      if (extras.length) {
+        const gapMs = await companyGapMs(msg.companyId, gapCache);
+        const failedExtras: number[] = [];
+        for (let i = 0; i < extras.length; i++) {
+          const extra = extras[i];
+          await new Promise((r) => setTimeout(r, gapMs));
+          try {
+            const text = extra.message.trim() ? applySpintax(extra.message) : "";
+            const extraBody = text ? ((await applyFirma(msg.companyId, text)) ?? text) : "";
+            const extraSent = extra.mediaUrl
+              ? await sendMedia(sender, to, stickerSafeKind(mediaKindFor(extra.mediaType || "image"), extra.mediaUrl), extra.mediaUrl, extraBody || undefined)
+              : await sendText(sender, to, extraBody);
+            if (msg.conversationId) {
+              await recordMessage({
+                companyId: msg.companyId,
+                customerId: msg.customerId,
+                conversationId: msg.conversationId,
+                role: "ASSISTANT",
+                message: extraBody,
+                mediaUrl: extra.mediaUrl,
+                ...(extra.mediaUrl && isStickerType(extra.mediaType) && isStickerGalleryUrl(extra.mediaUrl) ? { mediaType: "sticker" } : {}),
+                gatewayId: extraSent.gatewayId,
+                deliveryStatus: extraSent.gatewayId ? "pending" : null,
+                rawPayload: { source: NO_RETRY_SOURCES.reminder },
+              });
+            }
+          } catch (err) {
+            failedExtras.push(i + 2);
+            console.warn(`[scheduler] mensaje adicional ${i + 2} del paso no salió (${msg.id}):`, err instanceof Error ? err.message : err);
+          }
+        }
+        if (failedExtras.length) {
+          await prisma.scheduledMessage
+            .update({ where: { id: msg.id }, data: { failureReason: `enviado, pero no salió el mensaje ${failedExtras.join(", ")} del paso` } })
+            .catch(() => undefined);
+        }
+      }
+
       // Oferta ESCALONADA: al ENVIARSE este paso, el precio ofrecido queda activo
       // SOLO para este cliente — el agente lo presenta, cobra y valida en su
       // conversación (state.activeOffer) y el carrito se reprecia si ya tenía
@@ -610,6 +671,10 @@ async function collapseOverdueSiblings(
   // segundos/minutos por el pacing y aun así el paso está atrasado).
   const overdue = siblings.filter((r) => dueAtOf(r) <= nowMs);
   if (overdue.length <= 1) return "send";
+  // Sin atraso real (pasos puestos seguidos a propósito): no se descarta ninguno. Sale
+  // primero el paso más antiguo; el siguiente espera a la próxima pasada del worker.
+  const oldest = overdue.reduce((best, r) => (isNewer(best, r) ? r : best));
+  if (nowMs - dueAtOf(oldest) <= COLLAPSE_MIN_LATE_MS) return oldest.id === me.id ? "send" : "skip";
   const winner = overdue.reduce((best, r) => (isNewer(r, best) ? r : best));
   const losers = overdue.filter((r) => r.id !== winner.id);
   const carrier = overdue

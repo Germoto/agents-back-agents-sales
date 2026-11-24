@@ -1755,6 +1755,8 @@ async function scheduleAutoReminders(
       if (productId) meta.productId = productId;
       // Oferta escalonada: viaja en la fila y se ACTIVA al enviarse el step (worker).
       if (step.offerPrice) meta.offerPrice = step.offerPrice;
+      // Más mensajes del mismo paso: viajan en la fila y el worker los envía seguidos.
+      if (step.extraMessages?.length) meta.extraMessages = step.extraMessages;
       await scheduleReminder({
         companyId,
         customerId,

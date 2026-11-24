@@ -102,18 +102,21 @@ class Collector {
     for (const type of Object.keys(REMINDER_LABEL)) {
       const steps = stepsFrom(asObj(c[type])) ?? [];
       steps.forEach((step, i) => {
-        const url = (step.mediaUrl ?? "").trim();
-        if (!url) return;
-        this.push({
-          url,
-          tipo: normalizeResourceType(step.mediaType, url),
-          nombre: fileNameFromUrl(url),
-          descripcion: step.message.trim(),
-          origen: "recordatorio",
-          detalle: `${REMINDER_LABEL[type]} · paso ${i + 1}`,
-          productoId,
-          producto,
-        });
+        // El mensaje principal del paso y sus mensajes adicionales.
+        for (const item of [step, ...(step.extraMessages ?? [])]) {
+          const url = (item.mediaUrl ?? "").trim();
+          if (!url) continue;
+          this.push({
+            url,
+            tipo: normalizeResourceType(item.mediaType, url),
+            nombre: fileNameFromUrl(url),
+            descripcion: item.message.trim(),
+            origen: "recordatorio",
+            detalle: `${REMINDER_LABEL[type]} · paso ${i + 1}`,
+            productoId,
+            producto,
+          });
+        }
       });
     }
   }

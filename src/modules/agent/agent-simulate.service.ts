@@ -95,7 +95,11 @@ async function previewReminders(
     // El mensaje acordado sale una sola vez (en la primera secuencia que aplique).
     if (postponed?.body && !out.length) steps.push({ delaySeconds: baseSeconds, text: postponed.body });
     if (seq.enabled) {
-      for (const s of seq.steps) steps.push({ delaySeconds: baseSeconds + s.delaySeconds, text: s.message, mediaUrl: s.mediaUrl });
+      for (const s of seq.steps) {
+        steps.push({ delaySeconds: baseSeconds + s.delaySeconds, text: s.message, mediaUrl: s.mediaUrl });
+        // Mensajes adicionales del paso: salen seguidos, a la misma hora.
+        for (const m of s.extraMessages ?? []) steps.push({ delaySeconds: baseSeconds + s.delaySeconds, text: m.message, mediaUrl: m.mediaUrl });
+      }
     }
     if (!steps.length) continue;
     out.push({ type, label: postponed ? `${REMINDER_LABEL[type]} (pospuesto a pedido del cliente)` : REMINDER_LABEL[type], steps });

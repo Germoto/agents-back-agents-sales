@@ -10,6 +10,17 @@ const reminderStepSchema = z.object({
   // Oferta escalonada: al enviarse este paso, el agente ofrece/cobra/valida
   // este precio SOLO para ese cliente. Usa {oferta} en el mensaje para mostrarlo.
   offerPrice: z.string().trim().max(40).nullable().optional(),
+  // Más mensajes del mismo paso (salen seguidos tras el principal): texto + audio + texto.
+  extraMessages: z
+    .array(
+      z.object({
+        message: z.string().max(4000).optional().default(""),
+        mediaUrl: z.string().nullable().optional(),
+        mediaType: z.string().optional().default(""),
+      }),
+    )
+    .max(5, "Máximo 5 mensajes adicionales por paso")
+    .optional(),
 });
 
 // Secuencia de recordatorios por tipo: activar + varios mensajes. Se mantiene laxa

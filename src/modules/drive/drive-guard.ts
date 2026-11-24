@@ -37,8 +37,12 @@ function reminderTexts(cfg: Record<string, unknown> | null | undefined): string[
   if (!cfg) return [];
   const out: string[] = [];
   for (const key of ["abandonedCart", "leftOnRead"]) {
-    const seq = cfg[key] as { steps?: Array<{ message?: string }> } | undefined;
-    for (const st of seq?.steps ?? []) if (st?.message) out.push(st.message);
+    const seq = cfg[key] as { steps?: Array<{ message?: string; extraMessages?: Array<{ message?: string }> }> } | undefined;
+    for (const st of seq?.steps ?? []) {
+      if (st?.message) out.push(st.message);
+      // Mensajes adicionales del paso: también pueden traer la carpeta de muestra.
+      if (Array.isArray(st?.extraMessages)) for (const m of st.extraMessages) if (m?.message) out.push(m.message);
+    }
   }
   return out;
 }
