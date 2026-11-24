@@ -1385,6 +1385,17 @@ export const DEFAULT_STORE_INVITE_TEXT = "🛍️ Tenemos más productos que te 
  *  - MANUAL: no entrega; queda para que un asesor lo envíe.
  * Es async (toca la BD en POOL_AUTO). En `simulate` no consume stock real.
  */
+/**
+ * Marca como comprados los productos recién pagados en el estado del turno. La lista
+ * se carga al INICIO del turno (antes de aprobar el pago); sin esto, la guarda de
+ * carpetas de Drive veía «sin compra» a quien paga su segundo producto y le quitaba
+ * los links de la entrega.
+ */
+function markPurchased(state: { purchasedProductIds?: string[] }, productIds: string[]): void {
+  const prev = Array.isArray(state.purchasedProductIds) ? state.purchasedProductIds : [];
+  state.purchasedProductIds = Array.from(new Set([...prev, ...productIds.filter(Boolean)]));
+}
+
 export async function assignAndBuildDelivery(
   config: BotConfig,
   productIds: string[],
@@ -1783,6 +1794,7 @@ export async function approveExternalPayment(opts: {
   });
   if (del.delivered.length || del.manualNeeded.length) {
     state.status = del.delivered.length ? "ENTREGADO" : "PAGADO";
+    markPurchased(state, productIds);
     if (del.offeredCrossSellId) state.offeredCrossSellProductId = del.offeredCrossSellId;
     await registerStreamingSubscriptions({
       config,
@@ -1936,6 +1948,7 @@ export async function tryApprovePayment(opts: {
       if (del.delivered.length || del.manualNeeded.length) {
         const needsHandoff = del.manualNeeded.length > 0;
         state.status = del.delivered.length ? "ENTREGADO" : "PAGADO";
+        markPurchased(state, productIds);
         if (del.offeredCrossSellId) state.offeredCrossSellProductId = del.offeredCrossSellId;
         // Suscripciones de vencimiento (solo productos STREAMER con duración).
         await registerStreamingSubscriptions({
@@ -4262,6 +4275,7 @@ export async function executeTool(
       const needsHandoff = manualNeeded.length > 0;
       // Si todo quedó manual (nada entregado automático), el estado no es ENTREGADO.
       ctx.state.status = delivered.length ? "ENTREGADO" : "PAGADO";
+      markPurchased(ctx.state, ids);
 
       // Aviso al dueño por cada venta automática (entrega por inventario).
       for (const s of del.autoSales) {

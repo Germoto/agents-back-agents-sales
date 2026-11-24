@@ -74,11 +74,15 @@ export function blockedFolderIds(product: GuardProduct): Set<string> {
 /** Unión de carpetas bloqueadas de todos los productos digitales que el cliente NO compró. */
 export function blockedFolderIdsFor(products: GuardProduct[], state: GuardState): Set<string> {
   const out = new Set<string>();
+  // Carpetas de lo que el cliente SÍ compró: nunca se bloquean, aunque otro producto
+  // que no compró las comparta (p. ej. «Pack de Salsa» y «Megapack» con la misma entrega).
+  const owned = new Set<string>();
   for (const p of products) {
     if (p.productType && p.productType !== "digital") continue;
-    if (drivePurchased(state, p)) continue;
-    for (const id of blockedFolderIds(p)) out.add(id);
+    const target = drivePurchased(state, p) ? owned : out;
+    for (const id of blockedFolderIds(p)) target.add(id);
   }
+  for (const id of owned) out.delete(id);
   return out;
 }
 
