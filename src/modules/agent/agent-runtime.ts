@@ -195,9 +195,47 @@ const INTERNAL_NOTE_RE =
 export function isInternalNote(text: string | null | undefined): boolean {
   const t = (text ?? "").trim();
   if (!t) return false;
-  // Todo el mensaje es UNA sola nota entre corchetes: "[Respuesta vacía: …]".
-  if (/^\[[^\]]*\]$/.test(t) && t.length > 12) return true;
+  // Todo el mensaje es UNA sola nota entre paréntesis o corchetes, o una frase de "no digo nada".
+  if (isBareNote(t) || isEmptyPhrase(t)) return true;
   return INTERNAL_NOTE_RE.test(t);
+}
+
+/**
+ * ¿El texto ENTERO es una sola nota entre paréntesis o corchetes? «(sin texto adicional)»,
+ * «[VACÍO]», «(Los datos de pago ya te llegaron arriba.)». Regla de forma, no de frases:
+ * un vendedor no manda un mensaje que sea solo un paréntesis, así que cualquier variante
+ * que invente el modelo cae aquí. Un mensaje normal con un paréntesis ADENTRO no coincide.
+ */
+export function isBareNote(text: string | null | undefined): boolean {
+  const t = (text ?? "").trim().replace(/^[*_`"'\s]+|[*_`"'\s]+$/g, "");
+  return /^[(\[][^()\[\]]*[)\]]\.?$/.test(t) && /[a-záéíóúñ]{3}/i.test(t);
+}
+
+/** Vocabulario de "no digo nada" que el modelo escribe en vez de la palabra clave. */
+const EMPTY_PHRASE_RE =
+  /^(sin|ning[uú]n|no hay) (m[aá]s )?(texto|mensaje|respuesta|comentario|contenido)s?( final)?( adicional(es)?| extra| m[aá]s| que (enviar|agregar|a[nñ]adir))?$|^((mensaje|texto|respuesta) )?vac[ií][oa]$|^nada (m[aá]s )?que (agregar|a[nñ]adir|enviar)$|^n\/?a$/i;
+
+/** ¿El texto ENTERO es una frase de "no digo nada" sin paréntesis? («Sin texto adicional.») */
+export function isEmptyPhrase(text: string | null | undefined): boolean {
+  const t = (text ?? "").trim().replace(/^[*_`"'\s]+|[*_`"'.\s]+$/g, "");
+  return !!t && t.length <= 60 && EMPTY_PHRASE_RE.test(t);
+}
+
+const NOTE_LINE_WORDS_RE =
+  /sin (m[aá]s )?(texto|mensaje|respuesta|comentario)|vac[ií][oa]|el sistema|herramienta|nota interna|al cliente|el cliente|\bSIN_RESPUESTA\b/i;
+
+/**
+ * Quita de un mensaje normal las LÍNEAS que son solo una nota interna entre paréntesis o
+ * corchetes («dale, te espero\n(sin texto adicional)»). Solo cuando la línea habla del
+ * propio mensaje o del sistema: un paréntesis de venta («(pago único)») se conserva.
+ */
+export function stripNoteLines(text: string): string {
+  const lines = text.split("\n");
+  const kept = lines.filter((line) => {
+    const l = line.trim();
+    return !(l && (isEmptyPhrase(l) || (isBareNote(l) && NOTE_LINE_WORDS_RE.test(l))));
+  });
+  return kept.length === lines.length ? text : kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 const TOOL_WORD_RE = /[a-z][a-z0-9]*(?:_[a-z0-9]+)+/gi;
@@ -276,9 +314,18 @@ function mpLinkGuardNote(sent: boolean, toolResult: string, kind: "promise" | "p
 
 /** Texto final del modelo → lo que se envía ("" si contestó NO_REPLY_TOKEN). */
 function finalReply(text: string | null | undefined): string {
-  const t = (text ?? "").trim();
+  const raw = (text ?? "").trim();
   // Tolera formato alrededor del token (*SIN_RESPUESTA*, "SIN_RESPUESTA.", etc.).
-  return t === NO_REPLY_TOKEN || t.replace(/[*`"'.\[\]()]/g, "").trim() === NO_REPLY_TOKEN ? "" : t;
+  if (raw === NO_REPLY_TOKEN || raw.replace(/[*`"'.\[\]()]/g, "").trim() === NO_REPLY_TOKEN) return "";
+  // Variantes propias del modelo para "no digo nada": equivalen al token (sin reintento,
+  // que solo provocaría un cierre repetido). Las líneas-nota sueltas se quitan del mensaje.
+  const t = stripNoteLines(raw);
+  if (t !== raw) console.warn(`[agent] nota interna quitada del texto: ${raw.slice(0, 160)}`);
+  if (isBareNote(t) || isEmptyPhrase(t)) {
+    console.warn(`[agent] respuesta-nota tratada como sin respuesta: ${t.slice(0, 160)}`);
+    return "";
+  }
+  return t;
 }
 
 /**
