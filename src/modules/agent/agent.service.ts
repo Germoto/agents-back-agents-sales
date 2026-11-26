@@ -40,7 +40,7 @@ import { readReceiptImage } from "./receipt-vision";
 import { describeSticker } from "./sticker-vision";
 import { fulfillPendingDeliveryEmail } from "./email-delivery";
 import { NO_RETRY_SOURCES } from "./delivery-policy";
-import { runAgentTurn, isInternalNote, recordTurnLog } from "./agent-runtime";
+import { runAgentTurn, isInternalNote, disownsPreviousMessage, stripDisownSentences, recordTurnLog } from "./agent-runtime";
 import { deliver, flushOutbox, gapMsFor, sleep } from "./delivery";
 import { alertAiProviderFailure, notifyAiProviderRecovered } from "./ai-alerts";
 import { notifyHumanChatMessage } from "./human-chat-alert";
@@ -944,6 +944,11 @@ async function processConversationTurn(job: TurnJob): Promise<void> {
   if (finalText && isInternalNote(finalText)) {
     console.warn(`[agent] nota interna descartada (convo=${conversationId}): ${finalText.slice(0, 200)}`);
     finalText = "";
+  }
+  // Red final: tampoco sale una disculpa que desautoriza un mensaje anterior del negocio.
+  if (finalText && disownsPreviousMessage(finalText)) {
+    console.warn(`[agent] disculpa por mensaje anterior quitada (convo=${conversationId}): ${finalText.slice(0, 200)}`);
+    finalText = stripDisownSentences(finalText);
   }
   if (finalText) {
     if (ctx.outbox.length) await sleep(gapMs);

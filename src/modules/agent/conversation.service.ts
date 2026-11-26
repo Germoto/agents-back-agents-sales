@@ -1398,16 +1398,37 @@ export async function listConversationMessages(
  *  explica este marcador para que el modelo no los confunda con sus propios mensajes. */
 export const HUMAN_AGENT_TAG = "「Asesor humano del equipo」";
 
+/** Prefijo que marca, en el historial, los recordatorios/seguimientos que el negocio
+ *  programó y envió solo (no los redactó el modelo en un turno). Sin la marca el modelo
+ *  los veía como mensajes "suyos" que no reconocía y a veces se disculpaba por ellos
+ *  («mi mensaje anterior se mezcló con textos internos»). */
+export const REMINDER_TAG = "「Seguimiento automático del negocio」";
+
+type HistoryRow = {
+  role: string;
+  message: string | null;
+  mediaUrl: string | null;
+  mediaType: string | null;
+  fileName: string | null;
+  quotedPreview: string | null;
+  rawPayload?: unknown;
+};
+
 export async function buildHistory(conversationId: string): Promise<ChatMessage[]> {
   const limit = env.AGENT_HISTORY_LIMIT;
   const rows = await prisma.conversationMessage.findMany({
     where: { conversationId, role: { in: ["USER", "ASSISTANT", "ADMIN"] } },
     orderBy: { createdAt: "desc" },
     take: limit,
-    select: { role: true, message: true, mediaUrl: true, mediaType: true, fileName: true, quotedPreview: true },
+    select: { role: true, message: true, mediaUrl: true, mediaType: true, fileName: true, quotedPreview: true, rawPayload: true },
   });
   rows.reverse();
-  return rows.map((r) => {
+  return rows.map(historyMessageFor);
+}
+
+/** Una fila del chat → mensaje del historial que lee el modelo (función pura). */
+export function historyMessageFor(r: HistoryRow): ChatMessage {
+  {
     // USER = cliente. ADMIN (asesor humano/respuesta rápida) y ASSISTANT (el bot y los
     // recordatorios) son el lado del negocio = assistant; al ADMIN le anteponemos un
     // marcador para que el modelo sepa que lo escribió un humano, no él.
@@ -1444,9 +1465,12 @@ export async function buildHistory(conversationId: string): Promise<ChatMessage[
             : "[se envió una imagen/archivo al cliente]";
     }
     if (isHuman) content = `${HUMAN_AGENT_TAG} ${content}`;
+    // Recordatorio/seguimiento automático (lo graba el worker con source "reminder").
+    const source = (r.rawPayload as { source?: unknown } | null | undefined)?.source;
+    if (r.role === "ASSISTANT" && source === "reminder") content = `${REMINDER_TAG} ${content}`;
     // Respuesta citando: el agente recibe QUÉ citó el cliente (el panel pinta su
     // propio bloque de cita — este prefijo es solo para el contexto del modelo).
     if (isUser && r.quotedPreview) content = `[Responde citando: "${r.quotedPreview}"] ${content}`;
     return { role, content };
-  });
+  }
 }

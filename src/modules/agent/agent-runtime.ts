@@ -6,6 +6,7 @@
 
 import { chatCompletion, type ChatMessage } from "../../lib/openai";
 import { buildSystemPrompt } from "./agent-prompt";
+import { HUMAN_AGENT_TAG, REMINDER_TAG } from "./conversation.service";
 import { buildKnowledgeHint, trailingUserText } from "./faq-match";
 import { toolDefinitionsFor, executeTool, emailDeliveryAvailable, shippingOf, postponeAvailable, reportPaymentForReview, type TurnContext } from "./agent-tools";
 import { currentOrderFor } from "../orders/order-money";
@@ -254,16 +255,64 @@ export function leakedToolNames(text: string | null | undefined, toolNames: Read
   return [...found];
 }
 
-/** Quita las frases que nombran una herramienta; el resto del mensaje se conserva. */
-export function stripToolNameSentences(text: string, toolNames: ReadonlySet<string>): string {
+/** Quita las frases que cumplen `drop`; el resto del mensaje se conserva. */
+function stripSentences(text: string, drop: (sentence: string) => boolean): string {
   // Con captura, split devuelve frase, separador, frase, separador…
   const parts = text.split(/((?<=[.!?…])\s+|\n+)/);
   let out = "";
   for (let i = 0; i < parts.length; i += 2) {
-    if (leakedToolNames(parts[i], toolNames).length) continue;
+    if (drop(parts[i])) continue;
     out += parts[i] + (parts[i + 1] ?? "");
   }
   return out.trim();
+}
+
+/** Quita las frases que nombran una herramienta; el resto del mensaje se conserva. */
+export function stripToolNameSentences(text: string, toolNames: ReadonlySet<string>): string {
+  return stripSentences(text, (s) => leakedToolNames(s, toolNames).length > 0);
+}
+
+const PREV_MSG = "(?:mi|mis|ese|el|tu|este|esa|la)s? (?:[uú]ltim[oa]s? )?(?:mensaje|respuesta|texto|acci[oó]n|llamado)s?(?: anterior(?:es)?| de antes| previ[oa]s?)?";
+/**
+ * Frases con las que el modelo DESAUTORIZA lo que el negocio ya envió: «mi mensaje anterior
+ * se mezcló con textos internos», «ese mensaje anterior no es mío, no lo tomes en cuenta»,
+ * «no debí pasar el chat a un asesor». Pasó en prod tras varios recordatorios seguidos: el
+ * modelo no los reconoce como suyos y se disculpa por un error que no existe. No coincide
+ * con usos normales («revisa el mensaje anterior», «mi mensaje anterior ya tenía los datos»).
+ */
+const DISOWN_RE = new RegExp(
+  [
+    `${PREV_MSG}[^.!?\\n]{0,30}?(?:se mezcl|se cruz|no (?:es|era|fue|son|eran) (?:m[ií][oa]s?|correct|v[aá]lid)|(?:tuvo|tuve|ten[ií]a|tra[ií]a) (?:un |una |varios |varias |algunos |algunas )?(?:error|fall|equivocaci)|sali[oó] (?:con|mal)|se fue con|estuvo mal|fue(?:ron)? (?:un |una )?(?:error|equivocaci)|me equivoqu|me confund)`,
+    `(?:error|equivocaci[oó]n|me equivoqu[eé]|me confund[ií])[^.!?\\n]{0,20}? (?:en |con )${PREV_MSG}`,
+    "(?:textos?|mensajes?|notas?|datos|instrucciones) intern[oa]s?",
+    "no deb[ií] (?:derivar|pasar|enviar|mandar)",
+    "mis (?:respuestas|mensajes) se (?:cruzaron|mezclaron)",
+    "no (?:lo|los|la|las) tomes en cuenta",
+    "lo que te dije antes no (?:estuvo|era|es|fue)",
+  ].join("|"),
+  "i",
+);
+
+/** ¿El texto desautoriza o se disculpa por un mensaje anterior del negocio? */
+export function disownsPreviousMessage(text: string | null | undefined): boolean {
+  return DISOWN_RE.test((text ?? "").trim());
+}
+
+/** Quita las frases que desautorizan un mensaje anterior; el resto se conserva. */
+export function stripDisownSentences(text: string): string {
+  return stripSentences(text, disownsPreviousMessage);
+}
+
+const DISOWN_RETRY_NOTE =
+  "Tu respuesta anterior NO se envió al cliente: se disculpaba por un mensaje anterior o lo desautorizaba. " +
+  "Los mensajes anteriores del negocio que ves en el historial (incluidos los seguimientos automáticos) son correctos y el cliente ya los recibió: no hay nada que corregir ni aclarar sobre ellos. " +
+  `Escribe SOLO la respuesta a lo último que dijo el cliente, sin disculpas ni menciones a errores o a mensajes anteriores, o exactamente ${NO_REPLY_TOKEN} si no corresponde decir nada.`;
+
+/** Las etiquetas del historial son solo contexto del modelo: si las copia, se quitan. */
+function stripHistoryTags(text: string): string {
+  return text.includes(HUMAN_AGENT_TAG) || text.includes(REMINDER_TAG)
+    ? text.split(HUMAN_AGENT_TAG).join("").split(REMINDER_TAG).join("").trim()
+    : text;
 }
 
 function toolNameRetryNote(names: string[]): string {
@@ -319,7 +368,7 @@ function finalReply(text: string | null | undefined): string {
   if (raw === NO_REPLY_TOKEN || raw.replace(/[*`"'.\[\]()]/g, "").trim() === NO_REPLY_TOKEN) return "";
   // Variantes propias del modelo para "no digo nada": equivalen al token (sin reintento,
   // que solo provocaría un cierre repetido). Las líneas-nota sueltas se quitan del mensaje.
-  const t = stripNoteLines(raw);
+  const t = stripNoteLines(stripHistoryTags(raw));
   if (t !== raw) console.warn(`[agent] nota interna quitada del texto: ${raw.slice(0, 160)}`);
   if (isBareNote(t) || isEmptyPhrase(t)) {
     console.warn(`[agent] respuesta-nota tratada como sin respuesta: ${t.slice(0, 160)}`);
@@ -568,6 +617,7 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
 
   let internalNoteRetried = false;
   let toolNameRetried = false;
+  let disownRetried = false;
   const toolNames = new Set(toolDefinitionsFor(ctx.config).map((t) => t.function.name.toLowerCase()));
   let mpLinkGuardTried = false;
   const postponeGuardOn = postponeAvailable(ctx.config);
@@ -674,6 +724,22 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
       console.warn(`[agent] nombre interno de herramienta descartado tras reintento convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
       final = stripToolNameSentences(final, toolNames);
     }
+    // Freno de la disculpa por un mensaje anterior: el modelo desautoriza lo que el negocio
+    // ya envió (casi siempre recordatorios que no reconoce como suyos). Primero se le pide
+    // reescribir; si insiste, se quitan esas frases y el resto sigue por las demás guardias.
+    if (final && disownsPreviousMessage(final)) {
+      if (!disownRetried) {
+        disownRetried = true;
+        (ctx.guardEvents ??= []).push(`disculpa por mensaje anterior: se le pidió al modelo reescribir («${final.slice(0, 160)}»)`);
+        console.warn(`[agent] disculpa por mensaje anterior (reintento) convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+        messages.push({ role: "assistant", content: final });
+        messages.push({ role: "user", content: DISOWN_RETRY_NOTE });
+        continue;
+      }
+      (ctx.guardEvents ??= []).push(`disculpa por mensaje anterior descartada: se quitó la frase («${final.slice(0, 160)}»)`);
+      console.warn(`[agent] disculpa por mensaje anterior descartada tras reintento convo=${ctx.conversationId}: ${final.slice(0, 160)}`);
+      final = stripDisownSentences(final);
+    }
     // Guardia del link pegado a mano: el texto trae un link de pago de Mercado Pago que
     // escribió el modelo (pasó en prod: copió el link viejo del chat en vez de llamar a
     // la herramienta, así que no se generó uno nuevo ni se levantó la pausa de
@@ -778,6 +844,11 @@ export async function runAgentTurn(ctx: TurnContext, history: ChatMessage[]): Pr
     (ctx.guardEvents ??= []).push(`nombre interno descartado (${closingLeak.join(", ")}): se quitó la frase`);
     console.warn(`[agent] nombre interno de herramienta descartado en el cierre convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
     closingText = stripToolNameSentences(closingText, toolNames);
+  }
+  if (closingText && disownsPreviousMessage(closingText)) {
+    (ctx.guardEvents ??= []).push(`disculpa por mensaje anterior descartada: se quitó la frase («${closingText.slice(0, 160)}»)`);
+    console.warn(`[agent] disculpa por mensaje anterior descartada en el cierre convo=${ctx.conversationId}: ${closingText.slice(0, 160)}`);
+    closingText = stripDisownSentences(closingText);
   }
   if (trailingAssistant && closingText && repeatsRecentBotText(closingText, history)) {
     (ctx.guardEvents ??= []).push(REPEATED_CLOSING_EVENT);
