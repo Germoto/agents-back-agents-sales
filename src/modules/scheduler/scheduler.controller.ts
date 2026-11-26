@@ -23,7 +23,7 @@ export const aiReviewStatsController = asyncHandler(async (req: Request, res: Re
   res.json(await getAiReviewOverview(req.user!.companyId));
 });
 
-/** GET /agent/reminders?type=&q=&productId=&late=1&offset=&limit= → página de recordatorios pendientes. */
+/** GET /agent/reminders?type=&q=&productId=&customerId=&late=1&offset=&limit= → página de recordatorios pendientes. */
 export const listRemindersController = asyncHandler(async (req: Request, res: Response) => {
   const companyId = req.user!.companyId;
   const typeRaw = String(req.query.type ?? "").toUpperCase();
@@ -33,9 +33,11 @@ export const listRemindersController = asyncHandler(async (req: Request, res: Re
   const q = String(req.query.q ?? "");
   const productId = String(req.query.productId ?? "");
   const lateOnly = ["1", "true"].includes(String(req.query.late ?? ""));
+  // customerId: recordatorios de UN chat (pestaña Recordatorios de Conversaciones).
+  const customerId = String(req.query.customerId ?? "").trim() || undefined;
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const limit = Math.min(Math.max(Number(req.query.limit) || 25, 1), 100);
-  const page = await listPendingReminders(companyId, { type, q, productId, lateOnly, offset, limit });
+  const page = await listPendingReminders(companyId, { type, q, productId, customerId, lateOnly, offset, limit });
   // `data` es la página; total/porTipo/atrasados son el conteo REAL con el filtro.
   res.json({ success: true, data: page.items, total: page.total, offset: page.offset, limit: page.limit, porTipo: page.porTipo, atrasados: page.atrasados });
 });
