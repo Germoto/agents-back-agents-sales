@@ -2391,6 +2391,9 @@ function renderProductFicha(p: BotProduct, vertical?: string, symbol: string = "
 // mandaría al cliente, como dato puro (sin ctx/estado, sin enviar nada).
 // Mantener en sincronía con las ramas de enviar_ficha.
 // ---------------------------------------------------------------------------
+/** Motivo de `ctx.turnClosed` cuando la ficha del producto trae su propio cierre. */
+export const FICHA_CLOSES_TURN_REASON = "ficha enviada; el negocio configuró que el agente no agregue nada después";
+
 export interface FichaPreviewMessage {
   tipo: "texto" | "media";
   texto?: string;
@@ -2404,10 +2407,11 @@ export function buildFichaPreview(
   product: BotProduct,
   vertical?: string,
   symbol: string = "S/",
-): { modo: string; mensajes: FichaPreviewMessage[]; notas: string[] } {
+): { modo: string; mensajes: FichaPreviewMessage[]; notas: string[]; cierraTurno: boolean } {
   const mensajes: FichaPreviewMessage[] = [];
   const notas: string[] = [];
   const p = product as BotProduct & {
+    presentationClosesTurn?: boolean;
     presentationMessage?: string | null;
     presentationMessageMediaUrl?: string | null;
     presentationMessageMediaType?: string | null;
@@ -2448,7 +2452,10 @@ export function buildFichaPreview(
       "STREAMING sin mensaje de presentación fijo: el agente REDACTA la presentación con sus palabras en cada chat (no hay texto fijo que auditar)." +
         (planes.length ? ` Incluye estos planes con precios exactos: ${planes.join(" | ")}` : ""),
     );
-    return { modo: "streamer_redaccion_libre", mensajes, notas };
+    if (p.presentationClosesTurn === true) {
+      notas.push("La ficha con cierre propio está prendida pero NO aplica aquí: sin mensaje de presentación fijo, la presentación la redacta el agente.");
+    }
+    return { modo: "streamer_redaccion_libre", mensajes, notas, cierraTurno: false };
   }
 
   const fichaText = presentationMessage || renderProductFicha(product, vertical, symbol);
@@ -2486,6 +2493,15 @@ export function buildFichaPreview(
   if (onDemand) {
     notas.push(`${onDemand} archivo(s) on-demand NO van en la presentación: el agente los envía solo si el cliente los pide.`);
   }
+  const cierraTurno = p.presentationClosesTurn === true;
+  if (cierraTurno) {
+    notas.push("FICHA CON CIERRE PROPIO: tras estos mensajes el agente NO agrega ningún texto y responde recién cuando el cliente vuelva a escribir.");
+    // Aviso (no bloquea): el último texto debería invitar a responder.
+    const lastText = [...mensajes].reverse().map((m) => m.texto ?? m.caption ?? "").find((t) => t.trim()) ?? "";
+    if (!lastText.includes("?")) {
+      notas.push("OJO: el último texto de la ficha no termina en una pregunta. Conviene agregar el cierre al final de la ficha o como último mensaje adicional, para que el cliente sepa qué responder.");
+    }
+  }
   // Spintax {a|b|c}: igual que al enviar (deliver), la preview muestra UNA variante.
   const hasSpintax = mensajes.some((m) => /\{[^{}]*\|[^{}]*\}/.test(`${m.texto ?? ""}${m.caption ?? ""}`));
   for (const m of mensajes) {
@@ -2495,7 +2511,7 @@ export function buildFichaPreview(
   if (hasSpintax) {
     notas.push("Los textos con variantes {a|b|c} cambian en cada envío (cada cliente recibe una combinación distinta); esta preview muestra UNA versión.");
   }
-  return { modo: presentationMessage ? "mensaje_fijo" : "ficha_automatica", mensajes, notas };
+  return { modo: presentationMessage ? "mensaje_fijo" : "ficha_automatica", mensajes, notas, cierraTurno };
 }
 
 /** Productos visibles en el catálogo (excluye los marcados como secundarios). */
@@ -3285,6 +3301,18 @@ export async function executeTool(
       const fichaMedia = pushPresentationMedia(ctx, product);
       // Mensajes adicionales de la info completa (texto/media), tras el principal y la media.
       pushFollowupList(ctx.outbox, presentationFollowups);
+      // Ficha con cierre propio (opcional por producto): el dueño ya escribió el cierre en
+      // la ficha o en sus mensajes adicionales. El turno termina aquí: no se vuelve a
+      // consultar al modelo, así que no agrega texto. Responde cuando el cliente escriba.
+      if ((product as { presentationClosesTurn?: boolean }).presentationClosesTurn === true) {
+        ctx.turnClosed = FICHA_CLOSES_TURN_REASON;
+        return JSON.stringify({
+          ok: true,
+          sent: true,
+          mediaSent: fichaMedia,
+          nota: "Ya envié la ficha con el cierre configurado por el negocio. NO agregues nada: deja tu texto final VACÍO.",
+        });
+      }
       return JSON.stringify({
         ok: true,
         sent: true,

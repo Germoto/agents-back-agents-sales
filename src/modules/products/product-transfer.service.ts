@@ -458,6 +458,7 @@ export async function confirmImport(companyId: string, token: string) {
           presentationFollowups: Array.isArray(rewritten.presentationFollowups)
             ? rewritten.presentationFollowups
             : [],
+          presentationClosesTurn: rewritten.presentationClosesTurn === true,
           deliveryMethod: rewritten.deliveryMethod == null ? null : String(rewritten.deliveryMethod),
           support: rewritten.support == null ? null : String(rewritten.support),
           attributes: (rewritten.attributes as Record<string, string> | null) ?? null,

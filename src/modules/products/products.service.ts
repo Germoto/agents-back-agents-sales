@@ -31,6 +31,7 @@ type ProductPayload = {
   presentationMessageMediaUrl?: string;
   presentationMessageMediaType?: string;
   presentationFollowups?: { message?: string; mediaUrl?: string; mediaType?: string }[];
+  presentationClosesTurn?: boolean;
   deliveryMethod?: string | null;
   support?: string | null;
   attributes?: Record<string, string> | null;
@@ -439,6 +440,8 @@ export async function createProduct(companyId: string, payload: ProductPayload) 
         presentationMessageMediaUrl: (payload.presentationMessageMediaUrl ?? "").trim(),
         presentationMessageMediaType: (payload.presentationMessageMediaType ?? "").trim(),
         presentationFollowups: cleanFollowupList(payload.presentationFollowups) as Prisma.InputJsonValue,
+        // Sin el campo (panel viejo en caché) => se conserva el valor guardado / el default.
+        ...(typeof payload.presentationClosesTurn === "boolean" ? { presentationClosesTurn: payload.presentationClosesTurn } : {}),
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),
@@ -495,6 +498,8 @@ export async function updateProduct(companyId: string, productId: string, payloa
         presentationMessageMediaUrl: (payload.presentationMessageMediaUrl ?? "").trim(),
         presentationMessageMediaType: (payload.presentationMessageMediaType ?? "").trim(),
         presentationFollowups: cleanFollowupList(payload.presentationFollowups) as Prisma.InputJsonValue,
+        // Sin el campo (panel viejo en caché) => se conserva el valor guardado / el default.
+        ...(typeof payload.presentationClosesTurn === "boolean" ? { presentationClosesTurn: payload.presentationClosesTurn } : {}),
         deliveryMethod: payload.deliveryMethod ?? null,
         support: payload.support ?? null,
         attributes: payload.attributes == null ? Prisma.JsonNull : (payload.attributes as Prisma.InputJsonValue),

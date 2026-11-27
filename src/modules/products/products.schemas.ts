@@ -79,6 +79,8 @@ export const productBodySchema = z.object({
   presentationMessageMediaType: z.string().optional().default(""),
   // Mensajes adicionales (texto/media) que acompañan la info completa de presentación.
   presentationFollowups: followupListSchema,
+  // Ficha con cierre propio: tras la ficha el agente no agrega texto (apagado por defecto).
+  presentationClosesTurn: z.boolean().optional(),
   deliveryMethod: z.string().nullable().optional(),
   support: z.string().nullable().optional(),
   // Atributos flexibles por rubro (clave→valor). Ej. restaurante: {ingredientes, tiempo_preparacion};
