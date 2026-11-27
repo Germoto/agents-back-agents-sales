@@ -3,8 +3,8 @@ import { Request, Response } from "express";
 import { asyncHandler } from "../../lib/async-handler";
 import { requireAuth } from "../../middlewares/auth.middleware";
 import { validate } from "../../middlewares/validate";
-import { getDashboardStats, getDashboardExportData } from "./dashboard.service";
-import { dashboardQuerySchema, type DashboardQueryInput } from "./dashboard.schemas";
+import { getDashboardStats, getDashboardExportData, getAdLeads } from "./dashboard.service";
+import { dashboardQuerySchema, adLeadsQuerySchema, type DashboardQueryInput, type AdLeadsQueryInput } from "./dashboard.schemas";
 
 const router = Router();
 
@@ -30,6 +30,16 @@ router.get(
   validate({ query: dashboardQuerySchema }),
   asyncHandler(async (req: Request, res: Response) => {
     res.json(await getDashboardExportData(paramsOf(req)));
+  }),
+);
+
+// Personas detrás de una fila de «Por anuncio» (quién escribió, quién compró).
+router.get(
+  "/ad-leads",
+  validate({ query: adLeadsQuerySchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const q = req.query as unknown as AdLeadsQueryInput;
+    res.json(await getAdLeads({ ...paramsOf(req), adSourceId: q.adSourceId }));
   }),
 );
 

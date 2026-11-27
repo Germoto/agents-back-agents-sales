@@ -13,6 +13,7 @@ import { prisma } from "../../lib/prisma";
 import { resolveAdCatalog, adCatalogEntryFor } from "../ad-catalog/ad-catalog.service";
 import { loadSales, saleAmountFor, saleHasProduct, saleUnitsFor, type Sale } from "./dashboard-sales";
 import { daysBetween, resolveRange } from "./dashboard-periods";
+import { adKeyOf, buildAdRows, collectAdCohort, countAdLeads, summarizeAds, type AdSaleRow } from "./dashboard-ads";
 
 interface SeriesPoint {
   date: string; // "2026-06-12" (día) o "2026-06" (mes)
@@ -63,8 +64,10 @@ export interface DashboardParams {
 // Filas especiales de «Por anuncio» (no son anuncios).
 export const AD_ROW_STORE = "storefront";
 export const AD_ROW_UNLINKED = "unlinked";
+const AD_SPECIAL_ROWS = [AD_ROW_STORE, AD_ROW_UNLINKED];
 
-export async function getDashboardStats(params: DashboardParams) {
+/** Cálculo completo; devuelve además las personas por anuncio para el detalle. */
+async function computeDashboard(params: DashboardParams) {
   const { companyId, productId } = params;
   const company = await prisma.company.findUnique({
     where: { id: companyId },
@@ -267,47 +270,23 @@ export async function getDashboardStats(params: DashboardParams) {
   // Con filtro de producto: solo anuncios cuyo producto del catálogo es ese, y solo
   // ventas de ese producto.
   const adCatalog = await resolveAdCatalog(companyId);
-  type AdAgg = {
-    adSourceId: string | null;
-    adTitle: string | null;
-    people: Map<string, Date>; // persona → su primer clic del periodo en este anuncio
-    returning: number;
-    sales: number;
-    revenue: number;
-  };
-  const adAgg = new Map<string, AdAgg>();
-  const aggFor = (adSourceId: string | null, adTitle: string | null): AdAgg => {
-    const key = adSourceId ?? "__sin_anuncio__";
-    let a = adAgg.get(key);
-    if (!a) {
-      a = { adSourceId, adTitle, people: new Map(), returning: 0, sales: 0, revenue: 0 };
-      adAgg.set(key, a);
-    }
-    if (!a.adTitle && adTitle) a.adTitle = adTitle;
-    return a;
-  };
-
-  const periodTouches = await prisma.adTouch.findMany({
-    where: { companyId, createdAt: { gte: fromDate, lte: toDate } },
-    orderBy: { createdAt: "asc" },
-    select: { customerId: true, adSourceId: true, adTitle: true, createdAt: true },
-  });
-  // «Regresa» = ya era contacto antes del periodo (no un lead nuevo que toca dos anuncios).
-  const createdInPeriod = new Set(newCur.map((c) => c.id));
-  const touchedInPeriod = new Set<string>();
-  for (const t of periodTouches) {
-    if (productId && adCatalogEntryFor(adCatalog, t.adSourceId, t.adTitle)?.productId !== productId) continue;
-    touchedInPeriod.add(t.customerId);
-    const a = aggFor(t.adSourceId, t.adTitle ?? null);
-    if (a.people.has(t.customerId)) continue;
-    a.people.set(t.customerId, t.createdAt);
-    if (!createdInPeriod.has(t.customerId)) a.returning += 1;
-  }
-  // Sin anuncio: contactos nuevos del periodo que no llegaron desde ninguno.
-  for (const c of newCur) {
-    if (c.adSourceId || touchedInPeriod.has(c.id)) continue;
-    aggFor(null, null).people.set(c.id, c.createdAt);
-  }
+  // Clics del periodo y del periodo anterior (este último solo para comparar leads).
+  const touchSelect = { customerId: true, adSourceId: true, adTitle: true, createdAt: true } as const;
+  const [periodTouchesRaw, prevTouchesRaw] = await Promise.all([
+    prisma.adTouch.findMany({
+      where: { companyId, createdAt: { gte: fromDate, lte: toDate } },
+      orderBy: { createdAt: "asc" },
+      select: touchSelect,
+    }),
+    prisma.adTouch.findMany({
+      where: { companyId, createdAt: { gte: prevFrom, lte: prevTo } },
+      select: touchSelect,
+    }),
+  ]);
+  const touchOfProduct = (t: { adSourceId: string | null; adTitle: string | null }) =>
+    !productId || adCatalogEntryFor(adCatalog, t.adSourceId, t.adTitle)?.productId === productId;
+  const periodTouches = periodTouchesRaw.filter(touchOfProduct);
+  const prevTouches = prevTouchesRaw.filter(touchOfProduct);
 
   // Anuncio de cada venta del periodo: el guardado en la venta; si no lo tiene, el
   // último clic de esa persona anterior a la venta.
@@ -337,44 +316,38 @@ export async function getDashboardStats(params: DashboardParams) {
     }
     return { adSourceId: found?.adSourceId ?? null, adTitle: found?.adTitle ?? null };
   };
-  for (const s of cur) {
-    let a: AdAgg;
-    if (s.channel === "store") a = aggFor(AD_ROW_STORE, "Tienda web");
-    else {
-      const ad = adOfSale(s);
-      // Pago aprobado sin cliente asociado: fila propia (no es «orgánico»).
-      a = !ad.adSourceId && !s.customerId ? aggFor(AD_ROW_UNLINKED, "Pagos sin cliente") : aggFor(ad.adSourceId, ad.adTitle);
-    }
-    a.sales += 1;
-    a.revenue += saleAmountFor(s, productId);
+  const periodSales: AdSaleRow[] = cur.map((s) => {
+    const base = { key: s.key, customerId: s.customerId, at: s.at, amount: saleAmountFor(s, productId) };
+    if (s.channel === "store") return { ...base, adSourceId: AD_ROW_STORE, adTitle: "Tienda web" };
+    const ad = adOfSale(s);
+    // Pago aprobado sin cliente asociado: fila propia (no es «orgánico»).
+    if (!ad.adSourceId && !s.customerId) return { ...base, adSourceId: AD_ROW_UNLINKED, adTitle: "Pagos sin cliente" };
+    return { ...base, adSourceId: ad.adSourceId, adTitle: ad.adTitle };
+  });
+  // Compras de cada persona (del producto filtrado, si hay filtro), en orden de fecha.
+  const purchasesByCustomer = new Map<string, Array<{ at: number; amount: number }>>();
+  for (const s of allSales) {
+    if (!s.customerId || !saleHasProduct(s, productId)) continue;
+    const list = purchasesByCustomer.get(s.customerId) ?? [];
+    list.push({ at: s.at.getTime(), amount: saleAmountFor(s, productId) });
+    purchasesByCustomer.set(s.customerId, list);
   }
-  const adPerformance = [...adAgg.values()]
-    .map((a) => {
-      const special = a.adSourceId === AD_ROW_STORE || a.adSourceId === AD_ROW_UNLINKED;
-      const entry = a.adSourceId && !special ? adCatalogEntryFor(adCatalog, a.adSourceId, a.adTitle) : null;
-      const leads = a.people.size;
-      let buyers = 0;
-      for (const [customerId, since] of a.people) if (boughtSince(customerId, since)) buyers += 1;
-      return {
-        adSourceId: a.adSourceId,
-        adTitle: a.adTitle,
-        description: entry?.description ?? null,
-        productName: entry?.productName ?? null,
-        leads,
-        // De esos leads, cuántos ya eran contactos antes del periodo.
-        returningLeads: a.returning,
-        // De esos leads, cuántos ya compraron (después de escribir).
-        buyers,
-        // Ventas e ingresos del periodo atribuidos a este anuncio.
-        sales: a.sales,
-        revenue: r2(a.revenue),
-        // Conversión de cohorte: compraron / leads. Nunca pasa de 100 %.
-        conversionRate: leads > 0 ? pct(buyers / leads) : null,
-      };
-    })
-    .sort((x, y) => y.revenue - x.revenue || y.leads - x.leads);
+  for (const list of purchasesByCustomer.values()) list.sort((a, b) => a.at - b.at);
 
-  return {
+  const adBuckets = collectAdCohort({
+    touches: periodTouches,
+    newContacts: newCur,
+    periodSales,
+    purchasesByCustomer,
+    slackMs: COHORT_SLACK_MS,
+  });
+  const adPerformance = buildAdRows(adBuckets, (adSourceId, adTitle) =>
+    adSourceId && !AD_SPECIAL_ROWS.includes(adSourceId) ? adCatalogEntryFor(adCatalog, adSourceId, adTitle) : null,
+  );
+  // Resumen de los anuncios: lo que se lee de un vistazo arriba de la pestaña.
+  const adSummary = summarizeAds(adPerformance, adBuckets, { leadsPrev: countAdLeads(prevTouches), specialKeys: AD_SPECIAL_ROWS });
+
+  const stats = {
     range: { from: range.from, to: range.to, prevFrom: range.prevFrom, prevTo: range.prevTo, period: params.period ?? null, granularity },
     currency,
     productId: productId ?? null,
@@ -398,10 +371,93 @@ export async function getDashboardStats(params: DashboardParams) {
     topProducts,
     paymentMethods,
     adPerformance,
+    adSummary,
     // Embudo de cohorte: contactos nuevos → conversaciones abiertas → cuántos ya compraron.
     funnel: { contacts: newContacts.value, conversations: conversationsCur, sales: convertedLeads.value },
     flows: { total: flowsTotal, active: flowsActive },
     ordersByStatus: ordersGrouped.map((g) => ({ status: g.status as string, count: g._count._all })),
+  };
+  return { stats, adBuckets, timezone, fromDate };
+}
+
+export async function getDashboardStats(params: DashboardParams) {
+  return (await computeDashboard(params)).stats;
+}
+
+const AD_LEADS_CAP = 300;
+
+/**
+ * Personas detrás de una fila de «Por anuncio»: quién escribió en el periodo y si ya
+ * compró, y quién pagó en el periodo habiendo escrito antes. Misma cuenta que la tabla
+ * (sale del mismo cálculo). `adSourceId` «none» = sin anuncio (orgánico).
+ */
+export async function getAdLeads(params: DashboardParams & { adSourceId: string }) {
+  const { companyId } = params;
+  const { stats, adBuckets, fromDate, timezone } = await computeDashboard(params);
+  const adSourceId = params.adSourceId === "none" ? null : params.adSourceId;
+  const bucket = adBuckets.get(adKeyOf(adSourceId));
+  const row = stats.adPerformance.find((r) => r.adSourceId === adSourceId) ?? null;
+  const people = bucket ? [...bucket.people.values()].sort((a, b) => b.wroteAt.getTime() - a.wroteAt.getTime()) : [];
+  const earlier = bucket ? [...bucket.earlier].sort((a, b) => b.at.getTime() - a.at.getTime()) : [];
+  const shownPeople = people.slice(0, AD_LEADS_CAP);
+  const shownEarlier = earlier.slice(0, AD_LEADS_CAP);
+
+  const ids = [...new Set([...shownPeople.map((p) => p.customerId), ...shownEarlier.map((e) => e.customerId).filter((x): x is string => !!x)])];
+  const earlierIds = [...new Set(shownEarlier.map((e) => e.customerId).filter((x): x is string => !!x))];
+  const [customers, conversations, earlierTouches] = await Promise.all([
+    ids.length
+      ? prisma.customer.findMany({ where: { companyId, id: { in: ids } }, select: { id: true, name: true, phone: true, createdAt: true } })
+      : [],
+    ids.length
+      ? prisma.conversation.findMany({
+          where: { companyId, customerId: { in: ids } },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true, customerId: true },
+        })
+      : [],
+    // Cuándo escribió (antes del periodo) quien pagó en el periodo: su último clic previo.
+    earlierIds.length && adSourceId
+      ? prisma.adTouch.findMany({
+          where: { companyId, customerId: { in: earlierIds }, adSourceId, createdAt: { lt: fromDate } },
+          orderBy: { createdAt: "asc" },
+          select: { customerId: true, createdAt: true },
+        })
+      : [],
+  ]);
+  const customerById = new Map(customers.map((c) => [c.id, c]));
+  const conversationOf = new Map<string, string>();
+  for (const c of conversations) if (!conversationOf.has(c.customerId)) conversationOf.set(c.customerId, c.id);
+  const lastTouchBefore = new Map<string, Date>();
+  for (const t of earlierTouches) lastTouchBefore.set(t.customerId, t.createdAt);
+  const who = (customerId: string | null) => {
+    const c = customerId ? customerById.get(customerId) : undefined;
+    return {
+      customerId,
+      name: c?.name?.trim() || null,
+      phone: c?.phone ?? null,
+      conversationId: customerId ? conversationOf.get(customerId) ?? null : null,
+    };
+  };
+
+  return {
+    range: stats.range,
+    currency: stats.currency,
+    timezone,
+    ad: row,
+    people: shownPeople.map((p) => ({
+      ...who(p.customerId),
+      wroteAt: p.wroteAt.toISOString(),
+      isReturning: p.isReturning,
+      bought: !!p.boughtAt,
+      boughtAt: p.boughtAt?.toISOString() ?? null,
+      amount: p.amount,
+      hoursToBuy: p.hoursToBuy,
+    })),
+    earlierBuyers: shownEarlier.map((e) => {
+      const wrote = e.customerId ? lastTouchBefore.get(e.customerId) ?? customerById.get(e.customerId)?.createdAt ?? null : null;
+      return { ...who(e.customerId), wroteAt: wrote ? wrote.toISOString() : null, boughtAt: e.at.toISOString(), amount: e.amount };
+    }),
+    totals: { people: people.length, earlierBuyers: earlier.length, cap: AD_LEADS_CAP },
   };
 }
 
